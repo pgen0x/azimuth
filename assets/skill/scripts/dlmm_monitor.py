@@ -1582,7 +1582,24 @@ def main():
                 else:
                     rebalance_cap = 3
                     rebalance_budget_ok = rebalances_24h < rebalance_cap
-                is_oor_rebalance = (
+                # Turnover churn (2026-07-25): meridian-style close→reseed. A
+                # PROFITABLE turnover close — trailing-TP, TP, or pump-out — proves
+                # the pool is hot, not a reason to sit 15m in cooldown waiting on a
+                # fresh daemon signal. Re-center SOL-only at the current active bin
+                # immediately (auto-swap already put capital back in SOL). This is
+                # the churn that keeps liquidity on the active bin and drops avg hold
+                # from hours to minutes. Losses / emergency / downtrend / rug still
+                # exit + cooldown normally; the circuit breaker (rebalance_pnl_24h
+                # floor) + the 20/24h cap still bound how far it can run.
+                is_turnover_churn = (
+                    mode_cd == "turnover"
+                    and strategy != "single_sided_reseed"
+                    and not emergency_close
+                    and realized_sol > 0
+                    and not any(kw in reason_lower for kw in ("stop-loss", "stop_loss", "downtrend", "rug"))
+                    and rebalance_budget_ok
+                )
+                is_oor_rebalance = is_turnover_churn or (
                     mode_allows_rebalance
                     and strategy != "single_sided_reseed"  # reseed path redeploys on its own — never both
                     and close_reason.startswith("Out of Range")
