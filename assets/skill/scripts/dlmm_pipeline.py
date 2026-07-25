@@ -812,9 +812,16 @@ def select_batch_strategy(c, mode):
     keeps its tight two-sided range — its thesis is fee capture from
     oscillation around the active bin, not directional meme exposure.
     """
-    if mode == "turnover":
-        # Fee-capture thesis: tight two-sided range, ranked by turnover not price.
-        return "balanced_tight"
+    # 2026-07-25: turnover now uses sol_bidask too. Its old balanced_tight
+    # entry pre-swapped HALF the deploy into base token, so a dumping fee-capture
+    # pool (WORLDCUP/febu) booked a realized token loss the fee flow couldn't
+    # outrun (-0.102 SOL/14d, why ENABLE_TURNOVER was killed). The re-center path
+    # in dlmm_monitor.py already redeploys SOL-only below price (armor); the
+    # initial entry was the one place still carrying token exposure. SOL-only
+    # bid-ask below = zero token at entry, dumps fill bins at discounts while
+    # printing fees, pumps leave 100% SOL. Turnover's edge is now screen (small
+    # high-fee pools) + churn cadence (reseed on profitable close), not a
+    # two-sided range.
     return "sol_bidask"
 
 
