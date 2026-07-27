@@ -5,6 +5,14 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.15.0](https://github.com/pgen0x/meteora-dlmm-trading-bot/compare/v1.14.1...v1.15.0) (2026-07-27)
+
+
+### Features
+
+* turnover fee-capture with sol_bidask entry + churn reseed ([209016b](https://github.com/pgen0x/meteora-dlmm-trading-bot/commit/209016b066c7ddfd260ef50fa168f276e30ed6f0))
+* turnover fee-capture with sol_bidask entry + churn reseed ([6977ae0](https://github.com/pgen0x/meteora-dlmm-trading-bot/commit/6977ae049cfeeff3601272c6425f0255163f72f9))
+
 ## [1.14.1](https://github.com/pgen0x/meteora-dlmm-trading-bot/compare/v1.14.0...v1.14.1) (2026-07-22)
 
 
