@@ -258,6 +258,52 @@ See [`docs/SIGNAL_SCHEMA.md`](docs/SIGNAL_SCHEMA.md) for the exact webhook paylo
 
 ## Configuration
 
+### Two `.env` files, two readers
+
+This trips up most first-time setups. There are **two** env files and they are
+not interchangeable:
+
+| | `<repo>/.env` | `<profile>/.env` |
+|---|---|---|
+| read by | the Go daemon, via systemd `EnvironmentFile=` | the Python/Node executors + exit monitors |
+| holds | *what to screen, which venues, how to dispatch* | **every secret** — wallet keys, RPC URLs, alert targets |
+| wallet keys | none, ever | `SOLANA_PRIVATE_KEY`, `EVM_PRIVATE_KEY` |
+
+`install.sh` never writes either one — you create both. The daemon's unit uses
+the repo file as its `EnvironmentFile`, so **the service cannot start until
+`<repo>/.env` exists**.
+
+> ⚠️ Duplicate keys silently win from the bottom. systemd's `EnvironmentFile`
+> applies the *last* assignment, so a stray second `FOO=false` further down the
+> file makes edits to the first one look like they do nothing. Check with:
+> `grep -oE '^[A-Z_0-9]+=' .env | sort | uniq -d`
+
+### Enabling a venue
+
+Each venue is gated **twice**, on purpose — screening and spending are separate
+switches, so you can watch a venue produce signals for days before it can touch
+funds:
+
+| | Solana (Meteora DLMM) | Robinhood Chain (Uniswap v3/v4) |
+|---|---|---|
+| screen + signal | `ENABLE_CASUAL` / `ENABLE_MULTIDAY` / `ENABLE_TURNOVER` | `ROBINHOOD_ENABLED=true` |
+| actually trade | `DEPLOY_CMD=` → `dlmm_pipeline.py` (omit for webhook mode) | `ROBINHOOD_DEPLOY_ENABLED=true` |
+| secrets in `<profile>/.env` | `SOLANA_PUBLIC_KEY`, `SOLANA_PRIVATE_KEY` (base58), `SOLANA_RPC_URLS` (comma-separated, failover in order) | `EVM_PRIVATE_KEY`, `ROBINHOOD_RPC_URL` |
+| executors | — | `ROBINHOOD_EXECUTOR_CMD` (v3), `ROBINHOOD_V4_EXECUTOR_CMD` (v4) |
+| sizing | set in `SOUL.md` / the pipeline | `ROBINHOOD_DEPLOY_PCT`, `..._FLOOR_WETH`, `..._CEIL_WETH`, `..._RESERVE_WETH`, `..._MIN_GAS_ETH` (+ `_USDG` variants) |
+| exit monitor | `azimuth-sol-monitor.service` (enabled by `install.sh`) | `azimuth-rh-monitor.service` — **ships disabled** |
+
+> ⚠️ Enabling `ROBINHOOD_DEPLOY_ENABLED` without also enabling
+> `azimuth-rh-monitor.service` gives you positions with **no automated exits** —
+> no stop-loss, no take-profit, no out-of-range close:
+> `systemctl --user enable --now azimuth-rh-monitor`
+
+Set `DRY_RUN=1` in `<profile>/.env` to exercise the whole path without
+spending. Note it reports a **fixed synthetic wallet balance**, so position
+sizes in a dry run are not what live sizing would pick.
+
+### Daemon variables
+
 All daemon config is via environment (see `.env.example`):
 
 | Variable | Purpose |
