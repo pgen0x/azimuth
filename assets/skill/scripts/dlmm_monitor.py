@@ -89,6 +89,17 @@ SOL_MINT = "So11111111111111111111111111111111111111112"
 DEFAULT_DEPLOY_SOL = 0.5
 TRAILING_TRIGGER_PCT = 5.0
 TRAILING_DROP_PCT = 1.5
+# Turnover trailing TP (2026-07-28), mode-scoped. The thesis-mode 5.0/1.5 pair is
+# sized for price moves; a fee-capture position's whole win lives in the 1-2.5%
+# band, so a 5% trigger never arms and the mode's only profitable exit becomes an
+# upside-OOR pump-out. That starves is_turnover_churn (which requires
+# realized_sol > 0) and collapses the cadence back to the cooldown path. Values
+# match the reference bot's live closes ("peak 1.45% -> current 0.64%"), which
+# turn ~30 closes/day. Turnover also skips the fee/TVL trigger scaling below: its
+# income is fee_pct x churn, not price, so a yield-scaled price trigger is the
+# wrong axis — and that scaler's 2.0 floor would swallow a 1.2 trigger anyway.
+TURNOVER_TRAILING_TRIGGER_PCT = 1.2
+TURNOVER_TRAILING_DROP_PCT = 0.6
 MIN_FEE_TVL_24H_LIMIT = 1.0
 MIN_AGE_BEFORE_YIELD_CHECK = 60.0
 # Exit-side liquidity floor. Below the $10k entry TVL gate on purpose — only fires
@@ -285,7 +296,7 @@ def log_close(pool, pair, meta, pos_addr, pnl_pct, realized_sol, fee_per_tvl_24h
             print(f"⚠️ Failed to write pool memory: {e}")
 
 def clear_signal_seen(pool):
-    """Clear the mdtb signal daemon's dedup marker for this pool on close, so a
+    """Clear the azimuth signal daemon's dedup marker for this pool on close, so a
     still-qualifying pool can re-signal on the next poll instead of staying
     silenced for the rest of its SEEN_TTL window. The daemon's keys are
     mode-scoped (<prefix>:<mode>:<pool>) and a position's stored mode tag may be
@@ -301,6 +312,8 @@ def load_soul_dlmm_params():
         "STOP_LOSS_PCT": float(STOP_LOSS_PCT),
         "TRAILING_TRIGGER_PCT": float(TRAILING_TRIGGER_PCT),
         "TRAILING_DROP_PCT": float(TRAILING_DROP_PCT),
+        "TURNOVER_TRAILING_TRIGGER_PCT": float(TURNOVER_TRAILING_TRIGGER_PCT),
+        "TURNOVER_TRAILING_DROP_PCT": float(TURNOVER_TRAILING_DROP_PCT),
         "MAX_BINS_PUMPED_ABOVE": 10,
         "MAX_OOR_MINUTES": int(MAX_OOR_MINUTES),
         "OOR_DOWNSIDE_MAX_MINUTES": int(OOR_DOWNSIDE_MAX_MINUTES),
@@ -373,6 +386,12 @@ def load_soul_dlmm_params():
                 
             if "Hard Stop-Loss" in name:
                 params["STOP_LOSS_PCT"] = val
+            # Turnover keys must be tested BEFORE the generic ones — their names
+            # contain the generic name as a substring.
+            elif "Turnover Trailing TP Trigger" in name:
+                params["TURNOVER_TRAILING_TRIGGER_PCT"] = val
+            elif "Turnover Trailing TP Drop" in name:
+                params["TURNOVER_TRAILING_DROP_PCT"] = val
             elif "Trailing TP Trigger" in name:
                 params["TRAILING_TRIGGER_PCT"] = val
             elif "Trailing TP Drop" in name:
@@ -619,6 +638,8 @@ def main():
     stop_loss_pct = params["STOP_LOSS_PCT"]
     trailing_trigger_pct = params["TRAILING_TRIGGER_PCT"]
     trailing_drop_pct = params["TRAILING_DROP_PCT"]
+    turnover_trailing_trigger_pct = params["TURNOVER_TRAILING_TRIGGER_PCT"]
+    turnover_trailing_drop_pct = params["TURNOVER_TRAILING_DROP_PCT"]
     max_bins_pumped_above = params["MAX_BINS_PUMPED_ABOVE"]
     max_oor_minutes = params["MAX_OOR_MINUTES"]
     oor_downside_max_minutes = params["OOR_DOWNSIDE_MAX_MINUTES"]
@@ -627,7 +648,7 @@ def main():
     min_fee_tvl_24h_limit = params["MIN_FEE_TVL_24H_LIMIT"]
     min_exit_liquidity_usd = params["MIN_EXIT_LIQUIDITY_USD"]
     
-    print(f"Loaded SOUL.md parameters -> SL: {stop_loss_pct:.1f}%, Trailing TP Trigger: {trailing_trigger_pct:.1f}%, Trailing TP Drop: {trailing_drop_pct:.1f}%, Max Bins Pumped Above: {max_bins_pumped_above}, Max OOR: {max_oor_minutes}m (turnover {turnover_max_oor_minutes}m), Min Age for Yield Check: {min_age_before_yield_check:.1f}m, Min Fee/TVL: {min_fee_tvl_24h_limit:.2f}%")
+    print(f"Loaded SOUL.md parameters -> SL: {stop_loss_pct:.1f}%, Trailing TP Trigger: {trailing_trigger_pct:.1f}%, Trailing TP Drop: {trailing_drop_pct:.1f}%, Trailing TP (turnover): {turnover_trailing_trigger_pct:.1f}%/{turnover_trailing_drop_pct:.1f}%, Max Bins Pumped Above: {max_bins_pumped_above}, Max OOR: {max_oor_minutes}m (turnover {turnover_max_oor_minutes}m), Min Age for Yield Check: {min_age_before_yield_check:.1f}m, Min Fee/TVL: {min_fee_tvl_24h_limit:.2f}%")
     
     # --reset-trailing: reset peak_pnl + trailing_active after a standalone fee claim
     if cli.reset_trailing:
@@ -1067,16 +1088,25 @@ def main():
             
         # Check trailing TP trigger — scale by fee/TVL so high-yield pools activate sooner
         # Low yield (<10%): trigger at 2% | Mid (10-30%): trigger at 3-5% | High (>30%): trigger at 5%+
-        if fee_per_tvl_24h > 0:
-            effective_trigger = max(2.0, min(trailing_trigger_pct, trailing_trigger_pct * (fee_per_tvl_24h / 30.0)))
+        # Turnover (2026-07-28) runs its own flat, much tighter pair and skips the
+        # yield scaling entirely — see TURNOVER_TRAILING_TRIGGER_PCT. It used to be
+        # excluded from the trailing TP outright, on the rationale that a TP close
+        # sends the pool to cooldown and kills the fast-cycle. The churn leg
+        # (is_turnover_churn, 2026-07-25) removed that consequence: a profitable
+        # turnover close — trailing-TP included — reseeds immediately with no
+        # cooldown. Without an armable TP the only profitable turnover exit was an
+        # upside-OOR pump-out, so churn almost never fired.
+        is_turnover_pos = meta.get("mode") == "turnover"
+        if is_turnover_pos:
+            effective_trigger = turnover_trailing_trigger_pct
+            effective_drop = turnover_trailing_drop_pct
         else:
-            effective_trigger = trailing_trigger_pct
-        # Turnover never arms the trailing TP: its income is fee_pct × churn, not
-        # price (screen.go documents "not capped by the monitor's trailing TP").
-        # A TP close sends the pool to cooldown and kills the fast-cycle; instead
-        # the 2m OOR fuse closes into a re-center and the SL/downtrend/thin-liq
-        # rails handle the downside. Peak tracking above stays for reporting.
-        if not trailing_active and pnl_pct >= effective_trigger and meta.get("mode") != "turnover":
+            effective_drop = trailing_drop_pct
+            if fee_per_tvl_24h > 0:
+                effective_trigger = max(2.0, min(trailing_trigger_pct, trailing_trigger_pct * (fee_per_tvl_24h / 30.0)))
+            else:
+                effective_trigger = trailing_trigger_pct
+        if not trailing_active and pnl_pct >= effective_trigger:
             trailing_active = True
             print(f"🔥 Trailing TP activated for {pair}! Trigger {effective_trigger:.1f}% (fee/TVL {fee_per_tvl_24h:.1f}%) reached at {pnl_pct:.2f}% PnL")
             
@@ -1094,7 +1124,7 @@ def main():
         # 1. Trailing Take-Profit Exit Check — ratchet floor instead of flat drop
         if trailing_active:
             drop_from_peak = peak_pnl - pnl_pct
-            floor_pct = trailing_floor_pct(peak_pnl, trailing_drop_pct)
+            floor_pct = trailing_floor_pct(peak_pnl, effective_drop)
             print(f"ℹ️ Trailing TP active: Peak PnL {peak_pnl:.2f}% | Current PnL {pnl_pct:.2f}% | Ratchet floor: {floor_pct:.2f}%")
             if pnl_pct <= floor_pct:
                 # Gap-through grace: a "take-profit" that realizes a loss means price
