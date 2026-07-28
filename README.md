@@ -1,17 +1,23 @@
-# Meteora DLMM Trading Bot — Solana Liquidity Pool Signal Daemon for AI Agents
+# Azimuth — Concentrated-Liquidity Pool Signal Daemon for AI Agents
 
 [![Version](https://img.shields.io/static/v1?label=version&message=1.14.0&color=informational)](CHANGELOG.md) <!-- x-release-please-version -->
 [![Go Version](https://img.shields.io/badge/go-1.22%2B-00ADD8?logo=go&logoColor=white)](go.mod)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Status](https://img.shields.io/badge/status-beta-yellow)](#project-status)
 [![Chain](https://img.shields.io/badge/chain-Solana-9945FF?logo=solana&logoColor=white)](#)
+[![Chain](https://img.shields.io/badge/chain-Robinhood%20Chain-00C805)](#)
 
-**azimuth** is a Go daemon that watches **Meteora DLMM**
-(Dynamic Liquidity Market Maker) pools on **Solana**, screens them through
-quality gates, and hands an **AI trading agent** (built on
+**Azimuth** is a Go daemon that watches concentrated-liquidity pools across two
+venues — **Meteora DLMM** (Dynamic Liquidity Market Maker) on **Solana** and
+**Uniswap v3/v4** on **Robinhood Chain** — screens them through quality gates,
+and hands an **AI trading agent** (built on
 [Hermes](https://github.com/NousResearch/hermes)) a batch of vetted candidates
 to pick from and deploy — instead of you babysitting a screener or grabbing the
 first mediocre pool a dumb cron finds.
+
+Each venue gets its own exit monitor. Solana is the mature path (screening,
+entry and automated exits); the Robinhood Chain side screens and signals, and
+its exit loop ships disabled until you deploy there yourself.
 
 > ⚠️ **This trades real funds.** DYOR. NFA. Use at your own risk — see
 > [Disclaimer](#disclaimer).
