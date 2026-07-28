@@ -1,17 +1,23 @@
-# Meteora DLMM Trading Bot — Solana Liquidity Pool Signal Daemon for AI Agents
+# Azimuth — Concentrated-Liquidity Pool Signal Daemon for AI Agents
 
 [![Version](https://img.shields.io/static/v1?label=version&message=1.15.0&color=informational)](CHANGELOG.md) <!-- x-release-please-version -->
 [![Go Version](https://img.shields.io/badge/go-1.22%2B-00ADD8?logo=go&logoColor=white)](go.mod)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Status](https://img.shields.io/badge/status-beta-yellow)](#project-status)
 [![Chain](https://img.shields.io/badge/chain-Solana-9945FF?logo=solana&logoColor=white)](#)
+[![Chain](https://img.shields.io/badge/chain-Robinhood%20Chain-00C805)](#)
 
-**azimuth** is a Go daemon that watches **Meteora DLMM**
-(Dynamic Liquidity Market Maker) pools on **Solana**, screens them through
-quality gates, and hands an **AI trading agent** (built on
+**Azimuth** is a Go daemon that watches concentrated-liquidity pools across two
+venues — **Meteora DLMM** (Dynamic Liquidity Market Maker) on **Solana** and
+**Uniswap v3/v4** on **Robinhood Chain** — screens them through quality gates,
+and hands an **AI trading agent** (built on
 [Hermes](https://github.com/NousResearch/hermes)) a batch of vetted candidates
 to pick from and deploy — instead of you babysitting a screener or grabbing the
 first mediocre pool a dumb cron finds.
+
+Each venue gets its own exit monitor. Solana is the mature path (screening,
+entry and automated exits); the Robinhood Chain side screens and signals, and
+its exit loop ships disabled until you deploy there yourself.
 
 > ⚠️ **This trades real funds.** DYOR. NFA. Use at your own risk — see
 > [Disclaimer](#disclaimer).
@@ -251,6 +257,54 @@ end (2 position slots, tight-range `custom_ratio_spot` preferred).
 See [`docs/SIGNAL_SCHEMA.md`](docs/SIGNAL_SCHEMA.md) for the exact webhook payload.
 
 ## Configuration
+
+### Two `.env` files, two readers
+
+This trips up most first-time setups. There are **two** env files and they are
+not interchangeable:
+
+| | `<repo>/.env` | `<profile>/.env` |
+|---|---|---|
+| read by | the Go daemon, via systemd `EnvironmentFile=` | the Python/Node executors + exit monitors |
+| holds | *what to screen, which venues, how to dispatch* | **every secret** — wallet keys, RPC URLs, alert targets |
+| wallet keys | none, ever | `SOLANA_PRIVATE_KEY`, `EVM_PRIVATE_KEY` |
+
+`install.sh` never writes either one — you create both. The daemon's unit uses
+the repo file as its `EnvironmentFile`, so **the service cannot start until
+`<repo>/.env` exists**.
+
+> ⚠️ Duplicate keys silently win from the bottom. systemd's `EnvironmentFile`
+> applies the *last* assignment, so a stray second `FOO=false` further down the
+> file makes edits to the first one look like they do nothing. Check with:
+> `grep -oE '^[A-Z_0-9]+=' .env | sort | uniq -d`
+
+### Enabling a venue
+
+Each venue is gated **twice**, on purpose — screening and spending are separate
+switches, so you can watch a venue produce signals for days before it can touch
+funds:
+
+| | Solana (Meteora DLMM) | Robinhood Chain (Uniswap v3/v4) |
+|---|---|---|
+| screen + signal | `ENABLE_CASUAL` / `ENABLE_MULTIDAY` / `ENABLE_TURNOVER` | `ROBINHOOD_ENABLED=true` |
+| actually trade | `DEPLOY_CMD=` → `dlmm_pipeline.py` (omit for webhook mode) | `ROBINHOOD_DEPLOY_ENABLED=true` |
+| secrets in `<profile>/.env` | `SOLANA_PUBLIC_KEY`, `SOLANA_PRIVATE_KEY` (base58), `SOLANA_RPC_URLS` (comma-separated, failover in order) | `EVM_PRIVATE_KEY`, `ROBINHOOD_RPC_URL` |
+| executors | — | `ROBINHOOD_EXECUTOR_CMD` (v3), `ROBINHOOD_V4_EXECUTOR_CMD` (v4) |
+| sizing | set in `SOUL.md` / the pipeline | `ROBINHOOD_DEPLOY_PCT`, `..._FLOOR_WETH`, `..._CEIL_WETH`, `..._RESERVE_WETH`, `..._MIN_GAS_ETH` (+ `_USDG` variants) |
+| exit monitor | `azimuth-sol-monitor.service` (enabled by `install.sh`) | `azimuth-rh-monitor.service` — **ships disabled** |
+
+> ⚠️ Enabling `ROBINHOOD_DEPLOY_ENABLED` without also enabling
+> `azimuth-rh-monitor.service` gives you positions with **no automated exits** —
+> no stop-loss, no take-profit, no out-of-range close:
+> `systemctl --user enable --now azimuth-rh-monitor`
+
+Set `DRY_RUN=1` in `<profile>/.env` to exercise the whole path without
+spending. Dry runs read your **real** wallet balance — it is a read-only RPC
+call that spends nothing — so a soak reports the ticket sizes a live run would
+actually deploy. Only the offline fallback (RPC unreachable) substitutes a
+synthetic balance.
+
+### Daemon variables
 
 All daemon config is via environment (see `.env.example`):
 

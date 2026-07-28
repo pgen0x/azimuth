@@ -45,9 +45,11 @@ MODE_DEFAULTS = {
     # Signals come from the Go daemon's turnover screen (internal/meteora/screen.go);
     # the 30m-window fee_tvl_ratio floor 0.15 ~= 7.2%/day pace.
     "turnover": {
-        "MIN_TVL_USD": 5000.0,
+        # 2026-07-28: kept in sync with internal/meteora/screen.go Turnover —
+        # TVL floor 10k and mcap floor 150k, matching the reference bot's band.
+        "MIN_TVL_USD": 10000.0,
         "MIN_FEE_TVL_24H": 0.15,
-        "MIN_MCAP_USD": 1000000.0,
+        "MIN_MCAP_USD": 150000.0,
         "MIN_HOLDERS": 500,
         "TIMEFRAME": "30m",
         "MAX_POSITIONS": 2,
@@ -197,8 +199,12 @@ def run_command_json(cmd):
         return None, f"JSON parse error: {e}. Raw: {out}"
 
 def get_wallet_sol_balance():
-    if os.environ.get("DRY_RUN") == "true":
-        return 10.0
+    # NOTE: this used to short-circuit to a hardcoded 10.0 under DRY_RUN, which made
+    # every dry-run soak log fictional ticket sizes ((10.0-0.2)*0.45 = 4.41 SOL) and
+    # hid the fact that the real wallet funds roughly a tenth of that. Reading the
+    # balance is a read-only RPC call and spends nothing, so dry runs read it too and
+    # the soak reports the sizes a live run would actually deploy. The fallbacks below
+    # still return 10.0 so offline local testing keeps working.
     try:
         data, err = run_command_json(f"node {EXECUTOR_PATH} spl-balance SOL")
         if data and "balance" in data:
@@ -831,8 +837,8 @@ def main():
     parser.add_argument("--analyze-only", action="store_true", help="Screen pools, print all candidates JSON, exit without deploying")
     parser.add_argument("--strategy", type=str, default=None, help="Override SOUL.md strategy (sol_bidask, spot, custom_ratio_spot, balanced_tight, single_sided_reseed, fee_compounding, partial_harvest)")
     parser.add_argument("--pool", type=str, default=None, help="Deploy a specific pool address instead of auto-selecting winner")
-    parser.add_argument("--from-signal", dest="from_signal", type=str, default=None, help="JSON of a pre-screened candidate record from the mdtb signal daemon. Skips discovery+screen and deploys this exact pool; live gates (holding/cooldown/momentum/rent) still run.")
-    parser.add_argument("--from-batch", dest="from_batch", type=str, default=None, help="JSON ARRAY of pre-screened candidate records (the full mdtb signal payload). Deterministically re-ranks the batch (GMGN/PVP/prior-PnL heuristics + darwinian signal weights), then deploys the strongest candidate that clears every live gate — falling back to the runner-up when a gate rejects the pick. Replaces the LLM agent's pick step.")
+    parser.add_argument("--from-signal", dest="from_signal", type=str, default=None, help="JSON of a pre-screened candidate record from the azimuth signal daemon. Skips discovery+screen and deploys this exact pool; live gates (holding/cooldown/momentum/rent) still run.")
+    parser.add_argument("--from-batch", dest="from_batch", type=str, default=None, help="JSON ARRAY of pre-screened candidate records (the full azimuth signal payload). Deterministically re-ranks the batch (GMGN/PVP/prior-PnL heuristics + darwinian signal weights), then deploys the strongest candidate that clears every live gate — falling back to the runner-up when a gate rejects the pick. Replaces the LLM agent's pick step.")
     parser.add_argument("--mode", type=str, default="multiday", choices=["casual", "multiday", "turnover"], help="Pipeline mode: casual (30m, 2-6h plays), multiday (24h, 24h+ holds) or turnover (30m, high-fee fee-capture plays)")
     cli = parser.parse_args()
 
@@ -871,13 +877,12 @@ def main():
         print(f"[SKIP] Wallet {sol_balance:.3f} SOL < 0.25 SOL minimum — aborting pipeline (no SOL to deploy)")
         sys.exit(0)
     deploy_sol = compute_deploy_amount(sol_balance)
-    # Turnover runs at half size (2026-07-15): the mode booked -0.10 SOL over
-    # 14d and its big losers (WORLDCUP hard SL, febu OOR dump) passed every
-    # entry signal we screen on — the tail risk is structural to the thesis
-    # (tight ranges on fresh degen pools), so cap exposure instead of tuning
-    # gates that don't discriminate.
-    if mode == "turnover":
-        deploy_sol = round(deploy_sol * 0.5, 2)
+    # The turnover half-size cap (2026-07-15) was removed 2026-07-28. It was sized
+    # against the -0.10 SOL/14d journal produced by the OLD balanced_tight entry,
+    # which pre-swapped half the deploy into the base token — the losses it capped
+    # were realized token dumps, not the fee thesis. The sol_bidask entry removed
+    # that exposure, and on a thin wallet the halving is actively harmful: it drives
+    # the third turnover ticket under the 0.10 SOL floor and starves the mode out.
     if (deploy_sol <= 0 or deploy_sol < 0.10) and not cli.analyze_only:
         print(f"Aborting: deploy amount {deploy_sol:.3f} SOL below 0.10 SOL minimum (wallet {sol_balance:.3f} SOL)")
         sys.exit(0)
@@ -920,7 +925,7 @@ def main():
             sys.exit(0)
         pools = []
     elif cli.from_signal:
-        # mdtb signal daemon already discovered + screened this pool; deploy the
+        # azimuth signal daemon already discovered + screened this pool; deploy the
         # forwarded record directly. Skipping our own discovery/screen removes the
         # divergence between two independent trending snapshots that used to cause
         # "--pool ... not found in valid candidates. Aborting." The live gates below
