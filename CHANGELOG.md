@@ -5,6 +5,23 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.0.0](https://github.com/pgen0x/azimuth/compare/v1.15.0...v2.0.0) (2026-07-28)
+
+
+### ⚠ BREAKING CHANGES
+
+* the binary, the Go module path and all three systemd unit names changed. Re-run install.sh, then remove the old units: `systemctl --user disable --now meteora-dlmm-trading-bot sol-dlmm-monitor`.
+
+### Features
+
+* **systemd:** ship all three user units in install.sh ([a99683e](https://github.com/pgen0x/azimuth/commit/a99683eaa7655919d3b70423caf0a6250e736153))
+* **turnover:** realign screen bands, arm a tight trailing TP, drop half-size ([127e799](https://github.com/pgen0x/azimuth/commit/127e7996ebf69e2e8ea04fdc85699eb953e497d8))
+
+
+### Code Refactoring
+
+* rename project to Azimuth ([cc591cd](https://github.com/pgen0x/azimuth/commit/cc591cdb5cba221baecc5742e4e98237da03f882))
+
 ## [1.15.0](https://github.com/pgen0x/meteora-dlmm-trading-bot/compare/v1.14.1...v1.15.0) (2026-07-27)
 
 
