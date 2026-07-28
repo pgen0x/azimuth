@@ -1,4 +1,4 @@
-module github.com/meteora-dlmm-trading-bot
+module github.com/pgen0x/azimuth
 
 go 1.22
 

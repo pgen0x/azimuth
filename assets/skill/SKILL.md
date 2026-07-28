@@ -56,7 +56,7 @@ Two modes with **isolated position budgets** (2 slots each, max 4 total):
 **Flags**: `--analyze-only` (screen only, non-blocking), `--pool <ADDR>`, `--strategy <NAME>`
 
 **Batch mode (`--from-batch '<payload array>' --mode <mode>`)**: consumes the
-mdtb daemon's whole signal batch and replaces the LLM agent's pick step —
+azimuth daemon's whole signal batch and replaces the LLM agent's pick step —
 deterministic conviction re-rank (dev-exit / global-fees / PVP hard rejects,
 GMGN boosts+penalties, darwinian signal weights from Redis), strategy chosen
 from the same table the agent prompt used, and runner-up fallback when a live

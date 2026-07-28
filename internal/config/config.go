@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/meteora-dlmm-trading-bot/internal/robinhood"
+	"github.com/pgen0x/azimuth/internal/robinhood"
 )
 
 // Config holds all runtime settings, sourced from environment variables.
