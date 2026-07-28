@@ -92,8 +92,24 @@ func Summarize(out, mode string) string {
 	return fmt.Sprintf("[%s] ❌ %s", mode, last)
 }
 
-// GateNarrative extracts the pipeline's per-candidate conviction lines
-// ("Batch reject <name> - <reason>", "Batch conviction <name>: <adj>") so the
+// gateLinePrefixes are the pipeline stdout lines carrying a decisive
+// per-candidate verdict. The conviction pair came first; the post-conviction
+// gates were added 2026-07-28 because the pipeline's summary line collapses two
+// very different causes into one string — "No candidates deployable (bin-array
+// rent / entry timing rejected every candidate)" — so a batch dying on
+// non-refundable bin-array rent (a funding decision) read identically to one
+// dying on entry timing (correct behavior in a downtrend). Telling them apart
+// meant reading the pipeline source and re-probing the API by hand; these
+// prefixes make the journal answer it directly.
+var gateLinePrefixes = []string{
+	"Batch reject ",     // conviction hard-reject
+	"Batch conviction ", // conviction score adjustment
+	"Skipping ",         // per-candidate live gate (bin-array rent, entry timing, cooldown, ...)
+	"Entry timing:",     // indicator fail-open notice — absent data is NOT a reject
+	"Aborting:",         // pre-flight abort (balance, malformed payload)
+}
+
+// GateNarrative extracts the pipeline's per-candidate verdict lines so the
 // scanner can journal WHY a batch died. Summarize drops these — it keeps only
 // the last line for chat delivery — which left reject reasons invisible
 // (2026-07-12: five silent hours before anyone could see the decisive gate).
@@ -101,8 +117,11 @@ func GateNarrative(out string) string {
 	var lines []string
 	for _, line := range strings.Split(out, "\n") {
 		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "Batch reject ") || strings.HasPrefix(line, "Batch conviction ") {
-			lines = append(lines, line)
+		for _, p := range gateLinePrefixes {
+			if strings.HasPrefix(line, p) {
+				lines = append(lines, line)
+				break
+			}
 		}
 	}
 	return strings.Join(lines, "\n")
