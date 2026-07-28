@@ -1,0 +1,19 @@
+# User-level systemd unit for the Robinhood Chain (Uniswap v3) position monitor
+# loop. Installed by install.sh (rewrites __PROFILE__) but deliberately NOT
+# enabled: the Robinhood venue is observe-only until you deploy there yourself,
+# and this loop only matters once real v3/v4 positions exist.
+#
+# Enable when you start trading that venue:
+#   systemctl --user enable --now rh-dlmm-monitor.service
+[Unit]
+Description=Robinhood Chain (Uniswap v3) Position Monitor Loop (auto-close on SL/TP/trailing/OOR)
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/bin/bash __PROFILE__/skills/solana-dlmm/scripts/uni_monitor_loop.sh
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

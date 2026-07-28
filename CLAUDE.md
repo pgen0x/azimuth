@@ -34,6 +34,36 @@ Go tests exist for `internal/deploy` and `internal/robinhood`
 defaults in `.env.example`); nothing is hardcoded except the screening
 thresholds.
 
+## Runtime services + logs
+
+In production nothing runs in a terminal — everything is a **user** systemd unit
+(`systemctl --user`, *not* system-level; `sudo systemctl` will report "unit not
+found"). `loginctl enable-linger $USER` is what keeps them alive across logout.
+
+| unit | what it is | installed by |
+|---|---|---|
+| `meteora-dlmm-trading-bot` | the `mdtb` daemon in this repo (entry signals) | `install.sh` ← `assets/systemd/mdtb.service` |
+| `sol-dlmm-monitor` | 20s Solana exit loop (`dlmm_monitor_loop.sh`) — the real safety net | `install.sh` ← `assets/systemd/sol-dlmm-monitor.service` |
+| `rh-dlmm-monitor` | Robinhood Chain exit loop (`uni_monitor_loop.sh`); installed disabled | `install.sh` ← `assets/systemd/rh-dlmm-monitor.service` |
+| `hermes-gateway-<profile>` | Hermes gateway that receives the webhook | Hermes, not this repo |
+
+Units named after other agents (e.g. a separate LLM LP agent) may also be
+running on the same box; they are **not** this repo's and `install.sh` must
+never write them.
+
+```bash
+journalctl --user -u meteora-dlmm-trading-bot -f          # live tail
+journalctl --user -u meteora-dlmm-trading-bot -n 200 --no-pager
+journalctl --user -u meteora-dlmm-trading-bot -u sol-dlmm-monitor -f   # both
+journalctl --user -u meteora-dlmm-trading-bot --no-pager | grep -E 'DEPLOYED|DRY RUN|REJECT'
+systemctl --user status  meteora-dlmm-trading-bot
+systemctl --user restart meteora-dlmm-trading-bot          # after `go build`
+```
+
+A unit can be `active` while `is-enabled` says `disabled` — it is running now
+but will not come back after a reboot. Check both before assuming a box is
+self-healing; `systemctl --user enable <unit>` fixes it.
+
 ## Architecture
 
 Pipeline is a single loop in `internal/scanner`: `poll ▸ screen ▸ dedup ▸ forward`,
