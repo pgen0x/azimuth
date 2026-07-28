@@ -68,6 +68,33 @@ func TestGateNarrative(t *testing.T) {
 	}
 }
 
+// The post-conviction gates must be distinguishable in the journal: the
+// pipeline's own summary line names bin-array rent and entry timing together,
+// so without these the decisive cause is unrecoverable from logs.
+func TestGateNarrativePostConvictionGates(t *testing.T) {
+	out := "Batch mode: 2 signalled candidate(s)\n" +
+		"Skipping FOO-SOL - deploy range needs 2 new bin-array init (~0.0700 SOL non-refundable rent)\n" +
+		"Entry timing: indicator data unavailable for BAR — proceeding on other gates (fail-open).\n" +
+		"Skipping BAR-SOL - entry timing check (supertrend_or_rsi) rejected for base token BAR\n" +
+		"No candidates deployable (bin-array rent / entry timing rejected every candidate).\n"
+	got := GateNarrative(out)
+	for _, want := range []string{
+		"deploy range needs 2 new bin-array init",
+		"entry timing check (supertrend_or_rsi) rejected",
+		"indicator data unavailable for BAR",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("GateNarrative = %q, want it to contain %q", got, want)
+		}
+	}
+	if strings.Contains(got, "Batch mode:") {
+		t.Errorf("GateNarrative = %q, must not carry progress chatter", got)
+	}
+	if got := GateNarrative("Aborting: Insufficient SOL balance (0.500 SOL < 0.700 SOL required)\n"); got == "" {
+		t.Error("GateNarrative must surface pre-flight aborts")
+	}
+}
+
 func TestRunnerDisabled(t *testing.T) {
 	r := New("", "", time.Second)
 	if r.Enabled() {
