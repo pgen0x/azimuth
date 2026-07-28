@@ -82,12 +82,22 @@ var (
 	// matched 6 pools (best paying $382/30m on $128k TVL, ~14%/day pace).
 	// MinFeeTVL 0.15/30m ~= 7.2%/day pace. Bin band widened to 250: high-fee
 	// launch pools cluster at bin step 100-400.
+	// 2026-07-28: TVL band, mcap band and bin-step ceiling realigned to the
+	// reference bot's live screen, which is the one currently printing gains.
+	// TVL 10k-150k (was 5k-300k): below 10k our ticket moves the price and the
+	// exit swap strands; above 150k our share of the fee split is noise. Mcap
+	// 150k-10M (was >=1M, no ceiling): the 150k-1M band is where fee-capture
+	// pools actually live, and a 10M ceiling replaces "no ceiling" — a token
+	// above it clearing the fee bar is usually a major having a busy day, where
+	// the volatility-harvest assumption breaks. Bin step 80-125 (was 80-250):
+	// wider steps make each bin a bigger price jump, so the ladder sits out of
+	// range more and the 2m OOR fuse churns on noise instead of on fills.
 	Turnover = ModeParams{
 		Mode: "turnover", Timeframe: "30m", TfMinutes: 30,
-		MinTVL: 5000, MinFeeTVL: 0.15, MinMcap: 1000000, MinHolders: 500,
+		MinTVL: 10000, MinFeeTVL: 0.15, MinMcap: 150000, MaxMcap: 10_000_000, MinHolders: 500,
 		MinDailyFee: 25, MinOrganic: 50, MinQuoteOrganic: 60,
-		MinBinStep: 80, MaxBinStep: 250,
-		MaxTVL: 300000, MinFeePct: 1.0, MinVolTVLRatio: 3.0,
+		MinBinStep: 80, MaxBinStep: 125,
+		MaxTVL: 150000, MinFeePct: 1.0, MinVolTVLRatio: 3.0,
 		MinSwapCount: 20, MinUniqueTraders: 15,
 		Category: "all", SortBy: "fee:desc",
 	}
