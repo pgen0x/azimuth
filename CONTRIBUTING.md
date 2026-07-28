@@ -21,9 +21,9 @@ more correct or more reliable," not "is this a cool feature."
 ## Development setup
 
 ```bash
-git clone https://github.com/pgen0x/meteora-dlmm-trading-bot.git
-cd meteora-dlmm-trading-bot
-go build -o mdtb .
+git clone https://github.com/pgen0x/azimuth.git
+cd azimuth
+go build -o azimuth .
 go vet ./...
 ```
 
@@ -58,7 +58,7 @@ This project follows [Semantic Versioning](https://semver.org/)
 - **PATCH** — bug fix, threshold tuning, docs, no behavior contract change.
 
 The current version lives in `main.go` (`var Version`) and is reported via
-`./mdtb -version`.
+`./azimuth -version`.
 
 Releases are fully automated by
 [release-please](https://github.com/googleapis/release-please) — do **not**
@@ -75,7 +75,7 @@ bump `Version`, edit `CHANGELOG.md`, or push tags by hand. Instead:
    the next semver from the commits since the last release.
 3. Merging that PR creates the `vX.Y.Z` tag and GitHub Release, then
    [GoReleaser](https://goreleaser.com/) (`.goreleaser.yaml`) attaches
-   cross-compiled `mdtb` binaries (Linux/macOS, amd64/arm64) with checksums.
+   cross-compiled `azimuth` binaries (Linux/macOS, amd64/arm64) with checksums.
    The version string is injected at link time.
 
 Day-to-day PRs just need well-formed commit messages — the release PR

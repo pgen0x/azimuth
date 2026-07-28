@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A standalone Go daemon (`mdtb`) that polls Meteora's public DLMM pool-discovery
+A standalone Go daemon (`azimuth`) that polls Meteora's public DLMM pool-discovery
 API, screens pools through quality gates, dedups, and hands each poll cycle's
 *batch* of newly-qualifying pools to one of two sinks:
 
@@ -22,10 +22,10 @@ cron's job.
 ## Build / run
 
 ```bash
-go build -o mdtb .              # build the daemon
+go build -o azimuth .              # build the daemon
 go vet ./...                   # vet
 set -a && . ./.env && set +a   # load env (fish: use bass or `env` prefix)
-./mdtb                          # run (reads config from environment)
+./azimuth                          # run (reads config from environment)
 ./install.sh ~/.hermes/profiles/dlmm   # wire assets into a Hermes profile + build
 ```
 
@@ -42,9 +42,9 @@ found"). `loginctl enable-linger $USER` is what keeps them alive across logout.
 
 | unit | what it is | installed by |
 |---|---|---|
-| `meteora-dlmm-trading-bot` | the `mdtb` daemon in this repo (entry signals) | `install.sh` ← `assets/systemd/mdtb.service` |
-| `sol-dlmm-monitor` | 20s Solana exit loop (`dlmm_monitor_loop.sh`) — the real safety net | `install.sh` ← `assets/systemd/sol-dlmm-monitor.service` |
-| `rh-dlmm-monitor` | Robinhood Chain exit loop (`uni_monitor_loop.sh`); installed disabled | `install.sh` ← `assets/systemd/rh-dlmm-monitor.service` |
+| `azimuth` | the `azimuth` daemon in this repo (entry signals) | `install.sh` ← `assets/systemd/azimuth.service` |
+| `azimuth-sol-monitor` | 20s Solana exit loop (`dlmm_monitor_loop.sh`) — the real safety net | `install.sh` ← `assets/systemd/azimuth-sol-monitor.service` |
+| `azimuth-rh-monitor` | Robinhood Chain exit loop (`uni_monitor_loop.sh`); installed disabled | `install.sh` ← `assets/systemd/azimuth-rh-monitor.service` |
 | `hermes-gateway-<profile>` | Hermes gateway that receives the webhook | Hermes, not this repo |
 
 Units named after other agents (e.g. a separate LLM LP agent) may also be
@@ -52,12 +52,12 @@ running on the same box; they are **not** this repo's and `install.sh` must
 never write them.
 
 ```bash
-journalctl --user -u meteora-dlmm-trading-bot -f          # live tail
-journalctl --user -u meteora-dlmm-trading-bot -n 200 --no-pager
-journalctl --user -u meteora-dlmm-trading-bot -u sol-dlmm-monitor -f   # both
-journalctl --user -u meteora-dlmm-trading-bot --no-pager | grep -E 'DEPLOYED|DRY RUN|REJECT'
-systemctl --user status  meteora-dlmm-trading-bot
-systemctl --user restart meteora-dlmm-trading-bot          # after `go build`
+journalctl --user -u azimuth -f          # live tail
+journalctl --user -u azimuth -n 200 --no-pager
+journalctl --user -u azimuth -u azimuth-sol-monitor -f   # both
+journalctl --user -u azimuth --no-pager | grep -E 'DEPLOYED|DRY RUN|REJECT'
+systemctl --user status  azimuth
+systemctl --user restart azimuth          # after `go build`
 ```
 
 A unit can be `active` while `is-enabled` says `disabled` — it is running now

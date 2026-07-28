@@ -47,7 +47,7 @@ DRY_RUN = os.environ.get("DRY_RUN", "").lower() == "true"
 # Report-only: read positions + state + momentum, compute the decision label for
 # each, print a status card + MONITOR_REPORT JSON, and NEVER close or mutate the
 # persisted state file. This is the mode the Hermes reporting cron runs — the
-# systemd loop (rh-dlmm-monitor.service) owns the actual exits, so the cron is a
+# systemd loop (azimuth-rh-monitor.service) owns the actual exits, so the cron is a
 # read-only mirror ("rules not cadence are the lever"). A report tick must never
 # race the loop's on-chain writes.
 REPORT_ONLY = "--report-only" in sys.argv
@@ -126,7 +126,7 @@ def save_state(state):
 # because missing data is treated as passing. Any non-default UA is accepted
 # (Go's default gets 200, which is why the discovery daemon was never affected).
 # Same trap the Jupiter audit gate hit. Do not drop this header.
-USER_AGENT = "mdtb-uni-monitor/1.0"
+USER_AGENT = "azimuth-uni-monitor/1.0"
 
 
 def fetch_momentum(pool):

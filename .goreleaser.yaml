@@ -1,6 +1,6 @@
 version: 2
 
-project_name: mdtb
+project_name: azimuth
 
 before:
   hooks:
@@ -8,8 +8,8 @@ before:
     - go vet ./...
 
 builds:
-  - id: mdtb
-    binary: mdtb
+  - id: azimuth
+    binary: azimuth
     main: .
     env:
       - CGO_ENABLED=0

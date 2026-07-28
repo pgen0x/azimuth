@@ -1,6 +1,5 @@
 # Build artifacts
-/mdtb
-/meteora-dlmm-trading-bot
+/azimuth
 *.exe
 /dist/
 

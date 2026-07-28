@@ -121,50 +121,50 @@ echo "→ npm install (Meteora SDK) in repo"
 ( cd "$REPO/assets/skill" && npm install --no-audit --no-fund >/dev/null 2>&1 ) && echo "   ok" || echo "   ⚠ npm install failed — run manually in $REPO/assets/skill"
 
 echo "→ Building Go daemon"
-( cd "$REPO" && go build -o mdtb . ) && echo "   built $REPO/mdtb"
+( cd "$REPO" && go build -o azimuth . ) && echo "   built $REPO/azimuth"
 
 echo "→ Installing user systemd services"
 # Three user units, all WantedBy=default.target (so `loginctl enable-linger` is
 # what actually keeps them alive across logout/reboot):
-#   sol-dlmm-monitor         — 20s exit loop, the trader-side safety net:
+#   azimuth-sol-monitor         — 20s exit loop, the trader-side safety net:
 #                              auto-close, auto-swap-to-SOL, OOR re-centering and
 #                              cooldowns fire from here; the Hermes cron is only
 #                              the reporting layer. Enabled + started.
-#   meteora-dlmm-trading-bot — the Go discovery daemon (this repo). Enabled +
+#   azimuth — the Go discovery daemon (this repo). Enabled +
 #                              started only if $REPO/.env exists; it is the unit's
 #                              EnvironmentFile, so starting without it just fails.
-#   rh-dlmm-monitor          — Robinhood Chain exit loop. Installed, NOT enabled:
+#   azimuth-rh-monitor          — Robinhood Chain exit loop. Installed, NOT enabled:
 #                              that venue is observe-only until you deploy there.
 # Idempotent: re-running rewrites the units and restarts what is enabled.
 if command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >/dev/null 2>&1; then
   UNIT_DIR="$HOME/.config/systemd/user"
   mkdir -p "$UNIT_DIR"
-  sed "s#__PROFILE__#$PROFILE#g" "$REPO/assets/systemd/sol-dlmm-monitor.service" > "$UNIT_DIR/sol-dlmm-monitor.service"
-  sed "s#__PROFILE__#$PROFILE#g" "$REPO/assets/systemd/rh-dlmm-monitor.service"  > "$UNIT_DIR/rh-dlmm-monitor.service"
+  sed "s#__PROFILE__#$PROFILE#g" "$REPO/assets/systemd/azimuth-sol-monitor.service" > "$UNIT_DIR/azimuth-sol-monitor.service"
+  sed "s#__PROFILE__#$PROFILE#g" "$REPO/assets/systemd/azimuth-rh-monitor.service"  > "$UNIT_DIR/azimuth-rh-monitor.service"
   # The daemon posts to this profile's Hermes gateway, so order after it. Weak
   # Wants= — if that unit doesn't exist (direct-deploy-only hosts) systemd just
   # logs a warning instead of refusing to start the daemon.
   GATEWAY_UNIT="hermes-gateway-$(basename "$PROFILE").service"
   sed -e "s#__REPO__#$REPO#g" -e "s#__GATEWAY__#$GATEWAY_UNIT#g" \
-    "$REPO/assets/systemd/mdtb.service" > "$UNIT_DIR/meteora-dlmm-trading-bot.service"
+    "$REPO/assets/systemd/azimuth.service" > "$UNIT_DIR/azimuth.service"
   systemctl --user daemon-reload
-  systemctl --user enable --now sol-dlmm-monitor.service
-  echo "   installed + started sol-dlmm-monitor.service"
+  systemctl --user enable --now azimuth-sol-monitor.service
+  echo "   installed + started azimuth-sol-monitor.service"
   if [ -f "$REPO/.env" ]; then
-    systemctl --user enable --now meteora-dlmm-trading-bot.service
-    systemctl --user restart meteora-dlmm-trading-bot.service
-    echo "   installed + started meteora-dlmm-trading-bot.service"
+    systemctl --user enable --now azimuth.service
+    systemctl --user restart azimuth.service
+    echo "   installed + started azimuth.service"
   else
-    echo "   installed meteora-dlmm-trading-bot.service (not started — create $REPO/.env first,"
-    echo "     then: systemctl --user enable --now meteora-dlmm-trading-bot.service)"
+    echo "   installed azimuth.service (not started — create $REPO/.env first,"
+    echo "     then: systemctl --user enable --now azimuth.service)"
   fi
-  echo "   installed rh-dlmm-monitor.service (not enabled — Robinhood venue is observe-only)"
+  echo "   installed azimuth-rh-monitor.service (not enabled — Robinhood venue is observe-only)"
   echo "   ⚠ run 'loginctl enable-linger $USER' once so the loops survive logout/reboot"
-  echo "   logs: journalctl --user -u meteora-dlmm-trading-bot -f"
+  echo "   logs: journalctl --user -u azimuth -f"
 else
   echo "   ⚠ no user systemd available — run the loop + daemon yourself:"
   echo "     nohup bash $PROFILE/skills/solana-dlmm/scripts/dlmm_monitor_loop.sh &"
-  echo "     ( cd $REPO && set -a && . ./.env && set +a && nohup ./mdtb & )"
+  echo "     ( cd $REPO && set -a && . ./.env && set +a && nohup ./azimuth & )"
 fi
 
 cat <<DONE
@@ -189,10 +189,10 @@ Next steps:
      (Position Monitor, Self-Improvement Review, Journal Reconciliation) with your channel.
   5. Configure + run the daemon:
        cp $REPO/.env.example $REPO/.env   # edit secret to match step 2
-       systemctl --user enable --now meteora-dlmm-trading-bot.service
-       # or, foreground:  cd $REPO && set -a && . ./.env && set +a && ./mdtb
+       systemctl --user enable --now azimuth.service
+       # or, foreground:  cd $REPO && set -a && . ./.env && set +a && ./azimuth
 
 Services + logs:
-  systemctl --user status meteora-dlmm-trading-bot sol-dlmm-monitor
-  journalctl --user -u meteora-dlmm-trading-bot -u sol-dlmm-monitor -f
+  systemctl --user status azimuth azimuth-sol-monitor
+  journalctl --user -u azimuth -u azimuth-sol-monitor -f
 DONE
