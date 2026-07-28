@@ -23,7 +23,7 @@ jobs:
         run: go vet ./...
 
       - name: Build
-        run: go build -o mdtb .
+        run: go build -o azimuth .
 
       - name: Smoke test (-version)
-        run: ./mdtb -version
+        run: ./azimuth -version

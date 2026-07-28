@@ -6,7 +6,7 @@
 # degrades from seconds to the cron interval and the turnover fast-cycle
 # (2-minute OOR fuse) cannot react in time.
 [Unit]
-Description=DLMM Position Monitor Loop (auto-close + auto-swap to SOL)
+Description=Azimuth Solana DLMM Position Monitor Loop (auto-close + auto-swap to SOL)
 After=network-online.target
 
 [Service]

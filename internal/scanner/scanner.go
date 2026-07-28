@@ -9,12 +9,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/meteora-dlmm-trading-bot/internal/config"
-	"github.com/meteora-dlmm-trading-bot/internal/deploy"
-	"github.com/meteora-dlmm-trading-bot/internal/meteora"
-	"github.com/meteora-dlmm-trading-bot/internal/robinhood"
-	"github.com/meteora-dlmm-trading-bot/internal/store"
-	"github.com/meteora-dlmm-trading-bot/internal/webhook"
+	"github.com/pgen0x/azimuth/internal/config"
+	"github.com/pgen0x/azimuth/internal/deploy"
+	"github.com/pgen0x/azimuth/internal/meteora"
+	"github.com/pgen0x/azimuth/internal/robinhood"
+	"github.com/pgen0x/azimuth/internal/store"
+	"github.com/pgen0x/azimuth/internal/webhook"
 )
 
 // batchSummary renders a compact "SYM(score)" list for one log line.

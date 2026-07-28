@@ -6,7 +6,7 @@
 [![Status](https://img.shields.io/badge/status-beta-yellow)](#project-status)
 [![Chain](https://img.shields.io/badge/chain-Solana-9945FF?logo=solana&logoColor=white)](#)
 
-**meteora-dlmm-trading-bot** is a Go daemon that watches **Meteora DLMM**
+**azimuth** is a Go daemon that watches **Meteora DLMM**
 (Dynamic Liquidity Market Maker) pools on **Solana**, screens them through
 quality gates, and hands an **AI trading agent** (built on
 [Hermes](https://github.com/NousResearch/hermes)) a batch of vetted candidates
@@ -89,7 +89,7 @@ accounts, API keys, or scraping required to source signals.
 
 ```
 ┌─────────────────────────┐   HMAC-signed   ┌─────────────────────┐
-│ mdtb (this Go daemon)   │ POST /webhooks/ │ Hermes agent        │
+│ azimuth (this Go daemon)   │ POST /webhooks/ │ Hermes agent        │
 │                         ├────────────────▶│ ranks the batch,    │
 │                         │   dlmm-signal   │ picks 1 + strategy  │
 │ poll -> screen -> dedup │  (batch array)  │ -> dlmm_pipeline.py │
@@ -152,16 +152,16 @@ dlmm gateway install      # or persistent systemd/launchd service
 ### Installation
 
 ```bash
-git clone https://github.com/pgen0x/meteora-dlmm-trading-bot.git
-cd meteora-dlmm-trading-bot
+git clone https://github.com/pgen0x/azimuth.git
+cd azimuth
 
 # Installs the skill (symlinked, not copied — edits here go live instantly),
 # the webhook subscription, SOUL.md section + cron job templates, the 20s
-# monitor-loop systemd service, and builds mdtb.
+# monitor-loop systemd service, and builds azimuth.
 ./install.sh ~/.hermes/profiles/<your-profile>
 ```
 
-The install enables `sol-dlmm-monitor.service` (user-level systemd), which runs
+The install enables `azimuth-sol-monitor.service` (user-level systemd), which runs
 `dlmm_monitor.py` every 20 seconds. **This loop is the trader-side safety net** —
 auto-close, auto-swap-to-SOL, out-of-range re-centering and cooldowns all fire
 from it; the Hermes cron job is only the reporting/judgment layer. Make it
@@ -169,7 +169,7 @@ survive logout once per machine:
 
 ```bash
 loginctl enable-linger $USER
-systemctl --user status sol-dlmm-monitor   # verify it's running
+systemctl --user status azimuth-sol-monitor   # verify it's running
 ```
 
 Without user systemd (e.g. macOS), run the loop some other persistent way:
@@ -202,7 +202,7 @@ cp .env.example .env        # set HERMES_WEBHOOK_SECRET to match the subscriptio
 
 ```bash
 set -a && . ./.env && set +a
-./mdtb
+./azimuth
 ```
 
 The daemon is stateless except for its dedup set (in-memory by default; point
@@ -244,7 +244,7 @@ volume/TVL ≥ 3 per 30m window · ≥ 20 swaps and ≥ 15 unique traders in-win
 ENABLE_TURNOVER=true
 ```
 
-then restart `./mdtb`. Signals arrive with `"mode": "turnover"`; the agent
+then restart `./azimuth`. Signals arrive with `"mode": "turnover"`; the agent
 prompt and `dlmm_pipeline.py --mode turnover` already handle the mode end to
 end (2 position slots, tight-range `custom_ratio_spot` preferred).
 
@@ -340,7 +340,7 @@ it prevents) in the PR description.
 
 See [`CHANGELOG.md`](CHANGELOG.md) for release history. This project follows
 [Semantic Versioning](https://semver.org/); the current version is reported
-by `./mdtb -version`.
+by `./azimuth -version`.
 
 ## Security
 
