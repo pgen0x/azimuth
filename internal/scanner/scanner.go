@@ -483,6 +483,7 @@ func (s *Scanner) pollMode(ctx context.Context, mp meteora.ModeParams) {
 	// per-pool sends where a mediocre early pool grabs a slot the best pool wanted.
 	var batch []*meteora.Candidate
 	var batchKeys []string
+	var momRejectedKeys []string
 	for _, p := range pools {
 		cand, reason := meteora.Screen(p, mp)
 		if reason != "" {
@@ -535,6 +536,7 @@ func (s *Scanner) pollMode(ctx context.Context, mp meteora.ModeParams) {
 			if m, ok := meteora.GetMomentum(cand.BaseMint); ok {
 				if r := meteora.MomentumReject(m); r != "" {
 					momRejected++
+					momRejectedKeys = append(momRejectedKeys, poolKey)
 					log.Printf("scanner[%s]: %s (%s) rejected on momentum: %s", mp.Mode, cand.BaseSymbol, cand.Pool[:8], r)
 					continue
 				}
@@ -586,6 +588,23 @@ func (s *Scanner) pollMode(ctx context.Context, mp meteora.ModeParams) {
 
 		batch = append(batch, cand)
 		batchKeys = append(batchKeys, poolKey)
+	}
+
+	// A momentum reject normally stays marked seen for the whole SEEN_TTL so we
+	// don't re-hit DexScreener for a dumping pool every cycle. But when it took
+	// the LAST candidate with it, that trade-off silences the entire mode for
+	// hours: turnover's live supply is 1-4 qualifying pools per cycle, so a
+	// single -3.9% 5m print blanked it for the full 2h TTL (observed
+	// 2026-07-28). Momentum is the one *transient* reject — the price recovers
+	// in minutes — unlike the audit / GMGN safety rejects, which stay sticky by
+	// design. Unmark only when the batch ended up empty, so the extra
+	// DexScreener traffic is bounded to cycles that would have sent nothing.
+	if len(batch) == 0 && len(momRejectedKeys) > 0 {
+		for _, k := range momRejectedKeys {
+			s.seen.Unmark(ctx, k)
+		}
+		log.Printf("scanner[%s]: batch empty — unmarked %d momentum-rejected pool(s) to retry next cycle",
+			mp.Mode, len(momRejectedKeys))
 	}
 
 	// PVP rival check (advisory, fail-open): flag candidates whose symbol is

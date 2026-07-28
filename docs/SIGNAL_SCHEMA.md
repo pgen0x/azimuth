@@ -106,6 +106,7 @@ Every element of `payload` is one candidate pool with these fields:
 | `swap_count` / `unique_traders` | window activity — wash-trade guards (turnover mode gates ≥ 20 / ≥ 15) |
 | `score` | conviction score 0–100 (Degen Score: geometric mean of trading / LP-activity / fee / liquidity efficiency sub-scores, normalized to a 30m window — a high score requires balance, no single metric can fake it) |
 | `active_tvl` / `volume_active_tvl_ratio` / `unique_lps` / `positions_created` | the Degen Score inputs, exposed so the agent sees *why* a score is high or low |
+| `unverified` | the API reported `is_verified: false` and the mode allowed it through anyway (turnover only — casual/multiday still hard-reject). `score` already carries a ×0.85 haircut, so no further penalty is needed; treat it as a tie-break signal against an equally strong verified pool. **Absent** = verified or unknown, never unverified |
 | `bot_holders_pct` / `global_fees_sol` | Jupiter audit enrichment (audit gate). **May be absent** — absent means the audit fetch failed (fail-open); treat as unknown, never as zero |
 | `dev` | deployer wallet address from the Jupiter asset record. The pipeline hard-skips devs in the `sol:dlmm:blocklist:dev` Redis set and stores the value in position metadata so a rug close blocklists the dev permanently. **May be absent** — unknown deployer (fail-open) |
 | `prior_closes` / `prior_net_pnl_sol` | pool memory summary from the monitor's close journal (`sol:dlmm:history:pool:<pool>`, last 10 closes / 30d). **May be absent** — absent means no history (or non-Redis dedup backend), not a clean record. Negative net PnL = this pool cost us before |
@@ -128,9 +129,14 @@ Only pools passing **all** of these are emitted:
 
 - SOL-paired; TVL ≥ mode floor; fee/TVL ≥ mode floor; daily fee ≥ mode floor
 - `0 < volatility ≤ 15`; organic ≥ mode floor (60 casual/multiday, 50 turnover); mcap ≥ mode floor; holders ≥ mode floor
-- turnover mode only: TVL ≤ $300k; base fee ≥ 1%; volume/TVL ≥ 3; swaps ≥ 20; unique traders ≥ 15 (30m window)
+- turnover mode only: TVL ≤ $150k; mcap ≤ $10M; base fee ≥ 1%; volume/TVL ≥ 3; swaps ≥ 20; unique traders ≥ 15 (30m window)
 - fee/TVL change ≥ −40%; top-10 ≤ 60%; dev ≤ 20%
-- no freeze/mint authority; `is_verified` not false; no critical/warning flags
+- no freeze/mint authority; no critical/warning flags
+- `is_verified` not false — **except turnover**, where an unverified token is
+  admitted with a score haircut and flagged via `unverified` (its thesis pools
+  are never on the Jupiter strict list, so the hard gate rejected the mode's
+  entire population; the holder/organic/concentration/authority/GMGN/audit
+  gates carry the rug risk instead)
 - (if enabled) not dumping: 5m > −5%, 1h > −15%, 6h > −12%, 24h > −25%
 - (if enabled) Jupiter audit: bot holders ≤ 30% (fail-open when the audit is unavailable)
 - lone-candidate conviction gate: a cycle producing exactly one fresh pool only

@@ -29,6 +29,11 @@ type ModeParams struct {
 	MinSwapCount     float64 // swaps in window (wash-trade guard, with MinUniqueTraders)
 	MinUniqueTraders float64 // unique traders in window
 
+	// AllowUnverified downgrades the is_verified gate from a hard reject to a
+	// score penalty (unverifiedScorePenalty). Off by default — see the gate
+	// itself in Screen for why turnover is the one mode that needs it.
+	AllowUnverified bool
+
 	// Discovery query knobs. Empty = the historical defaults ("trending", API
 	// default sort) so Casual/Multiday queries are byte-identical to before.
 	Category string
@@ -99,7 +104,8 @@ var (
 		MinBinStep: 80, MaxBinStep: 125,
 		MaxTVL: 150000, MinFeePct: 1.0, MinVolTVLRatio: 3.0,
 		MinSwapCount: 20, MinUniqueTraders: 15,
-		Category: "all", SortBy: "fee:desc",
+		AllowUnverified: true,
+		Category:        "all", SortBy: "fee:desc",
 	}
 )
 
@@ -112,6 +118,13 @@ const (
 	degenTargetFeeRatio  = 0.20    // (30m) fee/active_tvl for a full fee sub-score
 	degenTargetLiquidity = 20000.0 // active_tvl ($) for full liquidity sub-score (not TF-scaled)
 )
+
+// unverifiedScorePenalty scales the score of a token the API reports as
+// is_verified=false, for the modes that let them through (AllowUnverified).
+// Sized so an unverified pool always loses a tie-break to an equally strong
+// verified one, and a marginal one drops itself through the lone-candidate
+// floor (LONE_MIN_SCORE) and the pipeline's per-mode batch-conviction floor.
+const unverifiedScorePenalty = 0.85
 
 // SkipReason is returned (non-empty) when a pool fails a gate, for logging.
 // A returned Candidate is only valid when reason == "".
@@ -212,7 +225,21 @@ func Screen(p Pool, mp ModeParams) (*Candidate, string) {
 	}
 
 	// Verified + Jupiter shield, fail-open when absent.
-	if !boolOr(base.Verified, true) {
+	//
+	// The is_verified gate is HARD for casual/multiday but a score penalty for
+	// turnover (AllowUnverified). "Fail-open when absent" never actually fired
+	// here: the discovery API always emits is_verified, so this was a strict
+	// Jupiter-list gate — and turnover deliberately hunts $10k-150k pools on
+	// $150k-10M mcap tokens, which are never on that list. Live probe
+	// 2026-07-28: 11 of 13 pools inside the turnover band were
+	// is_verified=false, including the best-paying pool on the board (BNUT,
+	// fee/TVL 1.28%/30m on $22k TVL), so the mode screened out its own thesis
+	// and sent 0 batches. Rug risk stays covered by the holders / organic /
+	// top10 / dev-balance / freeze-mint-authority gates plus the GMGN and
+	// Jupiter-audit gates; upstream marks NOT_VERIFIED severity "info", not
+	// "warning", so the warning-severity gate below deliberately ignores it.
+	unverified := !boolOr(base.Verified, true)
+	if unverified && !mp.AllowUnverified {
 		return nil, "not verified"
 	}
 	jupShield := base.JupShieldVerified
@@ -250,6 +277,9 @@ func Screen(p Pool, mp ModeParams) (*Candidate, string) {
 			score += 10
 		}
 	}
+	if unverified {
+		score *= unverifiedScorePenalty
+	}
 
 	return &Candidate{
 		Mode:                 mp.Mode,
@@ -276,6 +306,7 @@ func Screen(p Pool, mp ModeParams) (*Candidate, string) {
 		TopHoldersPct:        base.TopHoldersPct,
 		DevBalancePct:        base.DevBalancePct,
 		Score:                score,
+		Unverified:           unverified,
 		ActiveTVL:            p.ActiveTVL,
 		VolumeActiveTVLRatio: p.VolumeActiveTVLRatio,
 		UniqueLPs:            p.UniqueLPs,
