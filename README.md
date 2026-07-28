@@ -299,8 +299,10 @@ funds:
 > `systemctl --user enable --now azimuth-rh-monitor`
 
 Set `DRY_RUN=1` in `<profile>/.env` to exercise the whole path without
-spending. Note it reports a **fixed synthetic wallet balance**, so position
-sizes in a dry run are not what live sizing would pick.
+spending. Dry runs read your **real** wallet balance — it is a read-only RPC
+call that spends nothing — so a soak reports the ticket sizes a live run would
+actually deploy. Only the offline fallback (RPC unreachable) substitutes a
+synthetic balance.
 
 ### Daemon variables
 
