@@ -181,7 +181,7 @@ the entry→monitor→exit→report loop.
 
 ### Phase 3 — monitor: exits ✅ (landed 2026-07-13, commit 77cdc67)
 - `assets/skill/scripts/uni_monitor.py` — one-shot scan, run every 60s by
-  `uni_monitor_loop.sh` under user systemd unit **`rh-dlmm-monitor.service`**
+  `uni_monitor_loop.sh` under user systemd unit **`azimuth-rh-monitor.service`**
   (enabled + active). Ports dlmm_monitor.py's exit rulebook verbatim (same
   percent thresholds per operator "same like solana"): emergency SL, hard SL
   -25%, hard TP +50%, trailing profit-ratchet (arms +5%, `trailing_floor_pct`

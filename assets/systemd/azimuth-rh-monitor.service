@@ -4,9 +4,9 @@
 # and this loop only matters once real v3/v4 positions exist.
 #
 # Enable when you start trading that venue:
-#   systemctl --user enable --now rh-dlmm-monitor.service
+#   systemctl --user enable --now azimuth-rh-monitor.service
 [Unit]
-Description=Robinhood Chain (Uniswap v3) Position Monitor Loop (auto-close on SL/TP/trailing/OOR)
+Description=Azimuth Robinhood Chain (Uniswap v3) Position Monitor Loop (auto-close on SL/TP/trailing/OOR)
 After=network-online.target
 
 [Service]

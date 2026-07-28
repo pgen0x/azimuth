@@ -1,13 +1,13 @@
 # User-level systemd unit for the Go discovery daemon itself.
-# Installed by install.sh as `meteora-dlmm-trading-bot.service` (rewrites
+# Installed by install.sh as `azimuth.service` (rewrites
 # __REPO__ to the checkout path). Reads all config from $REPO/.env — the same
-# file you would `set -a && . ./.env` before running ./mdtb by hand.
+# file you would `set -a && . ./.env` before running ./azimuth by hand.
 #
 # Ordered after the Hermes gateway (__GATEWAY__ = hermes-gateway-<profile>.service,
 # derived from the install target) because webhook mode posts to it; in
 # direct-deploy mode (DEPLOY_CMD set) the dependency is a harmless weak Wants=.
 [Unit]
-Description=Meteora DLMM Trading Bot (pool discovery -> Hermes webhook / direct deploy)
+Description=Azimuth — multi-venue concentrated-liquidity LP bot (pool discovery -> Hermes webhook / direct deploy)
 After=network-online.target __GATEWAY__
 Wants=network-online.target __GATEWAY__
 
@@ -15,7 +15,7 @@ Wants=network-online.target __GATEWAY__
 Type=simple
 WorkingDirectory=__REPO__
 EnvironmentFile=__REPO__/.env
-ExecStart=__REPO__/mdtb
+ExecStart=__REPO__/azimuth
 Restart=always
 RestartSec=10
 
