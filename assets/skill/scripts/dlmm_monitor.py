@@ -479,6 +479,54 @@ def run_command_json(cmd, timeout=30):
     except Exception as e:
         return None, f"JSON parse error: {e}. Raw: {out}"
 
+# A DLMM close is a multi-tx chain (removeLiquidity ▸ claim fees ▸ closePosition),
+# so the old 30s subprocess budget was thinner than the chain's own confirmation
+# time. On 2026-07-30 a CHANCE-SOL trailing-TP close timed out at 30s, landed
+# on-chain anyway, and was reported as a failure: Redis kept the position
+# "open", the close never reached dlmm_closes.jsonl, and the trade vanished from
+# the PnL journal. Give the chain room — and then verify against it before
+# believing an error.
+CLOSE_CMD_TIMEOUT = 120
+
+def position_gone_onchain(wallet_address, pos_addr, attempts=2, gap_s=6):
+    """True/False when the Meteora portfolio API can answer, None when it can't.
+
+    Only a unanimous "not listed" across `attempts` polls counts as gone — one
+    lagging API read must never be enough to declare a live position closed.
+    """
+    if not wallet_address:
+        return None
+    verdicts = []
+    for i in range(attempts):
+        if i:
+            time.sleep(gap_s)
+        positions, _err = get_meteora_portfolio_positions(wallet_address)
+        if positions is None:
+            continue
+        verdicts.append(pos_addr not in positions)
+    if not verdicts:
+        return None
+    return all(verdicts)
+
+def close_position(pos_addr, env_prefix="", wallet_address=None, is_dry_run=False):
+    """Execute a close, reconciling a reported failure against the chain.
+
+    Same (result, error) shape as run_command_json. A close the subprocess gave
+    up on but the chain confirms comes back as a success with no tx hashes —
+    losing the hash is survivable, losing the close is not: an unrecorded close
+    leaves a phantom open position in Redis and a hole in the PnL journal.
+    """
+    cmd = f"{env_prefix}DLMM_CLOSE_AUTH=1 node {EXECUTOR_PATH} close {pos_addr}"
+    res, err = run_command_json(cmd, timeout=CLOSE_CMD_TIMEOUT)
+    if (res and res.get("success")) or is_dry_run:
+        return res, err
+    if position_gone_onchain(wallet_address, pos_addr) is True:
+        detail = err or (res or {}).get("error") or "unknown error"
+        print(f"⚠️ Close of {pos_addr} reported failure ({detail}) but the position "
+              f"is GONE on-chain — treating as closed.")
+        return {"success": True, "txHashes": [], "verifiedByChain": True}, None
+    return res, err
+
 def get_wallet_sol_balance():
     try:
         data, err = run_command_json(f"node {EXECUTOR_PATH} spl-balance SOL")
@@ -776,7 +824,8 @@ def main():
 
         print(f"🤖 AI FORCE-CLOSE: {meta.get('pair')} — Reason: {cli.reason}")
         env_prefix = "DRY_RUN=true " if is_dry else ""
-        close_res, close_err = run_command_json(f"{env_prefix}DLMM_CLOSE_AUTH=1 node {EXECUTOR_PATH} close {cli.override_close}")
+        close_res, close_err = close_position(cli.override_close, env_prefix,
+                                              get_wallet_address(), is_dry)
         if close_res and close_res.get("success"):
             run_command(f"redis-cli srem sol:dlmm:active_positions \"{cli.override_close}\"")
             run_command(f"redis-cli del \"sol:dlmm:position:{cli.override_close}\"")
@@ -925,7 +974,7 @@ def main():
                     print(f"🧟 [report-only] Untracked EMPTY position {oc_addr} (pool {oc_pool}) — would close to reclaim rent.")
                     continue
                 print(f"🧟 Untracked EMPTY position {oc_addr} (pool {oc_pool}) — closing to reclaim rent.")
-                close_res, close_err = run_command_json(f"DLMM_CLOSE_AUTH=1 node {EXECUTOR_PATH} close {oc_addr}")
+                close_res, close_err = close_position(oc_addr, "", wallet_address)
                 if close_res and close_res.get("success"):
                     print(f"✅ Reclaimed empty position {oc_addr}.")
                 else:
@@ -1382,8 +1431,8 @@ def main():
                 claim_res, claim_err = run_command_json(claim_cmd)
                 if claim_res and claim_res.get("success"):
                     # Close current position and redeploy total amount
-                    close_cmd = f"{env_prefix}DLMM_CLOSE_AUTH=1 node {EXECUTOR_PATH} close {pos_addr}"
-                    close_res, close_err = run_command_json(close_cmd)
+                    close_res, close_err = close_position(pos_addr, env_prefix,
+                                                         wallet_address, is_dry_run_stored)
                     if close_res and close_res.get("success"):
                         new_deploy_sol = meta.get("size_sol", DEFAULT_DEPLOY_SOL) + unclaimed_fees_sol
                         compound_shape = "bid_ask" if is_turnover_compound else "spot"
@@ -1433,8 +1482,8 @@ def main():
         has_harvested = meta.get("has_harvested", False)
         if strategy == "partial_harvest" and pnl_pct >= 10.0 and not has_harvested and in_range and not close_reason and not cli.report_only:
             print(f"💰 Strategy: partial_harvest. Securing 50% profits at +{pnl_pct:.2f}%...")
-            close_cmd = f"{env_prefix}DLMM_CLOSE_AUTH=1 node {EXECUTOR_PATH} close {pos_addr}"
-            close_res, close_err = run_command_json(close_cmd)
+            close_res, close_err = close_position(pos_addr, env_prefix,
+                                                 wallet_address, is_dry_run_stored)
             if close_res and close_res.get("success"):
                 new_deploy_sol = meta.get("size_sol", DEFAULT_DEPLOY_SOL) * 0.5
                 deploy_cmd = f"node {EXECUTOR_PATH} deploy {pool} 0 {new_deploy_sol} {bins_below} {meta.get('bins_above', 0)} spot {params.get('SLIPPAGE_BPS', 1000)}"
@@ -1528,13 +1577,13 @@ def main():
         if close_reason:
             print(f"🚨 Exiting Position {pair} - Reason: {close_reason}")
             env_prefix = "DRY_RUN=true " if is_dry_run_stored else ""
-            close_cmd = f"{env_prefix}DLMM_CLOSE_AUTH=1 node {EXECUTOR_PATH} close {pos_addr}"
-            close_res, close_err = run_command_json(close_cmd)
-            
+            close_res, close_err = close_position(pos_addr, env_prefix,
+                                                 wallet_address, is_dry_run_stored)
+
             if close_res and close_res.get("success"):
                 position_closed_this_cycle = True
-                txs = close_res.get("txHashes", ["DRY_RUN_TX_HASH"])
-                print(f"✅ Successfully closed position {pair}. Txs: {', '.join(txs)}")
+                txs = close_res.get("txHashes") or (["DRY_RUN_TX_HASH"] if is_dry_run_stored else [])
+                print(f"✅ Successfully closed position {pair}. Txs: {', '.join(txs) or '(confirmed on-chain, hash unavailable)'}")
                 
                 # Update Redis
                 run_command(f"redis-cli srem sol:dlmm:active_positions \"{pos_addr}\"")
@@ -1820,6 +1869,10 @@ def main():
                 ts_str = local_time_str()
                 is_dry = close_res.get("dryRun") or close_res.get("dry_run") == True
                 status_label = "🧪 DRY RUN CLOSE" if is_dry else "🚨 POSITION CLOSED"
+                # A chain-verified close (executor timed out, tx landed anyway)
+                # has no hash to link — say so instead of printing a dead link.
+                tx_line = (f"TX | https://solscan.io/tx/{txs[0]}" if txs
+                           else "TX | (confirmed on-chain — executor timed out before returning the hash)")
                 report = f"""{status_label} — {ts_str}
 {pair} {pos_addr}
 Exit Reason | {close_reason}
@@ -1827,7 +1880,7 @@ Metric | Value
 Entry Price | {entry_price:.8f}
 Exit Price | {active_price:.8f}
 Realized PnL | {pnl_pct:+.2f}% ({realized_sol:+.4f} SOL){swap_report}
-TX | https://solscan.io/tx/{txs[0]}
+{tx_line}
 """
                 print(report)
                 # Instant operator alert — the close (with any rebalance/compound
