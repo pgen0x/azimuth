@@ -105,6 +105,12 @@ type Candidate struct {
 	DevBalancePct        float64 `json:"dev_balance_pct"`
 	Score                float64 `json:"score"`
 
+	// Unverified is true when the API reported is_verified=false and the mode
+	// allowed it through anyway (ModeParams.AllowUnverified) — Score already
+	// carries the unverifiedScorePenalty haircut. Omitted when the token is
+	// verified, so absent means "verified or unknown", never "unverified".
+	Unverified bool `json:"unverified,omitempty"`
+
 	// Degen Score inputs, exposed so the agent sees WHY a score is high/low
 	// instead of trusting an opaque number.
 	ActiveTVL            float64 `json:"active_tvl"`
