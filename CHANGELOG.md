@@ -5,6 +5,20 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.1.0](https://github.com/pgen0x/azimuth/compare/v2.0.0...v2.1.0) (2026-07-30)
+
+
+### Features
+
+* **turnover:** fee-capture mode, Azimuth rename, chain-verified closes ([ac3f2ba](https://github.com/pgen0x/azimuth/commit/ac3f2ba44b0e7d503e5f99edf763d9137b6a6272))
+
+
+### Bug Fixes
+
+* **deploy:** journal the post-conviction gate that killed a batch ([05a787c](https://github.com/pgen0x/azimuth/commit/05a787cd107911d483482b756d52a9a837b97255))
+* **monitor:** verify closes against the chain before believing a failure ([635c2a2](https://github.com/pgen0x/azimuth/commit/635c2a275619e7b1c1e57be8b30416bc2773cb90))
+* **turnover:** admit unverified tokens, unstick momentum rejects ([c033f9b](https://github.com/pgen0x/azimuth/commit/c033f9b32dc111602405c171dcd0c3d3ac29d446))
+
 ## [2.0.0](https://github.com/pgen0x/azimuth/compare/v1.15.0...v2.0.0) (2026-07-28)
 
 
