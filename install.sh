@@ -59,27 +59,46 @@ else:
 open(dst_path, "w").write(content)
 PY
 
-echo "→ Merging DLMM cron jobs (skips any job name that already exists)"
+echo "→ Merging DLMM cron jobs (skips any job id or name that already exists)"
 JOBS_DST="$PROFILE/cron/jobs.json"
 mkdir -p "$(dirname "$JOBS_DST")"
 [ -f "$JOBS_DST" ] || echo "[]" > "$JOBS_DST"
 python3 - "$JOBS_DST" "$REPO/assets/hermes/cron_jobs_template.json" "$PROFILE" <<'PY'
 import json, sys
 dst, src, profile = sys.argv[1], sys.argv[2], sys.argv[3]
-existing = json.load(open(dst))
-if not isinstance(existing, list):
-    existing = existing.get("jobs", [])
+raw = json.load(open(dst))
+# Hermes stores {"jobs": [...], "updated_at": ...}; older files were a bare
+# list. Remember which shape we read and write the same one back — dumping a
+# bare list over a wrapped file made Hermes log "Auto-repaired jobs.json (bare
+# list wrapped as dict)" on its next tick.
+wrapped = isinstance(raw, dict)
+existing = raw.get("jobs", []) if wrapped else raw
+# Match on id AND name. Name alone is not an identity: the operator renames
+# jobs per profile ("DLMM ..." -> "Solanza ..."), and a name-only check then
+# re-appended the template under an id that was already live — two entries
+# sharing one id, one still carrying the REPLACE_ME deliver placeholder, both
+# claiming the same schedule.
+existing_ids = {j.get("id") for j in existing if j.get("id")}
 existing_names = {j.get("name") for j in existing}
 template = json.loads(open(src).read().replace("__PROFILE__", profile))
 added = 0
 for job in template:
+    if job.get("id") in existing_ids:
+        print(f"   skipped (id already present): {job['id']}")
+        continue
     if job["name"] in existing_names:
         print(f"   skipped (already present): {job['name']}")
         continue
     existing.append(job)
+    existing_ids.add(job.get("id"))
+    existing_names.add(job["name"])
     added += 1
     print(f"   added: {job['name']} (edit \"deliver\" — it's a placeholder)")
-json.dump(existing, open(dst, "w"), indent=2)
+if wrapped:
+    raw["jobs"] = existing
+    json.dump(raw, open(dst, "w"), indent=2)
+else:
+    json.dump(existing, open(dst, "w"), indent=2)
 if added == 0:
     print("   no new jobs added")
 PY
