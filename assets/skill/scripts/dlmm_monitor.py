@@ -304,7 +304,7 @@ def clear_signal_seen(pool):
     all modes. Re-entry safety is unaffected: the pipeline's already-held check
     and the symbol/pool cooldowns set alongside this still gate any redeploy."""
     prefix = os.environ.get("REDIS_SEEN_KEY", "dlmm:signal:seen_pools")
-    for mode in ("casual", "multiday", "turnover"):
+    for mode in ("casual", "multiday", "turnover", "pulse"):
         run_command(f"redis-cli del \"{prefix}:{mode}:{pool}\"")
 
 def load_soul_dlmm_params():
@@ -1145,8 +1145,14 @@ def main():
         # turnover close — trailing-TP included — reseeds immediately with no
         # cooldown. Without an armable TP the only profitable turnover exit was an
         # upside-OOR pump-out, so churn almost never fired.
-        is_turnover_pos = meta.get("mode") == "turnover"
-        if is_turnover_pos:
+        # Pulse shares the tight pair. Its screen has no base-fee or turnover
+        # floor, so its entries are not the high-fee oscillators the default
+        # 5.0/1.5 trailing pair was sized for: on a 5m-window pool a 5% trigger
+        # usually never arms, and the position rides a fading pool back to flat
+        # instead of banking. Only the trailing pair is shared; the 2m re-center
+        # fuse and the churn reseed stay turnover-only.
+        is_tight_tp_pos = meta.get("mode") in ("turnover", "pulse")
+        if is_tight_tp_pos:
             effective_trigger = turnover_trailing_trigger_pct
             effective_drop = turnover_trailing_drop_pct
         else:
@@ -1661,7 +1667,7 @@ def main():
                 else:
                     rebalance_cap = 3
                     rebalance_budget_ok = rebalances_24h < rebalance_cap
-                # Turnover churn (2026-07-25): reference-bot-style close→reseed. A
+                # Turnover churn (2026-07-25): close→reseed cadence. A
                 # PROFITABLE turnover close — trailing-TP, TP, or pump-out — proves
                 # the pool is hot, not a reason to sit 15m in cooldown waiting on a
                 # fresh daemon signal. Re-center SOL-only at the current active bin
