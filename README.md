@@ -62,9 +62,12 @@ accounts, API keys, or scraping required to source signals.
 - **Batch signalling** — one HMAC-signed webhook per cycle carries *every*
   qualifying pool, so your agent ranks the set instead of racing to grab the
   first one.
-- **Three isolated screening modes** — `casual` (30m, volume-spike plays),
-  `multiday` (24h, quality holds) and `turnover` (30m, fee-capture plays on
-  small high-base-fee pools) with independent thresholds and position budgets.
+- **Four isolated screening modes** — `casual` (30m, volume-spike plays),
+  `multiday` (24h, quality holds), `turnover` (30m, fee-capture plays on
+  small high-base-fee pools) and `pulse` (5m trending) with independent
+  thresholds and position budgets. `turnover` and `pulse` share a band but
+  sample it through different discovery windows, so enabling both makes entries
+  the union of the two screens rather than either alone.
 - **Layered risk gates** — TVL, fee/TVL, market cap, holder count, organic
   score, top-10/dev supply concentration, mint/freeze authority, Jupiter
   shield status, a best-effort DexScreener downtrend filter, and a Jupiter
@@ -216,29 +219,34 @@ The daemon is stateless except for its dedup set (in-memory by default; point
 
 ## What gets screened
 
-Three isolated modes, each with its own budget in the agent:
+Four isolated modes, each with its own budget in the agent:
 
 | Mode | Timeframe | Min TVL | Min fee/TVL (window) | Min mcap | Min holders | Min fees/day |
 |------|-----------|---------|----------------------|----------|-------------|--------------|
-| `casual`   | 30m | $5k  | 0.1%  | $250k | 500  | $20  |
-| `multiday` | 24h | $50k | 1.0%  | $1M   | 1000 | $150 |
-| `turnover` | 30m | $5k  | 0.15% | $1M   | 500  | $25  |
+| `casual`   | 30m | $5k  | 0.1%  | $250k | 10000 | $20  |
+| `multiday` | 24h | $50k | 1.0%  | $1M   | 5000  | $150 |
+| `turnover` | 30m | $10k | 0.15% | $150k | 500   | $25  |
+| `pulse` | 5m  | $10k | —     | $150k | 500   | —    |
 
-Shared gates (all modes): SOL-paired · `0 < volatility ≤ 15` · organic score
-floor · fee/TVL change ≥ −40% · top-10 ≤ 60% · dev ≤ 20% · no freeze/mint
-authority · `is_verified` not false · no critical warnings · (optional) not
-dumping (5m > −5%, 1h > −15%, 6h > −12%, 24h > −25%).
+`pulse` gates on fee/**active**-TVL (≥ 0.05 for the 5m window) rather than
+fee/TVL, and has no absolute fees/day floor — see below.
+
+Shared gates (all modes): SOL-paired · `volatility > 0` · organic score
+floor · top-10 ≤ 60% · dev ≤ 20% · no freeze/mint authority · no critical
+warnings · (optional) not dumping (5m > −5%, 1h > −15%, 6h > −12%, 24h > −25%).
+`volatility ≤ 15`, fee/TVL change ≥ −40%, the `warning`-severity flag gate and
+`is_verified` not false apply to every mode *except* where noted below.
 
 ### Turnover mode
 
 While `casual`/`multiday` chase trending pools, `turnover` targets the niche
-they never see: **small pools (TVL $5k–$300k) with degen base fees (≥1%)
+they never see: **small pools (TVL $10k–$150k) with degen base fees (≥1%)
 turning their TVL over fast**. The thesis is fee capture, not price — fee
 income is `fee_pct × turnover` and isn't capped by the monitor's trailing
 take-profit, so a $50k pool doing 5× volume/TVL at a 2% fee out-earns a
 "better" trending pool.
 
-Extra gates on top of the shared set: TVL ≤ $300k · pool base fee ≥ 1% ·
+Extra gates on top of the shared set: TVL ≤ $150k · pool base fee ≥ 1% ·
 volume/TVL ≥ 3 per 30m window · ≥ 20 swaps and ≥ 15 unique traders in-window
 (wash-trade guard — this is what lets the organic floor relax to 50) · fee/TVL
 ≥ 0.15% per 30m (~7.2%/day pace). Discovery queries `category=all` sorted by
@@ -253,6 +261,31 @@ ENABLE_TURNOVER=true
 then restart `./azimuth`. Signals arrive with `"mode": "turnover"`; the agent
 prompt and `dlmm_pipeline.py --mode turnover` already handle the mode end to
 end (2 position slots, tight-range `custom_ratio_spot` preferred).
+
+### Pulse mode
+
+`pulse` is a port of a reference bot's own screen. It sits on the **same**
+TVL/mcap/holder band as `turnover` ($10k–$150k TVL, $150k–$10M mcap, ≥500
+holders, bin step 80–125, organic ≥60), and the point is not the band — it is
+the **window**. `turnover` queries `category=all` on a 30m timeframe sorted by
+`fee:desc`; `pulse` queries `category=trending` on a **5m** timeframe. The
+same universe sampled two ways yields largely disjoint pools, which is the
+whole reason to run both: entries become the union of the screens.
+
+What it drops relative to `turnover`: no base-fee, volume/TVL, swap-count or
+unique-trader gate (it takes trending pools, not only high-fee oscillators);
+no fee/TVL or fees/day floor; no volatility ceiling; no yield-decline gate; no
+`warning`-severity gate (critical still hard-rejects). What it adds: fee/active-TVL
+≥ 0.05 and window volume ≥ $500. Organic stays at **60**, above turnover's
+relaxed 50 — without the swap/trader wash-trade guards, organic score is the
+only inorganic-volume defence left in the screen.
+
+The daemon's own momentum / Jupiter-audit / GMGN / PVP gates still apply to
+this mode, so it is strictly tighter here than in the bot it came from.
+
+```bash
+ENABLE_PULSE=true
+```
 
 See [`docs/SIGNAL_SCHEMA.md`](docs/SIGNAL_SCHEMA.md) for the exact webhook payload.
 

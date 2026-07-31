@@ -74,7 +74,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 * dynamic position sizing for the Robinhood venue (port of compute_deploy_amount) ([11ab447](https://github.com/pgen0x/meteora-dlmm-trading-bot/commit/11ab447c8952135545518894eb3dd95481f279f3))
 * monitor walks both executors so v4 positions get exits ([14a8af7](https://github.com/pgen0x/meteora-dlmm-trading-bot/commit/14a8af70dbb18e6db0b1dd93ac879f29a4a321bf))
 * pad gas estimates 30% and label v3 positions by pair ([bfde144](https://github.com/pgen0x/meteora-dlmm-trading-bot/commit/bfde144eb18cc3faddd79da4b2706b49cebd54be))
-* port reference-bot screening + exit upgrades ([8aaa241](https://github.com/pgen0x/meteora-dlmm-trading-bot/commit/8aaa241e155a8af42f680ba983de01bf9e46c3d9))
+* port external screening + exit upgrades ([8aaa241](https://github.com/pgen0x/meteora-dlmm-trading-bot/commit/8aaa241e155a8af42f680ba983de01bf9e46c3d9))
 * rh-mature mode — established fee-printers via Uniswap's own gateway ([2853812](https://github.com/pgen0x/meteora-dlmm-trading-bot/commit/2853812c60223afc8f4653a51f29d04b2389204e))
 * Robinhood Chain venue — GeckoTerminal discovery, screening, GMGN/Blockscout safety gates (observe-only) ([fe9f8f9](https://github.com/pgen0x/meteora-dlmm-trading-bot/commit/fe9f8f98ea105b7b26371265940550efe806dec7))
 * screening recalibration from the 14d close journal ([3208589](https://github.com/pgen0x/meteora-dlmm-trading-bot/commit/3208589629afc93317682d5b5418acc6e5be3c00))

@@ -87,7 +87,7 @@ Every element of `payload` is one candidate pool with these fields:
 
 | Field | Meaning |
 |-------|---------|
-| `mode` | `casual` (30m plays), `multiday` (24h+ holds) or `turnover` (30m fee-capture on small high-fee pools) — same for every element; drives which budget/params the agent uses |
+| `mode` | `casual` (30m plays), `multiday` (24h+ holds), `turnover` (30m fee-capture on small high-fee pools) or `pulse` (5m trending, a port of the reference bot's own screen) — same for every element; drives which budget/params the agent uses |
 | `timeframe` | discovery timeframe the pool trended on |
 | `pool` | Meteora DLMM pool address |
 | `name` | pair name (e.g. `CATWIF-SOL`) |
@@ -128,11 +128,12 @@ In direct-deploy mode the daemon passes the **whole payload array** to
 Only pools passing **all** of these are emitted:
 
 - SOL-paired; TVL ≥ mode floor; fee/TVL ≥ mode floor; daily fee ≥ mode floor
-- `0 < volatility ≤ 15`; organic ≥ mode floor (60 casual/multiday, 50 turnover); mcap ≥ mode floor; holders ≥ mode floor
+- `volatility > 0`, and `≤ 15` for every mode except pulse, which has no ceiling; organic ≥ mode floor (60 casual/multiday/pulse, 50 turnover); mcap ≥ mode floor; holders ≥ mode floor
 - turnover mode only: TVL ≤ $150k; mcap ≤ $10M; base fee ≥ 1%; volume/TVL ≥ 3; swaps ≥ 20; unique traders ≥ 15 (30m window)
-- fee/TVL change ≥ −40%; top-10 ≤ 60%; dev ≤ 20%
-- no freeze/mint authority; no critical/warning flags
-- `is_verified` not false — **except turnover**, where an unverified token is
+- pulse mode only: TVL ≤ $150k; mcap ≤ $10M; fee/**active**-TVL ≥ 0.05; window volume ≥ $500 (5m window). It has no base-fee, volume/TVL, swap-count or unique-trader gate — it takes trending pools, not only high-fee oscillators — and no fee/TVL or daily-fee floor
+- fee/TVL change ≥ −40% (all modes except pulse, which has no yield-decline gate); top-10 ≤ 60%; dev ≤ 20%
+- no freeze/mint authority; no critical flags — and no `warning`-severity flags either, except in pulse, which gates on critical only
+- `is_verified` not false — **except turnover and pulse**, where an unverified token is
   admitted with a score haircut and flagged via `unverified` (its thesis pools
   are never on the Jupiter strict list, so the hard gate rejected the mode's
   entire population; the holder/organic/concentration/authority/GMGN/audit
