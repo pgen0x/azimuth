@@ -5,6 +5,13 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.2.0](https://github.com/pgen0x/azimuth/compare/v2.1.0...v2.2.0) (2026-07-31)
+
+
+### Features
+
+* **pulse:** screen the 5m trending window alongside turnover ([cd3b14f](https://github.com/pgen0x/azimuth/commit/cd3b14f78828f94a435f583b554c2c9dafd56b70))
+
 ## [2.1.0](https://github.com/pgen0x/azimuth/compare/v2.0.0...v2.1.0) (2026-07-30)
 
 
