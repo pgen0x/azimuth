@@ -79,6 +79,14 @@ one pass per enabled mode per `POLL_INTERVAL`.
     is a **verbatim port** of the Python `dlmm_pipeline.py` config.
     When changing gates or thresholds, keep them in sync with that upstream, or
     note the divergence — the comments cite where each value came from.
+    Two modes are this daemon's own: `Turnover` (30m, `category=all`,
+    `sort=fee:desc`) and `Pulse` (5m, `category=trending`) — a port of the
+    reference bot's screen. Same TVL/mcap/holder band, different discovery
+    window, so they surface largely disjoint pools; running both makes entries
+    the **union** of the two screens. Gates only some modes want (volatility
+    ceiling, yield-decline, warning severity, verified) are zero-disabled
+    `ModeParams` fields, so a new mode that omits one silently opts out — set
+    them explicitly.
   - `momentum.go` — best-effort DexScreener downtrend gate (fail-open).
   - `audit.go` — best-effort Jupiter token-audit gate (fail-open): hard-rejects
     >30% bot holders, enriches signals with bot % + global fees paid.

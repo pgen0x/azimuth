@@ -33,12 +33,19 @@ type Config struct {
 	// re-compete after the cooldown clears without the re-signal spam a 1-2h
 	// window would cause (77% of screen passes are dedup re-qualifiers).
 	CasualSeenTTL time.Duration
+	// Pulse polls a 5m discovery window, so its pools churn even faster than
+	// turnover's; it shares turnover's short re-signal window.
+	PulseSeenTTL time.Duration
 
 	// Screening thresholds per mode are defined in the meteora package;
 	// only the enable toggles live here.
 	EnableCasual   bool
 	EnableMultiday bool
 	EnableTurnover bool
+	// EnablePulse runs the ported reference-bot screen (5m/trending)
+	// alongside turnover (30m/all), so entries are the union of both screens
+	// instead of only the pools turnover's window happens to surface.
+	EnablePulse bool
 
 	// EnableMomentumGate fetches DexScreener momentum to reject downtrends
 	// before emitting (matches the Python downtrend gate). Best-effort.
@@ -276,6 +283,8 @@ func Load() Config {
 		SeenTTL:                   getdur("SEEN_TTL", 24*time.Hour),
 		TurnoverSeenTTL:           getdur("TURNOVER_SEEN_TTL", 2*time.Hour),
 		CasualSeenTTL:             getdur("CASUAL_SEEN_TTL", 6*time.Hour),
+		PulseSeenTTL:           getdur("PULSE_SEEN_TTL", 2*time.Hour),
+		EnablePulse:            getbool("ENABLE_PULSE", false),
 		EnableCasual:              getbool("ENABLE_CASUAL", true),
 		EnableMultiday:            getbool("ENABLE_MULTIDAY", true),
 		EnableTurnover:            getbool("ENABLE_TURNOVER", false), // disabled: journal shows 44.8% WR, avg -3.91% per close — negative edge

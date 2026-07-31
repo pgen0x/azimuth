@@ -54,6 +54,22 @@ MODE_DEFAULTS = {
         "TIMEFRAME": "30m",
         "MAX_POSITIONS": 2,
     },
+    # Port of the reference bot's own screen (internal/meteora/screen.go
+    # Pulse). Same TVL/mcap/holder band as turnover, but sampled through a
+    # 5m trending window instead of a 30m fee-sorted one, so it surfaces pools
+    # turnover never sees. Its fee bar is fee/ACTIVE-tvl >= 0.05 for that 5m
+    # window; MIN_FEE_TVL_24H carries the same number so the printed header and
+    # the 5m entry of TIMEFRAME_SCREENING_SCALES agree.
+    # Signals arrive via --from-batch, which skips discovery/screen entirely —
+    # these values only drive the header, the timeframe and the slot budget.
+    "pulse": {
+        "MIN_TVL_USD": 10000.0,
+        "MIN_FEE_TVL_24H": 0.05,
+        "MIN_MCAP_USD": 150000.0,
+        "MIN_HOLDERS": 500,
+        "TIMEFRAME": "5m",
+        "MAX_POSITIONS": 2,
+    },
 }
 
 MIN_BINS_BELOW = 40
@@ -667,7 +683,7 @@ WEIGHTED_SIGNALS_HIGHER_IS_BETTER = (
 # Post-adjustment conviction floor per mode. Multiday batch scores naturally
 # run in the 20s (24h-window ratios), casual/turnover in the 60-90s — a single
 # absolute floor would either strangle multiday or wave everything through.
-BATCH_CONVICTION_FLOOR = {"casual": 30.0, "multiday": 12.0, "turnover": 30.0}
+BATCH_CONVICTION_FLOOR = {"casual": 30.0, "multiday": 12.0, "turnover": 30.0, "pulse": 30.0}
 
 
 def apply_batch_conviction(candidates, mode="multiday"):
@@ -812,7 +828,7 @@ def select_batch_strategy(c, mode):
     SOL of fees fully eaten by IL — the textbook two-sided symptom. The old
     branches all deployed token exposure at entry (balanced_tight pre-swapped
     half, single_sided_reseed swapped ALL of it); community consensus
-    (meridian default, SOL Decoder "safest", Goose DAO ~90% green days) is
+    (SOL Decoder "safest", Goose DAO ~90% green days) is
     SOL-only bid-ask below price: entry holds zero token, dumps fill bins
     at discounts while printing fees, pumps leave 100% SOL frozen. Turnover
     keeps its tight two-sided range — its thesis is fee capture from
@@ -839,7 +855,7 @@ def main():
     parser.add_argument("--pool", type=str, default=None, help="Deploy a specific pool address instead of auto-selecting winner")
     parser.add_argument("--from-signal", dest="from_signal", type=str, default=None, help="JSON of a pre-screened candidate record from the azimuth signal daemon. Skips discovery+screen and deploys this exact pool; live gates (holding/cooldown/momentum/rent) still run.")
     parser.add_argument("--from-batch", dest="from_batch", type=str, default=None, help="JSON ARRAY of pre-screened candidate records (the full azimuth signal payload). Deterministically re-ranks the batch (GMGN/PVP/prior-PnL heuristics + darwinian signal weights), then deploys the strongest candidate that clears every live gate — falling back to the runner-up when a gate rejects the pick. Replaces the LLM agent's pick step.")
-    parser.add_argument("--mode", type=str, default="multiday", choices=["casual", "multiday", "turnover"], help="Pipeline mode: casual (30m, 2-6h plays), multiday (24h, 24h+ holds) or turnover (30m, high-fee fee-capture plays)")
+    parser.add_argument("--mode", type=str, default="multiday", choices=["casual", "multiday", "turnover", "pulse"], help="Pipeline mode: casual (30m, 2-6h plays), multiday (24h, 24h+ holds), turnover (30m, high-fee fee-capture plays) or pulse (5m trending, the reference bot's screen)")
     cli = parser.parse_args()
 
     mode = cli.mode

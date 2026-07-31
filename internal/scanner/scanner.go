@@ -94,14 +94,20 @@ func (s *Scanner) modes() []meteora.ModeParams {
 	if s.cfg.EnableTurnover {
 		out = append(out, meteora.Turnover)
 	}
+	// Pulse samples the same universe through a different window (5m
+	// trending vs turnover's 30m fee-sorted full universe), so the two modes
+	// surface largely disjoint pools — running both is the point.
+	if s.cfg.EnablePulse {
+		out = append(out, meteora.Pulse)
+	}
 	return out
 }
 
 // Run blocks, polling on PollInterval until ctx is cancelled.
 func (s *Scanner) Run(ctx context.Context) {
-	log.Printf("scanner: started (interval=%v, casual=%v, multiday=%v, turnover=%v, momentum=%v, robinhood=%v, rh-mature=%v)",
-		s.cfg.PollInterval, s.cfg.EnableCasual, s.cfg.EnableMultiday, s.cfg.EnableTurnover, s.cfg.EnableMomentumGate,
-		s.cfg.EnableRobinhood, s.cfg.EnableRobinhoodMature)
+	log.Printf("scanner: started (interval=%v, casual=%v, multiday=%v, turnover=%v, pulse=%v, momentum=%v, robinhood=%v, rh-mature=%v)",
+		s.cfg.PollInterval, s.cfg.EnableCasual, s.cfg.EnableMultiday, s.cfg.EnableTurnover, s.cfg.EnablePulse,
+		s.cfg.EnableMomentumGate, s.cfg.EnableRobinhood, s.cfg.EnableRobinhoodMature)
 
 	ticker := time.NewTicker(s.cfg.PollInterval)
 	defer ticker.Stop()
@@ -514,6 +520,10 @@ func (s *Scanner) pollMode(ctx context.Context, mp meteora.ModeParams) {
 		switch mp.Mode {
 		case "turnover":
 			seenTTL = s.cfg.TurnoverSeenTTL
+		case "pulse":
+			// 5m discovery window — the pools churn faster than turnover's, so
+			// re-signalling must not be silenced for the default TTL either.
+			seenTTL = s.cfg.PulseSeenTTL
 		case "casual":
 			// Casual positions + their close cooldown resolve within hours;
 			// see CasualSeenTTL in config for why 24h over-silenced.

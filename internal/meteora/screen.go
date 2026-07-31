@@ -29,10 +29,26 @@ type ModeParams struct {
 	MinSwapCount     float64 // swaps in window (wash-trade guard, with MinUniqueTraders)
 	MinUniqueTraders float64 // unique traders in window
 
+	// Pulse-mode gates. Zero-disabled like the block above; the reference
+	// bot screens on the ACTIVE-TVL fee ratio and a raw window-volume floor
+	// instead of on fee/TVL plus an absolute daily-fee floor.
+	MinFeeActiveTVL float64 // fee/active-TVL floor for the window (percent)
+	MinVolumeUSD    float64 // raw window volume floor (USD)
+
+	// Ceilings the daemon used to apply unconditionally. Both are zero-disabled
+	// so a mode can opt out, which means every mode that wants them must set
+	// them explicitly. MaxYieldDecline is a negative percent (e.g. -40).
+	MaxVolatility   float64 // IL guard: reject above this window volatility
+	MaxYieldDecline float64 // reject when fee/TVL fell by more than this
+
 	// AllowUnverified downgrades the is_verified gate from a hard reject to a
 	// score penalty (unverifiedScorePenalty). Off by default — see the gate
 	// itself in Screen for why turnover is the one mode that needs it.
 	AllowUnverified bool
+
+	// AllowWarningSeverity narrows the token-warning gate to "critical" only.
+	// Off by default: casual/multiday/turnover also reject warning severity.
+	AllowWarningSeverity bool
 
 	// Discovery query knobs. Empty = the historical defaults ("trending", API
 	// default sort) so Casual/Multiday queries are byte-identical to before.
@@ -66,12 +82,14 @@ var (
 		MinTVL: 5000, MinFeeTVL: 0.1, MinMcap: 250000, MaxMcap: 100_000_000, MinHolders: 10000,
 		MinDailyFee: 20, MinOrganic: 60, MinQuoteOrganic: 60,
 		MinBinStep: 80, MaxBinStep: 125,
+		MaxVolatility: 15, MaxYieldDecline: -40,
 	}
 	Multiday = ModeParams{
 		Mode: "multiday", Timeframe: "24h", TfMinutes: 1440,
 		MinTVL: 50000, MinFeeTVL: 1.0, MinMcap: 1000000, MaxMcap: 500_000_000, MinHolders: 5000,
 		MinDailyFee: 150, MinOrganic: 60, MinQuoteOrganic: 60,
 		MinBinStep: 80, MaxBinStep: 125,
+		MaxVolatility: 15, MaxYieldDecline: -40,
 	}
 
 	// Turnover is NOT in the Python pipeline — it is this daemon's own mode,
@@ -104,8 +122,52 @@ var (
 		MinBinStep: 80, MaxBinStep: 125,
 		MaxTVL: 150000, MinFeePct: 1.0, MinVolTVLRatio: 3.0,
 		MinSwapCount: 20, MinUniqueTraders: 15,
+		MaxVolatility: 15, MaxYieldDecline: -40,
 		AllowUnverified: true,
 		Category:        "all", SortBy: "fee:desc",
+	}
+
+	// Pulse exists because turnover's window was never the whole opportunity.
+	// Observed 2026-08-01: across one day, five entries were available in this
+	// band and turnover's screen only ever surfaced two of them — the other
+	// three lived and died inside a 5m trending window that a 30m fee-sorted
+	// query never sampled. The two screens do not overlap by design —
+	//
+	//   turnover: timeframe 30m, category=all, sort fee:desc
+	//   pulse:    timeframe  5m, category=trending, API default sort
+	//
+	// so they sample different populations of the same universe. Running both
+	// makes the daemon's entry set the UNION rather than turnover's slice of it.
+	//
+	// The band (TVL 10k-150k, mcap 150k-10M, holders 500, bin step 80-125,
+	// organic 60/60) is identical to turnover's — 2026-07-28 realigned turnover
+	// onto exactly these numbers. What differs is everything turnover added on
+	// top and a plain trending screen never had:
+	//   - no fee/TVL floor; it gates fee/ACTIVE-TVL >= 0.05 for the 5m window
+	//   - no absolute daily-fee floor
+	//   - a raw window-volume floor ($500) instead
+	//   - no base-fee%, volume/TVL, swap-count or unique-trader gates: it takes
+	//     trending pools that are not necessarily high-fee oscillators
+	//   - no volatility ceiling and no yield-decline gate
+	//   - no is_verified gate and no warning-severity gate (only the API's
+	//     critical-warning / ownership / concentration booleans, which Screen
+	//     already checks first)
+	// Organic stays at 60, ABOVE turnover's relaxed 50: without the swap-count
+	// and unique-trader wash-trade guards, organic score is the only
+	// inorganic-volume defence left in the screen.
+	//
+	// The daemon's own momentum / Jupiter-audit / GMGN / PVP gates in the
+	// scanner still run on this mode. They are fail-open and are the daemon's
+	// safety layer, so they are deliberately not disabled per-mode — this screen
+	// is looser than turnover's, not unguarded.
+	Pulse = ModeParams{
+		Mode: "pulse", Timeframe: "5m", TfMinutes: 5,
+		MinTVL: 10000, MinMcap: 150000, MaxMcap: 10_000_000, MinHolders: 500,
+		MinOrganic: 60, MinQuoteOrganic: 60,
+		MinBinStep: 80, MaxBinStep: 125,
+		MaxTVL: 150000, MinFeeActiveTVL: 0.05, MinVolumeUSD: 500,
+		AllowUnverified: true, AllowWarningSeverity: true,
+		Category: "trending",
 	}
 )
 
@@ -169,8 +231,8 @@ func Screen(p Pool, mp ModeParams) (*Candidate, string) {
 	if p.Volatility <= 0 {
 		return nil, "volatility <= 0"
 	}
-	if p.Volatility > 15 {
-		return nil, fmt.Sprintf("volatility %.2f > 15 (IL risk)", p.Volatility)
+	if mp.MaxVolatility > 0 && p.Volatility > mp.MaxVolatility {
+		return nil, fmt.Sprintf("volatility %.2f > %.0f (IL risk)", p.Volatility, mp.MaxVolatility)
 	}
 	if base.OrganicScore < mp.MinOrganic {
 		return nil, fmt.Sprintf("organic %.0f < %.0f", base.OrganicScore, mp.MinOrganic)
@@ -187,7 +249,7 @@ func Screen(p Pool, mp ModeParams) (*Candidate, string) {
 	if base.Holders < mp.MinHolders {
 		return nil, fmt.Sprintf("holders %d < %d", base.Holders, mp.MinHolders)
 	}
-	if p.FeeTVLRatioChangePct < -40.0 {
+	if mp.MaxYieldDecline < 0 && p.FeeTVLRatioChangePct < mp.MaxYieldDecline {
 		return nil, fmt.Sprintf("yield declining %.0f%%", p.FeeTVLRatioChangePct)
 	}
 
@@ -206,6 +268,17 @@ func Screen(p Pool, mp ModeParams) (*Candidate, string) {
 	}
 	if mp.MinUniqueTraders > 0 && p.UniqueTraders < mp.MinUniqueTraders {
 		return nil, fmt.Sprintf("traders %.0f < %.0f", p.UniqueTraders, mp.MinUniqueTraders)
+	}
+
+	// Pulse-mode gates (zero-disabled for the other modes). fee/ACTIVE-TVL
+	// is the reference bot's core selectivity gate: it measures the fee pace
+	// against the liquidity actually in range, so a pool parking most of its
+	// TVL in dead bins can't dilute its way past the bar the way fee/TVL lets it.
+	if mp.MinFeeActiveTVL > 0 && p.FeeActiveTVLRatio < mp.MinFeeActiveTVL {
+		return nil, fmt.Sprintf("fee/active-TVL %.3f%% < %.3f%%", p.FeeActiveTVLRatio, mp.MinFeeActiveTVL)
+	}
+	if mp.MinVolumeUSD > 0 && p.VolumeWindow < mp.MinVolumeUSD {
+		return nil, fmt.Sprintf("volume $%.0f < $%.0f", p.VolumeWindow, mp.MinVolumeUSD)
 	}
 
 	// Supply-concentration safety gates.
@@ -250,9 +323,10 @@ func Screen(p Pool, mp ModeParams) (*Candidate, string) {
 		return nil, "failed Jupiter shield"
 	}
 
-	// Critical / warning severity gate.
+	// Critical / warning severity gate. AllowWarningSeverity narrows it to
+	// critical only, for the mode that ports a screen which never had it.
 	for _, w := range base.Warnings {
-		if w.Severity == "critical" || w.Severity == "warning" {
+		if w.Severity == "critical" || (w.Severity == "warning" && !mp.AllowWarningSeverity) {
 			return nil, "warning: " + w.Message
 		}
 	}

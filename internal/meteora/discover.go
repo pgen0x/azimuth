@@ -60,6 +60,14 @@ func buildFilters(mp ModeParams) string {
 	if mp.MinUniqueTraders > 0 {
 		f = append(f, fmt.Sprintf("unique_traders>=%.0f", mp.MinUniqueTraders))
 	}
+	// Pulse-mode thresholds. Both fields are verified live — the reference
+	// bot's own discovery query pushes exactly these two through filter_by.
+	if mp.MinFeeActiveTVL > 0 {
+		f = append(f, fmt.Sprintf("fee_active_tvl_ratio>=%.3f", mp.MinFeeActiveTVL))
+	}
+	if mp.MinVolumeUSD > 0 {
+		f = append(f, fmt.Sprintf("volume>=%.0f", mp.MinVolumeUSD))
+	}
 	// fee_tvl_ratio is pushed API-side only for full-universe modes: with
 	// category=all it is the core selectivity gate, while the trending modes
 	// keep their historical query shape (Screen still gates it locally).
