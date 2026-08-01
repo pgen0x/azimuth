@@ -50,6 +50,12 @@ type ModeParams struct {
 	// Off by default: casual/multiday/turnover also reject warning severity.
 	AllowWarningSeverity bool
 
+	// SkipMomentumGate opts a mode out of the scanner's DexScreener downtrend
+	// gate (ENABLE_MOMENTUM_GATE still switches it off globally). Off by
+	// default, so a mode keeps the gate unless it says otherwise — see Pulse
+	// for the one screen that wants out and why.
+	SkipMomentumGate bool
+
 	// Discovery query knobs. Empty = the historical defaults ("trending", API
 	// default sort) so Casual/Multiday queries are byte-identical to before.
 	Category string
@@ -156,10 +162,23 @@ var (
 	// and unique-trader wash-trade guards, organic score is the only
 	// inorganic-volume defence left in the screen.
 	//
-	// The daemon's own momentum / Jupiter-audit / GMGN / PVP gates in the
-	// scanner still run on this mode. They are fail-open and are the daemon's
-	// safety layer, so they are deliberately not disabled per-mode — this screen
-	// is looser than turnover's, not unguarded.
+	// The daemon's own Jupiter-audit / GMGN / PVP gates in the scanner still run
+	// on this mode. They are fail-open and are the daemon's safety layer, so
+	// this screen is looser than turnover's, not unguarded.
+	//
+	// The momentum gate is the exception (SkipMomentumGate). It is a
+	// DIRECTIONAL filter and pulse is not a directional strategy: the position
+	// is a SOL-side ladder harvesting fees from oscillation, and the monitor's
+	// OOR fuse — not the entry — is what bounds the downside. Measured
+	// 2026-08-01: the gate rejected Chiikawa 30+ times across 19:49-20:26 (1h
+	// -7% to -23%, 5m -3% to -8.8%); the reference bot, which has no momentum
+	// gate at all ("efficiency only, no momentum/change_pct, per design"),
+	// entered at 20:25 inside that window and closed +1.39% on the fee take.
+	// Turnover KEEPS the gate: its 30m fee-sorted screen is exactly where the
+	// APR trap lives (a collapsing price paying huge fees on the way down), and
+	// the gate has been catching those. Pulse's 5m trending window selects for
+	// pools that are moving, so applying a downtrend gate on top of it rejects
+	// most of the population the mode exists to sample.
 	Pulse = ModeParams{
 		Mode: "pulse", Timeframe: "5m", TfMinutes: 5,
 		MinTVL: 10000, MinMcap: 150000, MaxMcap: 10_000_000, MinHolders: 500,
@@ -167,7 +186,8 @@ var (
 		MinBinStep: 80, MaxBinStep: 125,
 		MaxTVL: 150000, MinFeeActiveTVL: 0.05, MinVolumeUSD: 500,
 		AllowUnverified: true, AllowWarningSeverity: true,
-		Category: "trending",
+		SkipMomentumGate: true,
+		Category:         "trending",
 	}
 )
 
