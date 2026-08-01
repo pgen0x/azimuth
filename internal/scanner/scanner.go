@@ -541,8 +541,10 @@ func (s *Scanner) pollMode(ctx context.Context, mp meteora.ModeParams) {
 
 		// Momentum / downtrend gate (best-effort, fail-open). Momentum-rejected
 		// pools stay marked seen (no unmark) so we don't re-hit DexScreener for
-		// them every cycle within the SEEN_TTL window.
-		if s.cfg.EnableMomentumGate {
+		// them every cycle within the SEEN_TTL window. Per-mode opt-out via
+		// ModeParams.SkipMomentumGate — a directional gate does not fit every
+		// screen; see the Pulse comment in meteora/screen.go.
+		if s.cfg.EnableMomentumGate && !mp.SkipMomentumGate {
 			if m, ok := meteora.GetMomentum(cand.BaseMint); ok {
 				if r := meteora.MomentumReject(m); r != "" {
 					momRejected++
