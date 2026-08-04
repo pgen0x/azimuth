@@ -161,7 +161,16 @@ def exit_confirmable(reason):
 
 def run_executor(executor, args, close_auth=False):
     """Run an executor script and return (parsed_json, err). Reads the last
-    stdout line as the JSON payload."""
+    stdout line as the JSON payload.
+
+    An executor crash is NOT a parse failure: its top-level handler prints
+    {"success": false, "error": ...} to stdout and exits 1, which is valid
+    JSON. Parsing that as a payload is how a transient RPC error closed a live
+    ladder rung on 2026-08-04 — the caller saw a "state" dict with no
+    `strategy` and no `pnlPct`, fell through to the position rulebook, and hit
+    the out-of-range timeout that ladders are exempt from. A failure payload is
+    an error, so return it as one.
+    """
     env = dict(os.environ)
     if close_auth:
         env["UNI_CLOSE_AUTH"] = "1"
@@ -171,11 +180,27 @@ def run_executor(executor, args, close_auth=False):
         out = (r.stdout or "").strip()
         line = out.splitlines()[-1] if out else ""
         try:
-            return json.loads(line), None
+            payload = json.loads(line)
         except json.JSONDecodeError:
             return None, (r.stderr or out or "no output").strip()
+        if isinstance(payload, dict) and payload.get("success") is False:
+            return None, str(payload.get("error") or "executor reported failure")
+        return payload, None
     except Exception as e:
         return None, str(e)
+
+
+def looks_like_state(s):
+    """True when `s` is an executor `state` payload and not some other JSON.
+
+    Positive shape check, not a `strategy` check: the v4 executor's state
+    payload has no `strategy` key at all, so its absence cannot distinguish a
+    real position from a stray payload. `tokenId` + `tickLower` are emitted by
+    both executors and by nothing else. Anything failing this is treated as a
+    read failure — deciding an exit from a payload we cannot identify is how a
+    ladder rung gets closed by a rule that does not apply to it.
+    """
+    return isinstance(s, dict) and "tokenId" in s and "tickLower" in s
 
 
 def load_state():
@@ -265,7 +290,13 @@ def decide(pnl, peak, in_range, age_min, oor_min, m5, h1, s=None):
     after minting, which is the one failure this branch exists to prevent.
     Positions minted before the ladder existed carry no strategy field and keep
     the original path unchanged.
+
+    A payload that is not recognizably a state read holds unconditionally: an
+    unidentifiable `s` means we do not know which rulebook applies, and the
+    default rulebook is the one that closes ladders.
     """
+    if s is not None and not looks_like_state(s):
+        return None
     if s is not None and str(s.get("strategy") or "").endswith("_ladder"):
         return ladder_decide(s, pnl, age_min)
     if pnl is not None:
@@ -463,8 +494,8 @@ def main():
         rows = []
         for proto, executor, tid in work:
             s, serr = run_executor(executor, ["state", "--id", str(tid)])
-            if serr or not s:
-                print(f"monitor: {proto} state #{tid} failed: {serr}")
+            if serr or not looks_like_state(s):
+                print(f"monitor: {proto} state #{tid} failed: {serr or 'unrecognized payload'}")
                 continue
             pnl = s.get("pnlPct")
             in_range = bool(s.get("inRange"))
@@ -519,8 +550,11 @@ def main():
         skey = state_key(proto, tid)
         live.add(skey)
         s, err = run_executor(executor, ["state", "--id", str(tid)])
-        if err or not s:
-            print(f"monitor: {proto} state #{tid} failed: {err}")
+        if err or not looks_like_state(s):
+            # Skip the tick entirely — no peak/oor bookkeeping either. A read we
+            # cannot trust must not start an oor_since clock that a later,
+            # healthy tick would then act on.
+            print(f"monitor: {proto} state #{tid} failed: {err or 'unrecognized payload'}")
             continue
 
         pnl = s.get("pnlPct")

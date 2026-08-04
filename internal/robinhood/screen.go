@@ -264,6 +264,18 @@ func Screen(p Pool, mp ModeParams, now time.Time) (*Candidate, string) {
 	if mp.QuoteAsset != "" && !strings.EqualFold(p.QuoteAddress, mp.QuoteAsset) {
 		return nil, fmt.Sprintf("quote-asset %s not this mode's", p.QuoteSymbol)
 	}
+	// Both sides a quote asset (WETH/USDG, ETH/USDG …) means there is no token
+	// here — orientQuote picks a side by address order, so such a pool lands in
+	// whichever mode the arbitrary "base" happens to suit and never leaves it.
+	// That is how rh-usdg-ladder deployed a USDG wall under WETH on 2026-08-04:
+	// WETH sorts below USDG, so the gateway's token0 was WETH, the mode's USDG
+	// quote pin matched, and every remaining gate (deep book, 0.05% tier, real
+	// 24h volume) passed easily. The shape was sound and the thesis was not —
+	// a fill leaves the wallet long ETH, and no security/holder gate here says
+	// anything meaningful about a quote asset.
+	if quoteAssets[strings.ToLower(p.BaseAddress)] {
+		return nil, fmt.Sprintf("quote-asset base %s/%s (no token side)", p.BaseSymbol, p.QuoteSymbol)
+	}
 
 	// v4-only hard gates. A hook can block or skim withdrawals (its behavior
 	// lives in the 14 permission bits of the hook address — the Cork exploit

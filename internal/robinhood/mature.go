@@ -274,6 +274,13 @@ func prefilter(p Pool, mp ModeParams, now time.Time) bool {
 	if mp.QuoteAsset != "" && !strings.EqualFold(p.QuoteAddress, mp.QuoteAsset) {
 		return false
 	}
+	// Quote/quote pools (WETH/USDG) have no token side at all — Screen rejects
+	// them outright, so spending an enrich slot on one is pure waste. The
+	// gateway's TVL leaderboard puts them near the top, where the batch is
+	// tightest.
+	if quoteAssets[strings.ToLower(p.BaseAddress)] {
+		return false
+	}
 	// v4 hard rejects, duplicated from Screen because they are free here and
 	// every prefilter cut saves enrichment-batch room for a pool that can win.
 	if p.Hook != "" || p.DynamicFee {

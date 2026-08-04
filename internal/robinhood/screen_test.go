@@ -317,6 +317,44 @@ func TestStockLadderRejectsWethQuotedPools(t *testing.T) {
 	}
 }
 
+// A pool whose BOTH sides are quote assets (WETH/USDG) has no token in it, and
+// every mode must refuse it. Regression for 2026-08-04, when rh-usdg-ladder
+// deployed a 3-rung USDG wall under WETH: orientQuote keeps the gateway's
+// token0 (WETH, the lower address) as base, StockLadder's USDG quote pin
+// matched, and the pool's deep book cleared every remaining gate. The mode was
+// working exactly as written — the gate it needed did not exist.
+func TestScreenRejectsQuoteQuotePools(t *testing.T) {
+	now := time.Now()
+
+	wethUsdg := stockPool(now) // deep, low-fee, USDG-quoted: passes everything else
+	wethUsdg.BaseAddress, wethUsdg.BaseSymbol, wethUsdg.BaseDecimals = WETH, "WETH", 18
+	for _, mp := range []ModeParams{StockLadder, Mature, Fresh} {
+		_, reason := Screen(wethUsdg, mp, now)
+		if !strings.Contains(reason, "quote-asset base") {
+			t.Errorf("%s: WETH/USDG pool got %q, want a quote-asset-base reject", mp.Mode, reason)
+		}
+	}
+	// Ladder never reaches the new gate — its WETH quote pin fires first, since
+	// this pool's quote side is USDG. Rejected either way; only the reason
+	// differs.
+	if _, reason := Screen(wethUsdg, Ladder, now); reason == "" {
+		t.Error("Ladder accepted a WETH/USDG pool")
+	}
+
+	// The v4 spelling of the same pool — native ETH against USDG.
+	ethUsdg := stockPool(now)
+	ethUsdg.Protocol = "v4"
+	ethUsdg.BaseAddress, ethUsdg.BaseSymbol = NativeETH, "ETH"
+	if _, reason := Screen(ethUsdg, StockLadder, now); !strings.Contains(reason, "quote-asset base") {
+		t.Errorf("ETH/USDG v4 pool got %q, want a quote-asset-base reject", reason)
+	}
+
+	// And the prefilter drops it before it can spend an enrichment slot.
+	if prefilter(wethUsdg, StockLadder, now) {
+		t.Error("prefilter passed a WETH/USDG pool into the enrich batch")
+	}
+}
+
 // The equity profile is invisible to every mode that came before it — and not
 // on one gate but on three: the quote pin, the deep book, the 0.05% tier and
 // the 0.24%/day pace each disqualify it independently. Documents WHY a fourth
