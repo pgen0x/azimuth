@@ -77,11 +77,86 @@ INDICATORS_PRESET = os.environ.get("UNI_INDICATORS_PRESET", "supertrend_or_rsi")
 MAX_INDICATOR_BLOCK_MINUTES = 60.0
 
 
+# --- ladder exit rule ------------------------------------------------------
+# A ladder rung is a resting one-sided QUOTE-ASSET bid parked below spot —
+# WETH under a memecoin (weth_ladder) or USDG under a tokenized equity
+# (usdg_ladder). Both shapes obey the same rulebook; only the tick scale
+# differs, because an equity's day is a memecoin's minute. It is
+# OUT OF RANGE BY DESIGN and holds no token, so almost none of the rulebook
+# above applies to it: there is no entry price to stop out of, no peak to
+# trail, and the fee-dead OOR timeout would close every rung 30 minutes after
+# it was minted. Its exits are re-pins, not stop-losses — the reference LP's
+# ladders closed with a median of ZERO fully-converted rungs, most of the wall
+# coming back unfilled each time.
+#
+# Drift is measured against the rung's INTENDED offset, not against spot
+# directly: rung k is built k widths away from the pin, so a flat tick
+# threshold would call the outer rungs stale the moment they were created.
+# Per quote asset, mirroring uni_executor.js's UNI_LADDER_RUNG_TICKS map — a
+# stale threshold is only meaningful relative to the rung width it is judging,
+# and USDG rungs are a tenth of a WETH rung's width. One absolute 1200 would
+# mean a stock ladder waits for a 12% move before re-pinning, i.e. never.
+LADDER_STALE_TICKS = {
+    "WETH": float(os.environ.get("UNI_LADDER_STALE_TICKS", "1200")),
+    "USDG": float(os.environ.get("UNI_LADDER_STALE_TICKS_USDG", "120")),
+}
+
+
+def ladder_decide(s, pnl, age_min):
+    """Close reason for one ladder rung (either quote asset), or None to hold."""
+    tick, lo, hi = s.get("tick"), s.get("tickLower"), s.get("tickUpper")
+    if tick is None or lo is None or hi is None:
+        return None
+    # quoteIs0 is the current field; wethIs0 is its pre-USDG name, still emitted
+    # by the executor (and the only one an older v4 build sends).
+    quote_is0 = bool(s.get("quoteIs0", s.get("wethIs0")))
+    qsym = s.get("quoteSymbol") or "WETH"
+    stale_ticks = LADDER_STALE_TICKS.get(qsym, LADDER_STALE_TICKS["WETH"])
+    rung = s.get("rung") or 0
+    width = hi - lo
+    # Which tick direction fills the rung depends on token ordering, the same
+    # invariant ladderBands() mints on: the quote as token0 means a RISING tick
+    # makes the token cheaper, so the ladder sits above spot and fills upward.
+    if quote_is0:
+        filled, gap = tick >= hi, lo - tick
+    else:
+        filled, gap = tick <= lo, tick - hi
+
+    if filled:
+        # Fully converted: this rung is now pure token inventory, which is the
+        # one thing the strategy exists to avoid holding. Sell it back. This is
+        # indicator-confirmable on purpose (see exit_confirmable) — if price
+        # recovers the rung un-fills back into WETH on its own, for free, so
+        # waiting out a bullish dip strictly beats crossing the spread twice.
+        return f"ladder rung filled (tick {tick} past [{lo},{hi}])"
+
+    drift = gap - rung * width
+    if drift > stale_ticks:
+        # Spot ran away: the wall is too far under the market to be traded into,
+        # so it is dead capital. Tear it down and let the scanner re-pin at the
+        # new price.
+        return (f"ladder stale: spot drifted {drift:.0f} ticks past rung {rung} "
+                f"(> {stale_ticks:.0f})")
+
+    # Backstop only. A rung mid-conversion does carry some token, so the hard SL
+    # still applies — but it should essentially never fire before the filled
+    # rule above does.
+    if pnl is not None and pnl <= STOP_LOSS_PCT and (age_min is None or age_min >= MIN_AGE_MIN_BEFORE_SL):
+        return f"stop loss {pnl:.1f}% <= {STOP_LOSS_PCT:.1f}%"
+    return None
+
+
 def exit_confirmable(reason):
     """Only momentum-shaped exits wait for indicator confirmation; hard-risk
     rules (SL, TP, fee-dead OOR) close unconditionally, mirroring the Solana
-    monitor's is_emergency carve-out."""
-    return reason.startswith(("trailing exit", "fast-out", "downtrend"))
+    monitor's is_emergency carve-out.
+
+    "ladder rung filled" joins the confirmable set because its close is a SELL
+    into weakness that the market may undo for us: an un-filling rung costs
+    nothing, a round-trip through the pool costs the fee tier twice. "ladder
+    stale" does not — dead capital does not get better by waiting.
+    """
+    return reason.startswith(("trailing exit", "fast-out", "downtrend", "ladder rung filled"))
 
 
 def run_executor(executor, args, close_auth=False):
@@ -176,10 +251,23 @@ def trailing_floor_pct(peak):
     return peak - TRAILING_DROP_PCT
 
 
-def decide(pnl, peak, in_range, age_min, oor_min, m5, h1):
+def decide(pnl, peak, in_range, age_min, oor_min, m5, h1, s=None):
     """Return a close reason string, or None to hold. Mirrors the Solana
     monitor's rule precedence: emergency SL first, then hard SL/TP, then
-    trailing/fast-out/downtrend, then OOR timeout."""
+    trailing/fast-out/downtrend, then OOR timeout.
+
+    `s` is the executor's state payload. Ladder rungs (weth_ladder,
+    usdg_ladder) are routed to ladder_decide instead — they are one-sided
+    resting bids whose entire rulebook differs (see above). Matching on the
+    "_ladder" suffix rather than a fixed list is deliberate: a new quote asset
+    adds a strategy name, and a ladder that silently fell through to the
+    position rulebook would be closed by the fee-dead OOR timeout 30 minutes
+    after minting, which is the one failure this branch exists to prevent.
+    Positions minted before the ladder existed carry no strategy field and keep
+    the original path unchanged.
+    """
+    if s is not None and str(s.get("strategy") or "").endswith("_ladder"):
+        return ladder_decide(s, pnl, age_min)
     if pnl is not None:
         # Emergency SL — bypasses the age grace.
         if pnl <= STOP_LOSS_PCT - EMERGENCY_SL_BUFFER_PCT:
@@ -394,7 +482,7 @@ def main():
             else:
                 oor_min = (now - ps["oor_since"]) / 60.0
             m5, h1 = fetch_momentum(pool) if pool else (None, None)
-            reason = decide(pnl, peak, in_range, age_min, oor_min, m5, h1)
+            reason = decide(pnl, peak, in_range, age_min, oor_min, m5, h1, s)
             val_w, ent_w = s.get("valueWeth"), s.get("entryWeth")
             # USDG positions are dollar-quoted already; everything else is
             # ETH-quoted and needs the ETH/USD conversion.
@@ -456,7 +544,7 @@ def main():
             oor_min = (now - ps["oor_since"]) / 60.0
 
         m5, h1 = fetch_momentum(pool) if pool else (None, None)
-        reason = decide(pnl, peak, in_range, age_min, oor_min, m5, h1)
+        reason = decide(pnl, peak, in_range, age_min, oor_min, m5, h1, s)
 
         # Pre-exit indicator confirmation (non-emergency exits only): postpone
         # the close while supertrend/RSI still read bullish — a dip inside an

@@ -176,3 +176,170 @@ func TestSecurityReject(t *testing.T) {
 		}
 	}
 }
+
+// The Ladder mode exists because Mature's yield bar is the wrong instrument
+// for a strategy that holds no inventory. This is the concrete case: a pool
+// with the median profile of the 23 pools a profitable ladder LP actually
+// worked (TVL ~$132k, 1% tier, ~2.6%/day fee pace, 8 days old). Mature must
+// reject it on fee pace and Ladder must take it — if this ever inverts, the
+// two modes have collapsed into one and rh-ladder is dead weight.
+func TestLadderTakesChurnPoolsMatureRejects(t *testing.T) {
+	now := time.Now()
+	p := Pool{
+		Address:      "0xc4a21f9d6485fc5893dd4a491b320a83daf4da1d",
+		Name:         "CHURN / WETH 1%",
+		Dex:          "uniswap-v3-robinhood",
+		CreatedAt:    now.Add(-8 * 24 * time.Hour),
+		BaseAddress:  "0x21028be78e8f521214d24328715c1a8aadbac5a8",
+		BaseSymbol:   "CHURN",
+		QuoteAddress: WETH,
+		QuoteSymbol:  "WETH",
+		FeePct:       1,
+		ReserveUSD:   132000,
+		FdvUSD:       1800000,
+		// 343200 * 1% / 132000 = 2.6%/day — over Ladder's 1.5 floor, under
+		// Mature's 8. Both modes read the realized 24h window (FeePaceH24).
+		VolumeH24USD: 343200,
+		VolumeH1USD:  14300,
+		TxH1:         gtTxWindow{Buys: 25, Sells: 20, Buyers: 15, Sellers: 12},
+		ChangeM5Pct:  1, ChangeH1Pct: 2, ChangeH6Pct: 3, ChangeH24Pct: 5,
+	}
+
+	if _, reason := Screen(p, Mature, now); reason == "" {
+		t.Fatal("Mature accepted a 2.6%/day pool; its 8%/day bar is what makes rh-ladder necessary")
+	} else if !strings.Contains(reason, "fee/TVL pace") {
+		t.Fatalf("Mature rejected for the wrong reason: %q", reason)
+	}
+
+	cand, reason := Screen(p, Ladder, now)
+	if reason != "" {
+		t.Fatalf("Ladder rejected a pool matching its reference profile: %s", reason)
+	}
+	if cand.Mode != "rh-ladder" {
+		t.Errorf("Mode = %q, want rh-ladder", cand.Mode)
+	}
+	if cand.FeeTVLDayPct < 2.5 || cand.FeeTVLDayPct > 2.7 {
+		t.Errorf("FeeTVLDayPct = %.2f, want ~2.6", cand.FeeTVLDayPct)
+	}
+}
+
+// A ladder is many NFTs but one entry, and the reference wallet ran 23 pools
+// at once — so the mode must not inherit Mature's implicit "one book is
+// enough" shape via a reserve ceiling that only fits a handful of pools.
+func TestLadderAcceptsTheReserveBandMatureCapsOut(t *testing.T) {
+	now := time.Now()
+	p := Pool{
+		Address:      "0xb7eedf33d02c743507c38e1ee20ef421e60661c6",
+		Name:         "BIG / WETH 1%",
+		Dex:          "uniswap-v3-robinhood",
+		CreatedAt:    now.Add(-13 * 24 * time.Hour),
+		BaseAddress:  "0x21028be78e8f521214d24328715c1a8aadbac5a8",
+		BaseSymbol:   "BIG",
+		QuoteAddress: WETH,
+		QuoteSymbol:  "WETH",
+		FeePct:       1,
+		ReserveUSD:   1043554, // over Mature's 500k cap, inside Ladder's 2M
+		FdvUSD:       19800000,
+		VolumeH24USD: 1669686, // 1.6%/day — over Ladder's 1.5 floor, under Mature's 8
+		VolumeH1USD:  65000,
+		TxH1:         gtTxWindow{Buys: 40, Sells: 30, Buyers: 20, Sellers: 15},
+		ChangeM5Pct:  0, ChangeH1Pct: 1, ChangeH6Pct: 2, ChangeH24Pct: 3,
+	}
+	if _, reason := Screen(p, Mature, now); !strings.Contains(reason, "reserve") {
+		t.Fatalf("Mature should cap out on reserve, got %q", reason)
+	}
+	if _, reason := Screen(p, Ladder, now); reason != "" {
+		t.Fatalf("Ladder rejected a $1.04M book: %s", reason)
+	}
+}
+
+// stockPool is the profile of the venue's tokenized equities, read off the
+// live USDG book on 2026-08-04: nvda / USDG 0.05%, $714k TVL, $3.42M of 24h
+// volume — a 0.24%/day fee pace, an order of magnitude under anything a
+// memecoin mode would look at.
+func stockPool(now time.Time) Pool {
+	return Pool{
+		Address:      "0xd4eb21209c4d6093f80b5b84f5c45cc093ea14a3",
+		Name:         "nvda / USDG 0.05%",
+		Dex:          "uniswap-v3-robinhood",
+		CreatedAt:    now.Add(-20 * 24 * time.Hour),
+		BaseAddress:  "0x21028be78e8f521214d24328715c1a8aadbac5a8",
+		BaseSymbol:   "nvda",
+		QuoteAddress: USDG,
+		QuoteSymbol:  "USDG",
+		FeePct:       0.05,
+		ReserveUSD:   714180,
+		// 3.42M * 0.05% / 714180 = 0.24%/day.
+		VolumeH24USD: 3420000,
+		VolumeH1USD:  95000,
+		// Thin h1 flow on purpose: equities trade on market hours, and the
+		// mode's floors (10/3) exist to allow exactly this.
+		TxH1:        gtTxWindow{Buys: 8, Sells: 6, Buyers: 5, Sellers: 4},
+		ChangeM5Pct: 0.1, ChangeH1Pct: 0.4, ChangeH6Pct: -1, ChangeH24Pct: 2,
+	}
+}
+
+// StockLadder exists for the pools every other mode is structurally blind to.
+// If Ladder ever accepts this profile the two modes have collapsed and the
+// WETH ladder is being sized off the wrong wallet balance.
+func TestStockLadderTakesEquityPoolsLadderRejects(t *testing.T) {
+	now := time.Now()
+	p := stockPool(now)
+
+	cand, reason := Screen(p, StockLadder, now)
+	if reason != "" {
+		t.Fatalf("StockLadder rejected its own reference profile: %s", reason)
+	}
+	if cand.Mode != "rh-usdg-ladder" {
+		t.Errorf("Mode = %q, want rh-usdg-ladder", cand.Mode)
+	}
+	if cand.FeeTVLDayPct < 0.23 || cand.FeeTVLDayPct > 0.25 {
+		t.Errorf("FeeTVLDayPct = %.3f, want ~0.24", cand.FeeTVLDayPct)
+	}
+
+	// Ladder must refuse it on the quote pin BEFORE the yield bar — the pin is
+	// the safety property (rungs and sizing must share one asset), the yield
+	// bar is only a preference.
+	if _, reason := Screen(p, Ladder, now); !strings.Contains(reason, "quote-asset") {
+		t.Fatalf("Ladder should reject a USDG pool on the quote pin, got %q", reason)
+	}
+}
+
+// The mirror: StockLadder must not reach for WETH pools, or a batch of them
+// would be sized in dollars off a WETH balance.
+func TestStockLadderRejectsWethQuotedPools(t *testing.T) {
+	now := time.Now()
+	p := passingPool(now)
+	p.CreatedAt = now.Add(-30 * 24 * time.Hour)
+	p.VolumeH24USD = 300000
+	if _, reason := Screen(p, StockLadder, now); !strings.Contains(reason, "quote-asset") {
+		t.Fatalf("StockLadder should reject a WETH pool on the quote pin, got %q", reason)
+	}
+}
+
+// The equity profile is invisible to every mode that came before it — and not
+// on one gate but on three: the quote pin, the deep book, the 0.05% tier and
+// the 0.24%/day pace each disqualify it independently. Documents WHY a fourth
+// mode had to exist rather than a threshold tweak to Ladder.
+func TestEquityProfileIsInvisibleToTheMemecoinModes(t *testing.T) {
+	now := time.Now()
+	p := stockPool(now)
+	for _, mp := range []ModeParams{Fresh, Mature, Ladder} {
+		if _, reason := Screen(p, mp, now); reason == "" {
+			t.Errorf("%s accepted an equity pool — the memecoin modes must not size USDG books off the WETH balance", mp.Mode)
+		}
+	}
+	// With the quote pin lifted, the yield bar alone still separates them: the
+	// pace this pool prints is under both memecoin floors and over the equity
+	// mode's. If that ordering ever breaks, rh-usdg-ladder has stopped being a
+	// distinct thesis.
+	pace := (p.VolumeH24USD * p.FeePct / 100) / p.ReserveUSD * 100
+	if pace >= Ladder.MinFeeTVLDay || pace >= Mature.MinFeeTVLDay {
+		t.Errorf("equity pace %.2f%%/day now clears a memecoin floor (ladder %.1f, mature %.1f)",
+			pace, Ladder.MinFeeTVLDay, Mature.MinFeeTVLDay)
+	}
+	if pace < StockLadder.MinFeeTVLDay {
+		t.Errorf("equity pace %.2f%%/day is under rh-usdg-ladder's own %.2f floor — the mode would screen nothing",
+			pace, StockLadder.MinFeeTVLDay)
+	}
+}

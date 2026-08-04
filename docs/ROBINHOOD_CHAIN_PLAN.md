@@ -439,6 +439,132 @@ close journal like the WETH set.
 5. Noxa's "LP locked" claim ≠ token contract safety — creator can still hold
    supply; holder-concentration gate stays mandatory.
 
+## 4b. `weth_ladder` — the one-sided rebuild (2026-08-04)
+
+Phase 2 shipped `balanced_tight` and it lost money, and the cause is
+structural, not a threshold: every exit it took was a *price* exit, never a fee
+take-profit. `balanced_tight` swaps half the commit into the memecoin before
+minting, so each position is long a token on a chain where tokens bleed, and no
+fee capture out-earns that. (Close-journal figures stay in the private profile
+notes.)
+
+### What a profitable ladder LP actually does
+
+The shape below was measured on-chain from an established one-sided ladder LP on
+the venue (Blockscout + GeckoTerminal, no Krystal API — it is Cloudflare-walled).
+The per-wallet measurements behind it — rung counts, widths, capital, fee yield,
+position life — stay in the private profile notes; only the structure that the
+code implements is described here.
+
+The ladder is a fixed number of **contiguous, equal-width rungs** funded
+**entirely in the quote asset**, sized on an **arithmetic ramp with the smallest
+rung nearest spot**, and it takes **no stop-loss and no take-profit** — a cycle
+ends by tearing the rungs down and re-pinning them.
+
+The ladder sits on the **bid** side: rungs occupy ticks where the token is
+cheaper than spot, so they are resting WETH bids that only convert if the
+market comes down to them. The rung nearest spot is the smallest because it is
+the one price actually reaches — a wick costs little inventory, while the far
+rungs hold the bulk of idle WETH across the widest fee coverage.
+
+Only viable on an L2: one cycle is 7 mints + 7 burns + 7 collects.
+
+### Why `rh-ladder` is its own mode
+
+`Mature` demands **8%/day** because it holds inventory and must out-earn the
+bleed. A ladder has no bleed, so that bar just starves it. Against the wallet's
+real 23-pool set:
+
+| gate | result |
+|---|---|
+| `Fresh.MaxAge` 24h | rejects **all 23** (entry ages 9.3h–684h, median 8.8 days) |
+| `Mature.MinFeeTVLDay` 8%/day | rejects 21 of 23 (observed 0.21–27.8%/day, median 2.6%) |
+| `Mature.MaxReserveUSD` $500k | rejects 5 (observed $11k–$8.25M, median $132k) |
+
+Mature would have picked **1 of 23**; Fresh **0**. Hence `robinhood.Ladder`:
+same gateway feed, screened on churn (1.5%/day, $10k–$2M, ≥0.3% tier, 24h+).
+
+### Implementation
+
+- `uni_executor.js` — `weth_ladder` strategy: `ladderSizes()` (linear ramp,
+  auto-reduces rung count rather than mint dust), `ladderBands()` (contiguous
+  bid-side rungs; direction follows token ordering exactly as `weth_below`),
+  minted atomically via `NPM.multicall`. Journals one entry per rung sharing a
+  `ladderId`. `positions` also reports `ladders` (distinct funded pools).
+- `uni_monitor.py` — `ladder_decide()`. A rung is out-of-range **by design**,
+  so the 30m fee-dead OOR timeout must never see it. Exits are: *filled*
+  (spot passed fully through → sell back; indicator-confirmable, because an
+  un-filling rung costs nothing while a round trip costs the tier twice) and
+  *stale* (spot drifted > `UNI_LADDER_STALE_TICKS` past the rung's intended
+  offset → dead capital, re-pin). Hard SL kept as a backstop only.
+- `internal/robinhood` — `Ladder` ModeParams; `OpenPositions` counts ladders,
+  not NFTs, so one 5-rung entry does not exhaust a cap of 3.
+- Config — `ROBINHOOD_LADDER`, strategy default flipped to `weth_ladder`,
+  `ROBINHOOD_MAX_OPEN_POSITIONS` 1 → 3, `UNI_LADDER_*` geometry.
+
+Ours is scaled down from 7×1200 to **5 rungs** with a 0.003 WETH per-rung
+floor, sized from the live wallet by the existing `SizeParams` path.
+
+**Unverified:** no live ladder has been minted yet. Every number above is the
+reference wallet's, not ours — the DRY_RUN path is exercised, the on-chain
+path is not.
+
+## 4c. `usdg_ladder` — the same wall under tokenized equities (2026-08-04)
+
+The chain's other universe: USDG-quoted **stock tokens**. Live v3 books,
+measured 2026-08-04:
+
+| pool | TVL | 24h vol | fee/TVL/day |
+|---|---|---|---|
+| nvda / USDG 0.05% | $712k | $3.42M | 0.24% |
+| spacex / USDG 0.05% | $173k | $2.06M | 0.59% |
+| gme / USDG 0.05% | $256k | $1.19M | 0.23% |
+| spacex / USDG 0.3% | $357k | $647k | 0.54% |
+| gme / USDG 1% | $235k | $436k | 1.86% |
+
+### Why a fourth mode and not a widened `rh-ladder`
+
+Every one of `Ladder`'s numbers is wrong here, and not by a little:
+
+| `Ladder` gate | equity reality |
+|---|---|
+| quote = WETH | these are USDG-quoted — different wallet balance, 6 decimals |
+| `MinFeePct` 0.3% | the deep books are on the **0.05%** tier |
+| `MinFeeTVLDay` 1.5%/day | observed 0.23–1.86%; only `gme/USDG 1%` clears |
+| `MaxReserveUSD` $2M | fine, but the floor moves: $50k, not $10k |
+| rung 1200 ticks (~12%) | an equity's whole year; the wall never gets touched |
+
+So `robinhood.StockLadder` (`rh-usdg-ladder`): USDG-pinned, $50k–$5M, ≥0.05%
+tier, **0.2%/day**, flow floors 10/3 (equities trade market hours — an h1
+window at 03:00 UTC is quiet on a book that did millions that session), FDV
+gates off (a wrapper's FDV is not a float anyone can dump).
+
+The trade is explicit: far less yield per rung, for a wall far less likely to
+be run over. A ladder's real risk is a collapse that fills every rung and
+leaves us holding the token — the failure that killed `balanced_tight` — and a
+tokenized equity is the least collapse-prone base asset on the chain.
+
+### Implementation
+
+- `uni_executor.js` is now **quote-aware throughout** (this was the bulk of the
+  work; it was WETH-only in `cmdDeploy`, `valueInWeth`, `sellTokenForWeth`,
+  `cmdBalance`, `cmdState` and `cmdClose`). `--quote` selects the side;
+  `parseQ`/`fmtQ` do every conversion at the quote's own decimals — **USDG is
+  6, WETH is 18**, and a `parseEther`'d USDG amount is off by 10¹².
+  `resolveQuote()` falls back to WETH, so every pre-USDG call is unchanged.
+- Geometry per quote: `UNI_LADDER_RUNG_TICKS_USDG` 120 (~1.2%/rung, ~6%
+  covered fall), `UNI_LADDER_MIN_RUNG_USDG` $2, `UNI_LADDER_STALE_TICKS_USDG`
+  120. A stale threshold only means anything relative to the rung width.
+- `uni_monitor.py` routes any `*_ladder` strategy to `ladder_decide` (suffix
+  match, so a third quote asset cannot silently fall through to the OOR
+  timeout) and reads `quoteIs0` with `wethIs0` as its legacy alias.
+- The scanner forwards `--quote` to **both** executors now and picks the USDG
+  `SizeParams` for USDG candidates; a USDG pick is renamed `usdg_ladder` so a
+  mixed close journal stays readable.
+
+**Unverified, same as 4b:** DRY_RUN only. Verified against the live nvda/USDG
+0.05% book: 5 rungs × 120 ticks, sizes [2,4,6,8,10] USDG, 6% covered fall.
+
 ## 5. Deliverable order
 
 | # | Deliverable | Depends on |

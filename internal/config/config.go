@@ -93,6 +93,22 @@ type Config struct {
 	// EnableRobinhood on purpose — the two modes share every safety gate but no
 	// discovery source, and either can run alone. Off by default.
 	EnableRobinhoodMature bool
+	// EnableRobinhoodLadder turns on the venue's THIRD mode (rh-ladder): the
+	// weth_ladder thesis, which parks a one-sided WETH bid wall under an
+	// established pool and never buys the token. It shares rh-mature's
+	// discovery source (Uniswap's gateway) but screens on churn instead of
+	// yield, so the two select largely different pools from the same feed —
+	// see robinhood.Ladder. Independent toggle for the same reason the other
+	// two are: either can run alone. Off by default.
+	EnableRobinhoodLadder bool
+	// EnableRobinhoodStockLadder turns on the venue's FOURTH mode
+	// (rh-usdg-ladder): the same one-sided bid-wall shape as rh-ladder, run
+	// against the chain's USDG-quoted tokenized equities instead of its WETH
+	// memecoins. Same gateway feed, far lower yield bar (0.2%/day vs 1.5%),
+	// and it spends the wallet's USDG rather than its WETH — so it competes
+	// with rh-ladder for gas but not for capital. Off by default; see
+	// robinhood.StockLadder.
+	EnableRobinhoodStockLadder bool
 	// RobinhoodDiscoverURL overrides the GeckoTerminal new_pools endpoint
 	// (empty = the package default). The public tier allows 30 req/min.
 	// Applies to the Fresh mode only; rh-mature has its own source.
@@ -287,7 +303,7 @@ func Load() Config {
 		EnablePulse:           getbool("ENABLE_PULSE", false),
 		EnableCasual:          getbool("ENABLE_CASUAL", true),
 		EnableMultiday:        getbool("ENABLE_MULTIDAY", true),
-		EnableTurnover:        getbool("ENABLE_TURNOVER", false), // disabled: journal shows 44.8% WR, avg -3.91% per close — negative edge
+		EnableTurnover:        getbool("ENABLE_TURNOVER", false), // off by default; enable after validating the screen on your own journal
 		EnableMomentumGate:    getbool("ENABLE_MOMENTUM_GATE", true),
 		EnableAuditGate:       getbool("ENABLE_AUDIT_GATE", true),
 		EnableGmgnGate:        getbool("ENABLE_GMGN_GATE", true),
@@ -298,12 +314,20 @@ func Load() Config {
 		EnablePVPCheck:        getbool("ENABLE_PVP_CHECK", true),
 		EnableRobinhood:       getbool("ROBINHOOD_ENABLED", false),
 		EnableRobinhoodMature: getbool("ROBINHOOD_MATURE", false),
-		RobinhoodDiscoverURL:  getenv("ROBINHOOD_DISCOVER_URL", ""),
-		RobinhoodWebhook:      getbool("ROBINHOOD_WEBHOOK", false),
-		// Robinhood deploy disabled by default: uni_closes.jsonl shows 30.6% WR,
-		// avg loss -23.39%, expectancy -15.04%/trade. Observe-only until venue math improves.
+		EnableRobinhoodLadder: getbool("ROBINHOOD_LADDER", false),
+
+		EnableRobinhoodStockLadder: getbool("ROBINHOOD_STOCK_LADDER", false),
+
+		RobinhoodDiscoverURL: getenv("ROBINHOOD_DISCOVER_URL", ""),
+		RobinhoodWebhook:     getbool("ROBINHOOD_WEBHOOK", false),
+		// Robinhood deploy disabled by default. Observe-only until the venue's
+		// own close journal argues otherwise.
 		RobinhoodDeployEnabled: getbool("ROBINHOOD_DEPLOY_ENABLED", false),
-		RobinhoodDeployModes:   getmodes("ROBINHOOD_DEPLOY_MODES", "fresh,mature"),
+		// Mode keys are the Mode string minus its "rh-" prefix, so the stock
+		// ladder is "usdg-ladder". It is NOT in the default set: the USDG rungs
+		// spend a balance the wallet may not hold, and enabling discovery for it
+		// should not silently enable spending.
+		RobinhoodDeployModes:   getmodes("ROBINHOOD_DEPLOY_MODES", "fresh,mature,ladder"),
 		RobinhoodExecutorCmd:   getenv("ROBINHOOD_EXECUTOR_CMD", ""),
 		RobinhoodV4ExecutorCmd: getenv("ROBINHOOD_V4_EXECUTOR_CMD", ""),
 		RobinhoodDeployTimeout: getdur("ROBINHOOD_DEPLOY_TIMEOUT", 2*time.Minute),
@@ -325,11 +349,25 @@ func Load() Config {
 			Floor:   getfloat("ROBINHOOD_DEPLOY_FLOOR_USDG", 8),
 			Ceil:    getfloat("ROBINHOOD_DEPLOY_CEIL_USDG", 150),
 		},
-		RobinhoodMinGasEth:        getfloat("ROBINHOOD_MIN_GAS_ETH", 0.0002),
-		RobinhoodDeployStrategy:   getenv("ROBINHOOD_DEPLOY_STRATEGY", "balanced_tight"),
-		RobinhoodRangePct:         getfloat("ROBINHOOD_RANGE_PCT", 10),
-		RobinhoodSlippagePct:      getfloat("ROBINHOOD_SLIPPAGE_PCT", 5),
-		RobinhoodMaxOpenPositions: getint("ROBINHOOD_MAX_OPEN_POSITIONS", 1),
+		RobinhoodMinGasEth: getfloat("ROBINHOOD_MIN_GAS_ETH", 0.0002),
+		// weth_ladder, not balanced_tight. balanced_tight swaps half the commit
+		// into the memecoin before minting, so every position is long a token on
+		// a chain where tokens bleed, and in backtest every exit it took was a
+		// price exit rather than a fee take-profit. weth_ladder never buys the
+		// token. It is still the loser's default only if you override this back.
+		RobinhoodDeployStrategy: getenv("ROBINHOOD_DEPLOY_STRATEGY", "weth_ladder"),
+		// Both ignored by weth_ladder (its geometry is rungs x rung-ticks, tuned
+		// executor-side via UNI_LADDER_*); they still drive balanced_tight and
+		// weth_below.
+		RobinhoodRangePct:    getfloat("ROBINHOOD_RANGE_PCT", 10),
+		RobinhoodSlippagePct: getfloat("ROBINHOOD_SLIPPAGE_PCT", 5),
+		// Counted in LADDERS (funded pools), not NPM NFTs — one ladder is N
+		// rungs, so an NFT-denominated cap would let a single entry exhaust the
+		// budget. See robinhood.Runner.OpenPositions. Raised from 1 because the
+		// ladder thesis is diversification across many small books: the observed
+		// wallet ran 23 concurrently. 3 is the scaled-down starting point, not a
+		// measured optimum — raise it as the close journal earns the confidence.
+		RobinhoodMaxOpenPositions: getint("ROBINHOOD_MAX_OPEN_POSITIONS", 3),
 		RobinhoodIndicatorGate:    getbool("ROBINHOOD_INDICATOR_GATE", true),
 		RobinhoodSeenTTL:          getdur("ROBINHOOD_SEEN_TTL", 6*time.Hour),
 		RobinhoodMinHolders:       getint("ROBINHOOD_MIN_HOLDERS", 50),

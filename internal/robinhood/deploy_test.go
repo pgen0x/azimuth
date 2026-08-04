@@ -1,9 +1,12 @@
 package robinhood
 
 import (
+	"context"
 	"math"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // defaults mirrors config.go's ROBINHOOD_DEPLOY_* defaults.
@@ -146,5 +149,46 @@ func TestSummarizeReportsFailedDeployInWords(t *testing.T) {
 	}
 	if Deployed(out) {
 		t.Fatal("Deployed() must be false when no position was opened")
+	}
+}
+
+// fakeRunner builds a Runner whose "executor" is a shell snippet printing a
+// canned stdout. run() appends the subcommand as an extra argv, which `sh -c`
+// binds to $0 and ignores, so the snippet runs unchanged.
+func fakeRunner(stdout string) *Runner {
+	return &Runner{execCmd: []string{"sh", "-c", "printf '%s\\n' " + strconv.Quote(stdout)}, timeout: 5 * time.Second}
+}
+
+// Under weth_ladder one entry mints N rungs, so counting NPM NFTs would report
+// a single ladder as N positions and a cap of 3 would reject every deploy
+// after the first. The cap is denominated in entries; the executor reports
+// both numbers and OpenPositions must prefer `ladders`.
+func TestOpenPositionsCountsLaddersNotNFTs(t *testing.T) {
+	got, err := fakeRunner(`{"address":"0xabc","count":5,"ladders":1}`).OpenPositions(context.Background())
+	if err != nil {
+		t.Fatalf("OpenPositions: %v", err)
+	}
+	if got != 1 {
+		t.Fatalf("OpenPositions = %d, want 1 (5 NFTs are one ladder)", got)
+	}
+}
+
+// The v4 executor and any build predating the field report only `count`, where
+// one position really is one entry. Zero ladders and a missing field must not
+// be confused: only the missing field may fall back.
+func TestOpenPositionsFallsBackToCountWhenLaddersAbsent(t *testing.T) {
+	got, err := fakeRunner(`{"address":"0xabc","count":2}`).OpenPositions(context.Background())
+	if err != nil {
+		t.Fatalf("OpenPositions: %v", err)
+	}
+	if got != 2 {
+		t.Fatalf("OpenPositions = %d, want 2 (no ladders field -> count)", got)
+	}
+	got, err = fakeRunner(`{"address":"0xabc","count":4,"ladders":0}`).OpenPositions(context.Background())
+	if err != nil {
+		t.Fatalf("OpenPositions: %v", err)
+	}
+	if got != 0 {
+		t.Fatalf("OpenPositions = %d, want 0 — an explicit ladders:0 must not fall back to count", got)
 	}
 }

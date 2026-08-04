@@ -47,11 +47,18 @@ func (r *Runner) run(ctx context.Context, args ...string) (string, error) {
 	return buf.String(), err
 }
 
-// OpenPositions returns the wallet's current NonfungiblePositionManager
-// position count, by running `uni_executor.js positions` and reading its
-// {"count": N} JSON line. Callers MUST treat a non-nil error as "unknown" and
-// fail closed (skip deploy) — there is no monitor yet to close stale
+// OpenPositions returns the wallet's current open-entry count, by running
+// `uni_executor.js positions`. Callers MUST treat a non-nil error as "unknown"
+// and fail closed (skip deploy) — there is no monitor yet to close stale
 // positions, so under-counting risks an unbounded number of open positions.
+//
+// The unit is ENTRIES, not NFTs. Under weth_ladder one entry mints N rungs
+// (N separate NPM tokens), so the raw {"count": N} would report a single
+// ladder as 5 positions and a cap of 3 would reject every deploy forever. The
+// executor therefore also reports {"ladders": M} — distinct funded pools —
+// and that is what this returns when present. Falls back to `count` for the
+// v4 executor and any older build that predates the field, where one position
+// really is one entry.
 func (r *Runner) OpenPositions(ctx context.Context) (int, error) {
 	out, err := r.run(ctx, "positions")
 	if err != nil {
@@ -59,11 +66,18 @@ func (r *Runner) OpenPositions(ctx context.Context) (int, error) {
 	}
 	var d struct {
 		Count int `json:"count"`
+		// Pointer, not int: a wallet with zero open ladders and an executor that
+		// does not report the field are both "0" after unmarshal, and only the
+		// first should suppress the fallback.
+		Ladders *int `json:"ladders"`
 	}
 	// The executor's last stdout line is the JSON payload; earlier lines (if
 	// any) are transaction log noise from other commands, never `positions`.
 	if err := json.Unmarshal([]byte(lastLine(out)), &d); err != nil {
 		return 0, fmt.Errorf("positions: unparseable output: %w", err)
+	}
+	if d.Ladders != nil {
+		return *d.Ladders, nil
 	}
 	return d.Count, nil
 }

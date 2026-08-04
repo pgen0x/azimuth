@@ -105,9 +105,26 @@ func (s *Scanner) modes() []meteora.ModeParams {
 
 // Run blocks, polling on PollInterval until ctx is cancelled.
 func (s *Scanner) Run(ctx context.Context) {
-	log.Printf("scanner: started (interval=%v, casual=%v, multiday=%v, turnover=%v, pulse=%v, momentum=%v, robinhood=%v, rh-mature=%v)",
+	// The robinhood deploy fields are logged too, not just the mode toggles:
+	// .env is the only place they can be set and it is unreadable by design
+	// (guard-secrets.sh), so this line is the operator's ONLY way to confirm a
+	// config edit actually took effect. A silently-wrong strategy here spends
+	// real money on the wrong shape.
+	log.Printf("scanner: started (interval=%v, casual=%v, multiday=%v, turnover=%v, pulse=%v, momentum=%v, robinhood=%v, rh-mature=%v, rh-ladder=%v, rh-usdg-ladder=%v)",
 		s.cfg.PollInterval, s.cfg.EnableCasual, s.cfg.EnableMultiday, s.cfg.EnableTurnover, s.cfg.EnablePulse,
-		s.cfg.EnableMomentumGate, s.cfg.EnableRobinhood, s.cfg.EnableRobinhoodMature)
+		s.cfg.EnableMomentumGate, s.cfg.EnableRobinhood, s.cfg.EnableRobinhoodMature, s.cfg.EnableRobinhoodLadder,
+		s.cfg.EnableRobinhoodStockLadder)
+	if s.cfg.EnableRobinhood || s.cfg.EnableRobinhoodMature || s.cfg.EnableRobinhoodLadder || s.cfg.EnableRobinhoodStockLadder {
+		modes := make([]string, 0, len(s.cfg.RobinhoodDeployModes))
+		for m := range s.cfg.RobinhoodDeployModes {
+			modes = append(modes, m)
+		}
+		sort.Strings(modes) // map order is random; a config line must be stable
+		log.Printf("scanner: robinhood deploy (enabled=%v, executor=%v, v4executor=%v, strategy=%s, modes=%s, max_open=%d, indicator_gate=%v)",
+			s.cfg.RobinhoodDeployEnabled, s.rhDep.Enabled(), s.rhDepV4.Enabled(),
+			s.cfg.RobinhoodDeployStrategy, strings.Join(modes, ","),
+			s.cfg.RobinhoodMaxOpenPositions, s.cfg.RobinhoodIndicatorGate)
+	}
 
 	ticker := time.NewTicker(s.cfg.PollInterval)
 	defer ticker.Stop()
@@ -141,6 +158,30 @@ func (s *Scanner) pollAll(ctx context.Context) {
 	if s.cfg.EnableRobinhoodMature {
 		s.pollRobinhood(ctx, robinhood.Mature, func(now time.Time) ([]robinhood.Pool, error) {
 			return robinhood.FetchMaturePools(robinhood.Mature, now)
+		})
+	}
+	if s.cfg.EnableRobinhoodLadder {
+		// Same gateway feed as rh-mature, prefiltered with the LADDER params —
+		// FetchMaturePools takes the mode so its local prefilter matches the
+		// gates that will actually run, which is what keeps the GeckoTerminal
+		// enrich to one request. Running both modes makes entries the union of
+		// a yield screen and a churn screen over one source; the dedup store
+		// keys per pool per mode, so a pool both modes like signals once each
+		// and then goes quiet for its SEEN_TTL.
+		s.pollRobinhood(ctx, robinhood.Ladder, func(now time.Time) ([]robinhood.Pool, error) {
+			return robinhood.FetchMaturePools(robinhood.Ladder, now)
+		})
+	}
+	if s.cfg.EnableRobinhoodStockLadder {
+		// The same gateway feed a third time, prefiltered with the USDG-pinned
+		// params. It costs an extra pair of gateway calls per cycle and cannot
+		// share rh-ladder's: the prefilter is what keeps the GeckoTerminal
+		// enrich to ONE request, and it can only be tuned to one mode's gates.
+		// The two ladders never contest a pool — one takes WETH-quoted pools,
+		// the other USDG-quoted, and the quote pin is checked in both the
+		// prefilter and Screen.
+		s.pollRobinhood(ctx, robinhood.StockLadder, func(now time.Time) ([]robinhood.Pool, error) {
+			return robinhood.FetchMaturePools(robinhood.StockLadder, now)
 		})
 	}
 }
@@ -273,13 +314,22 @@ func (s *Scanner) robinhoodDeploy(ctx context.Context, mode string, batch []*rob
 	// Size in the candidate's quote asset. USDG pools size off the USDG
 	// balance with the dollar-unit params; WETH and native-ETH pools size off
 	// WETH (the executor unwraps on demand for native settles). The quote
-	// address is only forwarded to the v4 executor — v3 is WETH-only.
-	sizeCfg, sizeBal, unit, quote := s.cfg.RobinhoodSize, bal.WETH, "WETH", ""
-	if best.Protocol == "v4" {
-		quote = best.QuoteAddress
-		if strings.EqualFold(quote, robinhood.USDG) {
-			sizeCfg, sizeBal, unit = s.cfg.RobinhoodSizeUSDG, bal.USDG, "USDG"
-		}
+	// address goes to BOTH executors now — v4 needs it to know which side of
+	// the PoolKey to settle in, and v3 needs it since the usdg_ladder landed
+	// (uni_executor.js resolves the pool's quote side from it, defaulting to
+	// WETH when the flag is absent).
+	sizeCfg, sizeBal, unit := s.cfg.RobinhoodSize, bal.WETH, "WETH"
+	quote := best.QuoteAddress
+	if strings.EqualFold(quote, robinhood.USDG) {
+		sizeCfg, sizeBal, unit = s.cfg.RobinhoodSizeUSDG, bal.USDG, "USDG"
+	}
+	// The ladder shape is quote-agnostic but its NAME is not: the journal, the
+	// close report and uni_monitor.py's re-pin rulebook all read the strategy
+	// string, and a USDG ladder logged as "weth_ladder" would be unreadable in
+	// a close journal that mixes both. Same executor path either way.
+	strategy := s.cfg.RobinhoodDeployStrategy
+	if strategy == "weth_ladder" && unit == "USDG" {
+		strategy = "usdg_ladder"
 	}
 	amount := robinhood.ComputeDeployAmount(sizeBal, sizeCfg)
 	if amount <= 0 {
@@ -290,9 +340,9 @@ func (s *Scanner) robinhoodDeploy(ctx context.Context, mode string, batch []*rob
 
 	log.Printf("scanner[%s]: DEPLOY PICK %s (%s, %s) score=%.0f amount=%.5f %s (%.0f%% of %.5f bal, reserve %.5f) strategy=%s",
 		mode, best.BaseSymbol, best.Pool[:10], best.Protocol, best.Score, amount, unit,
-		sizeCfg.Pct*100, sizeBal, sizeCfg.Reserve, s.cfg.RobinhoodDeployStrategy)
+		sizeCfg.Pct*100, sizeBal, sizeCfg.Reserve, strategy)
 
-	out, err := runner.Deploy(ctx, best.Pool, amount, s.cfg.RobinhoodRangePct, s.cfg.RobinhoodSlippagePct, s.cfg.RobinhoodDeployStrategy, quote)
+	out, err := runner.Deploy(ctx, best.Pool, amount, s.cfg.RobinhoodRangePct, s.cfg.RobinhoodSlippagePct, strategy, quote)
 	if err != nil {
 		log.Printf("scanner[%s]: DEPLOY FAILED %s (%s): %v\n%s", mode, best.BaseSymbol, best.Pool[:10], err, out)
 		return

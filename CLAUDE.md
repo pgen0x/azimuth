@@ -107,7 +107,29 @@ one pass per enabled mode per `POLL_INTERVAL`.
     comes from realized 24h volume, because extrapolating an h1 window would let
     one busy hour fake a 24× daily rate.
 
-  Both modes share `Screen` and every safety gate (GMGN OpenAPI
+  - `Ladder` (`ROBINHOOD_LADDER`) — the `weth_ladder` thesis: N contiguous
+    **one-sided WETH** rungs parked on the bid side, sized on a linear ramp,
+    minted in one `NPM.multicall`. It never buys the token, so its exits are
+    re-pins (`ladder stale` / `ladder rung filled`), not SL/TP, and a rung is
+    out-of-range **by design** — the fee-dead OOR timeout must never apply to
+    it. Shares `Mature`'s gateway feed but screens on churn, not yield: the
+    8%/day bar matched 1 of the 23 pools a profitable ladder LP actually
+    worked. This replaced `balanced_tight` as the deploy default, which was long
+    a bleeding token by construction. See `docs/ROBINHOOD_CHAIN_PLAN.md` §4b.
+  - `StockLadder` (`ROBINHOOD_STOCK_LADDER`) — the same wall, `usdg_ladder`,
+    under the chain's **USDG-quoted tokenized equities** (nvda, gme, spacex).
+    Same gateway feed; a separate mode because every `Ladder` threshold is
+    wrong for a deep, low-vol, 0.05%-tier book (0.2%/day vs 1.5%, $50k floor,
+    120-tick rungs vs 1200). It spends the wallet's **USDG**, so sizing uses
+    `RobinhoodSizeUSDG` (dollar units). §4c.
+
+  Modes are quote-pinned via `ModeParams.QuoteAsset` — a ladder's rungs and its
+  sizing must be the same asset, so a mode may not mix WETH- and USDG-quoted
+  pools in one batch. **USDG is 6 decimals, WETH is 18**: anything touching
+  amounts in `uni_executor.js` must go through `parseQ`/`fmtQ`, never
+  `parseEther`.
+
+  All four modes share `Screen` and every safety gate (GMGN OpenAPI
   `chain=robinhood` security + holder quality, Blockscout holders). The deploy
   pick also passes a supertrend/RSI entry-timing gate (`indicators.go`, the Go
   port of the skill's `local_indicators.py` — keep them in sync; fail-open,
