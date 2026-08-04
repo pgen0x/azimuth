@@ -6,7 +6,7 @@ func TestEnrichCopycat(t *testing.T) {
 	batch := []*Candidate{
 		{Pool: "0xaaaa000001", BaseSymbol: "CALLIE"},
 		{Pool: "0xbbbb000002", BaseSymbol: "callie"}, // case/space-insensitive collision
-		{Pool: "0xcccc000003", BaseSymbol: "PEPE"},    // unique -> clean
+		{Pool: "0xcccc000003", BaseSymbol: "PEPE"},   // unique -> clean
 		{Pool: "0xdddd000004", BaseSymbol: " CALLIE "},
 		{Pool: "0xeeee000005", BaseSymbol: ""}, // empty ticker never collides
 		{Pool: "0xffff000006", BaseSymbol: ""},
