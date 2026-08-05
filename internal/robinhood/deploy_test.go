@@ -192,3 +192,89 @@ func TestOpenPositionsFallsBackToCountWhenLaddersAbsent(t *testing.T) {
 		t.Fatalf("OpenPositions = %d, want 0 — an explicit ladders:0 must not fall back to count", got)
 	}
 }
+
+// Why the per-token cap exists: one underlying listing at several fee tiers is
+// normal here, and a wallet-wide slot count cannot see that three walls are one
+// price bet. Inventory attributes each POOL — not each rung — to its base token.
+func TestInventoryCountsPoolsPerBaseToken(t *testing.T) {
+	// GME at two tiers (3 rungs + 2 rungs) and NVDA at one, all USDG-quoted.
+	const gme, nvda = "0x1b0e319c6a659f002271b69db8a7df2f911c153e", "0xd0601ce157db5bdc3162bbac2a2c8af5320d9eec"
+	out := `{"address":"0xabc","count":6,"ladders":3,"positions":[{"tokenId":"1","token0":"` + gme + `","token1":"` + USDG + `","fee":3000,"liquidity":"100"},{"tokenId":"2","token0":"` + gme + `","token1":"` + USDG + `","fee":3000,"liquidity":"200"},{"tokenId":"3","token0":"` + gme + `","token1":"` + USDG + `","fee":3000,"liquidity":"300"},{"tokenId":"4","token0":"` + gme + `","token1":"` + USDG + `","fee":10000,"liquidity":"100"},{"tokenId":"5","token0":"` + gme + `","token1":"` + USDG + `","fee":10000,"liquidity":"200"},{"tokenId":"6","token0":"` + nvda + `","token1":"` + USDG + `","fee":500,"liquidity":"100"}]}`
+
+	inv, err := fakeRunner(out).Inventory(context.Background())
+	if err != nil {
+		t.Fatalf("Inventory: %v", err)
+	}
+	if inv.Ladders != 3 {
+		t.Fatalf("Ladders = %d, want 3 (the executor's own count)", inv.Ladders)
+	}
+	// Two POOLS of GME, not five rungs of it.
+	if got := inv.ByToken[gme]; got != 2 {
+		t.Fatalf("GME = %d, want 2 pools (5 rungs across 2 fee tiers)", got)
+	}
+	if got := inv.ByToken[nvda]; got != 1 {
+		t.Fatalf("NVDA = %d, want 1", got)
+	}
+	if got := inv.ByToken[strings.ToLower(USDG)]; got != 0 {
+		t.Fatalf("the quote asset must never count as an underlying, got %d", got)
+	}
+}
+
+// v4 reports pool sides as currency0/currency1, and one pair+fee can exist at
+// several tick spacings — those are different pools. Both facts must survive the
+// decode or the cap silently under-counts.
+func TestInventoryHandlesV4FieldsAndTickSpacing(t *testing.T) {
+	const tsla = "0x322f0929c4625ed5bad873c95208d54e1c003b2d"
+	out := `{"address":"0xabc","count":2,"ladders":2,"positions":[{"tokenId":"1","protocol":"v4","currency0":"` + tsla + `","currency1":"` + USDG + `","fee":3000,"tickSpacing":60,"liquidity":"100"},{"tokenId":"2","protocol":"v4","currency0":"` + tsla + `","currency1":"` + USDG + `","fee":3000,"tickSpacing":10,"liquidity":"100"}]}`
+
+	inv, err := fakeRunner(out).Inventory(context.Background())
+	if err != nil {
+		t.Fatalf("Inventory: %v", err)
+	}
+	if got := inv.ByToken[tsla]; got != 2 {
+		t.Fatalf("TSLA = %d, want 2 — one pair and fee at two tick spacings is two pools", got)
+	}
+}
+
+// A rung drained to zero liquidity holds nothing, exactly as the executors' own
+// `ladders` count treats it. Counting one would keep a token blocked forever
+// after its wall was closed.
+func TestInventoryIgnoresDrainedRungs(t *testing.T) {
+	const uso = "0xa30fa36db767ad9ed3f7a60fc79526fb4d56d344"
+	out := `{"address":"0xabc","count":2,"ladders":0,"positions":[{"tokenId":"1","token0":"` + uso + `","token1":"` + USDG + `","fee":3000,"liquidity":"0"},{"tokenId":"2","token0":"` + uso + `","token1":"` + USDG + `","fee":3000,"liquidity":"0"}]}`
+
+	inv, err := fakeRunner(out).Inventory(context.Background())
+	if err != nil {
+		t.Fatalf("Inventory: %v", err)
+	}
+	if len(inv.ByToken) != 0 {
+		t.Fatalf("drained rungs hold no token, got %v", inv.ByToken)
+	}
+}
+
+// A quote/quote pool (the WETH/USDG wall minted before that gate closed) has no
+// underlying to cap, so it attributes to neither side — while still spending a
+// wallet-wide slot, which `ladders` already accounts for.
+func TestInventorySkipsQuoteOnlyPools(t *testing.T) {
+	out := `{"address":"0xabc","count":3,"ladders":1,"positions":[{"tokenId":"1","token0":"` + WETH + `","token1":"` + USDG + `","fee":3000,"liquidity":"100"}]}`
+
+	inv, err := fakeRunner(out).Inventory(context.Background())
+	if err != nil {
+		t.Fatalf("Inventory: %v", err)
+	}
+	if len(inv.ByToken) != 0 {
+		t.Fatalf("a quote/quote pool has no underlying, got %v", inv.ByToken)
+	}
+	if inv.Ladders != 1 {
+		t.Fatalf("it still occupies a slot: Ladders = %d, want 1", inv.Ladders)
+	}
+}
+
+// Callers fail closed on error, so an unreadable payload must BE an error and
+// never an empty-but-successful census — that would read as "holds nothing" and
+// unblock every candidate.
+func TestInventoryErrorsOnUnparseableOutput(t *testing.T) {
+	if _, err := fakeRunner("not json").Inventory(context.Background()); err == nil {
+		t.Fatal("unparseable positions output must error, not return an empty inventory")
+	}
+}

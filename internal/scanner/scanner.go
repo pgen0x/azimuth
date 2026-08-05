@@ -253,8 +253,48 @@ func (s *Scanner) robinhoodDeploy(ctx context.Context, mode string, batch []*rob
 	// a collapsing price, and the raw h1 screen gate (-15%) sits looser than
 	// the monitor's downtrend exit (-5%), so an unchecked pick can be one tick
 	// from its own close. Data-unavailable fails open, per the gate convention.
+	// The position census comes BEFORE the pick, not after it, because the
+	// per-token cap must be able to skip a blocked candidate and fall through to
+	// the next-best one. Both caps read this one census. It spans BOTH executors
+	// — v3 NPM positions and v4 posm positions draw on the same wallet, so the
+	// brake is per-wallet, not per-protocol — and fails closed if any enabled
+	// executor cannot be counted.
+	open := 0
+	held := map[string]int{}
+	for _, r := range []*robinhood.Runner{s.rhDep, s.rhDepV4} {
+		if !r.Enabled() {
+			continue
+		}
+		inv, err := r.Inventory(ctx)
+		if err != nil {
+			log.Printf("scanner[%s]: DEPLOY SKIPPED (position count unknown, failing closed): %v", mode, err)
+			return
+		}
+		open += inv.Ladders
+		for t, n := range inv.ByToken {
+			held[t] += n
+		}
+	}
+	if open >= s.cfg.RobinhoodMaxOpenPositions {
+		log.Printf("scanner[%s]: DEPLOY SKIPPED %s (%s): at position cap %d/%d",
+			mode, eligible[0].BaseSymbol, eligible[0].Pool[:10], open, s.cfg.RobinhoodMaxOpenPositions)
+		return
+	}
+
 	var best *robinhood.Candidate
 	for _, c := range pickOrder(eligible) {
+		// Per-token cap. The same underlying lists in several pools here — three
+		// fee tiers is normal for an equity, and v4 multiplies that by tick
+		// spacing — so without this one token can hold every slot: three walls
+		// under one price, filling together, which is the concentration the slot
+		// budget exists to prevent.
+		if n := s.cfg.RobinhoodMaxPerToken; n > 0 {
+			if h := held[strings.ToLower(c.BaseAddress)]; h >= n {
+				log.Printf("scanner[%s]: %s (%s) skipped: wallet already holds %d/%d wall(s) of this token",
+					mode, c.BaseSymbol, c.Pool[:10], h, n)
+				continue
+			}
+		}
 		if s.cfg.RobinhoodIndicatorGate {
 			if confirmed, detail, ok := robinhood.EntryTimingConfirm(c.Pool); ok && !confirmed {
 				log.Printf("scanner[%s]: %s (%s) rejected on entry timing: %s",
@@ -269,7 +309,7 @@ func (s *Scanner) robinhoodDeploy(ctx context.Context, mode string, batch []*rob
 		break
 	}
 	if best == nil {
-		log.Printf("scanner[%s]: DEPLOY SKIPPED — entry timing rejected all %d candidate(s)", mode, len(eligible))
+		log.Printf("scanner[%s]: DEPLOY SKIPPED — per-token cap and entry timing rejected all %d candidate(s)", mode, len(eligible))
 		return
 	}
 	if best.IsCopycat {
@@ -279,27 +319,6 @@ func (s *Scanner) robinhoodDeploy(ctx context.Context, mode string, batch []*rob
 	runner := s.rhDep
 	if best.Protocol == "v4" {
 		runner = s.rhDepV4
-	}
-
-	// The position cap spans BOTH executors: v3 NPM positions and v4 posm
-	// positions draw on the same wallet, so the brake is per-wallet, not
-	// per-protocol. Fail closed if ANY enabled executor cannot be counted.
-	open := 0
-	for _, r := range []*robinhood.Runner{s.rhDep, s.rhDepV4} {
-		if !r.Enabled() {
-			continue
-		}
-		n, err := r.OpenPositions(ctx)
-		if err != nil {
-			log.Printf("scanner[%s]: DEPLOY SKIPPED (position count unknown, failing closed): %v", mode, err)
-			return
-		}
-		open += n
-	}
-	if open >= s.cfg.RobinhoodMaxOpenPositions {
-		log.Printf("scanner[%s]: DEPLOY SKIPPED %s (%s): at position cap %d/%d",
-			mode, best.BaseSymbol, best.Pool[:10], open, s.cfg.RobinhoodMaxOpenPositions)
-		return
 	}
 
 	// Size from the LIVE wallet, not a fixed constant — same rationale as the

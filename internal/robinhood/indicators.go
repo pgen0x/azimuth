@@ -35,6 +35,16 @@ type candles struct {
 // fetchOHLCV retrieves the pool's 15m candles, oldest-first (GeckoTerminal
 // serves newest-first; reversed here exactly like the Python fetch).
 func fetchOHLCV(pool string) (candles, error) {
+	// This is the request that repeats: the entry-timing gate walks the same
+	// stable feed every cycle, so most calls ask for candles already in hand.
+	// Serving those from cache is what frees GT budget for the enrich call the
+	// mature-family modes cannot discover without. See gtlimit.go.
+	if c, ok := cachedOHLCV(pool); ok {
+		return c, nil
+	}
+	if err := gt.acquire(); err != nil {
+		return candles{}, err
+	}
 	req, err := http.NewRequest(http.MethodGet, fmt.Sprintf(ohlcvURL, pool), nil)
 	if err != nil {
 		return candles{}, err
@@ -47,6 +57,9 @@ func fetchOHLCV(pool string) (candles, error) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		io.Copy(io.Discard, io.LimitReader(resp.Body, 512))
+		if resp.StatusCode == http.StatusTooManyRequests {
+			gt.penalize()
+		}
 		return candles{}, fmt.Errorf("geckoterminal ohlcv status %d", resp.StatusCode)
 	}
 	var d struct {
@@ -70,6 +83,10 @@ func fetchOHLCV(pool string) (candles, error) {
 		j := len(list) - 1 - i // newest-first -> oldest-first
 		c.highs[j], c.lows[j], c.closes[j] = row[2], row[3], row[4]
 	}
+	// Cache even a short series: the caller decides whether it clears minCandles,
+	// and a pool that returns too little history returns just as little next
+	// cycle — re-asking spends budget to learn the same thing.
+	storeOHLCV(pool, c)
 	return c, nil
 }
 

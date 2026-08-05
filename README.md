@@ -334,9 +334,16 @@ Two consequences worth understanding before enabling either:
   is the honest source for how wide a wall actually is.
 
 The equity universe in particular is not one fee tier: an underlying frequently
-lists at two or three of them simultaneously, and nothing currently caps
-positions *per token*, so one underlying can occupy several of the
-`ROBINHOOD_MAX_OPEN_POSITIONS` slots.
+lists at two or three of them simultaneously, so `ROBINHOOD_MAX_PER_TOKEN`
+(default 1) caps how many of the `ROBINHOOD_MAX_OPEN_POSITIONS` slots a single
+underlying may hold. Without it one token takes the whole book — three walls
+under one price, which all fill together.
+
+Both feeds are also rate-limited in one place. GeckoTerminal's public tier allows
+~30 requests/minute per IP, and a 429 on the enrich call costs a mode its entire
+cycle, so every GT request in the package passes a shared gate that spaces
+requests, backs off hard on a 429, and caches the per-candidate candle reads the
+entry-timing gate would otherwise repeat every cycle.
 
 Geometry (rung count, per-quote width, dust floor, size ramp, band layout) lives
 in one shared module, `assets/skill/scripts/uni_ladder.js`, required by both the
@@ -409,7 +416,8 @@ All daemon config is via environment (see `.env.example`):
 | `ENABLE_CASUAL` / `ENABLE_MULTIDAY` / `ENABLE_TURNOVER` / `ENABLE_PULSE` | Toggle each Solana screening mode (`turnover` and `pulse` off by default) |
 | `ROBINHOOD_ENABLED` / `ROBINHOOD_MATURE` / `ROBINHOOD_LADDER` / `ROBINHOOD_STOCK_LADDER` | Toggle each Robinhood Chain mode (all off by default; independent of each other) |
 | `ROBINHOOD_DEPLOY_ENABLED` / `ROBINHOOD_DEPLOY_MODES` | Let this venue spend funds, and which modes may (others still screen + journal) |
-| `ROBINHOOD_MAX_OPEN_POSITIONS` | Position cap for the venue — counted across all modes, and **not** per token |
+| `ROBINHOOD_MAX_OPEN_POSITIONS` | Position cap for the venue, counted in ladders (funded pools) across all modes |
+| `ROBINHOOD_MAX_PER_TOKEN` | How many of those slots one underlying may hold (default 1, 0 disables) |
 | `ENABLE_MOMENTUM_GATE` | DexScreener downtrend filter (fails open) |
 | `ENABLE_AUDIT_GATE` | Jupiter token-audit gate: rejects >30% bot holders, ships bot % + global fees in the signal (fails open) |
 | `ENABLE_PVP_CHECK` | same-symbol rival detection: flags candidates contested by an established token with its own live DLMM pool — advisory `is_pvp` + rival stats, never rejects (fails open) |

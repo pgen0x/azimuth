@@ -195,6 +195,15 @@ type Config struct {
 	// (fail-closed on any read error) since nothing closes positions
 	// automatically yet. Keep this low until Phase 3 monitor exists.
 	RobinhoodMaxOpenPositions int
+	// RobinhoodMaxPerToken caps how many of those slots ONE underlying may hold
+	// (0 disables). The venue lists the same token in several pools — a
+	// tokenized equity commonly trades at the 0.05%, 0.3% and 1% tiers at once,
+	// and in v4 one pair+fee can exist at several tick spacings — so the
+	// wallet-wide cap alone let a single underlying take every slot (GME held
+	// three of three on 2026-08-05). Walls in different pools of the same token
+	// are not diversification; they are one price bet minted three times, and
+	// they all fill together.
+	RobinhoodMaxPerToken int
 	// RobinhoodIndicatorGate runs the supertrend_or_rsi entry-timing check
 	// (internal/robinhood/indicators.go, the Go port of local_indicators.py)
 	// on each deploy pick, skipping candidates whose token is in a confirmed
@@ -377,6 +386,7 @@ func Load() Config {
 		// wallet ran 23 concurrently. 3 is the scaled-down starting point, not a
 		// measured optimum — raise it as the close journal earns the confidence.
 		RobinhoodMaxOpenPositions: getint("ROBINHOOD_MAX_OPEN_POSITIONS", 3),
+		RobinhoodMaxPerToken:      getint("ROBINHOOD_MAX_PER_TOKEN", 1),
 		RobinhoodIndicatorGate:    getbool("ROBINHOOD_INDICATOR_GATE", true),
 		RobinhoodSeenTTL:          getdur("ROBINHOOD_SEEN_TTL", 6*time.Hour),
 		RobinhoodStockSeenTTL:     getdur("ROBINHOOD_STOCK_SEEN_TTL", 90*time.Minute),

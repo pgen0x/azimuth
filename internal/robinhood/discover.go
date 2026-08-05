@@ -79,6 +79,12 @@ func pfloat(s string) float64 {
 // fetchPage retrieves and decodes one GeckoTerminal pools page (new_pools or
 // trending_pools — same JSON:API schema).
 func fetchPage(url string) (*gtResponse, error) {
+	// Every GT call in this package clears the shared gate first — see
+	// gtlimit.go. Unpaced bursts here are what starved the mature-family modes
+	// of a quarter of their cycles.
+	if err := gt.acquire(); err != nil {
+		return nil, err
+	}
 	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
@@ -91,6 +97,9 @@ func fetchPage(url string) (*gtResponse, error) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		io.Copy(io.Discard, io.LimitReader(resp.Body, 512))
+		if resp.StatusCode == http.StatusTooManyRequests {
+			gt.penalize()
+		}
 		return nil, fmt.Errorf("geckoterminal status %d", resp.StatusCode)
 	}
 	var gr gtResponse
