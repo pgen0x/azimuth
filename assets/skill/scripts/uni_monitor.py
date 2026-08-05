@@ -120,6 +120,48 @@ LADDER_STALE_TICKS = {
 #
 # Skipped while the rung is IN range: a partially-filled rung holds token, so
 # its quote value also moves with price, and a dip would read as "no fees".
+#
+# LADDER-SCOPED, NOT RUNG-SCOPED (2026-08-05, operator-approved). A ladder's
+# OUTER rungs are fee-dead BY DESIGN — rung 2 earns nothing until spot reaches
+# rung 2 — so a per-rung verdict closes the far side of a wall while the near
+# side is still earning, ratcheting the wall thinner every window until only
+# rung 0 is left. The first working on-chain fee meter (feesQuote, landed the
+# same day) made that visible on eight live usdg_ladder rungs: GME rung 0 had
+# 0.002039 USDG in 214m and NVDA rung 0 0.000297 in 136m, while NVDA rungs 1-2
+# and all three TSLA rungs read exactly 0 — judged per rung, five of the eight
+# would have been torn out of three walls that were working as designed. That
+# is the shape this file's own header block describes: the reference LP's
+# ladders "closed with a median of ZERO fully-converted rungs".
+#
+# Rungs already share a `ladderId` so the re-pin rules can treat them as one
+# wall; the idle rule now does too:
+#
+#   * the three meters are SUMMED over the wall (feesQuote, valueWeth, and
+#     Krystal's USD fee/value pair), and the wall's age is its OLDEST rung's,
+#   * ANY rung earning holds the WHOLE wall — release needs the AGGREGATE to be
+#     fee-dead across the window,
+#   * the window snapshot lives under `ladder:<ladderId>` in the monitor state,
+#     not under each rung's tokenId: three rungs each rolling their own 90m
+#     baseline makes the aggregate meaningless,
+#   * and the verdict is computed ONCE per wall per tick and handed to every
+#     rung, so the wall comes down whole in a single tick. Without that, the
+#     first rung judged would roll the shared window and hand the rest a fresh
+#     baseline, tearing the wall down one rung per window anyway.
+#
+# Unmeasured is never zero: a rung whose `feesQuote` is None voids the whole
+# wall's chain-fee meter, and a Krystal reply missing any rung voids the wall's
+# Krystal meter, because an understated sum is indistinguishable from "earned
+# nothing" — the one reading that closes. Both fall through to the next meter.
+#
+# The `ladder:<ladderId>` key is restart-safe: the executor mints ladderId as
+# `<pool>-<mintUnixTs>` and persists it in the entry journal, so it is byte-
+# identical after a deploy. This is the hazard from the note below — three
+# restarts on 2026-08-05 each minting a NEW state key and restarting the 90m
+# window from zero — not reintroduced. Cutover cost is one window: live rungs'
+# pre-existing per-tokenId idle_* snapshots cannot be merged into a wall total
+# (different units), so each wall starts one fresh window. The absolute-zero
+# branch is judged on AGE, not the window, so a fee-dead wall stays releasable
+# across that cutover.
 LADDER_IDLE_MIN_AGE_MIN = float(os.environ.get("UNI_LADDER_IDLE_MIN_AGE", "45"))
 LADDER_IDLE_WINDOW_MIN = float(os.environ.get("UNI_LADDER_IDLE_WINDOW", "90"))
 LADDER_IDLE_MIN_PCT = float(os.environ.get("UNI_LADDER_IDLE_MIN_PCT", "0.02"))
@@ -134,8 +176,18 @@ LADDER_IDLE_MIN_PCT = float(os.environ.get("UNI_LADDER_IDLE_MIN_PCT", "0.02"))
 #
 # STRICTLY an enrichment. Every hard-risk rule (SL/TP/trailing/OOR, and the
 # ladder's fill and stale rules) stays on-chain, and a failure here falls back
-# to the value-drift meter below. A third party must never sit in the kill
-# path: an outage or a 429 cannot be allowed to block a stop-loss.
+# to the meters below. A third party must never sit in the kill path: an outage
+# or a 429 cannot be allowed to block a stop-loss.
+#
+# 2026-08-05: it IS no longer the only fee meter. Krystal spent the entire
+# 40h/17-close ladder soak failing — `HTTP Error 521` (Cloudflare: origin down)
+# then repeated `read operation timed out` — which silently demoted every ladder
+# judgement to the value-drift meter, and that meter cannot see fees at all on
+# an out-of-range rung. uni_executor.js cmdState now measures uncollected fees
+# on-chain (`feesQuote`) inside the state read the monitor already performs, at
+# zero extra requests. Krystal is kept FIRST only because it is one request for
+# the whole wallet rather than one per position; it is no longer load-bearing,
+# and if the 521s persist it can be dropped outright without losing the rule.
 #
 # Requires KRYSTAL_API_KEY and KRYSTAL_WALLET (the public EVM address — this
 # script must never see a private key). Unset either and the feature is off.
@@ -204,11 +256,116 @@ def fetch_krystal_positions():
     return out
 
 
+# Prefix that marks a WALL's shared idle-window state, keyed by ladderId rather
+# than by tokenId. Distinguishable from a position key on sight, because the
+# prune at the end of main() has to treat the two differently: a position key is
+# retired when its position closes, a wall key when its LAST rung does.
+LADDER_WALL_PREFIX = "ladder:"
+
+
+def is_ladder(s):
+    """True for a ladder rung of either quote asset. Suffix match on the
+    strategy name, not a fixed list — same reason `decide` matches that way: a
+    new quote asset adds a strategy, and a ladder that fell through to the
+    position rulebook would be closed by the fee-dead OOR timeout."""
+    return str((s or {}).get("strategy") or "").endswith("_ladder")
+
+
+def ladder_wall_key(ladder_id):
+    """Monitor-state key for a wall's shared idle window. Keyed by `ladderId`
+    alone: the executor mints it as `<pool>-<mintUnixTs>` and persists it in the
+    entry journal, so it is globally unique AND identical after a restart, which
+    is what keeps the 90m window from re-baselining on every deploy. Not
+    proto-namespaced the way state_key() is — the pool address already separates
+    protocols, and only the v3 executor mints ladders."""
+    return LADDER_WALL_PREFIX + str(ladder_id)
+
+
+def ladder_walls(reads, krystal):
+    """Group this tick's ladder rungs into WALLS by `ladderId`, summing each
+    wall's idle meters. `reads` is [(tokenId, state)] over the state reads that
+    SUCCEEDED this tick; `krystal` the wallet-wide fee oracle map.
+
+    Every rung of a wall shares one pool and therefore one quote asset, so
+    feesQuote and valueWeth sum in a single unit and their ratio is still a real
+    fee yield (WETH or USDG). A rung missing from either fee meter voids that
+    meter for the entire wall — a partial sum reads as "earned nothing", which
+    is the reading that closes.
+    """
+    walls = {}
+    for tid, s in reads:
+        if not is_ladder(s):
+            continue
+        lid = s.get("ladderId")
+        if not lid:
+            # No wall to join (a pre-ladderId mint, or a build that does not
+            # echo it): this rung keeps judging itself, unchanged.
+            continue
+        w = walls.setdefault(str(lid), {
+            "rungs": [], "ages": [], "in_range": False,
+            "fees": 0.0, "fees_ok": True,
+            "value": 0.0, "value_ok": True,
+            "kry_fees": 0.0, "kry_value": 0.0, "kry_ok": True,
+        })
+        w["rungs"].append(str(tid))
+        if s.get("ageMin") is not None:
+            w["ages"].append(float(s["ageMin"]))
+        if s.get("inRange"):
+            # ANY rung in range makes the wall's summed value price-sensitive,
+            # so the value meter's mid-conversion carve-out applies to the whole
+            # wall — see the `value` meter note in ladder_idle_reason.
+            w["in_range"] = True
+        fq = s.get("feesQuote")
+        if fq is None:
+            w["fees_ok"] = False        # unmeasured — never read as zero
+        else:
+            w["fees"] += float(fq)
+        vq = s.get("valueWeth")         # quote units despite the name
+        if vq is None:
+            w["value_ok"] = False
+        else:
+            w["value"] += float(vq)
+        k = krystal.get(str(tid))
+        if not k or k.get("fees_usd") is None:
+            w["kry_ok"] = False
+        else:
+            w["kry_fees"] += float(k["fees_usd"])
+            w["kry_value"] += float(k.get("value_usd") or 0.0)
+    for w in walls.values():
+        # Shaped like one synthetic rung on purpose: ladder_idle_reason reads
+        # the wall through the exact same three meters, so the rule's logic and
+        # its meter preference order did not have to be duplicated or reordered.
+        w["state"] = {
+            "feesQuote": w["fees"] if w["fees_ok"] else None,
+            "valueWeth": w["value"] if w["value_ok"] else None,
+            "inRange": w["in_range"],
+        }
+        w["kry"] = ({"fees_usd": w["kry_fees"], "value_usd": w["kry_value"]}
+                    if w["kry_ok"] else None)
+        # OLDEST rung. The rungs are minted in one NPM.multicall so their ages
+        # should be equal to the second, but don't assume it — a wall must not
+        # read young (and so escape the age gate) because of one rung.
+        w["age_min"] = max(w["ages"]) if w["ages"] else None
+    return walls
+
+
+def wall_of(s, verdicts):
+    """This rung's precomputed wall verdict, or None when it belongs to no wall
+    (non-ladder position, or a rung with no `ladderId`) — None routes back to
+    the original per-position judgement."""
+    lid = (s or {}).get("ladderId")
+    return verdicts.get(str(lid)) if lid else None
+
+
 def _idle_window(ps, now, kind, level, basis=None):
     """Snapshot-and-compare a monotonic `level` over LADDER_IDLE_WINDOW_MIN,
     judged against `basis` (defaults to the snapshot itself, i.e. relative
     growth). Returns a close reason, or None to hold — rolling the window
-    forward in `ps` as a side effect."""
+    forward in `ps` as a side effect.
+
+    `ps` is the WALL's state dict for a laddered rung (ladder_wall_key), so one
+    window covers the whole wall; only a rung with no ladderId still snapshots
+    into its own position state."""
     skey, tkey = f"idle_{kind}_snap", f"idle_{kind}_at"
     snap, snap_at = ps.get(skey), ps.get(tkey)
     if snap is None or snap_at is None or level < float(snap):
@@ -230,17 +387,43 @@ def _idle_window(ps, now, kind, level, basis=None):
 
 
 def ladder_idle_reason(s, age_min, ps, now, kry=None):
-    """Close reason when a resting rung has earned nothing across a full
-    window, or None. Rolls the measurement window forward in `ps` as a side
-    effect — `ps` is this position's monitor-state dict, `now` a unix time.
+    """Close reason when a resting WALL has earned nothing across a full window,
+    or None. Rolls the measurement window forward in `ps` as a side effect —
+    `now` is a unix time.
 
-    Two meters, preferred first:
-      fee   — real pending+claimed fees from Krystal (`kry`). Valid IN range
-              too: a fee is a fee wherever spot sits.
-      value — quote-denominated position value, the fallback when the oracle
-              is absent. Only honest while the rung is OUT of range, where it
-              holds 100% quote and nothing but a trade through the band can
-              move it; in range it tracks price and a dip reads as "no fees".
+    Callers pass the WALL AGGREGATE, not one rung (ladder_walls / see the
+    LADDER-SCOPED block above): `s` is the wall's summed meters, `age_min` its
+    oldest rung's age, `kry` its summed Krystal pair, and `ps` the wall's own
+    `ladder:<ladderId>` state dict. Summed fees non-zero means SOME rung earned,
+    which holds every rung — an outer rung is fee-dead by design. The one caller
+    that still passes a single position is a rung with no `ladderId`, which
+    belongs to no wall.
+
+    THREE meters, preferred first — cheapest real measurement wins, and the
+    last one is not a measurement at all:
+
+      fee       — real pending+claimed fees from Krystal (`kry`). Preferred
+                  because it costs ONE request for the whole wallet regardless
+                  of position count. Valid IN range too: a fee is a fee
+                  wherever spot sits.
+      chain_fee — `feesQuote` from the executor's `state` read: uncollected
+                  fees measured on-chain via a batched
+                  decreaseLiquidity+collect simulate (uni_executor.js
+                  cmdState). Also valid in range, and it needs no third party
+                  — but it is already paid for by the state read the monitor
+                  does anyway, so it is second only on cost grounds. Added
+                  2026-08-05 because Krystal spent that whole soak returning
+                  HTTP 521 / read timeouts, which silently demoted every
+                  ladder judgement to the meter below.
+      value     — quote-denominated position value. LAST RESORT, and it CANNOT
+                  SEE FEES: `valueWeth` is principal-only by contract, and an
+                  out-of-range rung's principal is 100% quote asset and
+                  constant by construction, so growth reads ~0 whatever the
+                  rung earned. It detects a rung being TRADED INTO (principal
+                  converting), not a rung earning. Only honest while the rung
+                  is OUT of range; in range it tracks price and a dip reads as
+                  "no fees". Kept only so a total oracle failure still has
+                  *some* release valve for dead capital.
     """
     if ps is None or now is None or age_min is None or age_min < LADDER_IDLE_MIN_AGE_MIN:
         return None
@@ -259,6 +442,25 @@ def ladder_idle_reason(s, age_min, ps, now, kry=None):
     if kry and kry.get("fees_usd") is not None and kry.get("value_usd"):
         return _idle_window(ps, now, "fee", kry["fees_usd"], kry["value_usd"])
 
+    # Meter 2: on-chain uncollected fees. Same two-stage shape as Krystal
+    # (absolute zero judged on age, then a growth window), and the same units
+    # discipline — feesQuote and valueWeth are both in the position's own quote
+    # asset, so their ratio is a real fee yield in either WETH or USDG.
+    #
+    # A SEPARATE window key from Krystal's ("chain_fee", not "fee") on purpose:
+    # the two levels are different units (USD vs quote), so sharing a snapshot
+    # across an oracle recovery would either void the baseline or fake a jump.
+    # `feesQuote is None` means the batched simulate failed — unmeasured, so
+    # fall through rather than read it as zero.
+    fees_q = s.get("feesQuote")
+    if fees_q is not None:
+        if fees_q == 0 and age_min >= LADDER_IDLE_WINDOW_MIN:
+            return (f"ladder idle: zero on-chain fees in {age_min:.0f}m since mint "
+                    f"(>= {LADDER_IDLE_WINDOW_MIN:.0f}m) — wall untraded, re-pin")
+        value_q = s.get("valueWeth")
+        if value_q:
+            return _idle_window(ps, now, "chain_fee", fees_q, value_q)
+
     value = s.get("valueWeth")  # quote units despite the name (executor contract)
     if value is None or value <= 0:
         return None
@@ -269,8 +471,35 @@ def ladder_idle_reason(s, age_min, ps, now, kry=None):
     return _idle_window(ps, now, "value", value)
 
 
-def ladder_decide(s, pnl, age_min, ps=None, now=None, kry=None):
-    """Close reason for one ladder rung (either quote asset), or None to hold."""
+def judge_ladder_walls(walls, state, now, persist=True):
+    """{ladderId: {"idle": reason-or-None}} — ONE idle verdict per wall per
+    tick, then applied to every rung of that wall so the wall is held or torn
+    down whole. Judging each rung separately would let the first rung roll the
+    shared window and hand the others a fresh baseline, which is the rung-at-a-
+    time teardown this rule was rescoped to prevent.
+
+    Rolls each wall's window forward in `state` under ladder_wall_key().
+    persist=False judges on throwaway copies, which is what the report-only tick
+    needs: the systemd loop owns the windows, and a report must never consume
+    one.
+    """
+    out = {}
+    for lid, w in walls.items():
+        key = ladder_wall_key(lid)
+        ps = state.setdefault(key, {}) if persist else dict(state.get(key) or {})
+        out[lid] = {"idle": ladder_idle_reason(w["state"], w["age_min"], ps, now, w["kry"])}
+    return out
+
+
+def ladder_decide(s, pnl, age_min, ps=None, now=None, kry=None, wall=None):
+    """Close reason for one ladder rung (either quote asset), or None to hold.
+
+    `wall` is this rung's precomputed WALL verdict (judge_ladder_walls). The
+    idle rule is ladder-scoped, so it is decided once for the whole wall and
+    handed to each rung; every OTHER rule here — fill, stale, the backstop SL —
+    stays per-rung and on-chain. `wall=None` means this rung belongs to no wall
+    (no `ladderId`) and judges its own idleness, byte-for-byte the pre-
+    2026-08-05 behaviour."""
     tick, lo, hi = s.get("tick"), s.get("tickLower"), s.get("tickUpper")
     if tick is None or lo is None or hi is None:
         return None
@@ -306,8 +535,11 @@ def ladder_decide(s, pnl, age_min, ps=None, now=None, kry=None):
                 f"(> {stale_ticks:.0f})")
 
     # Still within re-pin distance, but is anyone trading into it? A price rule
-    # cannot answer that — see ladder_idle_reason.
-    idle = ladder_idle_reason(s, age_min, ps, now, kry)
+    # cannot answer that — see ladder_idle_reason. The answer is the WALL's, not
+    # this rung's: an outer rung is fee-dead by design, so judging it alone
+    # strips the wall's depth while the near rungs are still earning. Every rung
+    # of an idle wall gets this same reason on this same tick.
+    idle = wall["idle"] if wall is not None else ladder_idle_reason(s, age_min, ps, now, kry)
     if idle:
         return idle
 
@@ -450,7 +682,8 @@ def trailing_floor_pct(peak):
     return peak - TRAILING_DROP_PCT
 
 
-def decide(pnl, peak, in_range, age_min, oor_min, m5, h1, s=None, ps=None, now=None, kry=None):
+def decide(pnl, peak, in_range, age_min, oor_min, m5, h1, s=None, ps=None, now=None,
+           kry=None, wall=None):
     """Return a close reason string, or None to hold. Mirrors the Solana
     monitor's rule precedence: emergency SL first, then hard SL/TP, then
     trailing/fast-out/downtrend, then OOR timeout.
@@ -465,14 +698,18 @@ def decide(pnl, peak, in_range, age_min, oor_min, m5, h1, s=None, ps=None, now=N
     Positions minted before the ladder existed carry no strategy field and keep
     the original path unchanged.
 
+    `wall` is only read on that ladder branch (see ladder_decide). A position
+    with no `ladderId` — every non-ladder strategy, and any pre-ladderId mint —
+    never sees it.
+
     A payload that is not recognizably a state read holds unconditionally: an
     unidentifiable `s` means we do not know which rulebook applies, and the
     default rulebook is the one that closes ladders.
     """
     if s is not None and not looks_like_state(s):
         return None
-    if s is not None and str(s.get("strategy") or "").endswith("_ladder"):
-        return ladder_decide(s, pnl, age_min, ps, now, kry)
+    if s is not None and is_ladder(s):
+        return ladder_decide(s, pnl, age_min, ps, now, kry, wall)
     if pnl is not None:
         # Emergency SL — bypasses the age grace.
         if pnl <= STOP_LOSS_PCT - EMERGENCY_SL_BUFFER_PCT:
@@ -624,6 +861,31 @@ def state_key(proto, tid):
     return str(tid) if proto == "v3" else f"{proto}:{tid}"
 
 
+def read_states(work):
+    """Read every position's state up front. Returns [(proto, executor, tokenId,
+    state)] for the reads that SUCCEEDED; a failure is printed and dropped.
+
+    One pass before any decision is what lets the ladder rules aggregate a whole
+    wall from a single consistent snapshot, and it is why the decision loop no
+    longer interleaves state reads with closes. The cost is that a later
+    position's numbers are a few seconds staler than they used to be, bounded by
+    this loop; every rule already acts on up-to-a-tick-old data, and a wall
+    judged half from this tick and half from the last is the worse failure.
+
+    A dropped read gets NO peak/oor bookkeeping either — a read we cannot trust
+    must not start an oor_since clock a later, healthy tick would act on — but
+    the position still counts as live (see main), so its state is not pruned.
+    """
+    reads = []
+    for proto, executor, tid in work:
+        s, err = run_executor(executor, ["state", "--id", str(tid)])
+        if err or not looks_like_state(s):
+            print(f"monitor: {proto} state #{tid} failed: {err or 'unrecognized payload'}")
+            continue
+        reads.append((proto, executor, tid, s))
+    return reads
+
+
 def main():
     # Gather (proto, executor, tokenId) across executors. One executor's read
     # failure must not blind the monitor to the other's positions — note it,
@@ -666,12 +928,15 @@ def main():
         now = time.time()
         eth_usd = fetch_eth_usd()
         krystal = fetch_krystal_positions()
+        reads = read_states(work)
+        # A wall's verdict needs every rung's state before any row is decided.
+        # persist=False — the report must not roll a window the loop owns, the
+        # same reason the per-position ps is copied below.
+        wall_verdicts = judge_ladder_walls(
+            ladder_walls([(tid, s) for _, _, tid, s in reads], krystal),
+            state, now, persist=False)
         rows = []
-        for proto, executor, tid in work:
-            s, serr = run_executor(executor, ["state", "--id", str(tid)])
-            if serr or not looks_like_state(s):
-                print(f"monitor: {proto} state #{tid} failed: {serr or 'unrecognized payload'}")
-                continue
+        for proto, _executor, tid, s in reads:
             pnl = s.get("pnlPct")
             in_range = bool(s.get("inRange"))
             age_min = s.get("ageMin")
@@ -691,7 +956,7 @@ def main():
             # dict(ps): the idle window is rolled forward as a side effect, and
             # the report must not consume a window the loop owns.
             reason = decide(pnl, peak, in_range, age_min, oor_min, m5, h1, s, dict(ps), now,
-                            krystal.get(str(tid)))
+                            krystal.get(str(tid)), wall_of(s, wall_verdicts))
             val_w, ent_w = s.get("valueWeth"), s.get("entryWeth")
             # USDG positions are dollar-quoted already; everything else is
             # ETH-quoted and needs the ETH/USD conversion.
@@ -725,19 +990,21 @@ def main():
     # One request for the whole wallet, before the per-position loop — the
     # point of the oracle is that it does not scale with position count.
     krystal = fetch_krystal_positions()
-    live = set()
+    # Every position we were handed is live, whether or not its state read lands
+    # below — a read failure means we could not SEE the position, not that it
+    # closed, and pruning on that would reset its peak (see the prune at the
+    # bottom).
+    live = {state_key(proto, tid) for proto, _executor, tid in work}
 
-    for proto, executor, tid in work:
+    reads = read_states(work)
+    # Ladder idle is judged per WALL, once per tick, before any rung is decided:
+    # every rung of the wall then gets the same verdict on this same tick, so the
+    # wall is never left half torn down. Rolls the walls' windows in `state`.
+    wall_verdicts = judge_ladder_walls(
+        ladder_walls([(tid, s) for _, _, tid, s in reads], krystal), state, now)
+
+    for proto, executor, tid, s in reads:
         skey = state_key(proto, tid)
-        live.add(skey)
-        s, err = run_executor(executor, ["state", "--id", str(tid)])
-        if err or not looks_like_state(s):
-            # Skip the tick entirely — no peak/oor bookkeeping either. A read we
-            # cannot trust must not start an oor_since clock that a later,
-            # healthy tick would then act on.
-            print(f"monitor: {proto} state #{tid} failed: {err or 'unrecognized payload'}")
-            continue
-
         pnl = s.get("pnlPct")
         in_range = bool(s.get("inRange"))
         age_min = s.get("ageMin")
@@ -746,6 +1013,19 @@ def main():
         qsym = s.get("quoteSymbol") or "WETH"
 
         ps = state.setdefault(skey, {"peak_pnl": 0.0, "oor_since": None})
+        lid = s.get("ladderId")
+        if lid:
+            # Persist which wall this rung belongs to so the prune below can keep
+            # the wall's window alive even on a tick whose state read failed.
+            # Without it a transient RPC error orphans the wall key, silently
+            # re-baselining the 90m window — the exact failure that parked a
+            # fee-dead SPY wall for 6.7h on 2026-08-05.
+            ps["ladder_id"] = str(lid)
+            # The rung's own pre-rescoping idle_* snapshots are dead now that the
+            # window is the wall's; drop them rather than leave a second, stale
+            # baseline in the state file.
+            for k in [k for k in ps if k.startswith("idle_")]:
+                ps.pop(k, None)
         if pnl is not None and pnl > ps["peak_pnl"]:
             ps["peak_pnl"] = pnl
         peak = ps["peak_pnl"]
@@ -760,7 +1040,7 @@ def main():
 
         m5, h1 = fetch_momentum(pool) if pool else (None, None)
         reason = decide(pnl, peak, in_range, age_min, oor_min, m5, h1, s, ps, now,
-                        krystal.get(str(tid)))
+                        krystal.get(str(tid)), wall_of(s, wall_verdicts))
 
         # Pre-exit indicator confirmation (non-emergency exits only): postpone
         # the close while supertrend/RSI still read bullish — a dip inside an
@@ -843,9 +1123,23 @@ def main():
     # positions are missing from `live` because we couldn't see them, not
     # because they closed, and pruning would reset their peaks to zero.
     failed = {e.split(":", 1)[0] for e in errors}
-    for key in list(state.keys()):
+    keep = set()
+    for key in state:
+        if key.startswith(LADDER_WALL_PREFIX):
+            continue
         proto = key.split(":", 1)[0] if ":" in key else "v3"
-        if key not in live and proto not in failed:
+        if key in live or proto in failed:
+            keep.add(key)
+    # A wall's idle window is keyed by ladderId, so it is never in `live` (which
+    # holds position keys). Keep the walls still referenced by a surviving rung,
+    # read off that rung's persisted ladder_id — dropping a wall key silently
+    # restarts its 90m window, which is how a fee-dead wall sat 6.7h on
+    # 2026-08-05 with no rule able to release it. When a wall's last rung closes
+    # its position key goes, so the wall key goes with it on the same tick.
+    keep |= {ladder_wall_key(lid) for lid in
+             ((state.get(k) or {}).get("ladder_id") for k in keep) if lid}
+    for key in list(state.keys()):
+        if key not in keep:
             state.pop(key, None)
     save_state(state)
 
