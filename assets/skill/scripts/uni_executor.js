@@ -603,6 +603,35 @@ async function cmdUnwrap(wallet, account) {
   console.log(JSON.stringify({ success: true, unwrapped: formatEther(amount) }));
 }
 
+// cmdGasTopup buys gas with strategy capital: sell USDG for WETH, then unwrap
+// it to native ETH. A usdg_ladder wallet earns and holds dollars but pays gas
+// in ETH, so its gas balance only ever falls — and a wallet that cannot pay gas
+// can neither mint NOR close, which turns a resting rung into a position no
+// exit rule can release. Its own command rather than folded into deploy:
+// how much capital to pull out of the strategy is an operator decision, not
+// something a deploy should do silently mid-flight.
+async function cmdGasTopup(wallet, account) {
+  const q = QUOTES[USDG];
+  const amount = parseQ(arg("amount", "0"), q);
+  if (amount <= 0n) throw new Error("--amount required (USDG)");
+  const held = await pub.readContract({ address: USDG, abi: erc20Abi, functionName: "balanceOf", args: [account.address] });
+  if (held < amount) throw new Error(`insufficient USDG: have ${fmtQ(held, q)}, want ${fmtQ(amount, q)}`);
+
+  // sellTokenForQuote walks the fee tiers and sets the slippage floor off a
+  // router simulation, so a thin tier fails over instead of executing badly.
+  const sold = await sellTokenForQuote(wallet, account, USDG, amount, null, QUOTES[WETH]);
+  if (!sold.ok) throw new Error(`USDG -> WETH failed: ${sold.reason}`);
+
+  // Unwrap the proceeds only, never the whole WETH balance: on a wallet that
+  // also runs weth_ladder the rest of that balance is working capital.
+  await send(wallet, { address: WETH, abi: wethAbi, functionName: "withdraw", args: [sold.amountOut], account: wallet.account, chain }, `unwrap ${formatEther(sold.amountOut)} WETH`);
+  const eth = await pub.getBalance({ address: account.address });
+  console.log(JSON.stringify({
+    success: true, sold_usdg: fmtQ(amount, q), weth_out: formatEther(sold.amountOut),
+    fee_tier: sold.fee, eth: formatEther(eth), swap_tx: sold.tx,
+  }));
+}
+
 async function cmdQuote() {
   const pool = getAddress(arg("pool", ""));
   const st = await poolState(pool);
@@ -1361,8 +1390,9 @@ async function main() {
     case "close": return cmdClose(wallet, account);
     case "sweep": return cmdSweep(wallet, account);
     case "unwrap": return cmdUnwrap(wallet, account);
+    case "gas-topup": return cmdGasTopup(wallet, account);
     default:
-      console.error("usage: uni_executor.js address|balance|wrap|unwrap|quote|deploy|positions|state|collect|close|sweep [--flags]");
+      console.error("usage: uni_executor.js address|balance|wrap|unwrap|gas-topup|quote|deploy|positions|state|collect|close|sweep [--flags]");
       process.exit(2);
   }
 }
