@@ -44,6 +44,12 @@ const {
   decodeFunctionResult,
 } = require("viem");
 const { privateKeyToAccount } = require("viem/accounts");
+// Ladder geometry, shared verbatim with uni_v4_executor.js — see uni_ladder.js
+// for why it is a module and not a copy in each executor. Relative to THIS file,
+// so it resolves inside the symlinked scripts/ dir exactly as it does in-repo.
+const {
+  LADDER_RUNGS, ladderGeom, rungWidth, ladderSizes, ladderBands, ladderSpan,
+} = require("./uni_ladder.js");
 
 // Same profile resolution as dlmm_executor.js: process.argv[1], not __dirname,
 // so a symlinked scripts/ dir still resolves to the profile, not this repo.
@@ -113,72 +119,12 @@ function fmtQ(v, q) { return formatUnits(v, q.decimals); }
 // unwind, while still tolerating the ratio drift a live tick causes.
 const MIN_FILL_PCT = parseFloat(process.env.UNI_MIN_FILL_PCT || "25");
 
-// weth_ladder geometry. Reverse-engineered 2026-08-04 from a profitable
-// Robinhood Chain LP: N contiguous one-sided rungs stacked on the BID side,
-// sized on a linear ramp so the rung nearest spot is smallest. See
-// docs/ROBINHOOD_CHAIN_PLAN.md "weth_ladder" for the shape.
-//
-// Defaults are scaled DOWN from that reference, which ran both more rungs and
-// wider ones: rung count is the knob that trades fee-capture resolution
-// against per-rung dust, and our ticket is an order of magnitude smaller. The
-// executor lowers RUNGS further at runtime when the amount can't fund them —
-// see ladderSizes().
-const LADDER_RUNGS = parseInt(process.env.UNI_LADDER_RUNGS || "5", 10);
-
-// Rung width, PER QUOTE ASSET. The WETH figure is the reference wallet's, read
-// off a memecoin venue where a 12% move is a Tuesday. USDG pools are tokenized
-// equities: they move 1-3% in a day, so a 1200-tick wall would sit entirely out
-// of reach — five rungs covering a 45% crash is not a bid wall, it is a bet the
-// stock halts.
-//
-// 2026-08-05: USDG widened 120 -> 240. Every stock pool this mode has deployed
-// into (SPY, TSLA, SPCX) is the 0.3% tier with tickSpacing 60 — measured, not
-// assumed — so 120 was exactly TWO spacings, the narrowest rung the pool can
-// express, and the deposit floor (UNI_LADDER_MIN_RUNG_USDG against a ~$7
-// commit) drops the wall to 3 rungs. 3 x 120 covered 3.6% of downside: a wall
-// that a market moving 1-3% a day steps over and never returns to. 240 is four
-// spacings, ~2.4% a rung, 7.2% covered at 3 rungs and 12% at five.
-//
-// Widening is a trade, not a free win: rung 0's top edge is pinned adjacent to
-// spot either way (see ladderBands), so a wider rung buys depth by HALVING
-// liquidity density, and density is what pays on the small oscillations around
-// spot that make up most of an equity session. The stronger lever is rung
-// COUNT — sol_bidask, the Solana sibling this shape is ported from, reaches
-// -70% with ~70 NARROW bins, not with wide ones. Count here is capped by
-// deposit size, not by this constant.
-const LADDER_RUNG_TICKS = {
-  WETH: parseInt(process.env.UNI_LADDER_RUNG_TICKS || "1200", 10),
-  USDG: parseInt(process.env.UNI_LADDER_RUNG_TICKS_USDG || "240", 10),
-};
-
-// Floor on the SMALLEST rung, per quote asset. A rung below this is dust: it
-// earns fees that never repay the gas of minting and later burning it, and on
-// exit it is the rung most likely to strand an unsellable bag. The observed
-// wallet's smallest WETH rung was ~0.0115; ours is the old single-position
-// floor. The USDG figure is lower in dollar terms because the risk it guards
-// against is different — an equity rung will not strand (the book is real and
-// deep), so $2 only has to beat the gas of its own mint-and-burn, which at
-// this chain's ~0.05 gwei is cents.
-//
-// Consequence worth knowing: ladderSizes() drops rungs until the smallest
-// clears this, so a ladder funded near ROBINHOOD_DEPLOY_FLOOR_USDG mints two
-// or three real rungs instead of five dust ones. Five-rung stock ladders want
-// roughly $30 of commit.
-const LADDER_MIN_RUNG = {
-  WETH: process.env.UNI_LADDER_MIN_RUNG_WETH || "0.003",
-  USDG: process.env.UNI_LADDER_MIN_RUNG_USDG || "2",
-};
-
-// ladderGeom resolves the per-quote geometry for a resolveQuote() result.
-// Unknown quotes fall back to the WETH numbers — there is no third quote
-// today, and silently minting a zero-width rung would be worse than an
-// approximation.
-function ladderGeom(q) {
-  return {
-    rungTicks: LADDER_RUNG_TICKS[q.symbol] ?? LADDER_RUNG_TICKS.WETH,
-    minRung: parseQ(LADDER_MIN_RUNG[q.symbol] ?? LADDER_MIN_RUNG.WETH, q),
-  };
-}
+// Ladder geometry — rung count, per-quote rung width, per-quote dust floor, the
+// size ramp and the band layout — lives in ./uni_ladder.js (required above) and
+// is shared verbatim with the v4 executor, because those numbers describe the
+// THESIS rather than either protocol. uni_monitor.py's `ladder stale` rule
+// compares live drift against the same widths, so a private copy here is exactly
+// how a wall ends up re-pinning at a width it was never minted at.
 
 // Every Uniswap v3 fee tier. The exit sell walks all of them, not just the
 // tier of the pool we LP'd: a launch pool's liquidity can be pulled out from
@@ -649,80 +595,6 @@ async function cmdQuote() {
   }));
 }
 
-// ladderSizes splits `amountWei` across `rungs` on a linear 1:2:...:N ramp,
-// smallest rung FIRST (nearest spot). The ramp is not decoration: the near
-// rungs are the ones price actually reaches, so they are the ones that get
-// converted into the token when it dips. Keeping them small means a wick
-// costs little inventory, while the far rungs — which only fill in a real
-// collapse, and which we intend to tear down before that happens — hold the
-// bulk of the idle WETH where it earns the widest fee coverage.
-//
-// Returns { sizes, rungs }: rungs is lowered until the smallest rung clears
-// the quote's minimum (ladderGeom), because a ladder of dust is strictly worse
-// than a shorter ladder of real rungs. Throws if even one rung can't clear it.
-// `amountRaw` and the returned sizes are in the QUOTE's base units, so the
-// caller must format them with fmtQ — a 6-decimal USDG amount printed through
-// formatEther reads as zero.
-function ladderSizes(amountRaw, rungs, q) {
-  const { minRung } = ladderGeom(q);
-  let n = Math.max(1, rungs);
-  while (n > 1) {
-    const total = BigInt((n * (n + 1)) / 2);
-    if (amountRaw / total >= minRung) break;
-    n--;
-  }
-  const total = BigInt((n * (n + 1)) / 2);
-  if (amountRaw / total < minRung) {
-    throw new Error(`amount ${fmtQ(amountRaw, q)} ${q.symbol} cannot fund even one rung `
-      + `of ${fmtQ(minRung, q)} ${q.symbol} (UNI_LADDER_MIN_RUNG_${q.symbol})`);
-  }
-  const sizes = [];
-  let assigned = 0n;
-  for (let k = 1; k <= n; k++) {
-    const s = (amountRaw * BigInt(k)) / total;
-    sizes.push(s);
-    assigned += s;
-  }
-  // Integer division leaves a few base units; give them to the outermost rung so
-  // the ladder commits exactly `amountRaw` and no dust is left dangling.
-  sizes[sizes.length - 1] += amountRaw - assigned;
-  return { sizes, rungs: n };
-}
-
-// ladderBands lays `rungs` contiguous, non-overlapping ranges on the BID side
-// of `tick` — the side where the token is CHEAPER than spot, so each rung is
-// a resting quote-asset bid that only converts if price comes down to it.
-//
-// Which tick direction that is depends on token ordering, exactly as in
-// weth_below: the pool price is token1/token0, so with the QUOTE as token0 a
-// RISING tick means more token per unit of quote (token cheaper) and the
-// ladder goes up; with the quote as token1 it goes down. Getting this
-// backwards would mint an ask ladder that sells token we do not hold — the
-// mint would simply take nothing and refund, so this is a correctness
-// invariant, not a preference.
-//
-// Rungs are returned inner-first (index 0 nearest spot) to line up with
-// ladderSizes()'s smallest-first ramp.
-function ladderBands(tick, spacing, quoteIs0, rungs, rungTicks) {
-  const w = Math.max(spacing, Math.round(rungTicks / spacing) * spacing);
-  const bands = [];
-  if (quoteIs0) {
-    // Start one spacing ABOVE spot so rung 0 is adjacent but never straddles:
-    // a straddling rung would demand both tokens and take only part of the
-    // WETH offered.
-    const base = roundToSpacing(tick + spacing, spacing, true);
-    for (let k = 0; k < rungs; k++) {
-      bands.push({ tickLower: base + k * w, tickUpper: base + (k + 1) * w });
-    }
-  } else {
-    const base = roundToSpacing(tick - spacing, spacing, false);
-    for (let k = 0; k < rungs; k++) {
-      bands.push({ tickLower: base - (k + 1) * w, tickUpper: base - k * w });
-    }
-  }
-  return bands;
-}
-
 // cmdDeployLadder mints the ladder shape: N one-sided rungs of the pool's
 // QUOTE asset, in a single NPM.multicall. It serves both ladder strategies —
 // weth_ladder (WETH rungs under a memecoin) and usdg_ladder (USDG rungs under
@@ -772,15 +644,8 @@ async function cmdDeployLadder(wallet, account, strategy) {
     recipient: account.address, deadline,
   }));
 
-  // Bands are ordered inner-first, which is DESCENDING in tick terms when WETH
-  // is token1 — so the extent has to come from min/max, not from the first and
-  // last entries.
-  const tickLo = Math.min(...bands.map((b) => b.tickLower));
-  const tickHi = Math.max(...bands.map((b) => b.tickUpper));
-  // Reported as the price DROP the ladder covers, which is what it actually
-  // buys: a x1.82 tick span is a -45% fall in the token, not a +82% rise.
-  const dropPct = (1 - 1 / Math.pow(1.0001, tickHi - tickLo)) * 100;
-  console.log(`ladder: ${rungs} rungs x ${Math.max(spacing, Math.round(rungTicks / spacing) * spacing)} ticks `
+  const { tickLo, tickHi, dropPct } = ladderSpan(bands);
+  console.log(`ladder: ${rungs} rungs x ${rungWidth(spacing, rungTicks)} ticks `
     + `on the bid side of tick ${tick} (${q.symbol} is token${quoteIs0 ? 0 : 1}), `
     + `covering a ${dropPct.toFixed(0)}% fall, sizes `
     + `[${sizes.map((s) => fmtQ(s, q)).join(", ")}] ${q.symbol}`);
