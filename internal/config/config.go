@@ -116,6 +116,15 @@ type Config struct {
 	// RobinhoodSeenTTL is the venue's dedup window. Fresh-pool signals age out
 	// of the thesis within a day; 6h lets a still-qualifying pool re-signal.
 	RobinhoodSeenTTL time.Duration
+	// RobinhoodStockSeenTTL is the stock ladder's own, much shorter window.
+	// The venue default assumes a pool is only worth re-signalling once its
+	// thesis has had time to change, which is exactly wrong for a strategy
+	// whose EXIT IS A RE-PIN: the usdg_ladder closes precisely so it can be
+	// rebuilt around the new price, and 6h of silence on the pool it just left
+	// is 6h of idle capital. The tokenized-equity universe is also a handful of
+	// pools, so one long TTL silences the whole mode at once — observed
+	// 2026-08-05, every cycle deduped 18 of 18 and sent nothing.
+	RobinhoodStockSeenTTL time.Duration
 	// RobinhoodMinHolders is the Blockscout holder-count floor per candidate
 	// (fail-open when the fetch fails; 0 disables). New-chain tokens
 	// accumulate holders fast — 50 filters single-wallet theater without
@@ -370,6 +379,7 @@ func Load() Config {
 		RobinhoodMaxOpenPositions: getint("ROBINHOOD_MAX_OPEN_POSITIONS", 3),
 		RobinhoodIndicatorGate:    getbool("ROBINHOOD_INDICATOR_GATE", true),
 		RobinhoodSeenTTL:          getdur("ROBINHOOD_SEEN_TTL", 6*time.Hour),
+		RobinhoodStockSeenTTL:     getdur("ROBINHOOD_STOCK_SEEN_TTL", 90*time.Minute),
 		RobinhoodMinHolders:       getint("ROBINHOOD_MIN_HOLDERS", 50),
 		DeployCmd:                 getenv("DEPLOY_CMD", ""),
 		DeployTimeout:             getdur("DEPLOY_TIMEOUT", 5*time.Minute),

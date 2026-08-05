@@ -387,7 +387,14 @@ func (s *Scanner) pollRobinhood(ctx context.Context, mp robinhood.ModeParams, fe
 		// Solana venue's momentum/audit ordering. The rh: prefix keeps venue
 		// keys disjoint from Solana pool keys in the shared store.
 		poolKey := "rh:" + mp.Mode + ":" + cand.Pool
-		fresh, err := s.seen.MarkIfNewTTL(ctx, poolKey, s.cfg.RobinhoodSeenTTL)
+		seenTTL := s.cfg.RobinhoodSeenTTL
+		if mp.Mode == robinhood.StockLadder.Mode {
+			// A re-pin exit wants its own pool back, not a different one — see
+			// RobinhoodStockSeenTTL. The stock universe is small enough that
+			// the venue default silences every candidate simultaneously.
+			seenTTL = s.cfg.RobinhoodStockSeenTTL
+		}
+		fresh, err := s.seen.MarkIfNewTTL(ctx, poolKey, seenTTL)
 		if err != nil {
 			log.Printf("scanner[%s]: seen store error: %v", mp.Mode, err)
 			continue
