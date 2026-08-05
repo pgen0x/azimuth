@@ -565,13 +565,49 @@ Every one of `Ladder`'s numbers is wrong here, and not by a little:
 | quote = WETH | these are USDG-quoted — different wallet balance, 6 decimals |
 | `MinFeePct` 0.3% | the deep books are on the **0.05%** tier |
 | `MinFeeTVLDay` 1.5%/day | observed 0.23–1.86%; only `gme/USDG 1%` clears |
-| `MaxReserveUSD` $2M | fine, but the floor moves: $50k, not $10k |
+| `MaxReserveUSD` $2M | fine, but the floor moves: $20k, not $10k |
 | rung 1200 ticks (~12%) | an equity's whole year; the wall never gets touched |
 
-So `robinhood.StockLadder` (`rh-usdg-ladder`): USDG-pinned, $50k–$5M, ≥0.05%
-tier, **0.2%/day**, flow floors 10/3 (equities trade market hours — an h1
-window at 03:00 UTC is quiet on a book that did millions that session), FDV
-gates off (a wrapper's FDV is not a float anyone can dump).
+So `robinhood.StockLadder` (`rh-usdg-ladder`): USDG-pinned, $20k–$5M, ≥0.05%
+tier, **0.2%/day**, flow floors 10/3, FDV gates off (a wrapper's FDV is not a
+float anyone can dump).
+
+### Floor recalibrated $50k → $20k (2026-08-05)
+
+The floor was set at $50k off the five pools observed on 2026-08-04. A census of
+the venue's *whole* USDG book showed that was too tight. The gateway returned 90
+v3 pools against its page cap of 100 — so the census is the complete v3
+universe, not one page of it — containing 26 USDG/token pools. $50k admitted 19
+and cut seven already past `MinAge`:
+
+| cut at $50k | TVL | | cut at $50k | TVL |
+|---|---|---|---|---|
+| USO | $47.9k | | GOOGL | $42.7k |
+| BNKR | $46.3k | | INTC | $41.8k |
+| CASHCAT | $44.8k | | MSFT | $35.1k |
+| DELL | $43.8k | | | |
+
+Every one sits within 30% of the floor: the number was not separating deep books
+from thin ones, it was clipping a cluster. $20k restores all 26 and nothing in
+the census falls between $20k and $35k, so it is not a slide toward dust. The
+pace and flow gates remain the dead-book filter.
+
+Two things the same census settled, worth recording because both contradict a
+plausible guess:
+
+- **This universe is the equity book.** Only 4 of the 26 are non-equity
+  (CASHCAT, VEX, BNKR, MRDN); the other 22 are tokenized equities and ETFs. A
+  separate "USDG memecoin" mode with relaxed thresholds was considered and
+  dropped — at $20k it would add two pools, not a universe. USDG-quoted
+  memecoins are scarce on this chain, not merely screened out.
+- **A market-hours gate cannot be inferred from pool flow.** The premise was
+  that an equity pool goes quiet outside 09:30–16:00 ET, so recent flow could
+  stand in for a timezone-and-holiday calendar. Measured against the journal it
+  does not: screen outcomes are indistinguishable between sessions
+  (`passed_screen` 13–20 during RTH, 7–20 overnight) because these pools keep
+  printing ≥10 txns/h round the clock. The flow floors above therefore stay a
+  dead-pool guard only, and any future market-hours gate needs a real calendar
+  plus a way to tell an equity pool from a memecoin one.
 
 The trade is explicit: far less yield per rung, for a wall far less likely to
 be run over. A ladder's real risk is a collapse that fills every rung and

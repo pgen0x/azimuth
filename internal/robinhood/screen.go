@@ -201,12 +201,23 @@ var StockLadder = ModeParams{
 	MinAge: 24 * time.Hour,
 	MaxAge: 0,
 
-	// The observed pools ran $173k–$712k. The floor sits well under the
-	// smallest and the ceiling well over the largest — but both bind harder
-	// than Ladder's on purpose: our fee share is our share of the active tick,
-	// and these books are 5-50x deeper than a memecoin's, so a rung in a $5M
-	// equity pool earns rounding error.
-	MinReserveUSD: 50_000,
+	// The observed pools ran $173k–$712k. The ceiling sits well over the
+	// largest and binds harder than Ladder's on purpose: our fee share is our
+	// share of the active tick, and these books are 5-50x deeper than a
+	// memecoin's, so a rung in a $5M equity pool earns rounding error.
+	//
+	// The floor was $50k until a census of the venue's whole USDG book
+	// (2026-08-05: the gateway returned 90 v3 pools against a page cap of 100,
+	// so that census is the complete v3 universe, not one page of it) showed
+	// what it cost. Of 26 USDG/token pools, $50k admitted 19 and cut SEVEN that
+	// were already past MinAge: USO $47.9k, BNKR $46.3k, CASHCAT $44.8k,
+	// DELL $43.8k, GOOGL $42.7k, INTC $41.8k, MSFT $35.1k. Every one sits
+	// within 30% of the old floor — the number was not separating deep books
+	// from thin ones, it was clipping a cluster. $20k restores all 26 (nothing
+	// in the census falls between $20k and $35k, so this is not a slippery
+	// slope toward dust) and leaves the pace and flow gates below to drop dead
+	// books, which is their job and not the floor's.
+	MinReserveUSD: 20_000,
 	MaxReserveUSD: 5_000_000,
 
 	// 0.05% — the tier the deepest equity pools actually use (nvda/USDG did
