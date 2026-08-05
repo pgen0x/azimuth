@@ -129,9 +129,14 @@ one pass per enabled mode per `POLL_INTERVAL`.
     under the chain's **USDG-quoted tokenized equities** (nvda, gme, spacex).
     Same gateway feed; a separate mode because every `Ladder` threshold is
     wrong for a deep, low-vol book (0.2%/day vs 1.5%, $20k floor, 240-tick
-    rungs vs 1200 — every stock pool traded so far is the 0.3% tier at
-    tickSpacing 60, so USDG rung widths quantize to multiples of 60). It spends the wallet's **USDG**, so sizing uses
-    `RobinhoodSizeUSDG` (dollar units). §4c.
+    rungs vs 1200). The stock universe spans **all three fee tiers** — of the 12
+    pools this mode has minted into, 3 were 0.05% (spacing 10), 6 were 0.3% (60),
+    3 were 1% (200) — and one underlying often lists at two or three at once, so
+    it can hold several position slots (no per-token cap yet). `rungWidth`
+    quantizes to whole spacings, so a 240-tick request collapses to 200 on the 1%
+    tier: covered drop per rung is per-tier, and the executor's ladder log line
+    is the only honest source for a wall's real width. It spends the wallet's
+    **USDG**, so sizing uses `RobinhoodSizeUSDG` (dollar units). §4c.
 
   Modes are quote-pinned via `ModeParams.QuoteAsset` — a ladder's rungs and its
   sizing must be the same asset, so a mode may not mix WETH- and USDG-quoted

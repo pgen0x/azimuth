@@ -40,13 +40,26 @@ const LADDER_RUNGS = parseInt(process.env.UNI_LADDER_RUNGS || "5", 10);
 // of reach — five rungs covering a 45% crash is not a bid wall, it is a bet the
 // stock halts.
 //
-// 2026-08-05: USDG widened 120 -> 240. Every stock pool this mode has deployed
-// into (SPY, TSLA, SPCX) is the 0.3% tier with tickSpacing 60 — measured, not
-// assumed — so 120 was exactly TWO spacings, the narrowest rung the pool can
-// express, and the deposit floor (UNI_LADDER_MIN_RUNG_USDG against a ~$7
-// commit) drops the wall to 3 rungs. 3 x 120 covered 3.6% of downside: a wall
-// that a market moving 1-3% a day steps over and never returns to. 240 is four
-// spacings, ~2.4% a rung, 7.2% covered at 3 rungs and 12% at five.
+// 2026-08-05: USDG widened 120 -> 240, because 120 was near the narrowest rung
+// these pools can express. The stock universe is NOT one fee tier — a census of
+// the 12 USDG pools this mode has actually minted into (position journal) spans
+// all three, with several underlyings present at two or even three of them:
+//
+//   0.05% / spacing 10    3 pools   240 exact (24 spacings)
+//   0.3%  / spacing 60    6 pools   240 exact (4 spacings)
+//   1%    / spacing 200   3 pools   200  <-- quantized DOWN, see rungWidth
+//
+// So the widening bought depth in 9 of 12 pools and nothing in the other 3: at
+// spacing 200 a 240-tick request rounds to a single spacing, and the minted
+// rungs confirm it (every 1%-tier rung came out 200 ticks both before and after
+// this change). Sizing the constant for the 60-spacing majority is deliberate —
+// that is where most of the traded book is — but covered drop is therefore
+// PER TIER, not per mode: ~2.4% a rung at spacing 10 and 60, ~2.0% at 200.
+//
+// What 120 cost at that majority tier: two spacings, and the deposit floor
+// (UNI_LADDER_MIN_RUNG_USDG against a ~$7 commit) drops the wall to 3 rungs, so
+// 3 x 120 covered 3.6% of downside — a wall that a market moving 1-3% a day
+// steps over and never returns to. 240 covers 7.2% at 3 rungs, 12% at five.
 //
 // Widening is a trade, not a free win: rung 0's top edge is pinned adjacent to
 // spot either way (see ladderBands), so a wider rung buys depth by HALVING
@@ -102,6 +115,13 @@ function ladderGeom(q) {
 // one spacing keeps a too-narrow request from rounding to a zero-width range.
 // Both executors report this in their ladder log line, so it lives here rather
 // than being recomputed inline at each call site.
+//
+// The rounding is silent and it BINDS in production, so read the log line, not
+// the env var, when you want to know how wide a wall actually is. On the 1% tier
+// (spacing 200) the USDG request of 240 rounds to 1 spacing, i.e. 200 — 17%
+// narrower than asked, and unchanged by the 120 -> 240 widening because 120
+// rounds there too. Any request under 1.5 spacings collapses to exactly one.
+// See LADDER_RUNG_TICKS above for the per-tier census.
 function rungWidth(spacing, rungTicks) {
   return Math.max(spacing, Math.round(rungTicks / spacing) * spacing);
 }

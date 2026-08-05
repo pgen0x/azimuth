@@ -175,11 +175,17 @@ var Ladder = ModeParams{
 // It is a separate mode rather than a quote-widened Ladder because the two
 // universes are nothing alike on the axis that sets the thresholds. A
 // memecoin ladder is paid by violence: 1%-tier pools, wide rungs, a 1.5%/day
-// churn floor. A tokenized equity trades a real book — deep, low-volatility,
-// mostly on the 0.05% tier — so it clears a fraction of that pace and would
-// be rejected wholesale by Ladder's bar. Measured 2026-08-04 on the five live
-// USDG equity pools: fee pace 0.23%–1.86%/day, TVL $173k–$712k, and only
-// gme/USDG 1% cleared 1.5%/day.
+// churn floor. A tokenized equity trades a real book — deep, low-volatility —
+// so it clears a fraction of that pace and would be rejected wholesale by
+// Ladder's bar. Measured 2026-08-04 on the five live USDG equity pools: fee
+// pace 0.23%–1.86%/day, TVL $173k–$712k, and only gme/USDG 1% cleared 1.5%/day.
+//
+// The equity universe spans all three fee tiers, and an underlying often lists
+// at two or three of them at once — of the 12 USDG pools this mode has minted
+// into, 3 were 0.05%, 6 were 0.3%, 3 were 1%. So MinFeePct below is a floor
+// that admits every tier, not a description of the book, and rung geometry
+// quantizes per tier (see uni_ladder.js). It also means one underlying can
+// occupy several position slots at once; there is no per-token cap yet.
 //
 // The trade this mode makes is explicit: far less yield per rung, in exchange
 // for a bid wall that is far less likely to be run over. A ladder's real risk
@@ -280,7 +286,7 @@ func Screen(p Pool, mp ModeParams, now time.Time) (*Candidate, string) {
 	// whichever mode the arbitrary "base" happens to suit and never leaves it.
 	// That is how rh-usdg-ladder deployed a USDG wall under WETH on 2026-08-04:
 	// WETH sorts below USDG, so the gateway's token0 was WETH, the mode's USDG
-	// quote pin matched, and every remaining gate (deep book, 0.05% tier, real
+	// quote pin matched, and every remaining gate (deep book, 0.3% tier, real
 	// 24h volume) passed easily. The shape was sound and the thesis was not —
 	// a fill leaves the wallet long ETH, and no security/holder gate here says
 	// anything meaningful about a quote asset.

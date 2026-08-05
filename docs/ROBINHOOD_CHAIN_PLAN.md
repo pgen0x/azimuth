@@ -625,11 +625,26 @@ tokenized equity is the least collapse-prone base asset on the chain.
 - Geometry per quote: `UNI_LADDER_RUNG_TICKS_USDG` 240 (~2.4%/rung),
   `UNI_LADDER_MIN_RUNG_USDG` $2, `UNI_LADDER_STALE_TICKS_USDG` 240. A stale
   threshold only means anything relative to the rung width — keep them equal.
-- Widened from 120 on 2026-08-05. SPY, TSLA and SPCX are all the **0.3% tier
-  at tickSpacing 60** (measured on-chain; the plan previously assumed 0.05%),
-  so 120 was two spacings — the narrowest rung the pool can express — and the
-  $2 rung floor caps a ~$7 commit at 3 rungs, i.e. 3.6% of covered downside.
-  240 is four spacings: 7.2% at 3 rungs, 12% at five. The trade is density:
+- Widened from 120 on 2026-08-05. The stock universe is **not one fee tier** —
+  the 12 USDG pools this mode has minted into span all three, and an underlying
+  frequently lists at two or three of them at once (measured from the position
+  journal; both this plan's original "all 0.05%" assumption and its first
+  "all 0.3% at tickSpacing 60" correction were wrong):
+
+  | tier | spacing | pools | a 240-tick rung becomes |
+  |---|---|---|---|
+  | 0.05% | 10 | 3 | 240 (24 spacings) |
+  | 0.3% | 60 | 6 | 240 (4 spacings) |
+  | 1% | 200 | 3 | **200** — quantized down |
+
+  At the 0.3% majority tier 120 was two spacings — near the narrowest rung the
+  pool can express — and the $2 rung floor caps a ~$7 commit at 3 rungs, i.e.
+  3.6% of covered downside. 240 gives 7.2% at 3 rungs, 12% at five. But
+  `rungWidth` rounds to whole spacings, so at the 1% tier 240 collapses to a
+  single 200-tick spacing and the widening changed nothing there — minted rungs
+  read 200 both before and after it. **Covered drop is therefore per tier**:
+  ~2.4% a rung at spacing 10 and 60, ~2.0% at 200. Read the executor's ladder
+  log line, not the env var, for a wall's real width. The trade is density:
   rung 0's top is pinned adjacent to spot either way, so width buys depth by
   halving the liquidity that earns on small oscillations. Rung COUNT is the
   stronger lever (`sol_bidask` reaches -70% with ~70 narrow bins) and is capped
