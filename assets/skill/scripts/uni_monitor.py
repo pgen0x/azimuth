@@ -124,39 +124,141 @@ LADDER_IDLE_MIN_AGE_MIN = float(os.environ.get("UNI_LADDER_IDLE_MIN_AGE", "45"))
 LADDER_IDLE_WINDOW_MIN = float(os.environ.get("UNI_LADDER_IDLE_WINDOW", "90"))
 LADDER_IDLE_MIN_PCT = float(os.environ.get("UNI_LADDER_IDLE_MIN_PCT", "0.02"))
 
+# --- Krystal Cloud position API (optional fee oracle) ----------------------
+# Reads REAL accrued fees, which the chain does not hand over cheaply:
+# NPM.positions().tokensOwed only updates on poke/burn (it reads 0 on a live
+# rung no matter what it earned), and the honest alternative — static-calling
+# NPM.collect — costs one call per position per tick. Krystal returns
+# pending+claimed fees for the whole wallet in ONE request, which is what makes
+# a fee meter affordable at a 60s cadence.
+#
+# STRICTLY an enrichment. Every hard-risk rule (SL/TP/trailing/OOR, and the
+# ladder's fill and stale rules) stays on-chain, and a failure here falls back
+# to the value-drift meter below. A third party must never sit in the kill
+# path: an outage or a 429 cannot be allowed to block a stop-loss.
+#
+# Requires KRYSTAL_API_KEY and KRYSTAL_WALLET (the public EVM address — this
+# script must never see a private key). Unset either and the feature is off.
+# Costs 10 API units per request; at a 60s tick that is ~14.4k units/day.
+KRYSTAL_API_URL = os.environ.get("KRYSTAL_API_URL", "https://cloud-api.krystal.app/v1/positions")
+KRYSTAL_API_KEY = os.environ.get("KRYSTAL_API_KEY", "")
+KRYSTAL_WALLET = os.environ.get("KRYSTAL_WALLET", "")
+KRYSTAL_TIMEOUT = float(os.environ.get("KRYSTAL_TIMEOUT", "10"))
+ROBINHOOD_CHAIN_ID = 4663
 
-def ladder_idle_reason(s, age_min, ps, now):
+
+def _krystal_usd(entries):
+    """Sum a Krystal token-amount array to USD, or None if any row is
+    unreadable. `balance` is a RAW integer string at the token's own
+    `decimals` — USDG is 6 and WETH is 18, so dividing by a hardcoded 1e18
+    would silently report a stock rung's fees as zero forever."""
+    total = 0.0
+    for e in entries or []:
+        dec = (e.get("token") or {}).get("decimals")
+        if dec is None:
+            return None
+        try:
+            total += int(e.get("balance")) / (10 ** int(dec)) * float(e.get("price") or 0.0)
+        except (TypeError, ValueError):
+            return None
+    return total
+
+
+def fetch_krystal_positions():
+    """{tokenId: {"fees_usd", "value_usd", "earning24h"}} for this wallet's
+    open Robinhood positions. Returns {} on ANY failure — a missing oracle
+    means the idle rule falls back to value drift, never that a rung is
+    closed or held on data we do not have."""
+    if not (KRYSTAL_API_KEY and KRYSTAL_WALLET):
+        return {}
+    url = f"{KRYSTAL_API_URL}?wallet={KRYSTAL_WALLET}&positionStatus=OPEN"
+    try:
+        req = urllib.request.Request(url, headers={
+            "accept": "application/json",
+            "KC-APIKey": KRYSTAL_API_KEY,
+            "User-Agent": USER_AGENT,
+        })
+        with urllib.request.urlopen(req, timeout=KRYSTAL_TIMEOUT) as resp:
+            rows = json.loads(resp.read())
+    except Exception as e:
+        print(f"monitor: krystal fetch failed ({e}) — idle rule falls back to value drift")
+        return {}
+    out = {}
+    for r in rows if isinstance(rows, list) else []:
+        # chainId is a documented filter but takes a "<name>@<id>" form this
+        # chain's spelling is unconfirmed for, so filter locally instead.
+        if (r.get("chain") or {}).get("id") != ROBINHOOD_CHAIN_ID:
+            continue
+        tid = str(r.get("tokenId") or "")
+        fee = r.get("tradingFee") or {}
+        pending, claimed = _krystal_usd(fee.get("pending")), _krystal_usd(fee.get("claimed"))
+        if not tid or pending is None or claimed is None:
+            continue
+        out[tid] = {
+            # pending+claimed, so a collect that moves one to the other keeps
+            # the total monotonic and does not read as a fee reversal.
+            "fees_usd": pending + claimed,
+            "value_usd": float(r.get("currentPositionValue") or 0.0),
+            "earning24h": r.get("earning24h"),
+        }
+    return out
+
+
+def _idle_window(ps, now, kind, level, basis=None):
+    """Snapshot-and-compare a monotonic `level` over LADDER_IDLE_WINDOW_MIN,
+    judged against `basis` (defaults to the snapshot itself, i.e. relative
+    growth). Returns a close reason, or None to hold — rolling the window
+    forward in `ps` as a side effect."""
+    skey, tkey = f"idle_{kind}_snap", f"idle_{kind}_at"
+    snap, snap_at = ps.get(skey), ps.get(tkey)
+    if snap is None or snap_at is None or level < float(snap):
+        # First sighting, or the level fell — either way the baseline is void.
+        ps[skey], ps[tkey] = level, now
+        return None
+    window_min = (now - float(snap_at)) / 60.0
+    if window_min < LADDER_IDLE_WINDOW_MIN:
+        return None
+    denom = float(basis) if basis is not None else float(snap)
+    if denom <= 0:
+        return None
+    growth_pct = (level - float(snap)) / denom * 100.0
+    if growth_pct >= LADDER_IDLE_MIN_PCT:
+        ps[skey], ps[tkey] = level, now
+        return None
+    return (f"ladder idle: +{growth_pct:.4f}% {kind} in {window_min:.0f}m "
+            f"(< {LADDER_IDLE_MIN_PCT}%) — wall untraded, re-pin")
+
+
+def ladder_idle_reason(s, age_min, ps, now, kry=None):
     """Close reason when a resting rung has earned nothing across a full
     window, or None. Rolls the measurement window forward in `ps` as a side
     effect — `ps` is this position's monitor-state dict, `now` a unix time.
+
+    Two meters, preferred first:
+      fee   — real pending+claimed fees from Krystal (`kry`). Valid IN range
+              too: a fee is a fee wherever spot sits.
+      value — quote-denominated position value, the fallback when the oracle
+              is absent. Only honest while the rung is OUT of range, where it
+              holds 100% quote and nothing but a trade through the band can
+              move it; in range it tracks price and a dip reads as "no fees".
     """
     if ps is None or now is None or age_min is None or age_min < LADDER_IDLE_MIN_AGE_MIN:
         return None
+
+    if kry and kry.get("fees_usd") is not None and kry.get("value_usd"):
+        return _idle_window(ps, now, "fee", kry["fees_usd"], kry["value_usd"])
+
     value = s.get("valueWeth")  # quote units despite the name (executor contract)
     if value is None or value <= 0:
         return None
     if bool(s.get("inRange")):
         # Mid-conversion: value tracks price, not fees. Rebaseline and wait.
-        ps["idle_snap_value"], ps["idle_snap_at"] = value, now
+        ps["idle_value_snap"], ps["idle_value_at"] = value, now
         return None
-    snap, snap_at = ps.get("idle_snap_value"), ps.get("idle_snap_at")
-    if snap is None or snap_at is None or float(snap) <= 0 or value < float(snap):
-        # First sighting, or value fell (a fill converted quote to token at a
-        # worse price) — either way the old baseline is meaningless.
-        ps["idle_snap_value"], ps["idle_snap_at"] = value, now
-        return None
-    window_min = (now - float(snap_at)) / 60.0
-    if window_min < LADDER_IDLE_WINDOW_MIN:
-        return None
-    growth_pct = (value - float(snap)) / float(snap) * 100.0
-    if growth_pct >= LADDER_IDLE_MIN_PCT:
-        ps["idle_snap_value"], ps["idle_snap_at"] = value, now
-        return None
-    return (f"ladder idle: +{growth_pct:.3f}% value in {window_min:.0f}m "
-            f"(< {LADDER_IDLE_MIN_PCT}%) — wall untraded, re-pin")
+    return _idle_window(ps, now, "value", value)
 
 
-def ladder_decide(s, pnl, age_min, ps=None, now=None):
+def ladder_decide(s, pnl, age_min, ps=None, now=None, kry=None):
     """Close reason for one ladder rung (either quote asset), or None to hold."""
     tick, lo, hi = s.get("tick"), s.get("tickLower"), s.get("tickUpper")
     if tick is None or lo is None or hi is None:
@@ -194,7 +296,7 @@ def ladder_decide(s, pnl, age_min, ps=None, now=None):
 
     # Still within re-pin distance, but is anyone trading into it? A price rule
     # cannot answer that — see ladder_idle_reason.
-    idle = ladder_idle_reason(s, age_min, ps, now)
+    idle = ladder_idle_reason(s, age_min, ps, now, kry)
     if idle:
         return idle
 
@@ -337,7 +439,7 @@ def trailing_floor_pct(peak):
     return peak - TRAILING_DROP_PCT
 
 
-def decide(pnl, peak, in_range, age_min, oor_min, m5, h1, s=None, ps=None, now=None):
+def decide(pnl, peak, in_range, age_min, oor_min, m5, h1, s=None, ps=None, now=None, kry=None):
     """Return a close reason string, or None to hold. Mirrors the Solana
     monitor's rule precedence: emergency SL first, then hard SL/TP, then
     trailing/fast-out/downtrend, then OOR timeout.
@@ -359,7 +461,7 @@ def decide(pnl, peak, in_range, age_min, oor_min, m5, h1, s=None, ps=None, now=N
     if s is not None and not looks_like_state(s):
         return None
     if s is not None and str(s.get("strategy") or "").endswith("_ladder"):
-        return ladder_decide(s, pnl, age_min, ps, now)
+        return ladder_decide(s, pnl, age_min, ps, now, kry)
     if pnl is not None:
         # Emergency SL — bypasses the age grace.
         if pnl <= STOP_LOSS_PCT - EMERGENCY_SL_BUFFER_PCT:
@@ -552,6 +654,7 @@ def main():
         state = load_state()
         now = time.time()
         eth_usd = fetch_eth_usd()
+        krystal = fetch_krystal_positions()
         rows = []
         for proto, executor, tid in work:
             s, serr = run_executor(executor, ["state", "--id", str(tid)])
@@ -576,7 +679,8 @@ def main():
             m5, h1 = fetch_momentum(pool) if pool else (None, None)
             # dict(ps): the idle window is rolled forward as a side effect, and
             # the report must not consume a window the loop owns.
-            reason = decide(pnl, peak, in_range, age_min, oor_min, m5, h1, s, dict(ps), now)
+            reason = decide(pnl, peak, in_range, age_min, oor_min, m5, h1, s, dict(ps), now,
+                            krystal.get(str(tid)))
             val_w, ent_w = s.get("valueWeth"), s.get("entryWeth")
             # USDG positions are dollar-quoted already; everything else is
             # ETH-quoted and needs the ETH/USD conversion.
@@ -607,6 +711,9 @@ def main():
 
     state = load_state()
     now = time.time()
+    # One request for the whole wallet, before the per-position loop — the
+    # point of the oracle is that it does not scale with position count.
+    krystal = fetch_krystal_positions()
     live = set()
 
     for proto, executor, tid in work:
@@ -641,7 +748,8 @@ def main():
             oor_min = (now - ps["oor_since"]) / 60.0
 
         m5, h1 = fetch_momentum(pool) if pool else (None, None)
-        reason = decide(pnl, peak, in_range, age_min, oor_min, m5, h1, s, ps, now)
+        reason = decide(pnl, peak, in_range, age_min, oor_min, m5, h1, s, ps, now,
+                        krystal.get(str(tid)))
 
         # Pre-exit indicator confirmation (non-emergency exits only): postpone
         # the close while supertrend/RSI still read bullish — a dip inside an
