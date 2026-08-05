@@ -66,15 +66,38 @@ type Scanner struct {
 	seen    *store.Seen
 	fwd     *webhook.Forwarder
 	dep     *deploy.Runner
-	rhDep   *robinhood.Runner // uni_executor.js (v3)
-	rhDepV4 *robinhood.Runner // uni_v4_executor.js; disabled when unset
+	rhDep   rhRunner // uni_executor.js (v3)
+	rhDepV4 rhRunner // uni_v4_executor.js; disabled when unset
 }
+
+// rhRunner is the slice of *robinhood.Runner the deploy path uses, narrowed to an
+// interface so a test can drive the ordering below with a fake instead of
+// spawning the node executor and hitting a live wallet.
+type rhRunner interface {
+	Enabled() bool
+	Inventory(ctx context.Context) (robinhood.Inventory, error)
+	Balance(ctx context.Context) (robinhood.Balances, error)
+	Deploy(ctx context.Context, pool string, amount, rangePct, slippagePct float64, strategy, quote string) (string, error)
+}
+
+// entryTiming is robinhood.EntryTimingConfirm behind a var: it is the one call in
+// the deploy path that spends a GeckoTerminal request per candidate, so a test
+// has to be able to COUNT it — how many of these a cycle makes is the whole
+// point of the ordering in robinhoodDeploy.
+var entryTiming = robinhood.EntryTimingConfirm
 
 // New wires a Scanner from config.
 func New(cfg config.Config) *Scanner {
+	seen := store.New(cfg.RedisAddr, cfg.RedisSeenKey, cfg.SeenTTL)
+	// Give the robinhood package's OHLCV cache a persistent half, so candles
+	// survive a restart: the daemon restarted twice on 2026-08-05 and each restart
+	// re-fetched every walked pool's candles from GeckoTerminal at once. With no
+	// REDIS_ADDR configured, *store.Seen answers "not cached" to every read and
+	// this is a no-op — no branch needed here.
+	robinhood.SetCandleStore(seen)
 	return &Scanner{
 		cfg:     cfg,
-		seen:    store.New(cfg.RedisAddr, cfg.RedisSeenKey, cfg.SeenTTL),
+		seen:    seen,
 		fwd:     webhook.New(cfg.WebhookURL, cfg.WebhookSecret),
 		dep:     deploy.New(cfg.DeployCmd, cfg.ReportCmd, cfg.DeployTimeout),
 		rhDep:   robinhood.New(cfg.RobinhoodExecutorCmd, cfg.RobinhoodDeployTimeout),
@@ -227,6 +250,86 @@ func pickOrder(batch []*robinhood.Candidate) []*robinhood.Candidate {
 	return out
 }
 
+// protoKey is the cache key for anything read once per EXECUTOR rather than once
+// per candidate — the wallet balance, today. v4 poolIds mint through
+// uni_v4_executor.js and everything else through uni_executor.js, and the two
+// executors can hold different wallets, so a v3 and a v4 candidate in one batch
+// must not share a balance.
+func protoKey(c *robinhood.Candidate) string {
+	if c.Protocol == "v4" {
+		return "v4"
+	}
+	return "v3"
+}
+
+// runnerFor picks the executor that can mint this candidate. Same rule as
+// protoKey, and it must stay that way: a balance cached under one key has to have
+// come from the runner that later spends it.
+func (s *Scanner) runnerFor(c *robinhood.Candidate) rhRunner {
+	if c.Protocol == "v4" {
+		return s.rhDepV4
+	}
+	return s.rhDep
+}
+
+// deploySize is one candidate's sizing answer, computed before the entry-timing
+// walk so an unfundable batch costs zero GeckoTerminal requests. A non-empty skip
+// means "do not deploy this one" and carries the operator-facing reason; the
+// remaining fields are only meaningful when skip is empty, except that the log
+// line for the winning pick reads them all.
+type deploySize struct {
+	skip     string // non-empty: reason this candidate cannot be funded
+	amount   float64
+	unit     string // "WETH" or "USDG" — the quote asset amount is denominated in
+	quote    string // quote token address handed to the executor
+	strategy string
+	sizeCfg  robinhood.SizeParams
+	sizeBal  float64
+}
+
+// sizeFor sizes one candidate from the LIVE wallet, not a fixed constant — same
+// rationale as the Solana pipeline's compute_deploy_amount. The caller has
+// already failed closed on an unreadable balance: guessing a size is how you
+// overspend or mint dust.
+func (s *Scanner) sizeFor(c *robinhood.Candidate, bal robinhood.Balances) deploySize {
+	// Gas is native ETH here, not the assets we LP with — a WETH/USDG-rich
+	// wallet can still be too broke to pay for the mint.
+	if bal.ETH < s.cfg.RobinhoodMinGasEth {
+		return deploySize{skip: fmt.Sprintf("gas %.6f ETH < %.6f floor — fund the wallet",
+			bal.ETH, s.cfg.RobinhoodMinGasEth)}
+	}
+	// Size in the candidate's quote asset. USDG pools size off the USDG
+	// balance with the dollar-unit params; WETH and native-ETH pools size off
+	// WETH (the executor unwraps on demand for native settles). The quote
+	// address goes to BOTH executors now — v4 needs it to know which side of
+	// the PoolKey to settle in, and v3 needs it since the usdg_ladder landed
+	// (uni_executor.js resolves the pool's quote side from it, defaulting to
+	// WETH when the flag is absent).
+	sz := deploySize{
+		sizeCfg: s.cfg.RobinhoodSize,
+		sizeBal: bal.WETH,
+		unit:    "WETH",
+		quote:   c.QuoteAddress,
+	}
+	if strings.EqualFold(sz.quote, robinhood.USDG) {
+		sz.sizeCfg, sz.sizeBal, sz.unit = s.cfg.RobinhoodSizeUSDG, bal.USDG, "USDG"
+	}
+	// The ladder shape is quote-agnostic but its NAME is not: the journal, the
+	// close report and uni_monitor.py's re-pin rulebook all read the strategy
+	// string, and a USDG ladder logged as "weth_ladder" would be unreadable in
+	// a close journal that mixes both. Same executor path either way.
+	sz.strategy = s.cfg.RobinhoodDeployStrategy
+	if sz.strategy == "weth_ladder" && sz.unit == "USDG" {
+		sz.strategy = "usdg_ladder"
+	}
+	sz.amount = robinhood.ComputeDeployAmount(sz.sizeBal, sz.sizeCfg)
+	if sz.amount <= 0 {
+		sz.skip = fmt.Sprintf("%.5f %s balance cannot fund a %.5f floor position (reserve %.5f)",
+			sz.sizeBal, sz.unit, sz.sizeCfg.Floor, sz.sizeCfg.Reserve)
+	}
+	return sz
+}
+
 func (s *Scanner) robinhoodDeploy(ctx context.Context, mode string, batch []*robinhood.Candidate) {
 	// Keep only candidates an enabled executor can actually mint: v3 pools
 	// need uni_executor.js, v4 poolIds need uni_v4_executor.js (Phase 7).
@@ -261,7 +364,7 @@ func (s *Scanner) robinhoodDeploy(ctx context.Context, mode string, batch []*rob
 	// executor cannot be counted.
 	open := 0
 	held := map[string]int{}
-	for _, r := range []*robinhood.Runner{s.rhDep, s.rhDepV4} {
+	for _, r := range []rhRunner{s.rhDep, s.rhDepV4} {
 		if !r.Enabled() {
 			continue
 		}
@@ -281,8 +384,59 @@ func (s *Scanner) robinhoodDeploy(ctx context.Context, mode string, batch []*rob
 		return
 	}
 
+	order := pickOrder(eligible)
+
+	// Sizing comes BEFORE the candidate walk, and the reason is GeckoTerminal
+	// budget rather than tidiness. Every walked candidate can cost one OHLCV
+	// request (the entry-timing gate below), and GT's public tier is ~10
+	// requests/minute for the whole box — measured 2026-08-05, when rh-usdg-ladder
+	// logged 82 `status 429` in six hours and ~23% of its cycles discovered nothing
+	// because the mature enrich call fails closed without a slot. What the wallet
+	// holds never depended on which candidate won, so a mode whose quote asset is
+	// unfunded used to spend a request per candidate to reach a skip that was
+	// already certain — every cycle, forever, since nothing about an empty wallet
+	// changes on its own. Reading it first makes that cycle cost zero requests.
+	//
+	// Balance is per EXECUTOR while the executor is per candidate (v3 pools mint
+	// through uni_executor.js, v4 poolIds through uni_v4_executor.js), so balances
+	// are read once per protocol present in the batch and cached; the pick still
+	// deploys through its own runner further down. This moves WHEN the wallet is
+	// read, never which executor mints.
+	bals := map[string]robinhood.Balances{}
+	for _, c := range order {
+		key := protoKey(c)
+		if _, ok := bals[key]; ok {
+			continue
+		}
+		bal, err := s.runnerFor(c).Balance(ctx)
+		if err != nil {
+			log.Printf("scanner[%s]: DEPLOY SKIPPED (balance unknown, failing closed): %v", mode, err)
+			return
+		}
+		bals[key] = bal
+	}
+	sizes := make(map[string]deploySize, len(order))
+	fundable := 0
+	for _, c := range order {
+		sz := s.sizeFor(c, bals[protoKey(c)])
+		sizes[c.Pool] = sz
+		if sz.skip == "" {
+			fundable++
+		}
+	}
+	if fundable == 0 {
+		// Nothing here is affordable, and no entry-timing request was spent to learn
+		// it. The line names the top-ranked candidate because a mode pins ONE quote
+		// asset (ModeParams.QuoteAsset), so the reason is identical for every
+		// candidate in the batch and this is the one the old post-pick check would
+		// have reported.
+		c := order[0]
+		log.Printf("scanner[%s]: DEPLOY SKIPPED %s (%s): %s", mode, c.BaseSymbol, c.Pool[:10], sizes[c.Pool].skip)
+		return
+	}
+
 	var best *robinhood.Candidate
-	for _, c := range pickOrder(eligible) {
+	for _, c := range order {
 		// Per-token cap. The same underlying lists in several pools here — three
 		// fee tiers is normal for an equity, and v4 multiplies that by tick
 		// spacing — so without this one token can hold every slot: three walls
@@ -295,8 +449,17 @@ func (s *Scanner) robinhoodDeploy(ctx context.Context, mode string, batch []*rob
 				continue
 			}
 		}
+		if sz := sizes[c.Pool]; sz.skip != "" {
+			// Only reachable when one batch mixes protocols whose executors report
+			// different assets (the v4 build reports USDG; an older v3 build may
+			// not) — with one fundability answer for the batch the pre-walk check
+			// above has already returned. Skipping the candidate rather than the
+			// cycle keeps an affordable sibling deployable, and costs no request.
+			log.Printf("scanner[%s]: %s (%s) skipped: %s", mode, c.BaseSymbol, c.Pool[:10], sz.skip)
+			continue
+		}
 		if s.cfg.RobinhoodIndicatorGate {
-			if confirmed, detail, ok := robinhood.EntryTimingConfirm(c.Pool); ok && !confirmed {
+			if confirmed, detail, ok := entryTiming(c.Pool); ok && !confirmed {
 				log.Printf("scanner[%s]: %s (%s) rejected on entry timing: %s",
 					mode, c.BaseSymbol, c.Pool[:10], detail)
 				continue
@@ -321,53 +484,12 @@ func (s *Scanner) robinhoodDeploy(ctx context.Context, mode string, batch []*rob
 		runner = s.rhDepV4
 	}
 
-	// Size from the LIVE wallet, not a fixed constant — same rationale as the
-	// Solana pipeline's compute_deploy_amount. Fail closed on a balance we
-	// cannot read: guessing a size is how you overspend or mint dust.
-	bal, err := runner.Balance(ctx)
-	if err != nil {
-		log.Printf("scanner[%s]: DEPLOY SKIPPED (balance unknown, failing closed): %v", mode, err)
-		return
-	}
-	// Gas is native ETH here, not the assets we LP with — a WETH/USDG-rich
-	// wallet can still be too broke to pay for the mint.
-	if bal.ETH < s.cfg.RobinhoodMinGasEth {
-		log.Printf("scanner[%s]: DEPLOY SKIPPED %s (%s): gas %.6f ETH < %.6f floor — fund the wallet",
-			mode, best.BaseSymbol, best.Pool[:10], bal.ETH, s.cfg.RobinhoodMinGasEth)
-		return
-	}
-	// Size in the candidate's quote asset. USDG pools size off the USDG
-	// balance with the dollar-unit params; WETH and native-ETH pools size off
-	// WETH (the executor unwraps on demand for native settles). The quote
-	// address goes to BOTH executors now — v4 needs it to know which side of
-	// the PoolKey to settle in, and v3 needs it since the usdg_ladder landed
-	// (uni_executor.js resolves the pool's quote side from it, defaulting to
-	// WETH when the flag is absent).
-	sizeCfg, sizeBal, unit := s.cfg.RobinhoodSize, bal.WETH, "WETH"
-	quote := best.QuoteAddress
-	if strings.EqualFold(quote, robinhood.USDG) {
-		sizeCfg, sizeBal, unit = s.cfg.RobinhoodSizeUSDG, bal.USDG, "USDG"
-	}
-	// The ladder shape is quote-agnostic but its NAME is not: the journal, the
-	// close report and uni_monitor.py's re-pin rulebook all read the strategy
-	// string, and a USDG ladder logged as "weth_ladder" would be unreadable in
-	// a close journal that mixes both. Same executor path either way.
-	strategy := s.cfg.RobinhoodDeployStrategy
-	if strategy == "weth_ladder" && unit == "USDG" {
-		strategy = "usdg_ladder"
-	}
-	amount := robinhood.ComputeDeployAmount(sizeBal, sizeCfg)
-	if amount <= 0 {
-		log.Printf("scanner[%s]: DEPLOY SKIPPED %s (%s): %.5f %s balance cannot fund a %.5f floor position (reserve %.5f)",
-			mode, best.BaseSymbol, best.Pool[:10], sizeBal, unit, sizeCfg.Floor, sizeCfg.Reserve)
-		return
-	}
-
+	sz := sizes[best.Pool]
 	log.Printf("scanner[%s]: DEPLOY PICK %s (%s, %s) score=%.0f amount=%.5f %s (%.0f%% of %.5f bal, reserve %.5f) strategy=%s",
-		mode, best.BaseSymbol, best.Pool[:10], best.Protocol, best.Score, amount, unit,
-		sizeCfg.Pct*100, sizeBal, sizeCfg.Reserve, strategy)
+		mode, best.BaseSymbol, best.Pool[:10], best.Protocol, best.Score, sz.amount, sz.unit,
+		sz.sizeCfg.Pct*100, sz.sizeBal, sz.sizeCfg.Reserve, sz.strategy)
 
-	out, err := runner.Deploy(ctx, best.Pool, amount, s.cfg.RobinhoodRangePct, s.cfg.RobinhoodSlippagePct, strategy, quote)
+	out, err := runner.Deploy(ctx, best.Pool, sz.amount, s.cfg.RobinhoodRangePct, s.cfg.RobinhoodSlippagePct, sz.strategy, sz.quote)
 	if err != nil {
 		log.Printf("scanner[%s]: DEPLOY FAILED %s (%s): %v\n%s", mode, best.BaseSymbol, best.Pool[:10], err, out)
 		return

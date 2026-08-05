@@ -638,21 +638,55 @@ def save_state(state):
 USER_AGENT = "azimuth-uni-monitor/1.0"
 
 
+# GeckoTerminal's public tier allows ~10 requests/minute per IP, and this process
+# shares that IP with the discovery daemon — whose own limiter cannot see these
+# requests. One /pools/ call per position per tick was ~5 req/min on its own (7
+# rungs every ~82s): half the budget spent on a rule that reads two numbers.
+# /pools/multi/ returns the same attributes for up to GT_MULTI_MAX pools in ONE
+# request, and a ladder's rungs share a pool, so dedup shrinks it further — a
+# tick costs one request, not one per rung. Filled once per tick by
+# prefetch_momentum; fetch_momentum only reads it.
+GT_MULTI_MAX = 30
+_momentum_cache = {}
+
+
+def prefetch_momentum(pools):
+    """Fill the per-tick momentum cache for every distinct pool in one (or, past
+    GT_MULTI_MAX pools, a few) /pools/multi/ call. Best-effort: a failed chunk
+    leaves its pools uncached, so fetch_momentum returns (None, None) for them —
+    which every momentum rule treats as passing, same as before."""
+    want = sorted({p.lower() for p in pools if p})
+    for i in range(0, len(want), GT_MULTI_MAX):
+        chunk = want[i:i + GT_MULTI_MAX]
+        url = ("https://api.geckoterminal.com/api/v2/networks/robinhood/pools/multi/"
+               + ",".join(chunk))
+        try:
+            req = urllib.request.Request(url, headers={
+                "Accept": "application/json",
+                "User-Agent": USER_AGENT,
+            })
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                d = json.load(resp)
+            for entry in d.get("data") or []:
+                attrs = entry.get("attributes") or {}
+                addr = (attrs.get("address") or "").lower()
+                pc = attrs.get("price_change_percentage") or {}
+                if addr:
+                    _momentum_cache[addr] = (float(pc.get("m5") or 0),
+                                             float(pc.get("h1") or 0))
+        except Exception:
+            continue
+
+
 def fetch_momentum(pool):
     """Best-effort GeckoTerminal price-change windows for a pool. Returns
-    (m5, h1) percent, or (None, None) — missing data never fires a rule."""
-    url = f"https://api.geckoterminal.com/api/v2/networks/robinhood/pools/{pool}"
-    try:
-        req = urllib.request.Request(url, headers={
-            "Accept": "application/json",
-            "User-Agent": USER_AGENT,
-        })
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            d = json.load(resp)
-        pc = d["data"]["attributes"]["price_change_percentage"]
-        return float(pc.get("m5") or 0), float(pc.get("h1") or 0)
-    except Exception:
-        return None, None
+    (m5, h1) percent, or (None, None) — missing data never fires a rule.
+
+    Reads the cache prefetch_momentum filled for this tick. A miss does NOT fall
+    back to a single-pool request: the prefetch already asked GT about this pool,
+    so a miss means GT does not know it or the call was refused, and re-asking
+    one pool at a time is the request storm the batch exists to remove."""
+    return _momentum_cache.get((pool or "").lower(), (None, None))
 
 
 def fetch_eth_usd():
@@ -932,6 +966,10 @@ def main():
         eth_usd = fetch_eth_usd()
         krystal = fetch_krystal_positions()
         reads = read_states(work)
+        # One GT request for every row's momentum, before the row loop — same
+        # reason the ETH price and the Krystal oracle are fetched here: a tick's
+        # API cost must not scale with position count.
+        prefetch_momentum([s.get("pool") for _, _, _, s in reads])
         # A wall's verdict needs every rung's state before any row is decided.
         # persist=False — the report must not roll a window the loop owns, the
         # same reason the per-position ps is copied below.
@@ -1000,6 +1038,10 @@ def main():
     live = {state_key(proto, tid) for proto, _executor, tid in work}
 
     reads = read_states(work)
+    # One GT request for every rung's momentum, before the decision loop (see
+    # prefetch_momentum): the exit rules read the same two numbers they always
+    # did, they just no longer cost a request each.
+    prefetch_momentum([s.get("pool") for _, _, _, s in reads])
     # Ladder idle is judged per WALL, once per tick, before any rung is decided:
     # every rung of the wall then gets the same verdict on this same tick, so the
     # wall is never left half torn down. Rolls the walls' windows in `state`.
@@ -1055,8 +1097,20 @@ def main():
                 print(f"monitor: {proto} #{tid} indicator exit block timed out after {blocked_min:.0f}m — forcing close")
                 ps.pop("ind_block_since", None)
             else:
+                # quote/quoteSymbol are passed so the indicator check can fall
+                # back to the chain's own Swap logs when GeckoTerminal is rate-
+                # limited (see local_indicators.fetch_onchain_candles). Without
+                # them that fallback declines rather than guess: the raw pool
+                # price is token1-per-token0, so it takes BOTH addresses to know
+                # whether the series needs inverting, and an inverted series
+                # reads a dump as a rally — it would postpone exactly the exits
+                # this block exists to confirm. `quote` is the executor's
+                # authoritative funded-side address (both v3 and v4 emit it);
+                # quoteSymbol is the symbol fallback for older payloads.
                 confirmed = check_local_indicators(pool, s.get("token"), "exit",
-                                                   INDICATORS_PRESET, "24h", network="robinhood")
+                                                   INDICATORS_PRESET, "24h", network="robinhood",
+                                                   quote_address=s.get("quote"),
+                                                   quote_symbol=s.get("quoteSymbol"))
                 if confirmed is False:
                     print(f"monitor: {proto} #{tid} exit postponed ({INDICATORS_PRESET} rejected): {reason}")
                     if not blocked_since:

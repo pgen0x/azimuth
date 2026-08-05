@@ -1,6 +1,7 @@
 package robinhood
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"sync"
@@ -13,16 +14,22 @@ import (
 // The problem it solves, measured 2026-08-05: rh-usdg-ladder logged 34
 // `geckoterminal status 429` fetch errors in three hours — roughly a quarter of
 // its cycles discovered NOTHING, because the enrich call is the first GT request
-// of a cycle and the mode fails closed without it. GT's public tier allows ~30
-// requests/minute per IP, and the requests are not one per cycle:
+// of a cycle and the mode fails closed without it. The requests are not one per
+// cycle:
 //
 //   - one /pools/multi/ enrich per mature-family mode per cycle,
 //   - one /ohlcv/ per candidate walked by the entry-timing gate, which on a
 //     24-candidate batch can be most of the batch, and
 //   - the new_pools and trending_pools pages when Fresh is enabled.
 //
-// The IP is also shared with anything else on the box hitting GT, so the real
-// budget is smaller than it looks and bursts are what trip it.
+// The budget is smaller than this file first assumed. GT's public tier documents
+// ~10 requests/minute per IP, not ~30, and the IP is shared: uni_monitor.py polls
+// the same API for every open position's exit rules from a process this gate
+// cannot see. That process was the larger spender until it was batched into one
+// /pools/multi/ call per tick, which is why the spacing below can now leave it a
+// slice of the budget instead of half. The two changes are one change: raising
+// the interval here without batching the monitor would only make this side slower
+// at losing the same race.
 //
 // Three mechanisms, cheapest first:
 //
@@ -38,19 +45,25 @@ import (
 //     carrying the flow numbers every gate reads, and a stale reserve or volume
 //     figure would quietly change what the screen means.
 const (
-	// ~24 requests/minute at steady state, leaving headroom under GT's ~30 for
-	// whatever else shares the IP.
-	gtMinInterval = 2500 * time.Millisecond
+	// ~8 requests/minute at steady state, which is the documented ~10 minus the
+	// slice uni_monitor.py needs: one /pools/multi/ per ~82s tick, plus the rare
+	// OHLCV read when an exit rule fires and wants indicator confirmation.
+	gtMinInterval = 7 * time.Second
 	// Long enough to leave a one-minute window entirely, short enough that a
 	// single 429 costs at most a cycle or two.
 	gtCooldown = 75 * time.Second
 	// Under one 15m candle: an entry-timing decision can be at most this stale,
-	// which cannot flip a supertrend band built from 30+ candles.
-	gtOHLCVTTL = 4 * time.Minute
+	// which cannot flip a supertrend band built from 30+ candles. Sized just under
+	// the candle rather than at the old 4m because that TTL re-fetched the same
+	// pool up to four times per candle for a band that cannot move between them —
+	// pure request volume for no signal.
+	gtOHLCVTTL = 13 * time.Minute
 	// A caller should not block indefinitely behind a long queue. Past this it is
 	// better to fail open (indicators) or skip the cycle (enrich) than to stall
-	// the scanner loop.
-	gtMaxWait = 8 * time.Second
+	// the scanner loop. Three requests deep at the interval above: enough for an
+	// enrich plus a short entry-timing walk in one cycle, and still far inside the
+	// one-minute poll so a queue can never overlap the next cycle's.
+	gtMaxWait = 21 * time.Second
 )
 
 // gtNow is the gate's clock, injectable for tests. The repo convention is to take
@@ -131,19 +144,121 @@ type ohlcvEntry struct {
 	at time.Time
 }
 
-// cachedOHLCV returns a fresh-enough cached candle set, if any.
+// CandleStore is the cache's optional persistent half. An in-process map dies
+// with the process, and the process dies more often than the cache TTL: the
+// daemon restarted twice on 2026-08-05 and each restart re-fetched every walked
+// pool's candles from GeckoTerminal at once — the burst that earns the 429 the
+// rest of this file exists to avoid. *store.Seen satisfies this interface, and
+// the interface is declared HERE rather than importing the store so the
+// dependency keeps pointing one way (scanner -> robinhood); the scanner installs
+// the backend at startup.
+//
+// ok=false must mean "not cached" for every failure mode — no backend, no entry,
+// unreadable value — because the only alternative reading is a wrong candle set.
+type CandleStore interface {
+	CachedCandles(ctx context.Context, pool string, out any) bool
+	PutCandles(ctx context.Context, pool string, v any, ttl time.Duration)
+}
+
+var (
+	candleDBMu sync.Mutex
+	candleDB   CandleStore
+)
+
+// SetCandleStore installs the persistent layer. Called once at startup; nil (the
+// default) leaves the cache memory-only, which is what an operator running
+// without REDIS_ADDR gets.
+func SetCandleStore(cs CandleStore) {
+	candleDBMu.Lock()
+	candleDB = cs
+	candleDBMu.Unlock()
+}
+
+func candleStore() CandleStore {
+	candleDBMu.Lock()
+	defer candleDBMu.Unlock()
+	return candleDB
+}
+
+// ohlcvBlob is the wire form of a cached candle set. candles' fields are
+// unexported — nothing outside this package builds one — so encoding/json cannot
+// see them; this mirror exists only to cross a restart. At carries the FETCH
+// time, not the write time, so a restart inherits the entry's remaining
+// freshness instead of silently restarting the TTL on candles that are already
+// most of a candle old.
+type ohlcvBlob struct {
+	Highs  []float64 `json:"h"`
+	Lows   []float64 `json:"l"`
+	Closes []float64 `json:"c"`
+	At     int64     `json:"at"` // unix seconds
+}
+
+// toCandles converts a decoded blob back, rejecting anything the indicator math
+// must not see. Mismatched slice lengths are the dangerous case: supertrend and
+// ATR index highs/lows/closes in lockstep off len(closes), so a blob truncated
+// by a partial write or a schema change would panic or, worse, compute a band
+// from misaligned bars. A short/corrupt blob reads as a cache miss — one extra
+// GT request, versus a fabricated entry signal.
+func (b ohlcvBlob) toCandles() (candles, time.Time, bool) {
+	n := len(b.Closes)
+	if n == 0 || len(b.Highs) != n || len(b.Lows) != n || b.At <= 0 {
+		return candles{}, time.Time{}, false
+	}
+	return candles{highs: b.Highs, lows: b.Lows, closes: b.Closes}, time.Unix(b.At, 0), true
+}
+
+// cachedOHLCV returns a fresh-enough cached candle set, if any: memory first,
+// then the persistent layer, whose hits are promoted back into memory so the
+// rest of the cycle's candidates cost neither a Redis round-trip nor a request.
+//
+// context.Background() is deliberate here, for the same reason gtNow exists:
+// these helpers are called from inside leaf HTTP paths (fetchOHLCV) whose
+// signatures are shared with unthrottled callers, and threading a context
+// through them would put one on functions with no other use for it. The read is
+// a single local Redis GET on the hot path of a request we are trying NOT to
+// make — there is nothing here worth cancelling.
 func cachedOHLCV(pool string) (candles, bool) {
 	ohlcvCache.mu.Lock()
-	defer ohlcvCache.mu.Unlock()
 	e, ok := ohlcvCache.m[pool]
-	if !ok || gtNow().Sub(e.at) > gtOHLCVTTL {
+	ohlcvCache.mu.Unlock()
+	if ok && gtNow().Sub(e.at) <= gtOHLCVTTL {
+		return e.c, true
+	}
+
+	db := candleStore()
+	if db == nil {
 		return candles{}, false
 	}
-	return e.c, true
+	var b ohlcvBlob
+	if !db.CachedCandles(context.Background(), pool, &b) {
+		return candles{}, false
+	}
+	c, at, ok := b.toCandles()
+	if !ok {
+		return candles{}, false
+	}
+	// The persistent TTL should already have expired a stale entry, but the check
+	// is cheap and this side must not out-live the in-memory rule: a longer TTL
+	// configured on the Redis instance would otherwise widen the freshness
+	// contract the entry-timing gate is documented against.
+	if gtNow().Sub(at) > gtOHLCVTTL {
+		return candles{}, false
+	}
+	ohlcvCache.mu.Lock()
+	ohlcvCache.m[pool] = ohlcvEntry{c: c, at: at}
+	ohlcvCache.mu.Unlock()
+	return c, true
 }
 
 func storeOHLCV(pool string, c candles) {
+	now := gtNow()
 	ohlcvCache.mu.Lock()
-	defer ohlcvCache.mu.Unlock()
-	ohlcvCache.m[pool] = ohlcvEntry{c: c, at: gtNow()}
+	ohlcvCache.m[pool] = ohlcvEntry{c: c, at: now}
+	ohlcvCache.mu.Unlock()
+
+	if db := candleStore(); db != nil {
+		db.PutCandles(context.Background(), pool, ohlcvBlob{
+			Highs: c.highs, Lows: c.lows, Closes: c.closes, At: now.Unix(),
+		}, gtOHLCVTTL)
+	}
 }

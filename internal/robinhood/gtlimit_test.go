@@ -1,6 +1,8 @@
 package robinhood
 
 import (
+	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -107,6 +109,135 @@ func TestGateRefusesRatherThanStall(t *testing.T) {
 	}
 	if !strings.Contains(lastErr.Error(), "queue too long") {
 		t.Fatalf("want a queue-length refusal, got %q", lastErr)
+	}
+}
+
+// fakeCandleStore is the persistent half, kept in a map. It round-trips through
+// JSON like the Redis backend does, so anything the wire form cannot carry fails
+// here too.
+type fakeCandleStore struct {
+	m       map[string][]byte
+	reads   int
+	writes  int
+	lastTTL time.Duration
+}
+
+func newFakeCandleStore(t *testing.T) *fakeCandleStore {
+	t.Helper()
+	f := &fakeCandleStore{m: map[string][]byte{}}
+	SetCandleStore(f)
+	t.Cleanup(func() { SetCandleStore(nil) })
+	return f
+}
+
+func (f *fakeCandleStore) CachedCandles(_ context.Context, pool string, out any) bool {
+	f.reads++
+	b, ok := f.m[pool]
+	if !ok {
+		return false
+	}
+	return json.Unmarshal(b, out) == nil
+}
+
+func (f *fakeCandleStore) PutCandles(_ context.Context, pool string, v any, ttl time.Duration) {
+	f.writes++
+	f.lastTTL = ttl
+	b, err := json.Marshal(v)
+	if err != nil {
+		return
+	}
+	f.m[pool] = b
+}
+
+// Why the persistent half exists: the process dies more often than the TTL. A
+// restart empties the map, and every pool the entry-timing gate walks would
+// otherwise be re-fetched from GeckoTerminal at once — the burst that earns the
+// 429 this whole file exists to avoid.
+func TestPersistedCandlesSurviveARestart(t *testing.T) {
+	withFakeClock(t, time.Unix(1_700_000_000, 0))
+	db := newFakeCandleStore(t)
+	ohlcvCache.m = map[string]ohlcvEntry{}
+
+	storeOHLCV("0xpool", candles{highs: []float64{2}, lows: []float64{1}, closes: []float64{1.5}})
+	if db.writes != 1 {
+		t.Fatalf("storing candles should write through, got %d writes", db.writes)
+	}
+	if db.lastTTL != gtOHLCVTTL {
+		t.Fatalf("persistent TTL must match the in-memory one, got %v", db.lastTTL)
+	}
+
+	ohlcvCache.m = map[string]ohlcvEntry{} // the restart
+
+	got, ok := cachedOHLCV("0xpool")
+	if !ok || len(got.closes) != 1 || got.closes[0] != 1.5 {
+		t.Fatalf("entry did not survive the restart: %v ok=%v", got, ok)
+	}
+	// Promoted back into memory, so the rest of the cycle costs no round-trip.
+	before := db.reads
+	if _, ok := cachedOHLCV("0xpool"); !ok {
+		t.Fatal("second read missed")
+	}
+	if db.reads != before {
+		t.Fatalf("a memory hit must not touch the store, reads went %d -> %d", before, db.reads)
+	}
+}
+
+// A persisted entry carries its FETCH time, so a restart inherits the remaining
+// freshness instead of silently restarting the window on candles that are already
+// most of a candle old.
+func TestPersistedCandlesExpireOnFetchTime(t *testing.T) {
+	now := withFakeClock(t, time.Unix(1_700_000_000, 0))
+	newFakeCandleStore(t)
+	ohlcvCache.m = map[string]ohlcvEntry{}
+
+	storeOHLCV("0xpool", candles{highs: []float64{2}, lows: []float64{1}, closes: []float64{1.5}})
+	*now = now.Add(gtOHLCVTTL + time.Second)
+	ohlcvCache.m = map[string]ohlcvEntry{} // the restart
+
+	if _, ok := cachedOHLCV("0xpool"); ok {
+		t.Fatal("a restart must not resurrect candles that already aged out")
+	}
+}
+
+// A truncated or mismatched blob must read as a miss. Supertrend and ATR index
+// highs/lows/closes in lockstep off len(closes), so misaligned bars would either
+// panic or, worse, compute a band from bars that never traded together. One extra
+// GT request is the cheaper failure.
+func TestCorruptPersistedBlobReadsAsMiss(t *testing.T) {
+	withFakeClock(t, time.Unix(1_700_000_000, 0))
+	db := newFakeCandleStore(t)
+	ohlcvCache.m = map[string]ohlcvEntry{}
+
+	for name, blob := range map[string]ohlcvBlob{
+		"short highs":   {Highs: []float64{2}, Lows: []float64{1, 1}, Closes: []float64{1.5, 1.6}, At: 1_700_000_000},
+		"no closes":     {Highs: []float64{2}, Lows: []float64{1}, At: 1_700_000_000},
+		"no fetch time": {Highs: []float64{2}, Lows: []float64{1}, Closes: []float64{1.5}},
+	} {
+		b, err := json.Marshal(blob)
+		if err != nil {
+			t.Fatalf("%s: marshal: %v", name, err)
+		}
+		db.m["0xpool"] = b
+		if _, ok := cachedOHLCV("0xpool"); ok {
+			t.Fatalf("%s: corrupt blob was served as a cache hit", name)
+		}
+	}
+}
+
+// With no backend installed — an operator running without REDIS_ADDR — the cache
+// is memory-only, and nothing on this path may panic on the nil store.
+func TestCacheWorksWithoutAPersistentBackend(t *testing.T) {
+	withFakeClock(t, time.Unix(1_700_000_000, 0))
+	SetCandleStore(nil)
+	ohlcvCache.m = map[string]ohlcvEntry{}
+
+	storeOHLCV("0xpool", candles{highs: []float64{2}, lows: []float64{1}, closes: []float64{1.5}})
+	if _, ok := cachedOHLCV("0xpool"); !ok {
+		t.Fatal("memory-only cache should still serve")
+	}
+	ohlcvCache.m = map[string]ohlcvEntry{}
+	if _, ok := cachedOHLCV("0xpool"); ok {
+		t.Fatal("without a backend there is nothing to survive a restart")
 	}
 }
 

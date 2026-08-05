@@ -32,8 +32,18 @@ type candles struct {
 	highs, lows, closes []float64
 }
 
-// fetchOHLCV retrieves the pool's 15m candles, oldest-first (GeckoTerminal
-// serves newest-first; reversed here exactly like the Python fetch).
+// fetchOHLCV retrieves the pool's 15m candles, oldest-first, from the first
+// source that will answer: cache, then GeckoTerminal, then the chain itself.
+//
+// The ordering is a budget decision, not a preference. GT is one request for a
+// ready-made series and its buckets are the ones uni_monitor.py's Python side
+// sees, so it stays primary. But GT's public tier is ~10 req/min for an IP three
+// processes share, and when it refuses — cooldown, queue too long, 429, any
+// error — the gate used to simply lose its candles and fail open, which silently
+// removes the downtrend veto exactly when the venue is busiest. onchain.go
+// rebuilds the same series from the pool's Swap logs over an RPC with no such
+// budget. The fallback's result is cached through the SAME storeOHLCV path, so a
+// cycle that falls back pays for it once, not once per candidate per cycle.
 func fetchOHLCV(pool string) (candles, error) {
 	// This is the request that repeats: the entry-timing gate walks the same
 	// stable feed every cycle, so most calls ask for candles already in hand.
@@ -42,6 +52,28 @@ func fetchOHLCV(pool string) (candles, error) {
 	if c, ok := cachedOHLCV(pool); ok {
 		return c, nil
 	}
+	c, err := fetchOHLCVGecko(pool)
+	if err != nil {
+		c, err = onchainFallback(pool, err)
+		if err != nil {
+			return candles{}, err
+		}
+		markSource(pool, true)
+		storeOHLCV(pool, c)
+		return c, nil
+	}
+	markSource(pool, false)
+	// Cache even a short series: the caller decides whether it clears minCandles,
+	// and a pool that returns too little history returns just as little next
+	// cycle — re-asking spends budget to learn the same thing.
+	storeOHLCV(pool, c)
+	return c, nil
+}
+
+// fetchOHLCVGecko is the GeckoTerminal half, throttled by the shared gate. It
+// does not touch the cache: fetchOHLCV owns that, so both sources land in it the
+// same way.
+func fetchOHLCVGecko(pool string) (candles, error) {
 	if err := gt.acquire(); err != nil {
 		return candles{}, err
 	}
@@ -83,10 +115,6 @@ func fetchOHLCV(pool string) (candles, error) {
 		j := len(list) - 1 - i // newest-first -> oldest-first
 		c.highs[j], c.lows[j], c.closes[j] = row[2], row[3], row[4]
 	}
-	// Cache even a short series: the caller decides whether it clears minCandles,
-	// and a pool that returns too little history returns just as little next
-	// cycle — re-asking spends budget to learn the same thing.
-	storeOHLCV(pool, c)
 	return c, nil
 }
 
@@ -276,6 +304,13 @@ func EntryTimingConfirm(pool string) (confirmed bool, detail string, ok bool) {
 		return false, fmt.Sprintf("only %d candles < %d", len(c.closes), minCandles), false
 	}
 	confirmed, detail = entryConfirm(c)
+	// Name the source when it is not the usual one. The scanner logs `detail` on
+	// every rejection and on every fail-open, so a decision taken off chain-built
+	// candles — including one served from cache minutes after the build — says so
+	// in the journal rather than being indistinguishable from a GeckoTerminal read.
+	if src := candleSource(pool); src != "" {
+		detail += " (" + src + ")"
+	}
 	return confirmed, detail, true
 }
 

@@ -204,6 +204,23 @@ type Config struct {
 	// are not diversification; they are one price bet minted three times, and
 	// they all fill together.
 	RobinhoodMaxPerToken int
+	// RobinhoodRPCURL is the chain's JSON-RPC endpoint, used by the entry gate's
+	// on-chain candle fallback (internal/robinhood/onchain.go). Defaults to the
+	// public keyless endpoint because that is what the fallback is FOR: a
+	// fallback that needed its own provider account would expire quietly and
+	// leave the gate back where it started. Override to point at a private node.
+	RobinhoodRPCURL string
+	// RobinhoodOnchainCandles lets the entry-timing gate rebuild its 15m candles
+	// from the pool's Swap logs when GeckoTerminal will not serve them (429,
+	// cooldown, queue too long, any error). ON by default: GT's public tier is
+	// ~10 req/min for an IP three processes share, and the measured consequence
+	// of not having this was 82 `geckoterminal status 429` in six hours with the
+	// downtrend veto failing open through all of them — a gate that is absent
+	// precisely when the venue is busiest is worse than no gate, because the
+	// journal still reads as though it ran. Turn OFF only to isolate the RPC as
+	// a suspect; the gate then fails open on a GT refusal as it did before.
+	RobinhoodOnchainCandles bool
+
 	// RobinhoodIndicatorGate runs the supertrend_or_rsi entry-timing check
 	// (internal/robinhood/indicators.go, the Go port of local_indicators.py)
 	// on each deploy pick, skipping candidates whose token is in a confirmed
@@ -307,6 +324,17 @@ func getmodes(key, def string) map[string]bool {
 
 // Load builds a Config from the environment with sane public defaults.
 func Load() Config {
+	cfg := loadConfig()
+	// Install the venue's RPC settings in the robinhood package. It happens here
+	// rather than in scanner.New (where SetCandleStore is wired) because the
+	// fallback lives behind fetchOHLCV, a leaf HTTP helper the scanner never
+	// names — there is no call site up there to hand a URL to. Idempotent, and
+	// the package's own defaults already work if this never runs.
+	robinhood.SetOnchainFallback(cfg.RobinhoodRPCURL, cfg.RobinhoodOnchainCandles)
+	return cfg
+}
+
+func loadConfig() Config {
 	return Config{
 		DiscoverURL:           getenv("METEORA_DISCOVER_URL", "https://pool-discovery-api.datapi.meteora.ag/pools"),
 		PollInterval:          getdur("POLL_INTERVAL", 60*time.Second),
@@ -388,6 +416,8 @@ func Load() Config {
 		RobinhoodMaxOpenPositions: getint("ROBINHOOD_MAX_OPEN_POSITIONS", 3),
 		RobinhoodMaxPerToken:      getint("ROBINHOOD_MAX_PER_TOKEN", 1),
 		RobinhoodIndicatorGate:    getbool("ROBINHOOD_INDICATOR_GATE", true),
+		RobinhoodRPCURL:           getenv("ROBINHOOD_RPC_URL", "https://rpc.mainnet.chain.robinhood.com"),
+		RobinhoodOnchainCandles:   getbool("ROBINHOOD_ONCHAIN_CANDLES", true),
 		RobinhoodSeenTTL:          getdur("ROBINHOOD_SEEN_TTL", 6*time.Hour),
 		RobinhoodStockSeenTTL:     getdur("ROBINHOOD_STOCK_SEEN_TTL", 90*time.Minute),
 		RobinhoodMinHolders:       getint("ROBINHOOD_MIN_HOLDERS", 50),
