@@ -496,7 +496,20 @@ same gateway feed, screened on churn (1.5%/day, $10k–$2M, ≥0.3% tier, 24h+).
   (spot passed fully through → sell back; indicator-confirmable, because an
   un-filling rung costs nothing while a round trip costs the tier twice) and
   *stale* (spot drifted > `UNI_LADDER_STALE_TICKS` past the rung's intended
-  offset → dead capital, re-pin). Hard SL kept as a backstop only.
+  offset → dead capital, re-pin) and *idle* (quote-denominated value grew
+  < `UNI_LADDER_IDLE_MIN_PCT` across `UNI_LADDER_IDLE_WINDOW` while parked out
+  of range → the wall is not being traded into, re-pin). Hard SL kept as a
+  backstop only.
+- The *idle* rule exists because *filled* and *stale* are both PRICE rules: a
+  market that stops moving disarms the entire rulebook. A `usdg_ladder` minted
+  on SPY at 16:56 ET — four minutes after the US cash close — held 5.6h with
+  drift frozen at 56 of the 120 ticks it needed and zero fees on all three
+  rungs (verified by static-calling `NPM.collect`). Nothing was broken; no rule
+  *could* fire. Port of `dlmm_monitor.py`'s fee-pace-death exit. A rung out of
+  range holds 100% quote, so its quote value moves only when the pool trades
+  through the band — which makes value growth a fee meter with no extra RPC.
+  Skipped while the rung is in range (a partial fill tracks price, not fees),
+  and not indicator-confirmable: dead capital does not improve by waiting.
 - `internal/robinhood` — `Ladder` ModeParams; `OpenPositions` counts ladders,
   not NFTs, so one 5-rung entry does not exhaust a cap of 3.
 - Config — `ROBINHOOD_LADDER`, strategy default flipped to `weth_ladder`,
@@ -552,9 +565,19 @@ tokenized equity is the least collapse-prone base asset on the chain.
   `parseQ`/`fmtQ` do every conversion at the quote's own decimals — **USDG is
   6, WETH is 18**, and a `parseEther`'d USDG amount is off by 10¹².
   `resolveQuote()` falls back to WETH, so every pre-USDG call is unchanged.
-- Geometry per quote: `UNI_LADDER_RUNG_TICKS_USDG` 120 (~1.2%/rung, ~6%
-  covered fall), `UNI_LADDER_MIN_RUNG_USDG` $2, `UNI_LADDER_STALE_TICKS_USDG`
-  120. A stale threshold only means anything relative to the rung width.
+- Geometry per quote: `UNI_LADDER_RUNG_TICKS_USDG` 240 (~2.4%/rung),
+  `UNI_LADDER_MIN_RUNG_USDG` $2, `UNI_LADDER_STALE_TICKS_USDG` 240. A stale
+  threshold only means anything relative to the rung width — keep them equal.
+- Widened from 120 on 2026-08-05. SPY, TSLA and SPCX are all the **0.3% tier
+  at tickSpacing 60** (measured on-chain; the plan previously assumed 0.05%),
+  so 120 was two spacings — the narrowest rung the pool can express — and the
+  $2 rung floor caps a ~$7 commit at 3 rungs, i.e. 3.6% of covered downside.
+  240 is four spacings: 7.2% at 3 rungs, 12% at five. The trade is density:
+  rung 0's top is pinned adjacent to spot either way, so width buys depth by
+  halving the liquidity that earns on small oscillations. Rung COUNT is the
+  stronger lever (`sol_bidask` reaches -70% with ~70 narrow bins) and is capped
+  by deposit size, not by this constant — raising `ROBINHOOD_DEPLOY_FLOOR_USDG`
+  toward ~$30 is what buys a full five-rung wall.
 - `uni_monitor.py` routes any `*_ladder` strategy to `ladder_decide` (suffix
   match, so a third quote asset cannot silently fall through to the OOR
   timeout) and reads `quoteIs0` with `wethIs0` as its legacy alias.

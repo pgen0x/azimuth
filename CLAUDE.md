@@ -110,7 +110,10 @@ one pass per enabled mode per `POLL_INTERVAL`.
   - `Ladder` (`ROBINHOOD_LADDER`) — the `weth_ladder` thesis: N contiguous
     **one-sided WETH** rungs parked on the bid side, sized on a linear ramp,
     minted in one `NPM.multicall`. It never buys the token, so its exits are
-    re-pins (`ladder stale` / `ladder rung filled`), not SL/TP, and a rung is
+    re-pins (`ladder stale` / `ladder rung filled` / `ladder idle` — the last
+    one because the first two are price rules that a frozen market disarms;
+    an equity ladder held 5.6h fee-dead overnight before it existed), not
+    SL/TP, and a rung is
     out-of-range **by design** — the fee-dead OOR timeout must never apply to
     it. Shares `Mature`'s gateway feed but screens on churn, not yield: the
     8%/day bar matched 1 of the 23 pools a profitable ladder LP actually
@@ -119,8 +122,9 @@ one pass per enabled mode per `POLL_INTERVAL`.
   - `StockLadder` (`ROBINHOOD_STOCK_LADDER`) — the same wall, `usdg_ladder`,
     under the chain's **USDG-quoted tokenized equities** (nvda, gme, spacex).
     Same gateway feed; a separate mode because every `Ladder` threshold is
-    wrong for a deep, low-vol, 0.05%-tier book (0.2%/day vs 1.5%, $50k floor,
-    120-tick rungs vs 1200). It spends the wallet's **USDG**, so sizing uses
+    wrong for a deep, low-vol book (0.2%/day vs 1.5%, $50k floor, 240-tick
+    rungs vs 1200 — every stock pool traded so far is the 0.3% tier at
+    tickSpacing 60, so USDG rung widths quantize to multiples of 60). It spends the wallet's **USDG**, so sizing uses
     `RobinhoodSizeUSDG` (dollar units). §4c.
 
   Modes are quote-pinned via `ModeParams.QuoteAsset` — a ladder's rungs and its

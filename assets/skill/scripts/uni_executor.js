@@ -128,11 +128,26 @@ const LADDER_RUNGS = parseInt(process.env.UNI_LADDER_RUNGS || "5", 10);
 // off a memecoin venue where a 12% move is a Tuesday. USDG pools are tokenized
 // equities: they move 1-3% in a day, so a 1200-tick wall would sit entirely out
 // of reach — five rungs covering a 45% crash is not a bid wall, it is a bet the
-// stock halts. 120 ticks is ~1.2% a rung, ~6% of covered fall across five,
-// which is a week of ordinary equity range rather than a decade of it.
+// stock halts.
+//
+// 2026-08-05: USDG widened 120 -> 240. Every stock pool this mode has deployed
+// into (SPY, TSLA, SPCX) is the 0.3% tier with tickSpacing 60 — measured, not
+// assumed — so 120 was exactly TWO spacings, the narrowest rung the pool can
+// express, and the deposit floor (UNI_LADDER_MIN_RUNG_USDG against a ~$7
+// commit) drops the wall to 3 rungs. 3 x 120 covered 3.6% of downside: a wall
+// that a market moving 1-3% a day steps over and never returns to. 240 is four
+// spacings, ~2.4% a rung, 7.2% covered at 3 rungs and 12% at five.
+//
+// Widening is a trade, not a free win: rung 0's top edge is pinned adjacent to
+// spot either way (see ladderBands), so a wider rung buys depth by HALVING
+// liquidity density, and density is what pays on the small oscillations around
+// spot that make up most of an equity session. The stronger lever is rung
+// COUNT — sol_bidask, the Solana sibling this shape is ported from, reaches
+// -70% with ~70 NARROW bins, not with wide ones. Count here is capped by
+// deposit size, not by this constant.
 const LADDER_RUNG_TICKS = {
   WETH: parseInt(process.env.UNI_LADDER_RUNG_TICKS || "1200", 10),
-  USDG: parseInt(process.env.UNI_LADDER_RUNG_TICKS_USDG || "120", 10),
+  USDG: parseInt(process.env.UNI_LADDER_RUNG_TICKS_USDG || "240", 10),
 };
 
 // Floor on the SMALLEST rung, per quote asset. A rung below this is dust: it

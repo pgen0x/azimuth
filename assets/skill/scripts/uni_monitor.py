@@ -94,15 +94,69 @@ MAX_INDICATOR_BLOCK_MINUTES = 60.0
 # threshold would call the outer rungs stale the moment they were created.
 # Per quote asset, mirroring uni_executor.js's UNI_LADDER_RUNG_TICKS map — a
 # stale threshold is only meaningful relative to the rung width it is judging,
-# and USDG rungs are a tenth of a WETH rung's width. One absolute 1200 would
+# and USDG rungs are a fraction of a WETH rung's width. One absolute 1200 would
 # mean a stock ladder waits for a 12% move before re-pinning, i.e. never.
+# Each entry tracks its quote's UNI_LADDER_RUNG_TICKS* one-for-one — keep them
+# equal when either moves (USDG went 120 -> 240 on 2026-08-05).
 LADDER_STALE_TICKS = {
     "WETH": float(os.environ.get("UNI_LADDER_STALE_TICKS", "1200")),
-    "USDG": float(os.environ.get("UNI_LADDER_STALE_TICKS_USDG", "120")),
+    "USDG": float(os.environ.get("UNI_LADDER_STALE_TICKS_USDG", "240")),
 }
 
+# --- ladder idle exit ------------------------------------------------------
+# Drift and fill are both PRICE rules, so a market that stops moving disarms
+# the whole ladder rulebook: a usdg_ladder minted on SPY at 16:56 ET — four
+# minutes after the US cash close — sat 5.6h with drift stuck at 56 of the 120
+# ticks it needed, zero rungs filled, and zero fees on all three rungs. Nothing
+# was broken; no rule *could* fire, because an equity does not move 1.2%
+# overnight. Dead capital that no price rule will ever release is what this
+# rule releases.
+#
+# The test is fee productivity, not a bare timer: a rung parked out of range is
+# 100% quote asset, so its quote-denominated value moves ONLY when the pool
+# trades through the band. Growth below IDLE_MIN_PCT over the window means the
+# wall is not being traded into — tear it down and let the scanner re-pin. Port
+# of dlmm_monitor.py's fee-pace-death rule, which the ladder never inherited.
+#
+# Skipped while the rung is IN range: a partially-filled rung holds token, so
+# its quote value also moves with price, and a dip would read as "no fees".
+LADDER_IDLE_MIN_AGE_MIN = float(os.environ.get("UNI_LADDER_IDLE_MIN_AGE", "45"))
+LADDER_IDLE_WINDOW_MIN = float(os.environ.get("UNI_LADDER_IDLE_WINDOW", "90"))
+LADDER_IDLE_MIN_PCT = float(os.environ.get("UNI_LADDER_IDLE_MIN_PCT", "0.02"))
 
-def ladder_decide(s, pnl, age_min):
+
+def ladder_idle_reason(s, age_min, ps, now):
+    """Close reason when a resting rung has earned nothing across a full
+    window, or None. Rolls the measurement window forward in `ps` as a side
+    effect — `ps` is this position's monitor-state dict, `now` a unix time.
+    """
+    if ps is None or now is None or age_min is None or age_min < LADDER_IDLE_MIN_AGE_MIN:
+        return None
+    value = s.get("valueWeth")  # quote units despite the name (executor contract)
+    if value is None or value <= 0:
+        return None
+    if bool(s.get("inRange")):
+        # Mid-conversion: value tracks price, not fees. Rebaseline and wait.
+        ps["idle_snap_value"], ps["idle_snap_at"] = value, now
+        return None
+    snap, snap_at = ps.get("idle_snap_value"), ps.get("idle_snap_at")
+    if snap is None or snap_at is None or float(snap) <= 0 or value < float(snap):
+        # First sighting, or value fell (a fill converted quote to token at a
+        # worse price) — either way the old baseline is meaningless.
+        ps["idle_snap_value"], ps["idle_snap_at"] = value, now
+        return None
+    window_min = (now - float(snap_at)) / 60.0
+    if window_min < LADDER_IDLE_WINDOW_MIN:
+        return None
+    growth_pct = (value - float(snap)) / float(snap) * 100.0
+    if growth_pct >= LADDER_IDLE_MIN_PCT:
+        ps["idle_snap_value"], ps["idle_snap_at"] = value, now
+        return None
+    return (f"ladder idle: +{growth_pct:.3f}% value in {window_min:.0f}m "
+            f"(< {LADDER_IDLE_MIN_PCT}%) — wall untraded, re-pin")
+
+
+def ladder_decide(s, pnl, age_min, ps=None, now=None):
     """Close reason for one ladder rung (either quote asset), or None to hold."""
     tick, lo, hi = s.get("tick"), s.get("tickLower"), s.get("tickUpper")
     if tick is None or lo is None or hi is None:
@@ -138,6 +192,12 @@ def ladder_decide(s, pnl, age_min):
         return (f"ladder stale: spot drifted {drift:.0f} ticks past rung {rung} "
                 f"(> {stale_ticks:.0f})")
 
+    # Still within re-pin distance, but is anyone trading into it? A price rule
+    # cannot answer that — see ladder_idle_reason.
+    idle = ladder_idle_reason(s, age_min, ps, now)
+    if idle:
+        return idle
+
     # Backstop only. A rung mid-conversion does carry some token, so the hard SL
     # still applies — but it should essentially never fire before the filled
     # rule above does.
@@ -154,7 +214,8 @@ def exit_confirmable(reason):
     "ladder rung filled" joins the confirmable set because its close is a SELL
     into weakness that the market may undo for us: an un-filling rung costs
     nothing, a round-trip through the pool costs the fee tier twice. "ladder
-    stale" does not — dead capital does not get better by waiting.
+    stale" and "ladder idle" do not — dead capital does not get better by
+    waiting, and an idle rung has already waited a full window.
     """
     return reason.startswith(("trailing exit", "fast-out", "downtrend", "ladder rung filled"))
 
@@ -276,7 +337,7 @@ def trailing_floor_pct(peak):
     return peak - TRAILING_DROP_PCT
 
 
-def decide(pnl, peak, in_range, age_min, oor_min, m5, h1, s=None):
+def decide(pnl, peak, in_range, age_min, oor_min, m5, h1, s=None, ps=None, now=None):
     """Return a close reason string, or None to hold. Mirrors the Solana
     monitor's rule precedence: emergency SL first, then hard SL/TP, then
     trailing/fast-out/downtrend, then OOR timeout.
@@ -298,7 +359,7 @@ def decide(pnl, peak, in_range, age_min, oor_min, m5, h1, s=None):
     if s is not None and not looks_like_state(s):
         return None
     if s is not None and str(s.get("strategy") or "").endswith("_ladder"):
-        return ladder_decide(s, pnl, age_min)
+        return ladder_decide(s, pnl, age_min, ps, now)
     if pnl is not None:
         # Emergency SL — bypasses the age grace.
         if pnl <= STOP_LOSS_PCT - EMERGENCY_SL_BUFFER_PCT:
@@ -513,7 +574,9 @@ def main():
             else:
                 oor_min = (now - ps["oor_since"]) / 60.0
             m5, h1 = fetch_momentum(pool) if pool else (None, None)
-            reason = decide(pnl, peak, in_range, age_min, oor_min, m5, h1, s)
+            # dict(ps): the idle window is rolled forward as a side effect, and
+            # the report must not consume a window the loop owns.
+            reason = decide(pnl, peak, in_range, age_min, oor_min, m5, h1, s, dict(ps), now)
             val_w, ent_w = s.get("valueWeth"), s.get("entryWeth")
             # USDG positions are dollar-quoted already; everything else is
             # ETH-quoted and needs the ETH/USD conversion.
@@ -578,7 +641,7 @@ def main():
             oor_min = (now - ps["oor_since"]) / 60.0
 
         m5, h1 = fetch_momentum(pool) if pool else (None, None)
-        reason = decide(pnl, peak, in_range, age_min, oor_min, m5, h1, s)
+        reason = decide(pnl, peak, in_range, age_min, oor_min, m5, h1, s, ps, now)
 
         # Pre-exit indicator confirmation (non-emergency exits only): postpone
         # the close while supertrend/RSI still read bullish — a dip inside an
