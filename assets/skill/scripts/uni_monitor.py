@@ -245,6 +245,17 @@ def ladder_idle_reason(s, age_min, ps, now, kry=None):
     if ps is None or now is None or age_min is None or age_min < LADDER_IDLE_MIN_AGE_MIN:
         return None
 
+    # Absolute zero fees needs no snapshot window. The window exists to tell
+    # "earned a little" from "earned nothing", but pending+claimed == 0 across a
+    # full window's worth of lifetime is unambiguous: nothing has ever traded
+    # through this band. Judging that on age instead of a rolling baseline is
+    # also what makes the rule survive a deploy — three restarts on 2026-08-05
+    # each added a new idle_* state key, restarting the 90m window from zero and
+    # leaving a fee-dead SPY wall parked 6.7h that no rule could release.
+    if kry and kry.get("fees_usd") == 0 and age_min >= LADDER_IDLE_WINDOW_MIN:
+        return (f"ladder idle: zero fees in {age_min:.0f}m since mint "
+                f"(>= {LADDER_IDLE_WINDOW_MIN:.0f}m) — wall untraded, re-pin")
+
     if kry and kry.get("fees_usd") is not None and kry.get("value_usd"):
         return _idle_window(ps, now, "fee", kry["fees_usd"], kry["value_usd"])
 
