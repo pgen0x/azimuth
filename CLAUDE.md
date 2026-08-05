@@ -115,7 +115,11 @@ one pass per enabled mode per `POLL_INTERVAL`.
     an equity ladder held 5.6h fee-dead overnight before it existed), not
     SL/TP, and a rung is
     out-of-range **by design** — the fee-dead OOR timeout must never apply to
-    it. Shares `Mature`'s gateway feed but screens on churn, not yield: the
+    it. Discovery is the **union of two feeds** (`trending.go`): `Mature`'s
+    gateway feed plus the cached GeckoTerminal `trending_pools` page, which
+    carries v3 pools the gateway does not index at all. The page costs no extra
+    GT request while `Fresh` runs — `discover.go` already fetches it and now
+    publishes it to a shared, rate-limited cache. Screens on churn, not yield: the
     8%/day bar matched 1 of the 23 pools a profitable ladder LP actually
     worked. This replaced `balanced_tight` as the deploy default, which was long
     a bleeding token by construction. See `docs/ROBINHOOD_CHAIN_PLAN.md` §4b.

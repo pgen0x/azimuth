@@ -512,6 +512,27 @@ same gateway feed, screened on churn (1.5%/day, $10k–$2M, ≥0.3% tier, 24h+).
   and not indicator-confirmable: dead capital does not improve by waiting.
 - `internal/robinhood` — `Ladder` ModeParams; `OpenPositions` counts ladders,
   not NFTs, so one 5-rung entry does not exhaust a cap of 3.
+- **Discovery is a union of two feeds** (`trending.go`, 2026-08-05). Uniswap's
+  gateway is not the venue's whole universe: diffing GeckoTerminal
+  `trending_pools` against the gateway's `topV3Pools` (90 pools — under the page
+  cap of 100, so that IS the complete indexed v3 set) found 11 pools the
+  leaderboard lacked. Seven were `uniswap-v4`, already covered by `topV4Pools`;
+  three were `uniswap-v2`/`pons-dot-family`, which neither executor can mint in;
+  one was a genuine gap — LEMON.FUN/WETH 1%, `uniswap-v3`, $49.6k TVL, 10.8 days
+  old. So `rh-ladder` unions the gateway feed with the trending page, deduped by
+  address (gateway wins a collision: authoritative `feeTier` + v4 hook meta;
+  its zero fields backfill from the trending copy).
+  `trending_pools` is filtered on **DEX identity, not protocol version**, and it
+  costs no new GeckoTerminal request while `rh-fresh` is enabled — `discover.go`
+  already fetches that page every `trendingEvery` cycles and now publishes it to
+  a process-wide cache instead of consuming it privately. With `rh-fresh` off,
+  the ladder path refreshes the cache itself, rate-limited to one page per
+  `trendingRefresh` (5m) across every consumer — the same rate `trendingEvery`
+  spends at the default 60s `POLL_INTERVAL`. A failed refresh keeps serving the
+  cached page until it ages past `trendingUsable` (15m); GT 429s are this
+  venue's binding constraint, so the union degrades to gateway-only rather than
+  retrying per cycle. Only `rh-ladder` gets the union: all 11 missing pools were
+  WETH-quoted, so there is no evidence it helps `rh-usdg-ladder`.
 - Config — `ROBINHOOD_LADDER`, strategy default flipped to `weth_ladder`,
   `ROBINHOOD_MAX_OPEN_POSITIONS` 1 → 3, `UNI_LADDER_*` geometry.
 

@@ -151,8 +151,8 @@ func (s *Scanner) pollAll(ctx context.Context) {
 		// GeckoTerminal's new_pools is a launch feed (a pool scrolls off it in
 		// minutes); Uniswap's gateway is a TVL leaderboard that indexes nothing
 		// younger than a day. See mature.go.
-		s.pollRobinhood(ctx, robinhood.Fresh, func(time.Time) ([]robinhood.Pool, error) {
-			return robinhood.FetchNewPools(s.cfg.RobinhoodDiscoverURL)
+		s.pollRobinhood(ctx, robinhood.Fresh, func(now time.Time) ([]robinhood.Pool, error) {
+			return robinhood.FetchNewPools(s.cfg.RobinhoodDiscoverURL, now)
 		})
 	}
 	if s.cfg.EnableRobinhoodMature {
@@ -161,15 +161,21 @@ func (s *Scanner) pollAll(ctx context.Context) {
 		})
 	}
 	if s.cfg.EnableRobinhoodLadder {
-		// Same gateway feed as rh-mature, prefiltered with the LADDER params —
-		// FetchMaturePools takes the mode so its local prefilter matches the
-		// gates that will actually run, which is what keeps the GeckoTerminal
-		// enrich to one request. Running both modes makes entries the union of
-		// a yield screen and a churn screen over one source; the dedup store
-		// keys per pool per mode, so a pool both modes like signals once each
-		// and then goes quiet for its SEEN_TTL.
+		// TWO sources unioned (FetchLadderPools): the same gateway feed as
+		// rh-mature — prefiltered with the LADDER params, since FetchMaturePools
+		// takes the mode so its local prefilter matches the gates that will
+		// actually run, which is what keeps the GeckoTerminal enrich to one
+		// request — plus the CACHED GeckoTerminal trending page, which carries
+		// v3 pools the gateway does not index at all (LEMON.FUN/WETH, measured
+		// 2026-08-05). The trending page costs no extra request while rh-fresh
+		// is enabled; see trending.go.
+		//
+		// Running rh-ladder alongside rh-mature makes entries the union of a
+		// yield screen and a churn screen; the dedup store keys per pool per
+		// mode, so a pool both modes like signals once each and then goes quiet
+		// for its SEEN_TTL.
 		s.pollRobinhood(ctx, robinhood.Ladder, func(now time.Time) ([]robinhood.Pool, error) {
-			return robinhood.FetchMaturePools(robinhood.Ladder, now)
+			return robinhood.FetchLadderPools(robinhood.Ladder, now)
 		})
 	}
 	if s.cfg.EnableRobinhoodStockLadder {
