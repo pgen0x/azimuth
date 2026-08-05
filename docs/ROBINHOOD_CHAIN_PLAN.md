@@ -645,6 +645,78 @@ tokenized equity is the least collapse-prone base asset on the chain.
 **Unverified, same as 4b:** DRY_RUN only. Verified against the live nvda/USDG
 0.05% book: 5 rungs × 120 ticks, sizes [2,4,6,8,10] USDG, 6% covered fall.
 
+## 4d. The ladder on Uniswap v4 (2026-08-05)
+
+Both ladder modes screen v3 **and** v4 candidates — `mapGTPools` keeps either —
+and the scanner already routes a v4 pick to `uni_v4_executor.js`
+(`scanner.go:280`). But that executor only knew `balanced_tight` and
+`weth_below`, so a v4 ladder pick would have died on `unknown strategy` after the
+gas check. It never did in production only because `ROBINHOOD_V4_EXECUTOR_CMD` is
+unset (`v4executor=false` in every startup line), which filters v4 candidates out
+at `scanner.go:237`. Porting the shape is what makes that env var safe to set.
+
+**v4 mints the wall more cheaply than v3 does.** The v3 path batches N separate
+`NPM.mint` calls through `NPM.multicall`, so the quote is pulled N times. Here a
+single `modifyLiquidities` unlock carries N `MINT_POSITION` actions and **one**
+`SETTLE_PAIR`, which settles the summed debt of the whole batch in one transfer
+(plus one `SWEEP` when the quote is native ETH, to refund what the rungs did not
+consume). Atomicity is the same all-or-nothing: a revert anywhere undoes every
+rung.
+
+- **Geometry is now a shared module** (`uni_ladder.js`), required by both
+  executors. Rung count, per-quote width, per-quote dust floor, the size ramp and
+  the band layout are properties of the *thesis*, not of either protocol, and
+  `uni_monitor.py`'s `ladder stale` rule reads the same widths — three copies of
+  one number is how a wall silently re-pins at a width it was never minted at.
+  The v3 executor lost its private copies in the same change; a parity harness
+  confirmed identical `{sizes, rungs, bands}` across both orientations, all three
+  quote assets and five spacings before those copies were deleted.
+- **Liquidity per rung comes from the one-sided formula** (`liquidityForAmount0` /
+  `liquidityForAmount1`), not `liquidityForAmounts`: an out-of-range range needs
+  exactly one token, and asking the two-sided helper about a range that does not
+  straddle spot returns a figure that quietly wants the token side too.
+- **`amountMax` is the rung's size on the funded side and ZERO on the token
+  side.** That zero is load-bearing. It turns "spot moved into rung 0 between the
+  price sample and the mint" into a revert the one retry can reprice, instead of a
+  rung that consumes token inventory we do not hold, and it means a wrong-side
+  wall cannot half-open. The 0.3% liquidity shave covers posm re-deriving the
+  required amount with CEIL rounding where ours floors; unspent quote stays in the
+  wallet, where the next sizing pass sees it. Verified numerically: across 38
+  rungs (both orientations × four quote assets × five spacings) every rung's
+  CEIL-rounded requirement came in at or under its cap.
+- **`positionSnapshot` now returns principal and fees separately.** It used to sum
+  them into `amount0/amount1`, which broke a contract `uni_monitor.py` depends on:
+  `valueWeth` must be principal-only, because the ladder idle rule divides the fee
+  meter *by* it and every SL/TP rule compares it against an entry basis that never
+  contained fees. Summed, a rung's own fees inflated its PnL and sat on both sides
+  of that division. A latent v3/v4 divergence, not something the ladder introduced.
+- **v4's fee meter is strictly better than v3's.** StateView recomputes
+  `feeGrowthInside`, so `feesQuote` is exact the moment fees accrue — no poke, and
+  none of the batched `decreaseLiquidity`+`collect` simulate the v3 executor needs.
+  It is also never `null`: the read either succeeds or the whole state read throws,
+  so there is no "measured but unknown" case, and a hard `0` here is a measurement
+  that can legitimately release a fee-dead wall.
+- `cmdState` echoes `strategy`/`ladderId`/`rung`/`rungs`/`quoteIs0` from the entry
+  journal, so the monitor's rulebook switch and the wall-scoped idle rule work on
+  v4 rungs unchanged. `cmdPositions` now reports `ladders` (distinct funded pools)
+  so the position cap counts walls, not NFTs — pool identity includes
+  `tickSpacing`, because in v4 one currency pair and fee can exist at several
+  spacings, and a wall in each is two entries.
+- The wall-state key stays un-namespaced: a `ladderId` is `<pool>-<mintTs>`, and a
+  20-byte v3 pool address cannot collide with a 32-byte v4 poolId.
+- Close needs no change — `BURN_POSITION` + `TAKE_PAIR` is already per-tokenId,
+  and a one-sided rung frees no token side to sell.
+
+**Verified DRY_RUN against live v4 pools**: native-ETH quote (`ETH/Doom` 1% at
+tickSpacing 200) gave 5 rungs × 1200 ticks, a 45% covered fall and sizes
+[0.00333…, 0.00667…, 0.01, 0.01333…, 0.01667…] ETH; WETH quote (`WETH/DORK`) gave
+3 rungs and 30% covered. The batched action stream was decoded back and checked
+field by field — `0x02020202020d14` for a five-rung native wall, every rung's
+ticks and caps round-tripping. **A live v4 ladder mint has not run**: no
+USDG-quoted v4 pool appears in any batch the daemon has logged (all 51 are
+ETH/WETH-quoted, consistent with the USDG universe being v3), and
+`ROBINHOOD_V4_EXECUTOR_CMD` is still unset. Setting it is what starts that soak.
+
 ## 5. Deliverable order
 
 | # | Deliverable | Depends on |

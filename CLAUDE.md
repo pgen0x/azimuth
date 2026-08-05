@@ -109,7 +109,9 @@ one pass per enabled mode per `POLL_INTERVAL`.
 
   - `Ladder` (`ROBINHOOD_LADDER`) — the `weth_ladder` thesis: N contiguous
     **one-sided WETH** rungs parked on the bid side, sized on a linear ramp,
-    minted in one `NPM.multicall`. It never buys the token, so its exits are
+    minted atomically — one `NPM.multicall` on v3; on v4 one `modifyLiquidities`
+    unlock carrying N `MINT_POSITION` actions and a single `SETTLE_PAIR`, so the
+    quote is pulled once instead of N times. It never buys the token, so its exits are
     re-pins (`ladder stale` / `ladder rung filled` / `ladder idle` — the last
     one because the first two are price rules that a frozen market disarms;
     an equity ladder held 5.6h fee-dead overnight before it existed), not
@@ -126,7 +128,7 @@ one pass per enabled mode per `POLL_INTERVAL`.
   - `StockLadder` (`ROBINHOOD_STOCK_LADDER`) — the same wall, `usdg_ladder`,
     under the chain's **USDG-quoted tokenized equities** (nvda, gme, spacex).
     Same gateway feed; a separate mode because every `Ladder` threshold is
-    wrong for a deep, low-vol book (0.2%/day vs 1.5%, $50k floor, 240-tick
+    wrong for a deep, low-vol book (0.2%/day vs 1.5%, $20k floor, 240-tick
     rungs vs 1200 — every stock pool traded so far is the 0.3% tier at
     tickSpacing 60, so USDG rung widths quantize to multiples of 60). It spends the wallet's **USDG**, so sizing uses
     `RobinhoodSizeUSDG` (dollar units). §4c.
@@ -135,7 +137,14 @@ one pass per enabled mode per `POLL_INTERVAL`.
   sizing must be the same asset, so a mode may not mix WETH- and USDG-quoted
   pools in one batch. **USDG is 6 decimals, WETH is 18**: anything touching
   amounts in `uni_executor.js` must go through `parseQ`/`fmtQ`, never
-  `parseEther`.
+  `parseEther` (the v4 executor uses `parseUnits`/`formatUnits` at `q.decimals`
+  for the same reason).
+
+  Both ladder modes screen v3 **and** v4 pools, and both executors mint the
+  shape. Its geometry lives in `assets/skill/scripts/uni_ladder.js`, required by
+  both — rung count/width/floor/ramp describe the thesis, not the protocol, and
+  `uni_monitor.py`'s `ladder stale` rule reads the same widths. Change it there,
+  never in one executor. §4d.
 
   All four modes share `Screen` and every safety gate (GMGN OpenAPI
   `chain=robinhood` security + holder quality, Blockscout holders). The deploy

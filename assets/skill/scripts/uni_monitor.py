@@ -276,8 +276,11 @@ def ladder_wall_key(ladder_id):
     alone: the executor mints it as `<pool>-<mintUnixTs>` and persists it in the
     entry journal, so it is globally unique AND identical after a restart, which
     is what keeps the 90m window from re-baselining on every deploy. Not
-    proto-namespaced the way state_key() is — the pool address already separates
-    protocols, and only the v3 executor mints ladders."""
+    proto-namespaced the way state_key() is, and it does not need to be now that
+    BOTH executors mint ladders: the pool component is either a 20-byte v3 pool
+    address or a 32-byte v4 poolId, which cannot collide, so `<pool>-<ts>` is
+    unique across protocols on its own. state_key() still needs its prefix
+    because NPM and posm tokenIds both start at 1."""
     return LADDER_WALL_PREFIX + str(ladder_id)
 
 

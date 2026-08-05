@@ -52,13 +52,12 @@ func (r *Runner) run(ctx context.Context, args ...string) (string, error) {
 // and fail closed (skip deploy) — there is no monitor yet to close stale
 // positions, so under-counting risks an unbounded number of open positions.
 //
-// The unit is ENTRIES, not NFTs. Under weth_ladder one entry mints N rungs
-// (N separate NPM tokens), so the raw {"count": N} would report a single
-// ladder as 5 positions and a cap of 3 would reject every deploy forever. The
-// executor therefore also reports {"ladders": M} — distinct funded pools —
-// and that is what this returns when present. Falls back to `count` for the
-// v4 executor and any older build that predates the field, where one position
-// really is one entry.
+// The unit is ENTRIES, not NFTs. Under a ladder strategy one entry mints N rungs
+// (N separate position NFTs), so the raw {"count": N} would report a single
+// ladder as 5 positions and a cap of 3 would reject every deploy forever. BOTH
+// executors therefore also report {"ladders": M} — distinct funded pools — and
+// that is what this returns when present. Falls back to `count` for any older
+// build that predates the field, where one position really is one entry.
 func (r *Runner) OpenPositions(ctx context.Context) (int, error) {
 	out, err := r.run(ctx, "positions")
 	if err != nil {
