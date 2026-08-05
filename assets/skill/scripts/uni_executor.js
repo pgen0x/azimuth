@@ -41,6 +41,7 @@ const {
   createPublicClient, createWalletClient, http, parseEther, formatEther,
   parseUnits, formatUnits,
   getAddress, erc20Abi, parseAbi, parseEventLogs, maxUint128, encodeFunctionData,
+  decodeFunctionResult,
 } = require("viem");
 const { privateKeyToAccount } = require("viem/accounts");
 
@@ -1083,14 +1084,54 @@ async function cmdDeploy(wallet, account) {
 }
 
 // cmdState prices one position for the monitor: current value IN THE POOL'S
-// OWN QUOTE ASSET, PnL vs entry cost basis, in-range flag, and age. Value =
-// principal (from a simulated full decreaseLiquidity, which reuses the pool
-// contract's own tick math) + already-tracked owed fees, both converted to the
-// quote at spot — never cross-converted to WETH, because PnL is a ratio and a
-// USDG position's ratio is honest in dollars and meaningless in ether. Live
-// fees accruing since the last pool interaction are NOT counted (they only
-// materialize on collect) — a small undercount that makes PnL conservative,
-// fine for SL/TP decisions where the price move dominates.
+// OWN QUOTE ASSET, PnL vs entry cost basis, in-range flag, age, and — since
+// 2026-08-05 — the position's UNCOLLECTED FEES (`feesQuote`).
+//
+// `valueWeth` (quote units despite the name) is deliberately still
+// PRINCIPAL-ONLY: principal from a simulated full decreaseLiquidity, which
+// reuses the pool contract's own tick math, plus any already-poked tokensOwed.
+// Its meaning is a contract with uni_monitor.py's SL/TP/trailing rules and with
+// the entry cost basis it is compared against, so fees are reported ALONGSIDE
+// it, never folded into it. Neither figure is ever cross-converted to WETH,
+// because PnL is a ratio and a USDG position's ratio is honest in dollars and
+// meaningless in ether.
+//
+// WHY FEES NEED THEIR OWN MEASUREMENT, and why the obvious ways don't work:
+//
+//  - NPM.positions().tokensOwed0/1 (p[10], p[11]) reads ZERO on a live
+//    position no matter what it earned. tokensOwed is only written when the
+//    position is poked (decrease/collect/burn); until then the fees exist as
+//    feeGrowthInside deltas inside the POOL, not on the NFT.
+//  - A standalone `collect` static-call is no better: with liquidity untouched
+//    it also returns only the already-poked tokensOwed, i.e. 0.
+//  - decreaseLiquidity alone returns the PRINCIPAL released. The accrued fees
+//    are credited to tokensOwed inside that same call but are NOT part of its
+//    return value — which is why this function reported "zero fees" for every
+//    rung it ever priced, and why `ladder idle: zero fees` in the 2026-08-04/05
+//    logs (17 ladder closes over ~40h) was a meter reading, not a measurement.
+//  - decreaseLiquidity(0) as a "poke" is not portable — whether NPM reverts on
+//    zero liquidity depends on the deployment, and a revert here would take the
+//    value read down with it.
+//
+// So: ONE simulated NPM.multicall batching decreaseLiquidity(full) THEN
+// collect(max). Both legs run against the same simulated state inside a single
+// eth_call — same request budget as before, no extra RPC per position — and the
+// collect leg sees the tokensOwed the decrease leg just credited:
+//     result[0] -> (principal0, principal1)
+//     result[1] -> (total0, total1) = tokensOwed_prior + principal + fees
+//     fees = total - principal          (all uncollected fees, monotonic while
+//                                        the position lives — nothing collects
+//                                        mid-life except close, which burns)
+// The bytes[] legs are decoded with viem's decodeFunctionResult against the
+// same npmAbi that encoded them, so there is no second hand-written ABI to
+// drift out of sync.
+//
+// FAILURE IS REPORTED, NEVER GUESSED. If the batched simulate throws (an NPM
+// without Multicall, a chain that rejects it, an RPC that won't run it) this
+// falls back to the old single decreaseLiquidity simulate so `valueWeth` — and
+// with it every hard-risk rule — keeps working, and emits `feesQuote: null`.
+// Null means "unmeasured" and makes uni_monitor.py fall through to its next
+// meter; emitting 0 would be a lie that closes live, earning rungs.
 async function cmdState(account) {
   const id = BigInt(arg("id", "0"));
   if (id <= 0n) throw new Error("--id required");
@@ -1119,19 +1160,69 @@ async function cmdState(account) {
   }).catch(() => "?");
 
   let amount0 = owed0, amount1 = owed1;
+  // Uncollected fees in RAW token units. Seeded with tokensOwed: with no
+  // liquidity left to decrease nothing is accruing, so what is already poked
+  // onto the NFT is the whole of it. null once measurement is attempted and
+  // fails — see the header block on why null, not zero.
+  let fees0 = owed0, fees1 = owed1;
   if (liquidity > 0n) {
     const deadline = BigInt(Math.floor(Date.now() / 1000) + 120);
-    const { result } = await pub.simulateContract({
-      address: NPM, abi: npmAbi, functionName: "decreaseLiquidity",
-      args: [{ tokenId: id, liquidity, amount0Min: 0n, amount1Min: 0n, deadline }],
-      account: account.address,
-    });
-    amount0 += result[0];
-    amount1 += result[1];
+    const decArgs = [{ tokenId: id, liquidity, amount0Min: 0n, amount1Min: 0n, deadline }];
+    const colArgs = [{
+      tokenId: id, recipient: account.address,
+      amount0Max: maxUint128, amount1Max: maxUint128,
+    }];
+    try {
+      // decrease THEN collect, one eth_call. Order is load-bearing: collect
+      // first would return the (zero) tokensOwed of an un-poked position.
+      const { result } = await pub.simulateContract({
+        address: NPM, abi: npmAbi, functionName: "multicall",
+        args: [[
+          encodeFunctionData({ abi: npmAbi, functionName: "decreaseLiquidity", args: decArgs }),
+          encodeFunctionData({ abi: npmAbi, functionName: "collect", args: colArgs }),
+        ]],
+        account: account.address,
+      });
+      const [principal0, principal1] = decodeFunctionResult({
+        abi: npmAbi, functionName: "decreaseLiquidity", data: result[0],
+      });
+      const [total0, total1] = decodeFunctionResult({
+        abi: npmAbi, functionName: "collect", data: result[1],
+      });
+      amount0 += principal0;
+      amount1 += principal1;
+      // Clamped rather than trusted: an NPM whose collect somehow returns less
+      // than the principal it was just handed is a shape we do not understand,
+      // and a negative BigInt would print as a fee CREDIT and hold a dead rung
+      // open forever.
+      fees0 = total0 > principal0 ? total0 - principal0 : 0n;
+      fees1 = total1 > principal1 ? total1 - principal1 : 0n;
+    } catch (e) {
+      // Fall back to the pre-2026-08-05 read so the value figure (and every
+      // hard-risk rule that depends on it) survives a venue that cannot run the
+      // batch. The fee meter goes dark, loudly.
+      const reason = (e.shortMessage || e.message || "multicall simulate failed").split("\n")[0];
+      console.error(`warn: batched fee simulate failed (${reason}) — fees UNMEASURED for #${id}`);
+      const { result } = await pub.simulateContract({
+        address: NPM, abi: npmAbi, functionName: "decreaseLiquidity",
+        args: decArgs, account: account.address,
+      });
+      amount0 += result[0];
+      amount1 += result[1];
+      fees0 = null;
+      fees1 = null;
+    }
   }
 
   const valueRaw = valueInQuote(amount0, amount1, st.sqrtPriceX96, quoteIs0);
   const valueQuote = Number(fmtQ(valueRaw, q));
+  // Fees priced in the quote at spot, exactly like value — so feesQuote and
+  // valueWeth are the same unit and their ratio is the fee yield the idle rule
+  // wants. fmtQ, never formatEther: a 6-decimal USDG fee through formatEther
+  // reads as 0.000000000001 of a dollar and every stock rung looks fee-dead.
+  const feesQuote = (fees0 === null || fees1 === null)
+    ? null
+    : Number(fmtQ(valueInQuote(fees0, fees1, st.sqrtPriceX96, quoteIs0), q));
   const entryQuote = entry ? Number(entry.quoteIn ?? entry.wethIn)
     : (arg("entry-weth", "") ? Number(arg("entry-weth")) : null);
   const pnlPct = entryQuote ? ((valueQuote - entryQuote) / entryQuote) * 100 : null;
@@ -1149,6 +1240,13 @@ async function cmdState(account) {
     // the v4 executor's) but hold QUOTE units, never a WETH conversion.
     quote: q.address, quoteSymbol: q.symbol,
     valueWeth: valueQuote, entryWeth: entryQuote, pnlPct, ageMin,
+    // Uncollected fees in the SAME quote units as valueWeth, measured on-chain
+    // (see the header block). This is the only fee figure this venue can
+    // produce without a third party, and it is what uni_monitor.py's `ladder
+    // idle` rule falls back to when Krystal is down — which, on 2026-08-05, it
+    // was (HTTP 521 + read timeouts) for the whole soak that judged 17 ladders
+    // "zero fees". null = unmeasured, NOT zero.
+    feesQuote,
     // Ladder metadata, echoed from the entry journal so uni_monitor.py can tell
     // a resting bid rung from a normal position WITHOUT reading the journal
     // itself. It matters because the two need opposite exit rules: a ladder
