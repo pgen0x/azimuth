@@ -95,6 +95,7 @@ func New(cfg config.Config) *Scanner {
 	// REDIS_ADDR configured, *store.Seen answers "not cached" to every read and
 	// this is a no-op — no branch needed here.
 	robinhood.SetCandleStore(seen)
+	robinhood.SetWatchStore(seen)
 	return &Scanner{
 		cfg:     cfg,
 		seen:    seen,

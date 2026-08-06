@@ -1,6 +1,8 @@
 package robinhood
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"sort"
@@ -70,6 +72,131 @@ var watch struct {
 	lastTry time.Time       // when a launch sweep was last ATTEMPTED
 }
 
+// WatchStore is the registry's optional persistent half. Declared here rather
+// than importing the store, for the reason CandleStore gives: the dependency
+// points one way (scanner -> robinhood), and the scanner installs the backend.
+// *store.Seen satisfies it.
+//
+// The registry is the one piece of this mode's state a restart cannot rebuild
+// quickly. Entries only become useful once they are MinAge old, so a cold
+// registry means an hour of `eligible=0` and a full day before the carry is
+// back to depth — measured 2026-08-07, when a deploy dropped it from 2405
+// pools to 80 and the next cycles found nothing to screen. Persisting identity
+// (which never changes) costs one SET per newly-seen launch.
+type WatchStore interface {
+	LoadYoungPools(ctx context.Context) [][]byte
+	SaveYoungPool(ctx context.Context, addr string, v any, ttl time.Duration)
+}
+
+var (
+	watchDBMu sync.Mutex
+	watchDB   WatchStore
+	watchLoad sync.Once
+)
+
+// SetWatchStore installs the persistent layer. Called once at startup; nil (the
+// default) leaves the registry memory-only, which is what an operator running
+// without REDIS_ADDR gets — and what every test gets unless it installs a fake.
+func SetWatchStore(ws WatchStore) {
+	watchDBMu.Lock()
+	watchDB = ws
+	watchLoad = sync.Once{}
+	watchDBMu.Unlock()
+}
+
+func watchStore() WatchStore {
+	watchDBMu.Lock()
+	defer watchDBMu.Unlock()
+	return watchDB
+}
+
+// youngEntry is the wire form of a carried registry entry. It holds IDENTITY
+// only — the same subset publishYoung documents as safe to carry — so a
+// restored entry can no more reach a gate with stale numbers than a carried one
+// can. ReserveUSD rides along because it is the discovery-snapshot value the
+// enrich ranking sorts on, and it is overwritten by the enrich before any gate
+// reads it.
+type youngEntry struct {
+	Address       string    `json:"address"`
+	Name          string    `json:"name"`
+	Dex           string    `json:"dex"`
+	Protocol      string    `json:"protocol"`
+	CreatedAt     time.Time `json:"created_at"`
+	Hook          string    `json:"hook,omitempty"`
+	DynamicFee    bool      `json:"dynamic_fee,omitempty"`
+	BaseAddress   string    `json:"base_address"`
+	BaseSymbol    string    `json:"base_symbol"`
+	BaseDecimals  int       `json:"base_decimals"`
+	QuoteAddress  string    `json:"quote_address"`
+	QuoteSymbol   string    `json:"quote_symbol"`
+	QuoteDecimals int       `json:"quote_decimals"`
+	FeePct        float64   `json:"fee_pct"`
+	ReserveUSD    float64   `json:"reserve_usd"`
+}
+
+func toYoungEntry(p Pool) youngEntry {
+	return youngEntry{
+		Address: p.Address, Name: p.Name, Dex: p.Dex, Protocol: p.Protocol,
+		CreatedAt: p.CreatedAt, Hook: p.Hook, DynamicFee: p.DynamicFee,
+		BaseAddress: p.BaseAddress, BaseSymbol: p.BaseSymbol, BaseDecimals: p.BaseDecimals,
+		QuoteAddress: p.QuoteAddress, QuoteSymbol: p.QuoteSymbol, QuoteDecimals: p.QuoteDecimals,
+		FeePct: p.FeePct, ReserveUSD: p.ReserveUSD,
+	}
+}
+
+func (e youngEntry) pool() Pool {
+	return Pool{
+		Address: e.Address, Name: e.Name, Dex: e.Dex, Protocol: e.Protocol,
+		CreatedAt: e.CreatedAt, Hook: e.Hook, DynamicFee: e.DynamicFee,
+		BaseAddress: e.BaseAddress, BaseSymbol: e.BaseSymbol, BaseDecimals: e.BaseDecimals,
+		QuoteAddress: e.QuoteAddress, QuoteSymbol: e.QuoteSymbol, QuoteDecimals: e.QuoteDecimals,
+		FeePct: e.FeePct, ReserveUSD: e.ReserveUSD,
+	}
+}
+
+// restoreWatch seeds the registry from the persistent half, once per process.
+// It never overwrites an entry the running process already recorded: a live
+// sighting is at least as good as a stored one, and first-sighting order is
+// what publishYoung preserves.
+func restoreWatch(now time.Time) {
+	db := watchStore()
+	if db == nil {
+		return
+	}
+	watchLoad.Do(func() {
+		blobs := db.LoadYoungPools(context.Background())
+		if len(blobs) == 0 {
+			return
+		}
+		restored := 0
+		watch.mu.Lock()
+		if watch.pools == nil {
+			watch.pools = make(map[string]Pool, len(blobs))
+		}
+		for _, b := range blobs {
+			var e youngEntry
+			if json.Unmarshal(b, &e) != nil || e.Address == "" || e.CreatedAt.IsZero() {
+				continue
+			}
+			// Re-apply the age rule on read. Redis expiry and this prune agree, but
+			// only one of them is this package's contract.
+			if now.Sub(e.CreatedAt) > watchKeep {
+				continue
+			}
+			k := strings.ToLower(e.Address)
+			if _, ok := watch.pools[k]; !ok {
+				watch.pools[k] = e.pool()
+				restored++
+			}
+		}
+		pruneWatch(now)
+		watch.mu.Unlock()
+		if restored > 0 {
+			log.Printf("robinhood: restored %d carried young pool(s) from the store", restored)
+		}
+	})
+}
+
 // publishYoung records a discovery cycle's pools in the registry. Called by
 // FetchNewPools with the cycle's whole mapped result, so the registry fills
 // whether the sweep was rh-fresh's or this mode's own.
@@ -79,26 +206,58 @@ var watch struct {
 // entry is therefore never stale in a way a gate can see — which is what makes
 // carrying one safe at all.
 func publishYoung(pools []Pool, now time.Time) {
-	watch.mu.Lock()
-	defer watch.mu.Unlock()
-	if watch.pools == nil {
-		watch.pools = make(map[string]Pool, len(pools))
+	var fresh []Pool
+	func() {
+		watch.mu.Lock()
+		defer watch.mu.Unlock()
+		if watch.pools == nil {
+			watch.pools = make(map[string]Pool, len(pools))
+		}
+		watch.lastTry = now
+		for _, p := range pools {
+			if p.CreatedAt.IsZero() {
+				// No creation time means no age, and age is the only axis this
+				// registry is organized on. Dropping beats stamping it with `now`: a
+				// pool aged from the moment we happened to see it would leave the
+				// window on our clock rather than on its own.
+				continue
+			}
+			k := strings.ToLower(p.Address)
+			if _, ok := watch.pools[k]; !ok {
+				watch.pools[k] = p
+				fresh = append(fresh, p)
+			}
+		}
+		pruneWatch(now)
+	}()
+
+	// Outside the lock on purpose: these are network writes, and the registry is
+	// read by every pulse cycle. The in-process map is already correct, so a slow
+	// or failing store delays nothing a cycle depends on.
+	persistYoung(fresh, now)
+}
+
+// persistYoung mirrors newly-recorded entries into the persistent half so the
+// next process starts with the carry instead of rebuilding it. Only FIRST
+// sightings are written — a re-seen pool's stored record is already correct and
+// re-writing it would restart a TTL that must age on the pool's clock.
+//
+// Each key gets the pool's REMAINING watch window, so Redis expires an entry at
+// the same moment pruneWatch would drop it. Called WITHOUT the registry lock;
+// the writes are best-effort and the store's own methods swallow their errors.
+func persistYoung(pools []Pool, now time.Time) {
+	db := watchStore()
+	if db == nil || len(pools) == 0 {
+		return
 	}
-	watch.lastTry = now
+	ctx := context.Background()
 	for _, p := range pools {
-		if p.CreatedAt.IsZero() {
-			// No creation time means no age, and age is the only axis this
-			// registry is organized on. Dropping beats stamping it with `now`: a
-			// pool aged from the moment we happened to see it would leave the
-			// window on our clock rather than on its own.
+		ttl := watchKeep - now.Sub(p.CreatedAt)
+		if ttl <= 0 {
 			continue
 		}
-		k := strings.ToLower(p.Address)
-		if _, ok := watch.pools[k]; !ok {
-			watch.pools[k] = p
-		}
+		db.SaveYoungPool(ctx, p.Address, toYoungEntry(p), ttl)
 	}
-	pruneWatch(now)
 }
 
 // pruneWatch drops entries past watchKeep, then enforces pulseMaxWatch by
@@ -162,6 +321,10 @@ func watchNeedsSweep(now time.Time) bool {
 //
 // now is the cycle's clock, injected by the caller like every other rhFetcher.
 func FetchPulsePools(mp ModeParams, now time.Time) ([]Pool, error) {
+	// Seed from the persistent half before anything reads the registry. No-op
+	// after the first cycle, and a no-op forever without a store installed.
+	restoreWatch(now)
+
 	if watchNeedsSweep(now) {
 		// FetchNewPools publishes into the registry itself, so its result is
 		// deliberately discarded — this call exists to KEEP THE REGISTRY FED when

@@ -149,7 +149,12 @@ one pass per enabled mode per `POLL_INTERVAL`.
     the entries that have aged INTO the band are re-enriched in one
     `/pools/multi/` call. Only identity survives the carry — every number a gate
     reads is re-fetched, and an entry the enrich did not refresh is dropped
-    rather than screened on launch-minute data. Geometry is unchanged
+    rather than screened on launch-minute data. The registry is **mirrored to
+    Redis** (`rh:young:<pool>`, one key per pool, TTL = the pool's *remaining*
+    24h window, so Redis expires an entry when `pruneWatch` would): entries are
+    only useful once they are `MinAge` old, so a process-memory-only registry
+    left the mode blind for an hour and thin for a day after every restart.
+    In-memory stays authoritative; the store only seeds it at startup. Geometry is unchanged
     (`uni_ladder.js` keys on the quote asset, not the mode): if a soak shows a
     first-day pool wants a different wall, add per-strategy geometry, not a
     second WETH constant.

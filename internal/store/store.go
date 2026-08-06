@@ -153,6 +153,70 @@ func (s *Seen) PutCandles(ctx context.Context, pool string, v any, ttl time.Dura
 	s.rdb.Set(ctx, "rh:ohlcv:"+strings.ToLower(pool), b, ttl)
 }
 
+// youngPoolPrefix namespaces the pulse ladder's carried young-pool registry.
+// One key per pool rather than one hash for the set, because the registry is
+// organized on AGE and per-key TTLs let Redis do that eviction itself: an entry
+// written with the pool's remaining watch window expires exactly when the
+// in-process prune would have dropped it.
+const youngPoolPrefix = "rh:young:"
+
+// LoadYoungPools returns every carried young-pool record still live in Redis,
+// as raw JSON for the caller to decode. Read once at startup: the registry is
+// the pulse ladder's only view of the 1h-24h band (no feed can answer "which
+// WETH pools are three hours old"), and it lived in process memory alone — so
+// a restart blinded the mode for an hour and starved it for a day while ~2400
+// carried pools rebuilt from scratch. Measured 2026-08-07.
+//
+// Best-effort: a missing backend or a failed scan returns what it has. An
+// empty result is indistinguishable from a cold cache on purpose — both mean
+// "carry nothing yet", which is where the mode already starts.
+func (s *Seen) LoadYoungPools(ctx context.Context) [][]byte {
+	if s.rdb == nil {
+		return nil
+	}
+	var (
+		out    [][]byte
+		cursor uint64
+	)
+	for {
+		keys, next, err := s.rdb.Scan(ctx, cursor, youngPoolPrefix+"*", 500).Result()
+		if err != nil {
+			return out
+		}
+		if len(keys) > 0 {
+			vals, err := s.rdb.MGet(ctx, keys...).Result()
+			if err != nil {
+				return out
+			}
+			for _, v := range vals {
+				// A key can expire between the SCAN and the MGET; that reads as nil.
+				if sv, ok := v.(string); ok && sv != "" {
+					out = append(out, []byte(sv))
+				}
+			}
+		}
+		cursor = next
+		if cursor == 0 {
+			return out
+		}
+	}
+}
+
+// SaveYoungPool persists one registry entry for ttl. Silent and best-effort for
+// the same reason PutCandles is: the in-process registry has already recorded
+// the pool, so a Redis hiccup costs a future restart's head start, never a
+// candidate this cycle.
+func (s *Seen) SaveYoungPool(ctx context.Context, addr string, v any, ttl time.Duration) {
+	if s.rdb == nil || addr == "" || ttl <= 0 {
+		return
+	}
+	b, err := json.Marshal(v)
+	if err != nil {
+		return
+	}
+	s.rdb.Set(ctx, youngPoolPrefix+strings.ToLower(addr), b, ttl)
+}
+
 // Unmark removes id from the seen set so a failed emit can retry on the next
 // poll. Called when webhook delivery fails after MarkIfNew already recorded it.
 func (s *Seen) Unmark(ctx context.Context, id string) {
