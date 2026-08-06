@@ -5,6 +5,31 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.3.0](https://github.com/pgen0x/azimuth/compare/v2.2.0...v2.3.0) (2026-08-06)
+
+
+### Features
+
+* **robinhood:** add gas-topup — buy ETH gas with USDG ([a91be07](https://github.com/pgen0x/azimuth/commit/a91be073eb4a7a813dc538a450e8feb350e869d9))
+* **robinhood:** add the ladder idle exit and widen the USDG rungs ([ad6d0a7](https://github.com/pgen0x/azimuth/commit/ad6d0a7bff38d9a444825f25e5a5e9918e87fbc8))
+* **robinhood:** add the one-sided ladder modes for WETH and USDG ([66db788](https://github.com/pgen0x/azimuth/commit/66db78868b9f2a3b1b370005688c4fc3855c2b71))
+* **robinhood:** cap ladders per underlying, throttle GeckoTerminal ([2026ade](https://github.com/pgen0x/azimuth/commit/2026adec2b21b22b64d40781fb6f75ffe385cfa4))
+* **robinhood:** give the stock ladder its own dedup window ([7ba0fa8](https://github.com/pgen0x/azimuth/commit/7ba0fa8d42e22f645f0f27ba2b89873b25ca3739))
+* **robinhood:** measure ladder fees on-chain in the state read ([6c5d507](https://github.com/pgen0x/azimuth/commit/6c5d507b61bd13df3b87ffe7424c90c4a986337c))
+* **robinhood:** mint the ladder on Uniswap v4 ([14337dd](https://github.com/pgen0x/azimuth/commit/14337dd6618ef0e8ae10a29fe04d6479bead0485))
+* **robinhood:** one-sided WETH + USDG ladder modes, v3 and v4 ([1dc93f5](https://github.com/pgen0x/azimuth/commit/1dc93f540c2ff7977cd00e6749ec7e8ab78230a0))
+* **robinhood:** read real ladder fees from the Krystal position API ([5698192](https://github.com/pgen0x/azimuth/commit/5698192396ebe17b034d9eb569b4c471f2bcf409))
+* **robinhood:** union the ladder feed with a cached trending page ([6756719](https://github.com/pgen0x/azimuth/commit/675671976b26b6b7d4390c69b89dead06e0a77f4))
+
+
+### Bug Fixes
+
+* **robinhood:** drop the stock-ladder TVL floor to $20k ([a864096](https://github.com/pgen0x/azimuth/commit/a864096efe1cd306079b18e8e2cb8e02cad67bee))
+* **robinhood:** judge ladder idleness per wall, not per rung ([7d1fc45](https://github.com/pgen0x/azimuth/commit/7d1fc450d327f3b6b9cbb50c7c49c07fad1b8905))
+* **robinhood:** live within GeckoTerminal's real request budget ([1b5e555](https://github.com/pgen0x/azimuth/commit/1b5e5558fcb562dcab826d8a59560b65e1be3789))
+* **robinhood:** reject quote/quote pools and stop closing ladder rungs on error payloads ([2080a6b](https://github.com/pgen0x/azimuth/commit/2080a6bbe353ffe5b0399bbf1640ad19c07b70b0))
+* **robinhood:** release a fee-dead ladder on age, not a rolling window ([f2fe794](https://github.com/pgen0x/azimuth/commit/f2fe794851e45446b4eec9d5da73be3ca27b25be))
+
 ## [2.2.0](https://github.com/pgen0x/azimuth/compare/v2.1.0...v2.2.0) (2026-08-01)
 
 
