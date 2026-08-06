@@ -343,7 +343,18 @@ func (s *Scanner) sizeFor(c *robinhood.Candidate, bal robinhood.Balances) deploy
 	return sz
 }
 
-func (s *Scanner) robinhoodDeploy(ctx context.Context, mode string, batch []*robinhood.Candidate) {
+// robinhoodDeploy returns whether the batch was CONSUMED — i.e. reached a
+// decision that depended on the candidates themselves (deployed, or rejected by
+// the picker / entry timing). It returns false when the blocker was wallet
+// state rather than the pools: at the position cap, an uncountable inventory,
+// an unreadable balance, a quote asset too thin to fund the floor, or an
+// executor that failed to mint. Those resolve on their own — a position
+// closes, a transfer lands, the next mint sticks — and the caller
+// unmarks the batch so the pools come back next cycle instead of serving their
+// full ROBINHOOD_SEEN_TTL in silence. Measured 2026-08-06: a 0-WETH wallet
+// silenced its only pulse-ladder candidate for six hours on a skip that cost
+// the pool nothing.
+func (s *Scanner) robinhoodDeploy(ctx context.Context, mode string, batch []*robinhood.Candidate) bool {
 	// Keep only candidates an enabled executor can actually mint: v3 pools
 	// need uni_executor.js, v4 poolIds need uni_v4_executor.js (Phase 7).
 	// With no v4 executor configured, v4 candidates stay observe-only —
@@ -358,7 +369,9 @@ func (s *Scanner) robinhoodDeploy(ctx context.Context, mode string, batch []*rob
 		log.Printf("scanner[%s]: %d candidate(s) excluded from deploy (no executor for their protocol)", mode, len(batch)-len(eligible))
 	}
 	if len(eligible) == 0 {
-		return
+		// Consumed: no enabled executor can ever mint these pools, so retrying
+		// them next cycle would only re-walk the same protocol mismatch.
+		return true
 	}
 
 	// Walk candidates in score order (copycats demoted: a same-symbol collision
@@ -384,7 +397,7 @@ func (s *Scanner) robinhoodDeploy(ctx context.Context, mode string, batch []*rob
 		inv, err := r.Inventory(ctx)
 		if err != nil {
 			log.Printf("scanner[%s]: DEPLOY SKIPPED (position count unknown, failing closed): %v", mode, err)
-			return
+			return false
 		}
 		open += inv.Ladders
 		for t, n := range inv.ByToken {
@@ -394,7 +407,7 @@ func (s *Scanner) robinhoodDeploy(ctx context.Context, mode string, batch []*rob
 	if open >= s.cfg.RobinhoodMaxOpenPositions {
 		log.Printf("scanner[%s]: DEPLOY SKIPPED %s (%s): at position cap %d/%d",
 			mode, eligible[0].BaseSymbol, eligible[0].Pool[:10], open, s.cfg.RobinhoodMaxOpenPositions)
-		return
+		return false
 	}
 
 	order := pickOrder(eligible)
@@ -424,7 +437,7 @@ func (s *Scanner) robinhoodDeploy(ctx context.Context, mode string, batch []*rob
 		bal, err := s.runnerFor(c).Balance(ctx)
 		if err != nil {
 			log.Printf("scanner[%s]: DEPLOY SKIPPED (balance unknown, failing closed): %v", mode, err)
-			return
+			return false
 		}
 		bals[key] = bal
 	}
@@ -445,7 +458,7 @@ func (s *Scanner) robinhoodDeploy(ctx context.Context, mode string, batch []*rob
 		// have reported.
 		c := order[0]
 		log.Printf("scanner[%s]: DEPLOY SKIPPED %s (%s): %s", mode, c.BaseSymbol, c.Pool[:10], sizes[c.Pool].skip)
-		return
+		return false
 	}
 
 	var best *robinhood.Candidate
@@ -485,8 +498,12 @@ func (s *Scanner) robinhoodDeploy(ctx context.Context, mode string, batch []*rob
 		break
 	}
 	if best == nil {
+		// Consumed on purpose, even though the per-token cap is wallet state: the
+		// entry-timing gate costs one OHLCV request per candidate, and unmarking
+		// here would re-spend that on the same pools every cycle — the GT budget
+		// this function's sizing order exists to protect.
 		log.Printf("scanner[%s]: DEPLOY SKIPPED — per-token cap and entry timing rejected all %d candidate(s)", mode, len(eligible))
-		return
+		return true
 	}
 	if best.IsCopycat {
 		log.Printf("scanner[%s]: DEPLOY PICK is a copycat (%s, %d share ticker %q) — no clean candidate this batch",
@@ -505,7 +522,7 @@ func (s *Scanner) robinhoodDeploy(ctx context.Context, mode string, batch []*rob
 	out, err := runner.Deploy(ctx, best.Pool, sz.amount, s.cfg.RobinhoodRangePct, s.cfg.RobinhoodSlippagePct, sz.strategy, sz.quote)
 	if err != nil {
 		log.Printf("scanner[%s]: DEPLOY FAILED %s (%s): %v\n%s", mode, best.BaseSymbol, best.Pool[:10], err, out)
-		return
+		return false
 	}
 	deployed := robinhood.Deployed(out)
 	summary := robinhood.Summarize(out)
@@ -515,6 +532,7 @@ func (s *Scanner) robinhoodDeploy(ctx context.Context, mode string, batch []*rob
 			log.Printf("scanner[%s]: report delivery failed: %v", mode, rerr)
 		}
 	}
+	return true
 }
 
 // rhFetcher is a mode's discovery source. It takes the cycle's clock so the
@@ -620,8 +638,15 @@ func (s *Scanner) pollRobinhood(ctx context.Context, mp robinhood.ModeParams, fe
 			// mirroring how Solana's DEPLOY_CMD bypasses its webhook. Gated
 			// per-mode by ROBINHOOD_DEPLOY_MODES — a mode outside the set
 			// (e.g. fresh while only mature trades) still journals below.
-			s.robinhoodDeploy(ctx, mp.Mode, batch)
-			sent = len(batch)
+			if s.robinhoodDeploy(ctx, mp.Mode, batch) {
+				sent = len(batch)
+			} else {
+				// Wallet state blocked the batch, not the pools — put them back so
+				// the next cycle re-offers them once a slot or the funding lands.
+				for _, k := range batchKeys {
+					s.seen.Unmark(ctx, k)
+				}
+			}
 		} else if !s.cfg.RobinhoodWebhook {
 			// Observe-only (Phase 1 default): journal the full payload so the
 			// gate thresholds can be calibrated from logs, without exposing the
