@@ -199,7 +199,7 @@ func ladderEligible(pools []Pool, mp ModeParams) []Pool {
 		if quoteAssets[strings.ToLower(oriented.BaseAddress)] {
 			continue // WETH/USDG and friends: no token side at all
 		}
-		if mp.QuoteAsset != "" && !strings.EqualFold(oriented.QuoteAddress, mp.QuoteAsset) {
+		if mp.QuoteAsset != "" && !quotePinMatch(oriented.QuoteAddress, mp.QuoteAsset) {
 			continue
 		}
 		out = append(out, p)

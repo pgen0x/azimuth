@@ -271,7 +271,7 @@ func prefilter(p Pool, mp ModeParams, now time.Time) bool {
 	}
 	// A quote-pinned mode (the ladders) cannot use the other quote's pools at
 	// all, so cutting them here buys enrichment-batch room rather than recall.
-	if mp.QuoteAsset != "" && !strings.EqualFold(p.QuoteAddress, mp.QuoteAsset) {
+	if mp.QuoteAsset != "" && !quotePinMatch(p.QuoteAddress, mp.QuoteAsset) {
 		return false
 	}
 	// Quote/quote pools (WETH/USDG) have no token side at all — Screen rejects

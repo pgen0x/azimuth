@@ -347,7 +347,7 @@ func Screen(p Pool, mp ModeParams, now time.Time) (*Candidate, string) {
 	// A mode pinned to one quote asset takes only that asset's pools — the
 	// ladder modes are, because their rungs and their sizing are denominated in
 	// it (see ModeParams.QuoteAsset).
-	if mp.QuoteAsset != "" && !strings.EqualFold(p.QuoteAddress, mp.QuoteAsset) {
+	if mp.QuoteAsset != "" && !quotePinMatch(p.QuoteAddress, mp.QuoteAsset) {
 		return nil, fmt.Sprintf("quote-asset %s not this mode's", p.QuoteSymbol)
 	}
 	// Both sides a quote asset (WETH/USDG, ETH/USDG …) means there is no token

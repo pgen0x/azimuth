@@ -57,6 +57,32 @@ var quoteAssets = map[string]bool{
 	NativeETH: true,
 }
 
+// isEtherQuote reports whether an address is one of the two spellings of ether
+// on this venue: the ERC-20 wrapper (v3) and the zero address (v4 pools ether
+// natively). They are one asset, and both data sources call it "WETH".
+func isEtherQuote(addr string) bool {
+	return strings.EqualFold(addr, WETH) || strings.EqualFold(addr, NativeETH)
+}
+
+// quotePinMatch reports whether a pool's quote side satisfies a mode's
+// QuoteAsset pin. Exact match, EXCEPT that the two ether spellings satisfy each
+// other — a pin on WETH means "this mode LPs against ether", not "against the
+// ERC-20 wrapper specifically".
+//
+// This is not a widening of thesis; it is what the rest of the stack already
+// assumed. sizeFor sizes native-ETH pools off the WETH balance because the v4
+// executor unwraps on demand (ensureNativeFunds) and rewraps after a close, and
+// the v4 ladder was DRY_RUN-verified against a native-ETH pool. Only the pin
+// disagreed — and it decided everything, because the launch feed is almost
+// entirely v4: of 70 pools carried by the pulse registry on 2026-08-07, 68 were
+// native-ETH and 2 were wrapped. The mode could see 3% of its own universe.
+func quotePinMatch(poolQuote, pin string) bool {
+	if strings.EqualFold(poolQuote, pin) {
+		return true
+	}
+	return isEtherQuote(poolQuote) && isEtherQuote(pin)
+}
+
 // orientQuote returns p with its quote side guaranteed to be a whitelisted
 // quote asset, swapping base/quote when a source put the quote asset on the
 // base side (GeckoTerminal lists USDG base-side in USDG/memecoin pools; the

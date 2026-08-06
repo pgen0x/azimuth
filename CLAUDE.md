@@ -161,7 +161,13 @@ one pass per enabled mode per `POLL_INTERVAL`.
 
   Modes are quote-pinned via `ModeParams.QuoteAsset` — a ladder's rungs and its
   sizing must be the same asset, so a mode may not mix WETH- and USDG-quoted
-  pools in one batch. **USDG is 6 decimals, WETH is 18**: anything touching
+  pools in one batch. The pin goes through `quotePinMatch`, not an address
+  compare: **ether has two spellings** on this venue (the v3 ERC-20 wrapper and
+  the v4 zero address, both reported as "WETH"), and a WETH pin means "LPs
+  against ether". An exact compare made the WETH ladders blind to v4 — 68 of
+  the 70 pools the pulse registry carried on 2026-08-07 were native-ETH — even
+  though `sizeFor` and the v4 executor (`ensureNativeFunds` / `rewrapExcess`)
+  were already built to fund a native-quote mint from the WETH balance. **USDG is 6 decimals, WETH is 18**: anything touching
   amounts in `uni_executor.js` must go through `parseQ`/`fmtQ`, never
   `parseEther` (the v4 executor uses `parseUnits`/`formatUnits` at `q.decimals`
   for the same reason).
