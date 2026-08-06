@@ -42,6 +42,13 @@ if os.path.exists(_V4_EXECUTOR):
     EXECUTORS.append(("v4", _V4_EXECUTOR))
 STATE_PATH = os.path.join(PROFILE_DIR, "memories", "uni_monitor_state.json")
 CLOSES_PATH = os.path.join(PROFILE_DIR, "memories", "uni_closes.jsonl")
+# Momentum cache, shared ACROSS ticks. The loop runs this script one-shot, so a
+# process-local dict dies every tick and the GT request repeats at whatever the
+# loop's cadence is. Persisting it decouples the two: the on-chain reads (PnL,
+# range, rung fills) tick as fast as the loop wants, while the GT request stays
+# on MOMENTUM_TTL. That is what lets a 20s loop cost the GT budget a 60s loop
+# did — see uni_monitor_loop.sh.
+MOMENTUM_CACHE_PATH = os.path.join(PROFILE_DIR, "memories", "uni_momentum_cache.json")
 
 DRY_RUN = os.environ.get("DRY_RUN", "").lower() == "true"
 # Report-only: read positions + state + momentum, compute the decision label for
@@ -649,13 +656,59 @@ USER_AGENT = "azimuth-uni-monitor/1.0"
 GT_MULTI_MAX = 30
 _momentum_cache = {}
 
+# How long a fetched (m5, h1) pair stays usable. 60s is not arbitrary: these are
+# GeckoTerminal's 5-minute and 1-hour price-change windows, so re-reading them
+# every 20s returns the same numbers three times and spends two extra requests
+# out of a ~10/min budget this process shares with the discovery daemon. The
+# rules that DO need every tick — PnL, in-range, rung fills — are on-chain reads
+# and are unaffected by this TTL.
+MOMENTUM_TTL = float(os.environ.get("UNI_MOMENTUM_TTL", "60"))
+
+
+def _load_momentum_cache():
+    """Return (age_seconds, {pool: [m5, h1]}) from the persisted cache, or
+    (inf, {}) when it is missing/corrupt — an unreadable cache must look stale,
+    never fresh-and-empty, or the refetch it should trigger would be skipped."""
+    try:
+        with open(MOMENTUM_CACHE_PATH) as f:
+            d = json.load(f)
+        return max(0.0, time.time() - float(d.get("ts") or 0)), dict(d.get("pools") or {})
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        return float("inf"), {}
+
+
+def _save_momentum_cache(pools):
+    # The report cron reads the cache but never writes it, same rule that keeps
+    # it off STATE_PATH: the loop owns every file the exits depend on, and a
+    # report tick landing between two loop ticks must not move the window the
+    # loop is pacing its GT requests by.
+    if REPORT_ONLY:
+        return
+    try:
+        os.makedirs(os.path.dirname(MOMENTUM_CACHE_PATH), exist_ok=True)
+        with open(MOMENTUM_CACHE_PATH, "w") as f:
+            json.dump({"ts": time.time(), "pools": pools}, f)
+    except OSError as e:
+        print(f"warn: could not save momentum cache: {e}")
+
 
 def prefetch_momentum(pools):
-    """Fill the per-tick momentum cache for every distinct pool in one (or, past
+    """Fill this tick's momentum cache for every distinct pool in one (or, past
     GT_MULTI_MAX pools, a few) /pools/multi/ call. Best-effort: a failed chunk
     leaves its pools uncached, so fetch_momentum returns (None, None) for them —
-    which every momentum rule treats as passing, same as before."""
+    which every momentum rule treats as passing, same as before.
+
+    Serves the persisted cache instead when it is younger than MOMENTUM_TTL and
+    already covers every pool asked for. A pool that is NOT covered (a mint since
+    the last fetch) forces the request even on a young cache — a brand-new
+    position is exactly the one whose momentum rules must not be blind."""
     want = sorted({p.lower() for p in pools if p})
+    if not want:
+        return
+    age, cached = _load_momentum_cache()
+    if age < MOMENTUM_TTL and all(p in cached for p in want):
+        _momentum_cache.update({k: tuple(v) for k, v in cached.items()})
+        return
     for i in range(0, len(want), GT_MULTI_MAX):
         chunk = want[i:i + GT_MULTI_MAX]
         url = ("https://api.geckoterminal.com/api/v2/networks/robinhood/pools/multi/"
@@ -676,6 +729,11 @@ def prefetch_momentum(pools):
                                              float(pc.get("h1") or 0))
         except Exception:
             continue
+    # Persist whatever landed. A partial (or empty, all-chunks-refused) result is
+    # written with a fresh timestamp anyway: the NEXT tick's coverage check sees
+    # the missing pools and refetches, so a refused call costs one stale tick,
+    # not a poisoned window.
+    _save_momentum_cache({k: list(v) for k, v in _momentum_cache.items()})
 
 
 def fetch_momentum(pool):
