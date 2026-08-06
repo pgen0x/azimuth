@@ -180,6 +180,11 @@ func FetchNewPools(baseURL string, now time.Time) ([]Pool, error) {
 	if len(trendingAddrs) > 0 {
 		publishTrending(pools, trendingAddrs, now)
 	}
+	// Every pool this sweep saw also goes into the young-pool registry (pulse.go).
+	// This is the ONLY place the venue's launches can be recorded: they scroll off
+	// new_pools within minutes, so a mode that wants them at three hours old has
+	// to have written them down at three minutes old.
+	publishYoung(pools, now)
 	return pools, nil
 }
 

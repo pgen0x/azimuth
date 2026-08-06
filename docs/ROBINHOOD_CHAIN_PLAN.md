@@ -732,6 +732,78 @@ USDG-quoted v4 pool appears in any batch the daemon has logged (all 51 are
 ETH/WETH-quoted, consistent with the USDG universe being v3), and
 `ROBINHOOD_V4_EXECUTOR_CMD` is still unset. Setting it is what starts that soak.
 
+## 4e. `rh-pulse-ladder` — the same wall, one age band earlier (2026-08-06)
+
+`rh-ladder` cannot look at a pool younger than 24h. That floor is not a thesis
+choice, it is the Uniswap gateway's index boundary — and it means the venue's
+**highest-churn hours are unreachable**, which for a shape paid by churn and
+never holding the token is the wrong band to be excluded from.
+
+### The feed problem, measured
+
+The obvious fix — "screen `new_pools` and wait" — does not work here, and the
+reason is worth writing down because it is a property of this venue:
+
+> Sampled 2026-08-06: GeckoTerminal `new_pools` (2 pages) returned **33
+> WETH-quoted Uniswap pools and every single one was 1-5 minutes old**. Median
+> reserve $4.8k; the interesting tail was $21k-$27k with 79-153 h1 txns.
+
+The venue mints roughly **six WETH pools a minute**, so the launch feed only
+ever spans the last few minutes. There is no query, on any source this daemon
+has, that answers *"which WETH pools are three hours old"*. The band between the
+two feeds is not under-served; it is unaddressable.
+
+### The carried registry
+
+So `pulse.go` writes launches down. Every `FetchNewPools` sweep — rh-fresh's or
+this mode's own, whichever ran (`pulseRefresh`, the same sharing rule as the
+trending cache) — publishes into an in-memory registry keyed by pool address,
+holding **identity only**: address, protocol, currencies, fee tier, creation
+time. Each cycle:
+
+1. entries whose age has moved into `[MinAge, MaxAge)` are collected, unioned
+   with any in-window pool on the cached trending page,
+2. ranked by discovery-time reserve and cut to 30,
+3. **re-enriched in one `/pools/multi/` call** — the same per-cycle GT budget
+   every mature-family mode spends,
+4. and anything the enrich did not refresh is **dropped**, because a carried
+   entry's launch-minute numbers must never reach a gate.
+
+Retention is 24h (`watchKeep`), capped at 3000 entries, evicting oldest first —
+both bounds are the window itself, not tuning knobs.
+
+### Thresholds, and what backs them
+
+`PulseLadder.MaxAge == Ladder.MinAge` exactly, so the two modes hand off at 24h
+with no overlap; a test asserts it. Everything else is **first-pass and unbacked
+by outcomes** — unlike §4b's numbers, which came off a profitable LP's 23 real
+entries. Notable departures from `Ladder`:
+
+| gate | Ladder | PulseLadder | why |
+|---|---|---|---|
+| `MinAge` | 24h | 1h | cheapest "this launch survived" filter; a wall parked at minute 3 sits under an undiscovered price |
+| `MinFeePct` | 0.3% | 0.25% | the venue's v4 launch template mints at 0.25% — 20 of the 33 sampled pools |
+| `MinFeeTVLDay` | 1.5% realized | 4.0% extrapolated | a 6h-old pool's h24 volume IS its lifetime volume, so a realized pace understates it; `FeePaceH24=false` plus a higher bar keeps the two comparable |
+| `MinReserveUSD` | $10k | $10k | unchanged, and load-bearing here: in a $5k pool our rungs would BE the book |
+
+That last row is where the exit-liquidity calibration landed. Probing every live
+`Screen` passer on 2026-08-06 found **0 of 17** deploying-mode pools with zero
+active liquidity, but **5 of 5** young v4 pools did — and both a buy and a sell
+quote against them reverted `NotEnoughLiquidity`. Active liquidity also flips
+within minutes (two pools read non-zero, then zero five minutes later), so it is
+deliberately **not** a screen-time gate: it would be a snapshot of a value that
+changes before a mint lands. The reserve floor is the durable version of the
+same guard.
+
+### Status
+
+Wired, built, tested, `ROBINHOOD_PULSE_LADDER=false`. **No live entry yet** —
+the mode has never minted, and its thresholds are the soak's subject, not its
+conclusion. Geometry is untouched: `uni_ladder.js` keys rung width on the QUOTE
+asset, so a pulse-discovered WETH pool gets the same 1200-tick rungs rh-ladder
+mints. If the soak shows a first-day pool wants a different wall, the knob to
+add is per-strategy geometry — not a second WETH constant.
+
 ## 5. Deliverable order
 
 | # | Deliverable | Depends on |

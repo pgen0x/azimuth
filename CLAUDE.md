@@ -138,6 +138,22 @@ one pass per enabled mode per `POLL_INTERVAL`.
     is the only honest source for a wall's real width. It spends the wallet's
     **USDG**, so sizing uses `RobinhoodSizeUSDG` (dollar units). §4c.
 
+  - `PulseLadder` (`ROBINHOOD_PULSE_LADDER`) — the same WETH wall as `Ladder`,
+    one age band earlier: memecoin pools **1h-24h old**, handing off at exactly
+    24h (`PulseLadder.MaxAge == Ladder.MinAge`, asserted by a test). It needs a
+    discovery source no other mode does, because **neither feed can answer
+    "which WETH pools are three hours old"** — measured 2026-08-06, `new_pools`
+    returned 33 WETH pools and every one was 1-5 minutes old, while the gateway
+    indexes nothing under a day. So `pulse.go` keeps a **carried registry**:
+    every launch sweep records pools by identity + creation time, and each cycle
+    the entries that have aged INTO the band are re-enriched in one
+    `/pools/multi/` call. Only identity survives the carry — every number a gate
+    reads is re-fetched, and an entry the enrich did not refresh is dropped
+    rather than screened on launch-minute data. Geometry is unchanged
+    (`uni_ladder.js` keys on the quote asset, not the mode): if a soak shows a
+    first-day pool wants a different wall, add per-strategy geometry, not a
+    second WETH constant.
+
   Modes are quote-pinned via `ModeParams.QuoteAsset` — a ladder's rungs and its
   sizing must be the same asset, so a mode may not mix WETH- and USDG-quoted
   pools in one batch. **USDG is 6 decimals, WETH is 18**: anything touching

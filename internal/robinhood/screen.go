@@ -168,6 +168,75 @@ var Ladder = ModeParams{
 	MaxFdvUSD: 50_000_000,
 }
 
+// PulseLadder is the weth_ladder shape aimed one age-band earlier than Ladder:
+// WETH memecoin pools in their FIRST DAY, which no feed here could reach until
+// the carried registry in pulse.go existed.
+//
+// Same wall, same executor, same exit rulebook. What differs is only which pools
+// it looks at, and that is deliberate — rung width and count describe how far a
+// token can fall, not how old it is, so the geometry keys on the quote asset
+// (uni_ladder.js) and a pulse-discovered WETH pool gets the same 1200-tick rungs
+// rh-ladder mints. If a soak shows a first-day pool wants a different wall, the
+// knob to add is per-strategy geometry, NOT a second WETH constant.
+//
+// The two modes hand off at 24h with no overlap by construction: MaxAge here is
+// Ladder's MinAge, which is itself set by the gateway's inability to index
+// anything younger. Below that line this mode is the only one that can see the
+// pool; above it, rh-ladder's feed is strictly richer.
+//
+// FIRST-PASS thresholds. Unlike Ladder's — which were read off a profitable
+// LP's 23 real entries — nothing here is backed by an outcome yet, only by what
+// the venue's young universe looks like (measured 2026-08-06: 33 WETH launches
+// in the new_pools window, median reserve $4.8k, a handful at $21k-$27k with
+// 79-153 h1 txns). Treat every number below as a starting point for the soak.
+var PulseLadder = ModeParams{
+	Mode: "rh-pulse-ladder",
+
+	// WETH-quoted only, for the reason every ladder mode pins its quote: the
+	// rungs ARE the quote asset and the deploy sizes against that same balance.
+	QuoteAsset: WETH,
+
+	// One hour is the cheapest available "this launch survived" filter. The
+	// venue mints ~6 WETH pools a minute, nearly all of them $4.8k template dust
+	// that stops trading within the hour; waiting one out costs a mode whose
+	// thesis is a resting bid wall almost nothing, because a wall parked at
+	// minute 3 of a launch sits under a price nobody has discovered yet.
+	MinAge: 1 * time.Hour,
+	MaxAge: 24 * time.Hour, // == Ladder.MinAge: the handoff, not a thesis edge
+
+	// Ladder's floor. A wall in a $5k pool is not a smaller version of a wall in
+	// a $50k pool — our rungs would BE the book, so every fill is adverse and
+	// there is no external bid to exit into (measured 2026-08-06: young v4 pools
+	// whose active liquidity had drained refused swaps in BOTH directions with
+	// NotEnoughLiquidity). The ceiling is ours, not theirs: fee share is our
+	// share of the active tick.
+	MinReserveUSD: 10000,
+	MaxReserveUSD: 2_000_000,
+
+	// 0.25%, not Ladder's 0.3%. The venue's v4 launch template mints at the
+	// 0.25% tier — 20 of the 33 pools in the measured window — so a 0.3% floor
+	// would silently exclude most of this mode's universe on a rounding edge.
+	MinFeePct: 0.25,
+
+	// h1 EXTRAPOLATION here, unlike both established ladder modes, because a
+	// six-hour-old pool has no 24h history: GT's h24 volume for it is LIFETIME
+	// volume, so a realized pace would understate a pool that only started
+	// trading an hour ago. The bar is correspondingly higher than Ladder's
+	// realized 1.5% — an extrapolated rate reads high by construction, and 4%
+	// keeps the comparison honest rather than pretending the two measure the
+	// same thing.
+	MinFeeTVLDay: 4.0,
+	FeePaceH24:   false,
+
+	// Ladder's flow floors. A quiet hour is a non-event for a wall holding WETH,
+	// so these exist to drop dead books, not to rank live ones.
+	MinTxH1:     30,
+	MinBuyersH1: 10,
+
+	MinFdvUSD: 20000,
+	MaxFdvUSD: 50_000_000,
+}
+
 // StockLadder is the usdg_ladder mode: the SAME one-sided bid-wall shape as
 // Ladder, pointed at the venue's other universe — the tokenized equities
 // (nvda, gme, spacex …), which quote in USDG rather than WETH.

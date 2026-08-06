@@ -109,6 +109,15 @@ type Config struct {
 	// with rh-ladder for gas but not for capital. Off by default; see
 	// robinhood.StockLadder.
 	EnableRobinhoodStockLadder bool
+	// EnableRobinhoodPulseLadder turns on the venue's FIFTH mode
+	// (rh-pulse-ladder): the same one-sided WETH bid wall as rh-ladder, aimed at
+	// memecoin pools in their FIRST DAY — the band between the launch feed and
+	// the gateway's 24h floor. It is the only mode that needs a carried
+	// registry, because new_pools scrolls a pool off within minutes and nothing
+	// else here indexes an eight-hour-old pool (pulse.go). It spends the same
+	// WETH balance rh-ladder does, so running both splits one wallet across two
+	// age bands. Off by default; see robinhood.PulseLadder.
+	EnableRobinhoodPulseLadder bool
 	// RobinhoodDiscoverURL overrides the GeckoTerminal new_pools endpoint
 	// (empty = the package default). The public tier allows 30 req/min.
 	// Applies to the Fresh mode only; rh-mature has its own source.
@@ -363,6 +372,7 @@ func loadConfig() Config {
 		EnableRobinhoodLadder: getbool("ROBINHOOD_LADDER", false),
 
 		EnableRobinhoodStockLadder: getbool("ROBINHOOD_STOCK_LADDER", false),
+		EnableRobinhoodPulseLadder: getbool("ROBINHOOD_PULSE_LADDER", false),
 
 		RobinhoodDiscoverURL: getenv("ROBINHOOD_DISCOVER_URL", ""),
 		RobinhoodWebhook:     getbool("ROBINHOOD_WEBHOOK", false),

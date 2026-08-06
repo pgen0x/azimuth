@@ -133,11 +133,12 @@ func (s *Scanner) Run(ctx context.Context) {
 	// (guard-secrets.sh), so this line is the operator's ONLY way to confirm a
 	// config edit actually took effect. A silently-wrong strategy here spends
 	// real money on the wrong shape.
-	log.Printf("scanner: started (interval=%v, casual=%v, multiday=%v, turnover=%v, pulse=%v, momentum=%v, robinhood=%v, rh-mature=%v, rh-ladder=%v, rh-usdg-ladder=%v)",
+	log.Printf("scanner: started (interval=%v, casual=%v, multiday=%v, turnover=%v, pulse=%v, momentum=%v, robinhood=%v, rh-mature=%v, rh-ladder=%v, rh-usdg-ladder=%v, rh-pulse-ladder=%v)",
 		s.cfg.PollInterval, s.cfg.EnableCasual, s.cfg.EnableMultiday, s.cfg.EnableTurnover, s.cfg.EnablePulse,
 		s.cfg.EnableMomentumGate, s.cfg.EnableRobinhood, s.cfg.EnableRobinhoodMature, s.cfg.EnableRobinhoodLadder,
-		s.cfg.EnableRobinhoodStockLadder)
-	if s.cfg.EnableRobinhood || s.cfg.EnableRobinhoodMature || s.cfg.EnableRobinhoodLadder || s.cfg.EnableRobinhoodStockLadder {
+		s.cfg.EnableRobinhoodStockLadder, s.cfg.EnableRobinhoodPulseLadder)
+	if s.cfg.EnableRobinhood || s.cfg.EnableRobinhoodMature || s.cfg.EnableRobinhoodLadder ||
+		s.cfg.EnableRobinhoodStockLadder || s.cfg.EnableRobinhoodPulseLadder {
 		modes := make([]string, 0, len(s.cfg.RobinhoodDeployModes))
 		for m := range s.cfg.RobinhoodDeployModes {
 			modes = append(modes, m)
@@ -211,6 +212,18 @@ func (s *Scanner) pollAll(ctx context.Context) {
 		// prefilter and Screen.
 		s.pollRobinhood(ctx, robinhood.StockLadder, func(now time.Time) ([]robinhood.Pool, error) {
 			return robinhood.FetchMaturePools(robinhood.StockLadder, now)
+		})
+	}
+	if s.cfg.EnableRobinhoodPulseLadder {
+		// The only mode whose feed this venue cannot serve on demand. Its band
+		// (1h-24h) sits between new_pools, which scrolls a pool off in minutes,
+		// and the gateway, which starts at 24h — so FetchPulsePools reads a
+		// registry the launch sweeps have been filling all along (pulse.go).
+		// Ordered LAST for the reason rh-usdg-ladder trails rh-ladder: its enrich
+		// is one more GeckoTerminal request, and the mode that runs last is the
+		// one a spent budget starves first.
+		s.pollRobinhood(ctx, robinhood.PulseLadder, func(now time.Time) ([]robinhood.Pool, error) {
+			return robinhood.FetchPulsePools(robinhood.PulseLadder, now)
 		})
 	}
 }
