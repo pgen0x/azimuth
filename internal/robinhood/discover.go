@@ -121,11 +121,26 @@ func fetchPage(url string) (*gtResponse, error) {
 // no-hidden-clock-reads rule). It stamps the trending page this call fetches
 // into the shared cache the ladder mode's union reads — trending.go.
 func FetchNewPools(baseURL string, now time.Time) ([]Pool, error) {
+	return fetchNewPoolsPages(baseURL, now, newPoolPages)
+}
+
+// fetchNewPoolsPages is FetchNewPools with the page count made explicit, for the
+// one caller that does not want the full screen's depth: the pulse registry
+// sweeps only to RECORD launches, and page 1 already covers more than a sweep
+// interval of them (~6 pools/minute against 20 per page). Paging deeper there
+// spends two extra requests out of a ~10/min budget to re-record pools the
+// previous sweep already holds — which is what put this venue in a
+// rate-limit cooldown when rh-fresh was off and pulse was paying for the feed
+// alone.
+func fetchNewPoolsPages(baseURL string, now time.Time, pages int) ([]Pool, error) {
 	if baseURL == "" {
 		baseURL = DefaultDiscoverURL
 	}
-	urls := make([]string, 0, newPoolPages+1)
-	for page := 1; page <= newPoolPages; page++ {
+	if pages < 1 {
+		pages = 1
+	}
+	urls := make([]string, 0, pages+1)
+	for page := 1; page <= pages; page++ {
 		urls = append(urls, fmt.Sprintf("%s?include=base_token%%2Cquote_token&page=%d", baseURL, page))
 	}
 	// trendingIdx marks which request is the trending page so its pools can be

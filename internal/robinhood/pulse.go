@@ -46,6 +46,15 @@ const (
 	// about to drop anyway.
 	pulseMaxWatch = 3000
 
+	// pulseSweepPages is how deep a SELF-SERVED sweep pages. One, because the
+	// sweep only RECORDS launches: page 1 holds 20 pools and the venue mints ~6
+	// WETH pools a minute, so a page covers more than a pulseRefresh interval.
+	// The full newPoolPages depth belongs to rh-fresh, which screens those pages
+	// rather than filing them — and paging deep here is what starved the GT
+	// budget into a rate-limit cooldown the first time pulse ran without
+	// rh-fresh to share the feed.
+	pulseSweepPages = 1
+
 	// watchKeep is the widest age any pulse mode can ask for, and therefore how
 	// long an entry is worth carrying. Tied to Ladder.MinAge by intent: past 24h
 	// the gateway feed indexes the pool and rh-ladder owns it.
@@ -159,7 +168,7 @@ func FetchPulsePools(mp ModeParams, now time.Time) ([]Pool, error) {
 		// rh-fresh is disabled, not to screen launches. A failure is survivable:
 		// the registry still holds everything earlier sweeps recorded, which is
 		// the entire point of carrying it.
-		if _, err := FetchNewPools(DefaultDiscoverURL, now); err != nil {
+		if _, err := fetchNewPoolsPages(DefaultDiscoverURL, now, pulseSweepPages); err != nil {
 			log.Printf("robinhood[%s]: launch sweep failed, continuing on %d carried pool(s): %v",
 				mp.Mode, len(watchWindow(mp, now)), err)
 		}
@@ -177,8 +186,20 @@ func FetchPulsePools(mp ModeParams, now time.Time) ([]Pool, error) {
 	}
 
 	carried := watchWindow(mp, now)
-	candidates := mergeFeeds(ladderEligible(carried, mp), extra)
+	eligible := ladderEligible(carried, mp)
+	candidates := mergeFeeds(eligible, extra)
 	if len(candidates) == 0 {
+		// Logged, not silent. A cycle that returns nothing has three very
+		// different causes — an empty registry, a registry whose entries are all
+		// too young, and a window full of pools this mode may not touch (a
+		// USDG-quoted trending pool against a WETH-pinned mode) — and without
+		// these counts they are indistinguishable from the outside, which is
+		// exactly the question the first live cycles asked.
+		watch.mu.Lock()
+		total := len(watch.pools)
+		watch.mu.Unlock()
+		log.Printf("robinhood[%s]: no candidates — registry=%d in_window=%d eligible=%d trending=%d",
+			mp.Mode, total, len(carried), len(eligible), len(extra))
 		return nil, nil
 	}
 
