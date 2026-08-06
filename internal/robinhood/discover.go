@@ -79,6 +79,12 @@ func pfloat(s string) float64 {
 // fetchPage retrieves and decodes one GeckoTerminal pools page (new_pools or
 // trending_pools — same JSON:API schema).
 func fetchPage(url string) (*gtResponse, error) {
+	// Every GT call in this package clears the shared gate first — see
+	// gtlimit.go. Unpaced bursts here are what starved the mature-family modes
+	// of a quarter of their cycles.
+	if err := gt.acquire(); err != nil {
+		return nil, err
+	}
 	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
@@ -91,6 +97,9 @@ func fetchPage(url string) (*gtResponse, error) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		io.Copy(io.Discard, io.LimitReader(resp.Body, 512))
+		if resp.StatusCode == http.StatusTooManyRequests {
+			gt.penalize()
+		}
 		return nil, fmt.Errorf("geckoterminal status %d", resp.StatusCode)
 	}
 	var gr gtResponse
@@ -107,7 +116,11 @@ func fetchPage(url string) (*gtResponse, error) {
 // hook / fee metadata from one extra gateway call — see fillV4Meta). Page
 // errors after the first successful page are tolerated: a partial view still
 // yields a usable cycle.
-func FetchNewPools(baseURL string) ([]Pool, error) {
+//
+// now is the cycle's clock, passed in rather than read here (see the
+// no-hidden-clock-reads rule). It stamps the trending page this call fetches
+// into the shared cache the ladder mode's union reads — trending.go.
+func FetchNewPools(baseURL string, now time.Time) ([]Pool, error) {
 	if baseURL == "" {
 		baseURL = DefaultDiscoverURL
 	}
@@ -115,13 +128,18 @@ func FetchNewPools(baseURL string) ([]Pool, error) {
 	for page := 1; page <= newPoolPages; page++ {
 		urls = append(urls, fmt.Sprintf("%s?include=base_token%%2Cquote_token&page=%d", baseURL, page))
 	}
+	// trendingIdx marks which request is the trending page so its pools can be
+	// published to the shared cache below; -1 when this cycle skips it.
+	trendingIdx := -1
 	if cycleCount%trendingEvery == 0 {
-		urls = append(urls, trendingURL+"?include=base_token%2Cquote_token&page=1")
+		trendingIdx = len(urls)
+		urls = append(urls, trendingRequestURL())
 	}
 	cycleCount++
 
 	tokens := map[string]gtToken{}
 	var data []gtPool
+	trendingAddrs := map[string]bool{}
 	failed := 0
 	for i, u := range urls {
 		gr, err := fetchPage(u)
@@ -136,14 +154,13 @@ func FetchNewPools(baseURL string) ([]Pool, error) {
 			log.Printf("robinhood: page %d/%d fetch failed (continuing partial): %v", i+1, len(urls), err)
 			continue
 		}
-		data = append(data, gr.Data...)
-		// Index included token resources by JSON:API id for relationship lookup.
-		for _, raw := range gr.Included {
-			var t gtToken
-			if err := json.Unmarshal(raw, &t); err == nil && t.Type == "token" {
-				tokens[t.ID] = t
+		if i == trendingIdx {
+			for _, gp := range gr.Data {
+				trendingAddrs[strings.ToLower(gp.Attrs.Address)] = true
 			}
 		}
+		data = append(data, gr.Data...)
+		indexTokens(gr, tokens)
 		// Space page requests out: the public tier throttles bursts well
 		// before the documented 30 req/min average (observed: 429s on pages
 		// 5-6 even at 300ms spacing; 1.2s clears a 60s cycle with margin).
@@ -155,6 +172,40 @@ func FetchNewPools(baseURL string) ([]Pool, error) {
 		log.Printf("robinhood: %d/%d discovery pages failed this cycle", failed, len(urls))
 	}
 
+	pools := fillV4Meta(mapGTPools(data, tokens))
+	// Hand the trending slice of this cycle to the shared cache AFTER fillV4Meta,
+	// so a cached v4 pool carries verified hook/fee meta — a v4 pool whose meta
+	// did not resolve was dropped above and must not reach a second consumer
+	// looking hookless (the venue's deliberate fail-closed divergence).
+	if len(trendingAddrs) > 0 {
+		publishTrending(pools, trendingAddrs, now)
+	}
+	return pools, nil
+}
+
+// indexTokens folds one page's included token resources into tokens, keyed by
+// JSON:API id for relationship lookup. The included array mixes tokens and
+// dexes, hence the per-type decode.
+func indexTokens(gr *gtResponse, tokens map[string]gtToken) {
+	for _, raw := range gr.Included {
+		var t gtToken
+		if err := json.Unmarshal(raw, &t); err == nil && t.Type == "token" {
+			tokens[t.ID] = t
+		}
+	}
+}
+
+// mapGTPools converts raw GeckoTerminal pool entries into venue Pools, deduped
+// by address and restricted to Uniswap v3/v4. It is the ONE mapping used by
+// every GeckoTerminal-fed path (new_pools, trending_pools) on purpose: field
+// parity between the feeds is then structural rather than something two copies
+// of this loop have to agree on.
+//
+// Pools on any other DEX are dropped here rather than passed on with an empty
+// Protocol — the filter is on DEX IDENTITY, not protocol version, because a
+// pons-dot-family or Uniswap-v2 pool is not something either executor can mint
+// in at all.
+func mapGTPools(data []gtPool, tokens map[string]gtToken) []Pool {
 	seen := map[string]bool{}
 	pools := make([]Pool, 0, len(data))
 	for _, gp := range data {
@@ -204,7 +255,7 @@ func FetchNewPools(baseURL string) ([]Pool, error) {
 			ChangeH24Pct:  pfloat(gp.Attrs.PriceChangePct.H24),
 		})
 	}
-	return fillV4Meta(pools), nil
+	return pools
 }
 
 // fillV4Meta resolves hook / dynamic-fee / true fee tier for the batch's v4

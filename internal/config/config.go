@@ -93,6 +93,22 @@ type Config struct {
 	// EnableRobinhood on purpose — the two modes share every safety gate but no
 	// discovery source, and either can run alone. Off by default.
 	EnableRobinhoodMature bool
+	// EnableRobinhoodLadder turns on the venue's THIRD mode (rh-ladder): the
+	// weth_ladder thesis, which parks a one-sided WETH bid wall under an
+	// established pool and never buys the token. It shares rh-mature's
+	// discovery source (Uniswap's gateway) but screens on churn instead of
+	// yield, so the two select largely different pools from the same feed —
+	// see robinhood.Ladder. Independent toggle for the same reason the other
+	// two are: either can run alone. Off by default.
+	EnableRobinhoodLadder bool
+	// EnableRobinhoodStockLadder turns on the venue's FOURTH mode
+	// (rh-usdg-ladder): the same one-sided bid-wall shape as rh-ladder, run
+	// against the chain's USDG-quoted tokenized equities instead of its WETH
+	// memecoins. Same gateway feed, far lower yield bar (0.2%/day vs 1.5%),
+	// and it spends the wallet's USDG rather than its WETH — so it competes
+	// with rh-ladder for gas but not for capital. Off by default; see
+	// robinhood.StockLadder.
+	EnableRobinhoodStockLadder bool
 	// RobinhoodDiscoverURL overrides the GeckoTerminal new_pools endpoint
 	// (empty = the package default). The public tier allows 30 req/min.
 	// Applies to the Fresh mode only; rh-mature has its own source.
@@ -100,6 +116,15 @@ type Config struct {
 	// RobinhoodSeenTTL is the venue's dedup window. Fresh-pool signals age out
 	// of the thesis within a day; 6h lets a still-qualifying pool re-signal.
 	RobinhoodSeenTTL time.Duration
+	// RobinhoodStockSeenTTL is the stock ladder's own, much shorter window.
+	// The venue default assumes a pool is only worth re-signalling once its
+	// thesis has had time to change, which is exactly wrong for a strategy
+	// whose EXIT IS A RE-PIN: the usdg_ladder closes precisely so it can be
+	// rebuilt around the new price, and 6h of silence on the pool it just left
+	// is 6h of idle capital. The tokenized-equity universe is also a handful of
+	// pools, so one long TTL silences the whole mode at once — observed
+	// 2026-08-05, every cycle deduped 18 of 18 and sent nothing.
+	RobinhoodStockSeenTTL time.Duration
 	// RobinhoodMinHolders is the Blockscout holder-count floor per candidate
 	// (fail-open when the fetch fails; 0 disables). New-chain tokens
 	// accumulate holders fast — 50 filters single-wallet theater without
@@ -170,6 +195,32 @@ type Config struct {
 	// (fail-closed on any read error) since nothing closes positions
 	// automatically yet. Keep this low until Phase 3 monitor exists.
 	RobinhoodMaxOpenPositions int
+	// RobinhoodMaxPerToken caps how many of those slots ONE underlying may hold
+	// (0 disables). The venue lists the same token in several pools — a
+	// tokenized equity commonly trades at the 0.05%, 0.3% and 1% tiers at once,
+	// and in v4 one pair+fee can exist at several tick spacings — so the
+	// wallet-wide cap alone let a single underlying take every slot (GME held
+	// three of three on 2026-08-05). Walls in different pools of the same token
+	// are not diversification; they are one price bet minted three times, and
+	// they all fill together.
+	RobinhoodMaxPerToken int
+	// RobinhoodRPCURL is the chain's JSON-RPC endpoint, used by the entry gate's
+	// on-chain candle fallback (internal/robinhood/onchain.go). Defaults to the
+	// public keyless endpoint because that is what the fallback is FOR: a
+	// fallback that needed its own provider account would expire quietly and
+	// leave the gate back where it started. Override to point at a private node.
+	RobinhoodRPCURL string
+	// RobinhoodOnchainCandles lets the entry-timing gate rebuild its 15m candles
+	// from the pool's Swap logs when GeckoTerminal will not serve them (429,
+	// cooldown, queue too long, any error). ON by default: GT's public tier is
+	// ~10 req/min for an IP three processes share, and the measured consequence
+	// of not having this was 82 `geckoterminal status 429` in six hours with the
+	// downtrend veto failing open through all of them — a gate that is absent
+	// precisely when the venue is busiest is worse than no gate, because the
+	// journal still reads as though it ran. Turn OFF only to isolate the RPC as
+	// a suspect; the gate then fails open on a GT refusal as it did before.
+	RobinhoodOnchainCandles bool
+
 	// RobinhoodIndicatorGate runs the supertrend_or_rsi entry-timing check
 	// (internal/robinhood/indicators.go, the Go port of local_indicators.py)
 	// on each deploy pick, skipping candidates whose token is in a confirmed
@@ -273,40 +324,59 @@ func getmodes(key, def string) map[string]bool {
 
 // Load builds a Config from the environment with sane public defaults.
 func Load() Config {
+	cfg := loadConfig()
+	// Install the venue's RPC settings in the robinhood package. It happens here
+	// rather than in scanner.New (where SetCandleStore is wired) because the
+	// fallback lives behind fetchOHLCV, a leaf HTTP helper the scanner never
+	// names — there is no call site up there to hand a URL to. Idempotent, and
+	// the package's own defaults already work if this never runs.
+	robinhood.SetOnchainFallback(cfg.RobinhoodRPCURL, cfg.RobinhoodOnchainCandles)
+	return cfg
+}
+
+func loadConfig() Config {
 	return Config{
-		DiscoverURL:               getenv("METEORA_DISCOVER_URL", "https://pool-discovery-api.datapi.meteora.ag/pools"),
-		PollInterval:              getdur("POLL_INTERVAL", 60*time.Second),
-		WebhookURL:                getenv("HERMES_WEBHOOK_URL", "http://127.0.0.1:8646/webhooks/dlmm-signal"),
-		WebhookSecret:             getenv("HERMES_WEBHOOK_SECRET", "dlmm-signal-secret-change-me"),
-		RedisAddr:                 getenv("REDIS_ADDR", ""),
-		RedisSeenKey:              getenv("REDIS_SEEN_KEY", "dlmm:signal:seen_pools"),
-		SeenTTL:                   getdur("SEEN_TTL", 24*time.Hour),
-		TurnoverSeenTTL:           getdur("TURNOVER_SEEN_TTL", 2*time.Hour),
-		CasualSeenTTL:             getdur("CASUAL_SEEN_TTL", 6*time.Hour),
-		PulseSeenTTL:           getdur("PULSE_SEEN_TTL", 2*time.Hour),
-		EnablePulse:            getbool("ENABLE_PULSE", false),
-		EnableCasual:              getbool("ENABLE_CASUAL", true),
-		EnableMultiday:            getbool("ENABLE_MULTIDAY", true),
-		EnableTurnover:            getbool("ENABLE_TURNOVER", false), // disabled: journal shows 44.8% WR, avg -3.91% per close — negative edge
-		EnableMomentumGate:        getbool("ENABLE_MOMENTUM_GATE", true),
-		EnableAuditGate:           getbool("ENABLE_AUDIT_GATE", true),
-		EnableGmgnGate:            getbool("ENABLE_GMGN_GATE", true),
-		GmgnAPIKey:                getenv("GMGN_API_KEY", ""),
-		GmgnMaxRatPct:             getfloat("GMGN_MAX_RAT_PCT", 40),
-		GmgnMaxBundlerPct:         getfloat("GMGN_MAX_BUNDLER_PCT", 40),
-		LoneMinScore:              getfloat("LONE_MIN_SCORE", 50),
-		EnablePVPCheck:            getbool("ENABLE_PVP_CHECK", true),
-		EnableRobinhood:           getbool("ROBINHOOD_ENABLED", false),
-		EnableRobinhoodMature:     getbool("ROBINHOOD_MATURE", false),
-		RobinhoodDiscoverURL:      getenv("ROBINHOOD_DISCOVER_URL", ""),
-		RobinhoodWebhook:          getbool("ROBINHOOD_WEBHOOK", false),
-		// Robinhood deploy disabled by default: uni_closes.jsonl shows 30.6% WR,
-		// avg loss -23.39%, expectancy -15.04%/trade. Observe-only until venue math improves.
-		RobinhoodDeployEnabled:    getbool("ROBINHOOD_DEPLOY_ENABLED", false),
-		RobinhoodDeployModes:      getmodes("ROBINHOOD_DEPLOY_MODES", "fresh,mature"),
-		RobinhoodExecutorCmd:      getenv("ROBINHOOD_EXECUTOR_CMD", ""),
-		RobinhoodV4ExecutorCmd:    getenv("ROBINHOOD_V4_EXECUTOR_CMD", ""),
-		RobinhoodDeployTimeout:    getdur("ROBINHOOD_DEPLOY_TIMEOUT", 2*time.Minute),
+		DiscoverURL:           getenv("METEORA_DISCOVER_URL", "https://pool-discovery-api.datapi.meteora.ag/pools"),
+		PollInterval:          getdur("POLL_INTERVAL", 60*time.Second),
+		WebhookURL:            getenv("HERMES_WEBHOOK_URL", "http://127.0.0.1:8646/webhooks/dlmm-signal"),
+		WebhookSecret:         getenv("HERMES_WEBHOOK_SECRET", "dlmm-signal-secret-change-me"),
+		RedisAddr:             getenv("REDIS_ADDR", ""),
+		RedisSeenKey:          getenv("REDIS_SEEN_KEY", "dlmm:signal:seen_pools"),
+		SeenTTL:               getdur("SEEN_TTL", 24*time.Hour),
+		TurnoverSeenTTL:       getdur("TURNOVER_SEEN_TTL", 2*time.Hour),
+		CasualSeenTTL:         getdur("CASUAL_SEEN_TTL", 6*time.Hour),
+		PulseSeenTTL:          getdur("PULSE_SEEN_TTL", 2*time.Hour),
+		EnablePulse:           getbool("ENABLE_PULSE", false),
+		EnableCasual:          getbool("ENABLE_CASUAL", true),
+		EnableMultiday:        getbool("ENABLE_MULTIDAY", true),
+		EnableTurnover:        getbool("ENABLE_TURNOVER", false), // off by default; enable after validating the screen on your own journal
+		EnableMomentumGate:    getbool("ENABLE_MOMENTUM_GATE", true),
+		EnableAuditGate:       getbool("ENABLE_AUDIT_GATE", true),
+		EnableGmgnGate:        getbool("ENABLE_GMGN_GATE", true),
+		GmgnAPIKey:            getenv("GMGN_API_KEY", ""),
+		GmgnMaxRatPct:         getfloat("GMGN_MAX_RAT_PCT", 40),
+		GmgnMaxBundlerPct:     getfloat("GMGN_MAX_BUNDLER_PCT", 40),
+		LoneMinScore:          getfloat("LONE_MIN_SCORE", 50),
+		EnablePVPCheck:        getbool("ENABLE_PVP_CHECK", true),
+		EnableRobinhood:       getbool("ROBINHOOD_ENABLED", false),
+		EnableRobinhoodMature: getbool("ROBINHOOD_MATURE", false),
+		EnableRobinhoodLadder: getbool("ROBINHOOD_LADDER", false),
+
+		EnableRobinhoodStockLadder: getbool("ROBINHOOD_STOCK_LADDER", false),
+
+		RobinhoodDiscoverURL: getenv("ROBINHOOD_DISCOVER_URL", ""),
+		RobinhoodWebhook:     getbool("ROBINHOOD_WEBHOOK", false),
+		// Robinhood deploy disabled by default. Observe-only until the venue's
+		// own close journal argues otherwise.
+		RobinhoodDeployEnabled: getbool("ROBINHOOD_DEPLOY_ENABLED", false),
+		// Mode keys are the Mode string minus its "rh-" prefix, so the stock
+		// ladder is "usdg-ladder". It is NOT in the default set: the USDG rungs
+		// spend a balance the wallet may not hold, and enabling discovery for it
+		// should not silently enable spending.
+		RobinhoodDeployModes:   getmodes("ROBINHOOD_DEPLOY_MODES", "fresh,mature,ladder"),
+		RobinhoodExecutorCmd:   getenv("ROBINHOOD_EXECUTOR_CMD", ""),
+		RobinhoodV4ExecutorCmd: getenv("ROBINHOOD_V4_EXECUTOR_CMD", ""),
+		RobinhoodDeployTimeout: getdur("ROBINHOOD_DEPLOY_TIMEOUT", 2*time.Minute),
 		RobinhoodSize: robinhood.SizeParams{
 			// Same 45% pct as the Solana pipeline. Floor is the old fixed size —
 			// a position smaller than that isn't worth its gas + round-trip swap.
@@ -325,13 +395,31 @@ func Load() Config {
 			Floor:   getfloat("ROBINHOOD_DEPLOY_FLOOR_USDG", 8),
 			Ceil:    getfloat("ROBINHOOD_DEPLOY_CEIL_USDG", 150),
 		},
-		RobinhoodMinGasEth:      getfloat("ROBINHOOD_MIN_GAS_ETH", 0.0002),
-		RobinhoodDeployStrategy: getenv("ROBINHOOD_DEPLOY_STRATEGY", "balanced_tight"),
-		RobinhoodRangePct:         getfloat("ROBINHOOD_RANGE_PCT", 10),
-		RobinhoodSlippagePct:      getfloat("ROBINHOOD_SLIPPAGE_PCT", 5),
-		RobinhoodMaxOpenPositions: getint("ROBINHOOD_MAX_OPEN_POSITIONS", 1),
+		RobinhoodMinGasEth: getfloat("ROBINHOOD_MIN_GAS_ETH", 0.0002),
+		// weth_ladder, not balanced_tight. balanced_tight swaps half the commit
+		// into the memecoin before minting, so every position is long a token on
+		// a chain where tokens bleed, and in backtest every exit it took was a
+		// price exit rather than a fee take-profit. weth_ladder never buys the
+		// token. It is still the loser's default only if you override this back.
+		RobinhoodDeployStrategy: getenv("ROBINHOOD_DEPLOY_STRATEGY", "weth_ladder"),
+		// Both ignored by weth_ladder (its geometry is rungs x rung-ticks, tuned
+		// executor-side via UNI_LADDER_*); they still drive balanced_tight and
+		// weth_below.
+		RobinhoodRangePct:    getfloat("ROBINHOOD_RANGE_PCT", 10),
+		RobinhoodSlippagePct: getfloat("ROBINHOOD_SLIPPAGE_PCT", 5),
+		// Counted in LADDERS (funded pools), not NPM NFTs — one ladder is N
+		// rungs, so an NFT-denominated cap would let a single entry exhaust the
+		// budget. See robinhood.Runner.OpenPositions. Raised from 1 because the
+		// ladder thesis is diversification across many small books: the observed
+		// wallet ran 23 concurrently. 3 is the scaled-down starting point, not a
+		// measured optimum — raise it as the close journal earns the confidence.
+		RobinhoodMaxOpenPositions: getint("ROBINHOOD_MAX_OPEN_POSITIONS", 3),
+		RobinhoodMaxPerToken:      getint("ROBINHOOD_MAX_PER_TOKEN", 1),
 		RobinhoodIndicatorGate:    getbool("ROBINHOOD_INDICATOR_GATE", true),
+		RobinhoodRPCURL:           getenv("ROBINHOOD_RPC_URL", "https://rpc.mainnet.chain.robinhood.com"),
+		RobinhoodOnchainCandles:   getbool("ROBINHOOD_ONCHAIN_CANDLES", true),
 		RobinhoodSeenTTL:          getdur("ROBINHOOD_SEEN_TTL", 6*time.Hour),
+		RobinhoodStockSeenTTL:     getdur("ROBINHOOD_STOCK_SEEN_TTL", 90*time.Minute),
 		RobinhoodMinHolders:       getint("ROBINHOOD_MIN_HOLDERS", 50),
 		DeployCmd:                 getenv("DEPLOY_CMD", ""),
 		DeployTimeout:             getdur("DEPLOY_TIMEOUT", 5*time.Minute),

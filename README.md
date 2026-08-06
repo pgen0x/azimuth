@@ -52,8 +52,11 @@ each cycle, emits every pool that crosses all quality gates as one batch. Your
 AI agent sees the full set side by side and deploys only the strongest
 candidate — always off fresh data.
 
-It runs entirely on Meteora's **public pool-discovery API** — no third-party
-accounts, API keys, or scraping required to source signals.
+The Solana path runs entirely on Meteora's **public pool-discovery API** — no
+third-party accounts, API keys, or scraping required to source signals. The
+Robinhood Chain path is keyless for discovery too (GeckoTerminal's public tier
+plus Uniswap's interface GraphQL gateway), though its token-safety gates want a
+GMGN key and fail open without one.
 
 ## Features
 
@@ -62,12 +65,16 @@ accounts, API keys, or scraping required to source signals.
 - **Batch signalling** — one HMAC-signed webhook per cycle carries *every*
   qualifying pool, so your agent ranks the set instead of racing to grab the
   first one.
-- **Four isolated screening modes** — `casual` (30m, volume-spike plays),
+- **Four isolated Solana screening modes** — `casual` (30m, volume-spike plays),
   `multiday` (24h, quality holds), `turnover` (30m, fee-capture plays on
   small high-base-fee pools) and `pulse` (5m trending) with independent
   thresholds and position budgets. `turnover` and `pulse` share a band but
   sample it through different discovery windows, so enabling both makes entries
   the union of the two screens rather than either alone.
+- **Four more on Robinhood Chain** — `fresh` (launch feed), `mature` (24h+ pools
+  still printing an outsized fee pace), and two **one-sided bid-wall** modes,
+  `ladder` (WETH-quoted) and `usdg-ladder` (USDG-quoted tokenized equities),
+  which park resting quote-asset rungs *below* spot and never buy the token.
 - **Layered risk gates** — TVL, fee/TVL, market cap, holder count, organic
   score, top-10/dev supply concentration, mint/freeze authority, Jupiter
   shield status, a best-effort DexScreener downtrend filter, and a Jupiter
@@ -287,7 +294,66 @@ this mode, so it is strictly tighter here than in the bot it came from.
 ENABLE_PULSE=true
 ```
 
-See [`docs/SIGNAL_SCHEMA.md`](docs/SIGNAL_SCHEMA.md) for the exact webhook payload.
+### Robinhood Chain modes
+
+The second venue (Uniswap v3/v4, chain 4663) has four modes of its own. They
+share one `Screen` and every safety gate, but not their discovery source — no
+single feed spans all four theses:
+
+| Mode | Toggle | Discovery | Thesis |
+|---|---|---|---|
+| `fresh` | `ROBINHOOD_ENABLED` | GeckoTerminal `new_pools` | brand-new pools; a launch feed, so a pool scrolls off within minutes |
+| `mature` | `ROBINHOOD_MATURE` | Uniswap interface GraphQL gateway (keyless) | 24h+ pools still printing an outsized fee/TVL pace — the gateway indexes nothing younger than a day |
+| `ladder` | `ROBINHOOD_LADDER` | gateway ∪ cached GeckoTerminal trending page | `weth_ladder`: a one-sided **WETH** bid wall under an established pool |
+| `usdg-ladder` | `ROBINHOOD_STOCK_LADDER` | gateway | `usdg_ladder`: the same wall under **USDG-quoted tokenized equities** |
+
+Each mode is quote-pinned, so a batch never mixes WETH- and USDG-quoted pools:
+a ladder's rungs and its sizing must be denominated in the same asset. **USDG is
+6 decimals, WETH is 18** — every amount in the executors goes through a
+quote-aware parse/format, never `parseEther`.
+
+#### The ladder shape
+
+Both ladder modes mint the same thing: N contiguous rungs of the **quote asset
+only**, stacked on the bid side below spot, sized on a linear ramp so the rung
+nearest spot is smallest, minted atomically — one `multicall` on v3, one
+`modifyLiquidities` unlock on v4.
+
+Two consequences worth understanding before enabling either:
+
+- **It never buys the token.** That is the entire edge — the failure mode of a
+  two-sided range is holding a bag after a collapse. So its exits are *re-pins*
+  (the wall is stale, a rung filled, or the wall has gone fee-dead), not
+  stop-loss/take-profit, and a rung sitting **out of range is by design** — the
+  fee-dead OOR timeout that governs other strategies must never apply to it.
+- **Rung width quantizes to the pool's tick spacing**, which differs per fee
+  tier (0.05% → 10, 0.3% → 60, 1% → 200). The requested width rounds to whole
+  spacings, so a 240-tick request stays 240 at spacings 10 and 60 but collapses
+  to a single 200-tick spacing on the 1% tier. **Covered drop per rung is
+  therefore per-tier**, and the executor's ladder log line — not the env var —
+  is the honest source for how wide a wall actually is.
+
+The equity universe in particular is not one fee tier: an underlying frequently
+lists at two or three of them simultaneously, so `ROBINHOOD_MAX_PER_TOKEN`
+(default 1) caps how many of the `ROBINHOOD_MAX_OPEN_POSITIONS` slots a single
+underlying may hold. Without it one token takes the whole book — three walls
+under one price, which all fill together.
+
+Both feeds are also rate-limited in one place. GeckoTerminal's public tier allows
+~30 requests/minute per IP, and a 429 on the enrich call costs a mode its entire
+cycle, so every GT request in the package passes a shared gate that spaces
+requests, backs off hard on a 429, and caches the per-candidate candle reads the
+entry-timing gate would otherwise repeat every cycle.
+
+Geometry (rung count, per-quote width, dust floor, size ramp, band layout) lives
+in one shared module, `assets/skill/scripts/uni_ladder.js`, required by both the
+v3 and v4 executors and mirrored by the exit monitor's stale-rung rule — those
+numbers describe the thesis, not the protocol, so change them there and never in
+one executor.
+
+See [`docs/SIGNAL_SCHEMA.md`](docs/SIGNAL_SCHEMA.md) for the exact webhook payload,
+and [`docs/ROBINHOOD_CHAIN_PLAN.md`](docs/ROBINHOOD_CHAIN_PLAN.md) for this venue's
+full plan and phase status.
 
 ## Configuration
 
@@ -319,8 +385,8 @@ funds:
 
 | | Solana (Meteora DLMM) | Robinhood Chain (Uniswap v3/v4) |
 |---|---|---|
-| screen + signal | `ENABLE_CASUAL` / `ENABLE_MULTIDAY` / `ENABLE_TURNOVER` | `ROBINHOOD_ENABLED=true` |
-| actually trade | `DEPLOY_CMD=` → `dlmm_pipeline.py` (omit for webhook mode) | `ROBINHOOD_DEPLOY_ENABLED=true` |
+| screen + signal | `ENABLE_CASUAL` / `ENABLE_MULTIDAY` / `ENABLE_TURNOVER` / `ENABLE_PULSE` | `ROBINHOOD_ENABLED` (fresh) / `ROBINHOOD_MATURE` / `ROBINHOOD_LADDER` / `ROBINHOOD_STOCK_LADDER` — independent, any subset |
+| actually trade | `DEPLOY_CMD=` → `dlmm_pipeline.py` (omit for webhook mode) | `ROBINHOOD_DEPLOY_ENABLED=true`, plus the mode allowlist `ROBINHOOD_DEPLOY_MODES` |
 | secrets in `<profile>/.env` | `SOLANA_PUBLIC_KEY`, `SOLANA_PRIVATE_KEY` (base58), `SOLANA_RPC_URLS` (comma-separated, failover in order) | `EVM_PRIVATE_KEY`, `ROBINHOOD_RPC_URL` |
 | executors | — | `ROBINHOOD_EXECUTOR_CMD` (v3), `ROBINHOOD_V4_EXECUTOR_CMD` (v4) |
 | sizing | set in `SOUL.md` / the pipeline | `ROBINHOOD_DEPLOY_PCT`, `..._FLOOR_WETH`, `..._CEIL_WETH`, `..._RESERVE_WETH`, `..._MIN_GAS_ETH` (+ `_USDG` variants) |
@@ -347,7 +413,11 @@ All daemon config is via environment (see `.env.example`):
 | `POLL_INTERVAL` | How often to poll each enabled timeframe |
 | `HERMES_WEBHOOK_URL` / `HERMES_WEBHOOK_SECRET` | Where signals go, HMAC secret |
 | `REDIS_ADDR` / `REDIS_SEEN_KEY` / `SEEN_TTL` | Dedup store (empty `REDIS_ADDR` = in-memory) |
-| `ENABLE_CASUAL` / `ENABLE_MULTIDAY` / `ENABLE_TURNOVER` | Toggle each screening mode (`turnover` off by default) |
+| `ENABLE_CASUAL` / `ENABLE_MULTIDAY` / `ENABLE_TURNOVER` / `ENABLE_PULSE` | Toggle each Solana screening mode (`turnover` and `pulse` off by default) |
+| `ROBINHOOD_ENABLED` / `ROBINHOOD_MATURE` / `ROBINHOOD_LADDER` / `ROBINHOOD_STOCK_LADDER` | Toggle each Robinhood Chain mode (all off by default; independent of each other) |
+| `ROBINHOOD_DEPLOY_ENABLED` / `ROBINHOOD_DEPLOY_MODES` | Let this venue spend funds, and which modes may (others still screen + journal) |
+| `ROBINHOOD_MAX_OPEN_POSITIONS` | Position cap for the venue, counted in ladders (funded pools) across all modes |
+| `ROBINHOOD_MAX_PER_TOKEN` | How many of those slots one underlying may hold (default 1, 0 disables) |
 | `ENABLE_MOMENTUM_GATE` | DexScreener downtrend filter (fails open) |
 | `ENABLE_AUDIT_GATE` | Jupiter token-audit gate: rejects >30% bot holders, ships bot % + global fees in the signal (fails open) |
 | `ENABLE_PVP_CHECK` | same-symbol rival detection: flags candidates contested by an established token with its own live DLMM pool — advisory `is_pvp` + rival stats, never rejects (fails open) |
@@ -411,11 +481,14 @@ Strategy: custom_ratio_spot — meme-pool volatility, symmetric range fits
 
 ## Project Status
 
-**Beta.** The entry-signal daemon (this repo) and the screening gates are
-stable and running against real capital. There is no CI and no Go test suite
-yet (`go vet ./...` is the current bar) — if that's a blocker for your use
-case, treat this as a reference implementation to adapt rather than a
-drop-in production dependency.
+**Beta.** The entry-signal daemon (this repo) and the Solana screening gates are
+stable and running against real capital. Go tests cover the screening,
+deploy-pick and indicator logic (`go test ./internal/...`, with `go vet ./...`
+the other bar), but there is no CI and coverage is not uniform across packages.
+The Robinhood Chain venue is newer than the Solana one and its ladder exits are
+still being validated against live fills — if that's a blocker for your use case,
+treat this as a reference implementation to adapt rather than a drop-in
+production dependency.
 
 ## Contributing
 

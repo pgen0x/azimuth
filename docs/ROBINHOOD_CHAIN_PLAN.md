@@ -439,6 +439,299 @@ close journal like the WETH set.
 5. Noxa's "LP locked" claim ≠ token contract safety — creator can still hold
    supply; holder-concentration gate stays mandatory.
 
+## 4b. `weth_ladder` — the one-sided rebuild (2026-08-04)
+
+Phase 2 shipped `balanced_tight` and it lost money, and the cause is
+structural, not a threshold: every exit it took was a *price* exit, never a fee
+take-profit. `balanced_tight` swaps half the commit into the memecoin before
+minting, so each position is long a token on a chain where tokens bleed, and no
+fee capture out-earns that. (Close-journal figures stay in the private profile
+notes.)
+
+### What a profitable ladder LP actually does
+
+The shape below was measured on-chain from an established one-sided ladder LP on
+the venue (Blockscout + GeckoTerminal, no Krystal API — it is Cloudflare-walled).
+The per-wallet measurements behind it — rung counts, widths, capital, fee yield,
+position life — stay in the private profile notes; only the structure that the
+code implements is described here.
+
+The ladder is a fixed number of **contiguous, equal-width rungs** funded
+**entirely in the quote asset**, sized on an **arithmetic ramp with the smallest
+rung nearest spot**, and it takes **no stop-loss and no take-profit** — a cycle
+ends by tearing the rungs down and re-pinning them.
+
+The ladder sits on the **bid** side: rungs occupy ticks where the token is
+cheaper than spot, so they are resting WETH bids that only convert if the
+market comes down to them. The rung nearest spot is the smallest because it is
+the one price actually reaches — a wick costs little inventory, while the far
+rungs hold the bulk of idle WETH across the widest fee coverage.
+
+Only viable on an L2: one cycle is 7 mints + 7 burns + 7 collects.
+
+### Why `rh-ladder` is its own mode
+
+`Mature` demands **8%/day** because it holds inventory and must out-earn the
+bleed. A ladder has no bleed, so that bar just starves it. Against the wallet's
+real 23-pool set:
+
+| gate | result |
+|---|---|
+| `Fresh.MaxAge` 24h | rejects **all 23** (entry ages 9.3h–684h, median 8.8 days) |
+| `Mature.MinFeeTVLDay` 8%/day | rejects 21 of 23 (observed 0.21–27.8%/day, median 2.6%) |
+| `Mature.MaxReserveUSD` $500k | rejects 5 (observed $11k–$8.25M, median $132k) |
+
+Mature would have picked **1 of 23**; Fresh **0**. Hence `robinhood.Ladder`:
+same gateway feed, screened on churn (1.5%/day, $10k–$2M, ≥0.3% tier, 24h+).
+
+### Implementation
+
+- `uni_executor.js` — `weth_ladder` strategy: `ladderSizes()` (linear ramp,
+  auto-reduces rung count rather than mint dust), `ladderBands()` (contiguous
+  bid-side rungs; direction follows token ordering exactly as `weth_below`),
+  minted atomically via `NPM.multicall`. Journals one entry per rung sharing a
+  `ladderId`. `positions` also reports `ladders` (distinct funded pools).
+- `uni_monitor.py` — `ladder_decide()`. A rung is out-of-range **by design**,
+  so the 30m fee-dead OOR timeout must never see it. Exits are: *filled*
+  (spot passed fully through → sell back; indicator-confirmable, because an
+  un-filling rung costs nothing while a round trip costs the tier twice) and
+  *stale* (spot drifted > `UNI_LADDER_STALE_TICKS` past the rung's intended
+  offset → dead capital, re-pin) and *idle* (quote-denominated value grew
+  < `UNI_LADDER_IDLE_MIN_PCT` across `UNI_LADDER_IDLE_WINDOW` while parked out
+  of range → the wall is not being traded into, re-pin). Hard SL kept as a
+  backstop only.
+- The *idle* rule exists because *filled* and *stale* are both PRICE rules: a
+  market that stops moving disarms the entire rulebook. A `usdg_ladder` minted
+  on SPY at 16:56 ET — four minutes after the US cash close — held 5.6h with
+  drift frozen at 56 of the 120 ticks it needed and zero fees on all three
+  rungs (verified by static-calling `NPM.collect`). Nothing was broken; no rule
+  *could* fire. Port of `dlmm_monitor.py`'s fee-pace-death exit. A rung out of
+  range holds 100% quote, so its quote value moves only when the pool trades
+  through the band — which makes value growth a fee meter with no extra RPC.
+  Skipped while the rung is in range (a partial fill tracks price, not fees),
+  and not indicator-confirmable: dead capital does not improve by waiting.
+- `internal/robinhood` — `Ladder` ModeParams; `OpenPositions` counts ladders,
+  not NFTs, so one 5-rung entry does not exhaust a cap of 3.
+- **Discovery is a union of two feeds** (`trending.go`, 2026-08-05). Uniswap's
+  gateway is not the venue's whole universe: diffing GeckoTerminal
+  `trending_pools` against the gateway's `topV3Pools` (90 pools — under the page
+  cap of 100, so that IS the complete indexed v3 set) found 11 pools the
+  leaderboard lacked. Seven were `uniswap-v4`, already covered by `topV4Pools`;
+  three were `uniswap-v2`/`pons-dot-family`, which neither executor can mint in;
+  one was a genuine gap — LEMON.FUN/WETH 1%, `uniswap-v3`, $49.6k TVL, 10.8 days
+  old. So `rh-ladder` unions the gateway feed with the trending page, deduped by
+  address (gateway wins a collision: authoritative `feeTier` + v4 hook meta;
+  its zero fields backfill from the trending copy).
+  `trending_pools` is filtered on **DEX identity, not protocol version**, and it
+  costs no new GeckoTerminal request while `rh-fresh` is enabled — `discover.go`
+  already fetches that page every `trendingEvery` cycles and now publishes it to
+  a process-wide cache instead of consuming it privately. With `rh-fresh` off,
+  the ladder path refreshes the cache itself, rate-limited to one page per
+  `trendingRefresh` (5m) across every consumer — the same rate `trendingEvery`
+  spends at the default 60s `POLL_INTERVAL`. A failed refresh keeps serving the
+  cached page until it ages past `trendingUsable` (15m); GT 429s are this
+  venue's binding constraint, so the union degrades to gateway-only rather than
+  retrying per cycle. Only `rh-ladder` gets the union: all 11 missing pools were
+  WETH-quoted, so there is no evidence it helps `rh-usdg-ladder`.
+- Config — `ROBINHOOD_LADDER`, strategy default flipped to `weth_ladder`,
+  `ROBINHOOD_MAX_OPEN_POSITIONS` 1 → 3, `UNI_LADDER_*` geometry.
+
+Ours is scaled down from 7×1200 to **5 rungs** with a 0.003 WETH per-rung
+floor, sized from the live wallet by the existing `SizeParams` path.
+
+**Unverified:** no live ladder has been minted yet. Every number above is the
+reference wallet's, not ours — the DRY_RUN path is exercised, the on-chain
+path is not.
+
+## 4c. `usdg_ladder` — the same wall under tokenized equities (2026-08-04)
+
+The chain's other universe: USDG-quoted **stock tokens**. Live v3 books,
+measured 2026-08-04:
+
+| pool | TVL | 24h vol | fee/TVL/day |
+|---|---|---|---|
+| nvda / USDG 0.05% | $712k | $3.42M | 0.24% |
+| spacex / USDG 0.05% | $173k | $2.06M | 0.59% |
+| gme / USDG 0.05% | $256k | $1.19M | 0.23% |
+| spacex / USDG 0.3% | $357k | $647k | 0.54% |
+| gme / USDG 1% | $235k | $436k | 1.86% |
+
+### Why a fourth mode and not a widened `rh-ladder`
+
+Every one of `Ladder`'s numbers is wrong here, and not by a little:
+
+| `Ladder` gate | equity reality |
+|---|---|
+| quote = WETH | these are USDG-quoted — different wallet balance, 6 decimals |
+| `MinFeePct` 0.3% | the deep books are on the **0.05%** tier |
+| `MinFeeTVLDay` 1.5%/day | observed 0.23–1.86%; only `gme/USDG 1%` clears |
+| `MaxReserveUSD` $2M | fine, but the floor moves: $20k, not $10k |
+| rung 1200 ticks (~12%) | an equity's whole year; the wall never gets touched |
+
+So `robinhood.StockLadder` (`rh-usdg-ladder`): USDG-pinned, $20k–$5M, ≥0.05%
+tier, **0.2%/day**, flow floors 10/3, FDV gates off (a wrapper's FDV is not a
+float anyone can dump).
+
+### Floor recalibrated $50k → $20k (2026-08-05)
+
+The floor was set at $50k off the five pools observed on 2026-08-04. A census of
+the venue's *whole* USDG book showed that was too tight. The gateway returned 90
+v3 pools against its page cap of 100 — so the census is the complete v3
+universe, not one page of it — containing 26 USDG/token pools. $50k admitted 19
+and cut seven already past `MinAge`:
+
+| cut at $50k | TVL | | cut at $50k | TVL |
+|---|---|---|---|---|
+| USO | $47.9k | | GOOGL | $42.7k |
+| BNKR | $46.3k | | INTC | $41.8k |
+| CASHCAT | $44.8k | | MSFT | $35.1k |
+| DELL | $43.8k | | | |
+
+Every one sits within 30% of the floor: the number was not separating deep books
+from thin ones, it was clipping a cluster. $20k restores all 26 and nothing in
+the census falls between $20k and $35k, so it is not a slide toward dust. The
+pace and flow gates remain the dead-book filter.
+
+Two things the same census settled, worth recording because both contradict a
+plausible guess:
+
+- **This universe is the equity book.** Only 4 of the 26 are non-equity
+  (CASHCAT, VEX, BNKR, MRDN); the other 22 are tokenized equities and ETFs. A
+  separate "USDG memecoin" mode with relaxed thresholds was considered and
+  dropped — at $20k it would add two pools, not a universe. USDG-quoted
+  memecoins are scarce on this chain, not merely screened out.
+- **A market-hours gate cannot be inferred from pool flow.** The premise was
+  that an equity pool goes quiet outside 09:30–16:00 ET, so recent flow could
+  stand in for a timezone-and-holiday calendar. Measured against the journal it
+  does not: screen outcomes are indistinguishable between sessions
+  (`passed_screen` 13–20 during RTH, 7–20 overnight) because these pools keep
+  printing ≥10 txns/h round the clock. The flow floors above therefore stay a
+  dead-pool guard only, and any future market-hours gate needs a real calendar
+  plus a way to tell an equity pool from a memecoin one.
+
+The trade is explicit: far less yield per rung, for a wall far less likely to
+be run over. A ladder's real risk is a collapse that fills every rung and
+leaves us holding the token — the failure that killed `balanced_tight` — and a
+tokenized equity is the least collapse-prone base asset on the chain.
+
+### Implementation
+
+- `uni_executor.js` is now **quote-aware throughout** (this was the bulk of the
+  work; it was WETH-only in `cmdDeploy`, `valueInWeth`, `sellTokenForWeth`,
+  `cmdBalance`, `cmdState` and `cmdClose`). `--quote` selects the side;
+  `parseQ`/`fmtQ` do every conversion at the quote's own decimals — **USDG is
+  6, WETH is 18**, and a `parseEther`'d USDG amount is off by 10¹².
+  `resolveQuote()` falls back to WETH, so every pre-USDG call is unchanged.
+- Geometry per quote: `UNI_LADDER_RUNG_TICKS_USDG` 240 (~2.4%/rung),
+  `UNI_LADDER_MIN_RUNG_USDG` $2, `UNI_LADDER_STALE_TICKS_USDG` 240. A stale
+  threshold only means anything relative to the rung width — keep them equal.
+- Widened from 120 on 2026-08-05. The stock universe is **not one fee tier** —
+  the 12 USDG pools this mode has minted into span all three, and an underlying
+  frequently lists at two or three of them at once (measured from the position
+  journal; both this plan's original "all 0.05%" assumption and its first
+  "all 0.3% at tickSpacing 60" correction were wrong):
+
+  | tier | spacing | pools | a 240-tick rung becomes |
+  |---|---|---|---|
+  | 0.05% | 10 | 3 | 240 (24 spacings) |
+  | 0.3% | 60 | 6 | 240 (4 spacings) |
+  | 1% | 200 | 3 | **200** — quantized down |
+
+  At the 0.3% majority tier 120 was two spacings — near the narrowest rung the
+  pool can express — and the $2 rung floor caps a ~$7 commit at 3 rungs, i.e.
+  3.6% of covered downside. 240 gives 7.2% at 3 rungs, 12% at five. But
+  `rungWidth` rounds to whole spacings, so at the 1% tier 240 collapses to a
+  single 200-tick spacing and the widening changed nothing there — minted rungs
+  read 200 both before and after it. **Covered drop is therefore per tier**:
+  ~2.4% a rung at spacing 10 and 60, ~2.0% at 200. Read the executor's ladder
+  log line, not the env var, for a wall's real width. The trade is density:
+  rung 0's top is pinned adjacent to spot either way, so width buys depth by
+  halving the liquidity that earns on small oscillations. Rung COUNT is the
+  stronger lever (`sol_bidask` reaches -70% with ~70 narrow bins) and is capped
+  by deposit size, not by this constant — raising `ROBINHOOD_DEPLOY_FLOOR_USDG`
+  toward ~$30 is what buys a full five-rung wall.
+- `uni_monitor.py` routes any `*_ladder` strategy to `ladder_decide` (suffix
+  match, so a third quote asset cannot silently fall through to the OOR
+  timeout) and reads `quoteIs0` with `wethIs0` as its legacy alias.
+- The scanner forwards `--quote` to **both** executors now and picks the USDG
+  `SizeParams` for USDG candidates; a USDG pick is renamed `usdg_ladder` so a
+  mixed close journal stays readable.
+
+**Unverified, same as 4b:** DRY_RUN only. Verified against the live nvda/USDG
+0.05% book: 5 rungs × 120 ticks, sizes [2,4,6,8,10] USDG, 6% covered fall.
+
+## 4d. The ladder on Uniswap v4 (2026-08-05)
+
+Both ladder modes screen v3 **and** v4 candidates — `mapGTPools` keeps either —
+and the scanner already routes a v4 pick to `uni_v4_executor.js`
+(`scanner.go:280`). But that executor only knew `balanced_tight` and
+`weth_below`, so a v4 ladder pick would have died on `unknown strategy` after the
+gas check. It never did in production only because `ROBINHOOD_V4_EXECUTOR_CMD` is
+unset (`v4executor=false` in every startup line), which filters v4 candidates out
+at `scanner.go:237`. Porting the shape is what makes that env var safe to set.
+
+**v4 mints the wall more cheaply than v3 does.** The v3 path batches N separate
+`NPM.mint` calls through `NPM.multicall`, so the quote is pulled N times. Here a
+single `modifyLiquidities` unlock carries N `MINT_POSITION` actions and **one**
+`SETTLE_PAIR`, which settles the summed debt of the whole batch in one transfer
+(plus one `SWEEP` when the quote is native ETH, to refund what the rungs did not
+consume). Atomicity is the same all-or-nothing: a revert anywhere undoes every
+rung.
+
+- **Geometry is now a shared module** (`uni_ladder.js`), required by both
+  executors. Rung count, per-quote width, per-quote dust floor, the size ramp and
+  the band layout are properties of the *thesis*, not of either protocol, and
+  `uni_monitor.py`'s `ladder stale` rule reads the same widths — three copies of
+  one number is how a wall silently re-pins at a width it was never minted at.
+  The v3 executor lost its private copies in the same change; a parity harness
+  confirmed identical `{sizes, rungs, bands}` across both orientations, all three
+  quote assets and five spacings before those copies were deleted.
+- **Liquidity per rung comes from the one-sided formula** (`liquidityForAmount0` /
+  `liquidityForAmount1`), not `liquidityForAmounts`: an out-of-range range needs
+  exactly one token, and asking the two-sided helper about a range that does not
+  straddle spot returns a figure that quietly wants the token side too.
+- **`amountMax` is the rung's size on the funded side and ZERO on the token
+  side.** That zero is load-bearing. It turns "spot moved into rung 0 between the
+  price sample and the mint" into a revert the one retry can reprice, instead of a
+  rung that consumes token inventory we do not hold, and it means a wrong-side
+  wall cannot half-open. The 0.3% liquidity shave covers posm re-deriving the
+  required amount with CEIL rounding where ours floors; unspent quote stays in the
+  wallet, where the next sizing pass sees it. Verified numerically: across 38
+  rungs (both orientations × four quote assets × five spacings) every rung's
+  CEIL-rounded requirement came in at or under its cap.
+- **`positionSnapshot` now returns principal and fees separately.** It used to sum
+  them into `amount0/amount1`, which broke a contract `uni_monitor.py` depends on:
+  `valueWeth` must be principal-only, because the ladder idle rule divides the fee
+  meter *by* it and every SL/TP rule compares it against an entry basis that never
+  contained fees. Summed, a rung's own fees inflated its PnL and sat on both sides
+  of that division. A latent v3/v4 divergence, not something the ladder introduced.
+- **v4's fee meter is strictly better than v3's.** StateView recomputes
+  `feeGrowthInside`, so `feesQuote` is exact the moment fees accrue — no poke, and
+  none of the batched `decreaseLiquidity`+`collect` simulate the v3 executor needs.
+  It is also never `null`: the read either succeeds or the whole state read throws,
+  so there is no "measured but unknown" case, and a hard `0` here is a measurement
+  that can legitimately release a fee-dead wall.
+- `cmdState` echoes `strategy`/`ladderId`/`rung`/`rungs`/`quoteIs0` from the entry
+  journal, so the monitor's rulebook switch and the wall-scoped idle rule work on
+  v4 rungs unchanged. `cmdPositions` now reports `ladders` (distinct funded pools)
+  so the position cap counts walls, not NFTs — pool identity includes
+  `tickSpacing`, because in v4 one currency pair and fee can exist at several
+  spacings, and a wall in each is two entries.
+- The wall-state key stays un-namespaced: a `ladderId` is `<pool>-<mintTs>`, and a
+  20-byte v3 pool address cannot collide with a 32-byte v4 poolId.
+- Close needs no change — `BURN_POSITION` + `TAKE_PAIR` is already per-tokenId,
+  and a one-sided rung frees no token side to sell.
+
+**Verified DRY_RUN against live v4 pools**: native-ETH quote (`ETH/Doom` 1% at
+tickSpacing 200) gave 5 rungs × 1200 ticks, a 45% covered fall and sizes
+[0.00333…, 0.00667…, 0.01, 0.01333…, 0.01667…] ETH; WETH quote (`WETH/DORK`) gave
+3 rungs and 30% covered. The batched action stream was decoded back and checked
+field by field — `0x02020202020d14` for a five-rung native wall, every rung's
+ticks and caps round-tripping. **A live v4 ladder mint has not run**: no
+USDG-quoted v4 pool appears in any batch the daemon has logged (all 51 are
+ETH/WETH-quoted, consistent with the USDG universe being v3), and
+`ROBINHOOD_V4_EXECUTOR_CMD` is still unset. Setting it is what starts that soak.
+
 ## 5. Deliverable order
 
 | # | Deliverable | Depends on |

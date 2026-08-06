@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -47,25 +48,117 @@ func (r *Runner) run(ctx context.Context, args ...string) (string, error) {
 	return buf.String(), err
 }
 
-// OpenPositions returns the wallet's current NonfungiblePositionManager
-// position count, by running `uni_executor.js positions` and reading its
-// {"count": N} JSON line. Callers MUST treat a non-nil error as "unknown" and
-// fail closed (skip deploy) — there is no monitor yet to close stale
+// OpenPositions returns the wallet's current open-entry count, by running
+// `uni_executor.js positions`. Callers MUST treat a non-nil error as "unknown"
+// and fail closed (skip deploy) — there is no monitor yet to close stale
 // positions, so under-counting risks an unbounded number of open positions.
+//
+// The unit is ENTRIES, not NFTs. Under a ladder strategy one entry mints N rungs
+// (N separate position NFTs), so the raw {"count": N} would report a single
+// ladder as 5 positions and a cap of 3 would reject every deploy forever. BOTH
+// executors therefore also report {"ladders": M} — distinct funded pools — and
+// that is what this returns when present. Falls back to `count` for any older
+// build that predates the field, where one position really is one entry.
 func (r *Runner) OpenPositions(ctx context.Context) (int, error) {
-	out, err := r.run(ctx, "positions")
+	inv, err := r.Inventory(ctx)
 	if err != nil {
 		return 0, err
 	}
+	return inv.Ladders, nil
+}
+
+// Inventory is one `positions` read decoded two ways: the entry count the
+// wallet-wide cap spends, and the per-underlying census the per-token cap needs.
+// One exec call serves both — the executor is a node process and a second spawn
+// per cycle buys nothing.
+type Inventory struct {
+	// Ladders is distinct funded pools (see OpenPositions).
+	Ladders int
+	// ByToken counts funded pools per BASE-token address, lowercased. A token
+	// absent from the map holds nothing.
+	ByToken map[string]int
+}
+
+// Inventory reads the wallet's open positions and attributes each funded pool to
+// its base token. Callers MUST fail closed on error, same as OpenPositions.
+//
+// Both executors already report every position's pool sides — v3 as
+// token0/token1, v4 as currency0/currency1 — so the base side is derived here
+// rather than adding a field to two executors. Pool identity includes fee AND
+// tick spacing because in v4 one pair+fee can exist at several spacings: those
+// are different pools, and a wall in each is two entries.
+func (r *Runner) Inventory(ctx context.Context) (Inventory, error) {
+	out, err := r.run(ctx, "positions")
+	if err != nil {
+		return Inventory{}, err
+	}
 	var d struct {
 		Count int `json:"count"`
+		// Pointer, not int: a wallet with zero open ladders and an executor that
+		// does not report the field are both "0" after unmarshal, and only the
+		// first should suppress the fallback.
+		Ladders   *int `json:"ladders"`
+		Positions []struct {
+			Liquidity string `json:"liquidity"`
+			// v3 field names plus their v4 aliases. One pair is populated per
+			// position; the other stays empty and is ignored.
+			Token0      string `json:"token0"`
+			Token1      string `json:"token1"`
+			Currency0   string `json:"currency0"`
+			Currency1   string `json:"currency1"`
+			Fee         int    `json:"fee"`
+			TickSpacing int    `json:"tickSpacing"`
+		} `json:"positions"`
 	}
 	// The executor's last stdout line is the JSON payload; earlier lines (if
 	// any) are transaction log noise from other commands, never `positions`.
 	if err := json.Unmarshal([]byte(lastLine(out)), &d); err != nil {
-		return 0, fmt.Errorf("positions: unparseable output: %w", err)
+		return Inventory{}, fmt.Errorf("positions: unparseable output: %w", err)
 	}
-	return d.Count, nil
+	inv := Inventory{Ladders: d.Count, ByToken: map[string]int{}}
+	if d.Ladders != nil {
+		inv.Ladders = *d.Ladders
+	}
+
+	// Dedup by pool before counting, so a 5-rung wall counts ONCE against its
+	// token — the same unit `ladders` is expressed in.
+	pools := map[string][2]string{}
+	for _, p := range d.Positions {
+		// A rung drained to zero liquidity holds nothing, exactly as the
+		// executors' own `ladders` count treats it.
+		if p.Liquidity == "" || p.Liquidity == "0" {
+			continue
+		}
+		a, b := strings.ToLower(p.Token0), strings.ToLower(p.Token1)
+		if a == "" && b == "" {
+			a, b = strings.ToLower(p.Currency0), strings.ToLower(p.Currency1)
+		}
+		if a == "" && b == "" {
+			continue
+		}
+		pools[fmt.Sprintf("%s-%s-%d-%d", a, b, p.Fee, p.TickSpacing)] = [2]string{a, b}
+	}
+	for _, sides := range pools {
+		// The base side is whichever is not a whitelisted quote asset. BOTH
+		// sides being quote assets (a legacy WETH/USDG wall) attributes to
+		// neither — there is no underlying there to cap. Neither side being one
+		// cannot happen through Screen, but if it ever does, count both: an
+		// unattributable position must not silently free a slot.
+		var base []string
+		for _, s := range sides {
+			if !quoteAssets[s] {
+				base = append(base, s)
+			}
+		}
+		if len(base) == 2 {
+			log.Printf("robinhood: open pool %s/%s has no quote side — counting both against the per-token cap",
+				sides[0], sides[1])
+		}
+		for _, t := range base {
+			inv.ByToken[t]++
+		}
+	}
+	return inv, nil
 }
 
 // Balances is the wallet's spendable capital. ETH and WETH are NOT

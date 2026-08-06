@@ -3,6 +3,7 @@ package robinhood
 import (
 	"fmt"
 	"math"
+	"strings"
 	"time"
 )
 
@@ -24,6 +25,13 @@ type ModeParams struct {
 	MinBuyersH1   int     // unique buyers in the last hour
 	MinFdvUSD     float64 // FDV sanity floor
 	MaxFdvUSD     float64 // FDV sanity ceiling (0 disables): fake-priced pools show absurd FDV
+
+	// QuoteAsset pins the mode to ONE quote-side asset (lowercase address; ""
+	// accepts any whitelisted quote). Ladder modes must set it: a ladder's
+	// rungs are denominated in the pool's quote asset, and the deploy sizes
+	// against that asset's wallet balance — a mode whose batch mixed WETH- and
+	// USDG-quoted pools would size in one unit and mint in another.
+	QuoteAsset string
 
 	// FeePaceH24 measures the fee/TVL pace over the realized 24h volume instead
 	// of extrapolating the h1 window out to a day. Modes selecting for
@@ -103,6 +111,150 @@ var Mature = ModeParams{
 	MaxFdvUSD: 50_000_000,
 }
 
+// Ladder is the weth_ladder mode: pools worth parking a one-sided WETH bid
+// wall under. Unlike Fresh and Mature — which buy the token and are therefore
+// betting on it — a ladder holds only WETH until the market trades down into
+// a rung, so what it needs from a pool is CHURN, not yield.
+//
+// That inverts the usual threshold logic and is why this mode exists at all
+// rather than reusing Mature. Mature demands 8%/day because it holds inventory
+// and must out-earn the bleed; the bar has to be high or the position loses.
+// A ladder has no bleed to out-earn, so a high bar just starves it: measured
+// against a profitable Robinhood Chain ladder LP (23 pools, 2026-08-04),
+// Mature's gates matched exactly ONE of the 23 pools it actually worked, and
+// Fresh matched none. These values are read off that real pool set — see
+// docs/ROBINHOOD_CHAIN_PLAN.md.
+var Ladder = ModeParams{
+	Mode: "rh-ladder",
+
+	// WETH-quoted pools only. The rungs ARE WETH, so a USDG-quoted pool in this
+	// batch would be sized off the WETH balance and minted in USDG — see
+	// StockLadder, which is the same shape aimed at that universe.
+	QuoteAsset: WETH,
+
+	// The observed wallet entered as early as 9.3h after pool creation, but our
+	// mature discovery source (Uniswap's gateway) indexes nothing younger than a
+	// day, so anything below 24h is unreachable here no matter what this says.
+	// Set to what the source can actually deliver rather than to a number that
+	// would silently never bind. 21 of the 23 observed entries were over 24h.
+	MinAge: 24 * time.Hour,
+	MaxAge: 0, // a ladder does not care how old a pool is, only whether it trades
+
+	// Observed entry reserves ran $11k–$8.25M, median $134k. The floor sits just
+	// under the smallest ($11.3k). The ceiling is OURS, not theirs: fee share is
+	// proportional to our liquidity's share of the active tick, so on their
+	// $8.25M pool a 0.05 WETH ladder earns rounding error. 2M keeps 22 of the 23.
+	MinReserveUSD: 10000,
+	MaxReserveUSD: 2_000_000,
+
+	// 21 of 23 observed pools were the 1% tier, 2 were 0.3%. Below 0.3% a rung
+	// has to be crossed far too often to pay for its own gas.
+	MinFeePct: 0.3,
+
+	// 1.5%/day against Mature's 8%. Observed fee pace across the 23 pools ran
+	// 0.21%–27.8%/day, median 2.6% — this keeps 17 of 23 and drops only the
+	// genuinely dead books. A ladder in a slow pool costs opportunity, not
+	// capital, so the floor buys shortlist quality rather than safety.
+	MinFeeTVLDay: 1.5,
+	FeePaceH24:   true, // established pools have real 24h history; never extrapolate h1
+
+	// Fresh's flow floors (30/12), not Mature's (60/20). A quiet hour is a real
+	// risk to a position holding the token and a non-event to one holding WETH,
+	// so this mode can afford the thinner books that Mature must refuse.
+	MinTxH1:     30,
+	MinBuyersH1: 10,
+
+	MinFdvUSD: 20000,
+	MaxFdvUSD: 50_000_000,
+}
+
+// StockLadder is the usdg_ladder mode: the SAME one-sided bid-wall shape as
+// Ladder, pointed at the venue's other universe — the tokenized equities
+// (nvda, gme, spacex …), which quote in USDG rather than WETH.
+//
+// It is a separate mode rather than a quote-widened Ladder because the two
+// universes are nothing alike on the axis that sets the thresholds. A
+// memecoin ladder is paid by violence: 1%-tier pools, wide rungs, a 1.5%/day
+// churn floor. A tokenized equity trades a real book — deep, low-volatility —
+// so it clears a fraction of that pace and would be rejected wholesale by
+// Ladder's bar. Measured 2026-08-04 on the five live USDG equity pools: fee
+// pace 0.23%–1.86%/day, TVL $173k–$712k, and only gme/USDG 1% cleared 1.5%/day.
+//
+// The equity universe spans all three fee tiers, and an underlying often lists
+// at two or three of them at once — of the 12 USDG pools this mode has minted
+// into, 3 were 0.05%, 6 were 0.3%, 3 were 1%. So MinFeePct below is a floor
+// that admits every tier, not a description of the book, and rung geometry
+// quantizes per tier (see uni_ladder.js). It also means one underlying can
+// occupy several position slots at once; there is no per-token cap yet.
+//
+// The trade this mode makes is explicit: far less yield per rung, in exchange
+// for a bid wall that is far less likely to be run over. A ladder's real risk
+// is a collapse that fills every rung and leaves us holding the token — the
+// failure mode that killed balanced_tight — and a tokenized equity is the
+// least collapse-prone base asset on the chain.
+var StockLadder = ModeParams{
+	Mode: "rh-usdg-ladder",
+
+	// USDG-quoted only, for the same reason Ladder is WETH-only: the rungs and
+	// the sizing must be denominated in one asset. USDG is 6 decimals, so the
+	// deploy path sizes it with the dollar-unit SizeParams (config.RobinhoodSizeUSDG)
+	// and the executor parses the amount at the quote's own decimals.
+	QuoteAsset: USDG,
+
+	// Same discovery source as Ladder (the gateway indexes nothing younger than
+	// a day), and the same indifference to age: an equity pool does not decay
+	// out of thesis, its book either trades or it doesn't.
+	MinAge: 24 * time.Hour,
+	MaxAge: 0,
+
+	// The observed pools ran $173k–$712k. The ceiling sits well over the
+	// largest and binds harder than Ladder's on purpose: our fee share is our
+	// share of the active tick, and these books are 5-50x deeper than a
+	// memecoin's, so a rung in a $5M equity pool earns rounding error.
+	//
+	// The floor was $50k until a census of the venue's whole USDG book
+	// (2026-08-05: the gateway returned 90 v3 pools against a page cap of 100,
+	// so that census is the complete v3 universe, not one page of it) showed
+	// what it cost. Of 26 USDG/token pools, $50k admitted 19 and cut SEVEN that
+	// were already past MinAge: USO $47.9k, BNKR $46.3k, CASHCAT $44.8k,
+	// DELL $43.8k, GOOGL $42.7k, INTC $41.8k, MSFT $35.1k. Every one sits
+	// within 30% of the old floor — the number was not separating deep books
+	// from thin ones, it was clipping a cluster. $20k restores all 26 (nothing
+	// in the census falls between $20k and $35k, so this is not a slippery
+	// slope toward dust) and leaves the pace and flow gates below to drop dead
+	// books, which is their job and not the floor's.
+	MinReserveUSD: 20_000,
+	MaxReserveUSD: 5_000_000,
+
+	// 0.05% — the tier the deepest equity pools actually use (nvda/USDG did
+	// $3.42M of 24h volume there). Ladder's 0.3% floor would leave only the
+	// thin 1% pools, which is the opposite of this mode's thesis.
+	MinFeePct: 0.05,
+
+	// 0.2%/day against Ladder's 1.5%. That is ~73%/yr on idle USDG with no
+	// token exposure, and it keeps 4 of the 5 observed pools; the bar exists to
+	// drop dead books, not to rank. FeePaceH24 for the same reason Ladder sets
+	// it: these pools have real 24h history and h1 extrapolation would let one
+	// busy hour fake a 24x rate.
+	MinFeeTVLDay: 0.2,
+	FeePaceH24:   true,
+
+	// Lower flow floors than any other mode (Ladder is 30/10). Equities trade
+	// on market hours: an h1 window sampled at 03:00 UTC is legitimately quiet
+	// on a pool that did millions the previous session, and the 24h fee pace
+	// above is the honest measure of whether the book is alive. These stay only
+	// as a fully-dead-pool guard.
+	MinTxH1:     10,
+	MinBuyersH1: 3,
+
+	// FDV gates OFF on purpose (both zero-disabled). A tokenized equity's FDV
+	// is a function of the wrapper's token supply, not of a float anyone can
+	// dump — it is neither a rug signal here nor comparable to a memecoin's, so
+	// gating on it would reject or admit pools for reasons unrelated to risk.
+	MinFdvUSD: 0,
+	MaxFdvUSD: 0,
+}
+
 // Score saturation targets, degen-score analogs computed over the h1 window.
 const (
 	targetTurnoverH1 = 3.0     // h1 volume / reserve for a full trading sub-score
@@ -122,6 +274,24 @@ func Screen(p Pool, mp ModeParams, now time.Time) (*Candidate, string) {
 	p, ok := orientQuote(p)
 	if !ok {
 		return nil, fmt.Sprintf("quote not WETH/USDG/ETH (%s/%s)", p.BaseSymbol, p.QuoteSymbol)
+	}
+	// A mode pinned to one quote asset takes only that asset's pools — the
+	// ladder modes are, because their rungs and their sizing are denominated in
+	// it (see ModeParams.QuoteAsset).
+	if mp.QuoteAsset != "" && !strings.EqualFold(p.QuoteAddress, mp.QuoteAsset) {
+		return nil, fmt.Sprintf("quote-asset %s not this mode's", p.QuoteSymbol)
+	}
+	// Both sides a quote asset (WETH/USDG, ETH/USDG …) means there is no token
+	// here — orientQuote picks a side by address order, so such a pool lands in
+	// whichever mode the arbitrary "base" happens to suit and never leaves it.
+	// That is how rh-usdg-ladder deployed a USDG wall under WETH on 2026-08-04:
+	// WETH sorts below USDG, so the gateway's token0 was WETH, the mode's USDG
+	// quote pin matched, and every remaining gate (deep book, 0.3% tier, real
+	// 24h volume) passed easily. The shape was sound and the thesis was not —
+	// a fill leaves the wallet long ETH, and no security/holder gate here says
+	// anything meaningful about a quote asset.
+	if quoteAssets[strings.ToLower(p.BaseAddress)] {
+		return nil, fmt.Sprintf("quote-asset base %s/%s (no token side)", p.BaseSymbol, p.QuoteSymbol)
 	}
 
 	// v4-only hard gates. A hook can block or skim withdrawals (its behavior

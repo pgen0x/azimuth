@@ -12,7 +12,7 @@
 //   node uni_v4_executor.js address
 //   node uni_v4_executor.js balance                    # ETH + WETH + USDG
 //   node uni_v4_executor.js quote --pool 0x<32B>       # pool state
-//   node uni_v4_executor.js deploy --pool 0x<32B> --amount 0.01 [--quote 0x..] [--strategy balanced_tight|weth_below] [--range-pct 10] [--slippage 5]
+//   node uni_v4_executor.js deploy --pool 0x<32B> --amount 0.01 [--quote 0x..] [--strategy weth_ladder|usdg_ladder|balanced_tight|weth_below] [--range-pct 10] [--slippage 5] [--rungs 5] [--rung-ticks 1200]
 //   node uni_v4_executor.js positions                  # journal-known live positions
 //   node uni_v4_executor.js state --id 123
 //   node uni_v4_executor.js collect --id 123
@@ -25,7 +25,8 @@
 // Actions/tick math needed is small and auditable, same policy as the v3
 // script. Env contract identical to uni_executor.js (EVM_PRIVATE_KEY,
 // ROBINHOOD_RPC_URL, DRY_RUN, UNI_GAS_* / UNI_EXIT_SLIPPAGE_PCT /
-// UNI_STRANDED_MAX_BACKOFF_S knobs).
+// UNI_STRANDED_MAX_BACKOFF_S knobs), including the UNI_LADDER_* geometry, which
+// is read by the shared ./uni_ladder.js and therefore identical on both venues.
 
 const bs58 = require("bs58");
 const dotenv = require("dotenv");
@@ -37,6 +38,12 @@ const {
   encodeAbiParameters, keccak256,
 } = require("viem");
 const { privateKeyToAccount } = require("viem/accounts");
+// Ladder geometry, shared verbatim with uni_executor.js — see uni_ladder.js for
+// why it is a module and not a copy in each executor. Relative to THIS file, so
+// it resolves inside the symlinked scripts/ dir exactly as it does in-repo.
+const {
+  LADDER_RUNGS, ladderGeom, rungWidth, ladderSizes, ladderBands, ladderSpan,
+} = require("./uni_ladder.js");
 
 const SCRIPT_DIR = path.dirname(path.isAbsolute(process.argv[1]) ? process.argv[1] : path.resolve(process.argv[1]));
 const PROFILE_DIR = path.dirname(path.dirname(path.dirname(SCRIPT_DIR)));
@@ -692,6 +699,246 @@ async function cmdQuote() {
   }));
 }
 
+// cmdDeployLadder mints the ladder shape on v4: N one-sided rungs of the pool's
+// QUOTE asset, all in a SINGLE modifyLiquidities call. It serves both ladder
+// strategies — weth_ladder (WETH or native-ETH rungs under a memecoin) and
+// usdg_ladder (USDG rungs under a tokenized equity). Only the geometry differs,
+// and that comes from uni_ladder.js, shared verbatim with the v3 executor; the
+// shape, the atomicity and the exit rules are identical across both protocols.
+//
+// Why the ladder at all: balanced_tight swaps half the commit into the token
+// before minting, so every position is LONG a token on a chain where tokens
+// bleed, and every exit it took was a price exit. A ladder never buys the token.
+// It parks quote under the price and gets paid the fee tier whenever the market
+// trades down into it, so the only inventory it holds is inventory the market
+// handed it at a price we chose. Exits are re-pins, not stop-losses — see
+// uni_monitor.py.
+//
+// v4 makes this shape cheaper than v3 does. The v3 executor batches N separate
+// NPM.mint calls through NPM.multicall; here ONE unlock carries N MINT_POSITION
+// actions and a single SETTLE_PAIR that settles the whole batch's net debt, so
+// the quote is pulled once instead of N times. Atomicity is the same all-or-
+// nothing: a revert anywhere in the unlock undoes every rung.
+async function cmdDeployLadder(wallet, account, strategy) {
+  const poolId = arg("pool", "");
+  const key = await resolvePoolKey(poolId);
+  // Same hard gate as cmdDeploy: a hook owns the pool's withdrawal path and the
+  // close sequence assumes nobody can veto a burn. A ladder is MORE exposed to
+  // this than a normal position, not less — it re-pins on a schedule, so it burns
+  // and re-mints many times over a day.
+  if (key.hooks !== getAddress(ZERO)) throw new Error(`pool has a hook (${key.hooks}) — refusing to LP`);
+
+  const qSide = quoteSide(key, arg("quote", ""));
+  const quoteAddr = qSide === 0 ? key.currency0 : key.currency1;
+  const tokenAddr = qSide === 0 ? key.currency1 : key.currency0;
+  const q = QUOTES[quoteAddr.toLowerCase()];
+  if (!q) throw new Error(`quote side ${quoteAddr} not in whitelist`);
+  const quoteIs0 = qSide === 0;
+
+  const geom = ladderGeom(q);
+  const rungTicks = parseInt(arg("rung-ticks", String(geom.rungTicks)), 10);
+  // Parsed at the QUOTE's decimals — parseEther here would inflate a USDG amount
+  // by 10^12 and offer the whole wallet to the first rung.
+  const amountQuote = parseUnits(arg("amount", "0"), q.decimals);
+  if (amountQuote <= 0n) throw new Error(`--amount required (${q.symbol} units)`);
+
+  await ensureGas(wallet, account);
+  // A native-quoted ladder spends raw ETH, so the wallet needs the whole commit
+  // unwrapped before the mint — one unwrap for the wall, not one per rung.
+  if (q.native) await ensureNative(wallet, account, amountQuote);
+
+  let st = await slot0(poolId);
+  const spacing = key.tickSpacing;
+  const { sizes, rungs } = ladderSizes(amountQuote, parseInt(arg("rungs", String(LADDER_RUNGS)), 10), q);
+
+  // buildWall (re)derives every rung from the CURRENT st sample, so the mint
+  // retry below can reprice the whole wall after a failed attempt.
+  //
+  // Liquidity per rung comes from the ONE-SIDED formula for the funded side, not
+  // from liquidityForAmounts: an out-of-range range needs exactly one token, and
+  // asking the two-sided helper for a range that does not straddle spot is how
+  // you get a liquidity figure that silently wants the token side too.
+  //
+  // amountMax is the rung's own size on the funded side and ZERO on the token
+  // side. The zero is load-bearing: it is what turns "spot moved into this rung
+  // between the sample and the mint" into a revert the retry can reprice, rather
+  // than a rung that quietly consumes token inventory we do not have. It also
+  // means a wrong-side wall (ladderBands' invariant) cannot half-open.
+  //
+  // The 0.3% liquidity shave covers posm re-deriving the required amount with
+  // CEIL rounding where ours floors. Unspent quote stays in the wallet, where the
+  // daemon's next sizing pass sees it — a strictly cheaper outcome than a
+  // reverted five-rung mint.
+  const buildWall = () => {
+    const bands = ladderBands(st.tick, spacing, quoteIs0, rungs, rungTicks);
+    const pairs = [];
+    const rungInfo = [];
+    for (let k = 0; k < bands.length; k++) {
+      const { tickLower, tickUpper } = bands[k];
+      const sqrtA = getSqrtRatioAtTick(tickLower);
+      const sqrtB = getSqrtRatioAtTick(tickUpper);
+      const liquidity = (quoteIs0
+        ? liquidityForAmount0(sqrtA, sqrtB, sizes[k])
+        : liquidityForAmount1(sqrtA, sqrtB, sizes[k])) * 997n / 1000n;
+      if (liquidity <= 0n) {
+        throw new Error(`rung ${k} computed 0 liquidity for [${tickLower},${tickUpper}] `
+          + `from ${formatUnits(sizes[k], q.decimals)} ${q.symbol} — rung too small for its width`);
+      }
+      const amount0Max = quoteIs0 ? sizes[k] : 0n;
+      const amount1Max = quoteIs0 ? 0n : sizes[k];
+      pairs.push([A.MINT_POSITION,
+        mintParams(key, tickLower, tickUpper, liquidity, amount0Max, amount1Max, account.address)]);
+      rungInfo.push({ rung: k, tickLower, tickUpper, sqrtA, sqrtB, liquidity, size: sizes[k] });
+    }
+    // ONE settle for the whole wall: v4 nets every action's deltas inside the
+    // unlock, so SETTLE_PAIR pays the summed debt of all N mints in one transfer.
+    pairs.push([A.SETTLE_PAIR, settlePairParams(key.currency0, key.currency1)]);
+    // Native quote: refund whatever the rungs did not consume. Without the sweep
+    // the shave above would leave real ETH sitting in posm.
+    if (q.native && quoteIs0) pairs.push([A.SWEEP, sweepParams(ZERO, account.address)]);
+    return { bands, rungInfo, unlockData: encodeActions(pairs) };
+  };
+  let { bands, rungInfo, unlockData } = buildWall();
+
+  const { tickLo, tickHi, dropPct } = ladderSpan(bands);
+  console.log(`ladder: ${rungs} rungs x ${rungWidth(spacing, rungTicks)} ticks `
+    + `on the bid side of tick ${st.tick} (${q.symbol} is currency${quoteIs0 ? 0 : 1}), `
+    + `covering a ${dropPct.toFixed(0)}% fall, sizes `
+    + `[${sizes.map((s) => formatUnits(s, q.decimals)).join(", ")}] ${q.symbol}`);
+
+  if (DRY_RUN) {
+    console.log(`🧪 DRY RUN DEPLOY pool=${poolId} strategy=${strategy} rungs=${rungs} `
+      + `ticks=[${tickLo},${tickHi}] amount=${formatUnits(amountQuote, q.decimals)} ${q.symbol}`);
+    console.log(JSON.stringify({
+      success: true, dryRun: true, pool: poolId, protocol: "v4", strategy, rungs,
+      quote: quoteAddr, quoteSymbol: q.symbol,
+      bands, sizes: sizes.map((s) => formatUnits(s, q.decimals)),
+    }));
+    return;
+  }
+
+  // Permit2 once for the whole commit, not per rung — posm pulls the settled
+  // total in a single transfer. Native quote is paid as msg.value and needs no
+  // approval at all. Approve BEFORE sampling for the mint, same reason cmdDeploy
+  // documents: approvals are on-chain txs and the pool trades through them.
+  if (!q.native) await ensurePermit2(wallet, account, quoteAddr, POSM, amountQuote);
+  const nativeValue = q.native && quoteIs0 ? amountQuote : 0n;
+
+  const preId = await pub.readContract({ address: POSM, abi: posmAbi, functionName: "nextTokenId" });
+  let hash, rcpt;
+  try {
+    const mintOnce = () => wallet.writeContract({
+      address: POSM, abi: posmAbi, functionName: "modifyLiquidities",
+      args: [unlockData, BigInt(Math.floor(Date.now() / 1000) + 120)],
+      value: nativeValue, account: wallet.account, chain,
+    });
+    try {
+      hash = await mintOnce();
+    } catch (e1) {
+      // Rung 0 sits one spacing off spot, so any adverse move between the sample
+      // and the simulation can pull spot into it and overdraw the zero token-side
+      // cap. One retry at the fresh price; a second failure is reported, and
+      // costs only gas.
+      const r1 = (e1.shortMessage || e1.message || "").split("\n").slice(0, 2).join(" ").trim();
+      console.error(`ladder mint attempt 1 failed (${r1}) — repricing the wall and retrying`);
+      st = await slot0(poolId);
+      ({ bands, rungInfo, unlockData } = buildWall());
+      hash = await mintOnce();
+    }
+    rcpt = await pub.waitForTransactionReceipt({ hash, timeout: 120_000 });
+    if (rcpt.status !== "success") throw new Error(`ladder mint reverted: ${hash}`);
+  } catch (e) {
+    // Nothing to unwind: the ladder never swapped, so every unit is still quote
+    // asset in the wallet. That is the whole point of the one-sided shape — a
+    // failed entry costs gas and nothing else.
+    const reason = (e.shortMessage || e.message || "ladder mint failed").split("\n").slice(0, 2).join(" ").trim();
+    console.log(`❌ DEPLOY FAILED (no position opened): ${reason}`);
+    console.log(JSON.stringify({
+      success: false, error: `ladder mint failed: ${reason}`,
+      pool: poolId, protocol: "v4", strategy, quoteSymbol: q.symbol,
+    }));
+    return;
+  }
+
+  // Every rung is journaled as its own position (the monitor prices and closes
+  // per tokenId) but they share a ladderId so the re-pin and idle rules can treat
+  // the wall as one unit and tear it down together.
+  const ladderId = `${poolId.toLowerCase()}-${Math.floor(Date.now() / 1000)}`;
+  const acct = account.address.toLowerCase();
+  // Mint order is action order, but the tokenIds are read back from the ERC-721
+  // Transfer(0x0 -> us) logs and then matched to a rung BY TICK RANGE rather than
+  // by position in the list. Log ordering would almost certainly work; a tick
+  // match cannot silently mis-attribute a rung's cost basis if it ever doesn't.
+  const minted = rcpt.logs.filter((l) =>
+    l.address.toLowerCase() === POSM.toLowerCase() &&
+    l.topics.length === 4 &&
+    BigInt(l.topics[1]) === 0n &&
+    `0x${l.topics[2].slice(-40)}`.toLowerCase() === acct).map((l) => BigInt(l.topics[3]));
+  if (minted.length !== rungs) {
+    console.error(`warn: ${minted.length} mint Transfer logs for ${rungs} rungs — `
+      + "journaling only what landed; unjournaled rungs are invisible to the monitor");
+  }
+  const stAfter = await slot0(poolId);
+  const opened = [];
+  let totalIn = 0n;
+  for (const id of minted.length ? minted : [preId]) {
+    const [, infoPacked] = await pub.readContract({
+      address: POSM, abi: posmAbi, functionName: "getPoolAndPositionInfo", args: [id],
+    });
+    const { tickLower, tickUpper } = unpackInfo(infoPacked);
+    const info = rungInfo.find((r) => r.tickLower === tickLower && r.tickUpper === tickUpper);
+    if (!info) {
+      console.error(`warn: minted #${id} at [${tickLower},${tickUpper}] matches no rung — not journaled`);
+      continue;
+    }
+    // Cost basis: value the minted liquidity at a fresh slot0, deterministic from
+    // (liquidity, range, price) — the same valuation cmdDeploy uses. The shave's
+    // leftover stayed in the wallet and belongs to no rung's PnL.
+    const [used0, used1] = amountsForLiquidity(stAfter.sqrtPriceX96, info.sqrtA, info.sqrtB, info.liquidity);
+    const entryQuoteRaw = valueInQuote(used0, used1, stAfter.sqrtPriceX96, quoteIs0);
+    totalIn += entryQuoteRaw;
+    journalEntry({
+      tokenId: id.toString(), pool: poolId, protocol: "v4", key,
+      quote: quoteAddr, quoteSymbol: q.symbol, quoteDecimals: q.decimals,
+      tickLower, tickUpper, strategy,
+      // quoteIn is the canonical cost basis; wethIn mirrors it for readers that
+      // predate USDG. The mirror is only honest because quote/quoteSymbol travel
+      // with it — a ladder's basis is in its OWN quote asset, never converted.
+      quoteIn: formatUnits(entryQuoteRaw, q.decimals),
+      wethIn: formatUnits(entryQuoteRaw, q.decimals),
+      ladderId, rung: info.rung, rungs,
+      committedQuote: formatUnits(info.size, q.decimals),
+      liquidity: info.liquidity.toString(),
+      used0: used0.toString(), used1: used1.toString(),
+      ts: Math.floor(Date.now() / 1000),
+    });
+    opened.push({
+      tokenId: id.toString(), rung: info.rung, tickLower, tickUpper,
+      quoteIn: formatUnits(entryQuoteRaw, q.decimals),
+    });
+  }
+  if (!opened.length) {
+    // Funds are committed but nothing is manageable — surface the tx for a hand
+    // journal rather than write silence (v3 policy for an unresolved tokenId).
+    console.error(`ERROR: ladder mint ${hash} succeeded but no rung could be journaled`);
+    console.log(JSON.stringify({
+      success: false, error: "ladder minted but no tokenId resolved",
+      pool: poolId, protocol: "v4", strategy, tx: hash,
+    }));
+    return;
+  }
+
+  console.log(`🚀 DEPLOYED pool=${poolId} strategy=${strategy} rungs=${opened.length} `
+    + `ladder=${ladderId} ${q.symbol.toLowerCase()}=${formatUnits(totalIn, q.decimals)} tx=${hash}`);
+  console.log(JSON.stringify({
+    success: true, pool: poolId, protocol: "v4", strategy, ladderId, rungs: opened.length,
+    quote: quoteAddr, quoteSymbol: q.symbol,
+    positions: opened, tx: hash,
+    quoteIn: formatUnits(totalIn, q.decimals),
+    committedQuote: formatUnits(amountQuote, q.decimals),
+  }));
+}
+
 async function cmdDeploy(wallet, account) {
   const poolId = arg("pool", "");
   const strategy = arg("strategy", "balanced_tight");
@@ -916,10 +1163,19 @@ async function cmdDeploy(wallet, account) {
   }));
 }
 
-// positionSnapshot prices one v4 position: principal from tick math plus
-// pending fees from the fee-growth deltas. StateView recomputes the
-// up-to-date inside growth, so unlike the v3 state read this DOES count
-// live-accrued fees.
+// positionSnapshot prices one v4 position: principal from tick math, and pending
+// fees from the fee-growth deltas. StateView recomputes the up-to-date inside
+// growth, so this sees fees the moment they accrue — no poke needed, and none of
+// the simulated decrease+collect the v3 executor has to run to see the same
+// number.
+//
+// PRINCIPAL AND FEES ARE RETURNED SEPARATELY (2026-08-05). They used to be summed
+// into amount0/amount1, which quietly broke a contract uni_monitor.py depends on:
+// `valueWeth` must be principal-only, because the ladder idle rule divides the
+// fee meter BY it to get a fee yield, and every SL/TP/trailing rule compares it
+// against an entry cost basis that never contained fees. Summed, a rung's own
+// fees inflated its PnL and put the fees on both sides of that division. The v3
+// executor splits them for the same reason — see its cmdState header.
 async function positionSnapshot(id) {
   const [keyRaw, infoPacked] = await pub.readContract({
     address: POSM, abi: posmAbi, functionName: "getPoolAndPositionInfo", args: [id],
@@ -936,8 +1192,9 @@ async function positionSnapshot(id) {
 
   const sqrtA = getSqrtRatioAtTick(tickLower);
   const sqrtB = getSqrtRatioAtTick(tickUpper);
-  let [amount0, amount1] = amountsForLiquidity(st.sqrtPriceX96, sqrtA, sqrtB, liquidity);
+  const [amount0, amount1] = amountsForLiquidity(st.sqrtPriceX96, sqrtA, sqrtB, liquidity);
 
+  let fees0 = 0n, fees1 = 0n;
   if (liquidity > 0n) {
     // Pending fees: liquidity * (feeGrowthInside_now - feeGrowthInside_last)
     // in Q128, with the same overflow-wrapping subtraction the core uses.
@@ -947,10 +1204,14 @@ async function positionSnapshot(id) {
       pub.readContract({ address: STATE_VIEW, abi: stateViewAbi, functionName: "getFeeGrowthInside", args: [poolId, tickLower, tickUpper] }),
     ]);
     const wrapSub = (a, b) => (a - b + (1n << 256n)) & MAX_UINT256;
-    amount0 += (liquidity * wrapSub(fg0Now, fg0Last)) >> 128n;
-    amount1 += (liquidity * wrapSub(fg1Now, fg1Last)) >> 128n;
+    fees0 = (liquidity * wrapSub(fg0Now, fg0Last)) >> 128n;
+    fees1 = (liquidity * wrapSub(fg1Now, fg1Last)) >> 128n;
   }
-  return { key, poolId, tickLower, tickUpper, liquidity, st, amount0, amount1 };
+  // A zero-liquidity position accrues nothing, so 0n here is a measurement and
+  // not a gap — the reason this can report a hard zero where the v3 executor has
+  // to report null. uni_monitor.py treats null as "unmeasured" and falls through
+  // to its next meter; a real zero is what releases a fee-dead wall.
+  return { key, poolId, tickLower, tickUpper, liquidity, st, amount0, amount1, fees0, fees1 };
 }
 
 async function cmdState() {
@@ -966,8 +1227,13 @@ async function cmdState() {
   const q = QUOTES[quoteAddr.toLowerCase()] || { symbol: "?", decimals: 18, native: false };
   const tokenSymbol = (await tokenMeta(tokenAddr)).symbol;
 
+  // Principal only — see positionSnapshot. Fees are priced through the same
+  // conversion so feesQuote and valueQuote share a unit and their ratio is the
+  // fee yield uni_monitor.py's ladder idle rule wants.
   const valueRaw = valueInQuote(snap.amount0, snap.amount1, st.sqrtPriceX96, qSide === 0);
   const valueQuote = Number(formatUnits(valueRaw, q.decimals));
+  const feesQuote = Number(formatUnits(
+    valueInQuote(snap.fees0, snap.fees1, st.sqrtPriceX96, qSide === 0), q.decimals));
   const entryQuote = entry ? Number(entry.quoteIn) : (arg("entry-quote", "") ? Number(arg("entry-quote")) : null);
   const pnlPct = entryQuote ? ((valueQuote - entryQuote) / entryQuote) * 100 : null;
   const inRange = st.tick >= tickLower && st.tick < tickUpper;
@@ -982,6 +1248,25 @@ async function cmdState() {
     // v3-name aliases so quote-agnostic readers keep working; quoteSymbol
     // says what unit these are really in.
     valueWeth: valueQuote, entryWeth: entryQuote,
+    // Uncollected fees in the same units as valueQuote. Unlike the v3 executor's
+    // batched-simulate meter this is never null: the fee-growth read either
+    // succeeds or the whole state read throws, so there is no "measured but
+    // unknown" case to signal.
+    feesQuote,
+    // Ladder metadata, echoed from the entry journal so uni_monitor.py can tell a
+    // resting bid rung from a normal position WITHOUT reading the journal itself.
+    // The two need opposite exit rules: a ladder rung is out-of-range BY DESIGN,
+    // so the fee-dead OOR timeout that protects a balanced_tight position would
+    // close every rung 30 minutes after it was minted. `ladderId` is what groups
+    // rungs into the wall the idle rule judges as one unit.
+    strategy: entry?.strategy || null,
+    ladderId: entry?.ladderId || null,
+    rung: entry?.rung ?? null,
+    rungs: entry?.rungs ?? null,
+    // quoteIs0 is what ladder_decide reads to know which tick direction fills a
+    // rung; wethIs0 is its pre-USDG alias.
+    quoteIs0: qSide === 0,
+    wethIs0: qSide === 0,
   }));
 }
 
@@ -998,10 +1283,22 @@ async function cmdPositions(account) {
     out.push({
       tokenId: idStr, protocol: "v4",
       currency0: keyRaw.currency0, currency1: keyRaw.currency1, fee: Number(keyRaw.fee),
+      tickSpacing: Number(keyRaw.tickSpacing),
       tickLower, tickUpper, liquidity: liquidity.toString(),
     });
   }
-  console.log(JSON.stringify({ address: account.address, count: out.length, positions: out }));
+  // `count` is NFTs, `ladders` is distinct funded pools — the same two units the
+  // v3 executor reports, and the scanner caps on `ladders`. A ladder entry mints
+  // N rungs as N posm NFTs, so a cap expressed in NFTs would let one wall exhaust
+  // the whole position budget. Pool identity includes tickSpacing because in v4
+  // the same currency pair and fee can exist at several spacings — those are
+  // different pools, and a wall in each is two entries, not one. Rungs drained to
+  // zero liquidity don't count: they hold nothing.
+  const ladders = new Set(
+    out.filter((p) => p.liquidity !== "0")
+      .map((p) => `${p.currency0}-${p.currency1}-${p.fee}-${p.tickSpacing}`.toLowerCase()),
+  ).size;
+  console.log(JSON.stringify({ address: account.address, count: out.length, ladders, positions: out }));
 }
 
 async function cmdCollect(wallet, account) {
@@ -1163,7 +1460,17 @@ async function main() {
     case "address": return cmdAddress(account);
     case "balance": return cmdBalance(account);
     case "quote": return cmdQuote();
-    case "deploy": return cmdDeploy(wallet, account);
+    // Ladder strategies branch to their own command before cmdDeploy sees them:
+    // one entry mints N positions in one unlock, so it shares no control flow with
+    // the single-position path. Matched by SUFFIX, like uni_monitor.py's rulebook
+    // switch — a new quote asset adds a strategy name, and a ladder that fell
+    // through to cmdDeploy would die on "unknown strategy" after the gas check.
+    case "deploy": {
+      const strategy = arg("strategy", "balanced_tight");
+      return strategy.endsWith("_ladder")
+        ? cmdDeployLadder(wallet, account, strategy)
+        : cmdDeploy(wallet, account);
+    }
     case "positions": return cmdPositions(account);
     case "state": return cmdState();
     case "collect": return cmdCollect(wallet, account);

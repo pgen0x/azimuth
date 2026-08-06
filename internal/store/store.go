@@ -113,6 +113,46 @@ func (s *Seen) CooldownRemaining(ctx context.Context, symbol string) time.Durati
 	return d
 }
 
+// CachedCandles reads a Robinhood pool's cached GeckoTerminal candle set into
+// out (a pointer, JSON-decoded) and reports whether it was served. ok=false
+// covers no Redis backend, no cached entry and an unreadable/undecodable value
+// alike: every one of them means "fetch it", which is the only safe reading —
+// the indicator math must never run on a half-decoded series.
+//
+// The key namespace is rh:ohlcv:<pool> so it cannot collide with the Solana
+// keys (sol:dlmm:*) or the seen keys sharing this instance. Pool addresses
+// arrive from GeckoTerminal in mixed case, so they are lowercased: the same
+// pool reached from two feeds must be one cache entry, not two.
+//
+// Why persist candles at all: the daemon restarted twice on 2026-08-05 and each
+// restart re-fetched every pool's 15m candles from scratch, which is precisely
+// the request burst that earns GT's 429 on a ~10 req/min public tier.
+func (s *Seen) CachedCandles(ctx context.Context, pool string, out any) bool {
+	if s.rdb == nil || pool == "" {
+		return false
+	}
+	b, err := s.rdb.Get(ctx, "rh:ohlcv:"+strings.ToLower(pool)).Bytes()
+	if err != nil || len(b) == 0 {
+		return false
+	}
+	return json.Unmarshal(b, out) == nil
+}
+
+// PutCandles caches v as this pool's candle set for ttl. Best-effort and
+// silent by design: the caller has already served the value from its in-memory
+// half, so a Redis hiccup here costs a future request, never a correct answer,
+// and logging it would repeat once per pool per TTL.
+func (s *Seen) PutCandles(ctx context.Context, pool string, v any, ttl time.Duration) {
+	if s.rdb == nil || pool == "" || ttl <= 0 {
+		return
+	}
+	b, err := json.Marshal(v)
+	if err != nil {
+		return
+	}
+	s.rdb.Set(ctx, "rh:ohlcv:"+strings.ToLower(pool), b, ttl)
+}
+
 // Unmark removes id from the seen set so a failed emit can retry on the next
 // poll. Called when webhook delivery fails after MarkIfNew already recorded it.
 func (s *Seen) Unmark(ctx context.Context, id string) {

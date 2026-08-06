@@ -107,7 +107,51 @@ one pass per enabled mode per `POLL_INTERVAL`.
     comes from realized 24h volume, because extrapolating an h1 window would let
     one busy hour fake a 24× daily rate.
 
-  Both modes share `Screen` and every safety gate (GMGN OpenAPI
+  - `Ladder` (`ROBINHOOD_LADDER`) — the `weth_ladder` thesis: N contiguous
+    **one-sided WETH** rungs parked on the bid side, sized on a linear ramp,
+    minted atomically — one `NPM.multicall` on v3; on v4 one `modifyLiquidities`
+    unlock carrying N `MINT_POSITION` actions and a single `SETTLE_PAIR`, so the
+    quote is pulled once instead of N times. It never buys the token, so its exits are
+    re-pins (`ladder stale` / `ladder rung filled` / `ladder idle` — the last
+    one because the first two are price rules that a frozen market disarms;
+    an equity ladder held 5.6h fee-dead overnight before it existed), not
+    SL/TP, and a rung is
+    out-of-range **by design** — the fee-dead OOR timeout must never apply to
+    it. Discovery is the **union of two feeds** (`trending.go`): `Mature`'s
+    gateway feed plus the cached GeckoTerminal `trending_pools` page, which
+    carries v3 pools the gateway does not index at all. The page costs no extra
+    GT request while `Fresh` runs — `discover.go` already fetches it and now
+    publishes it to a shared, rate-limited cache. Screens on churn, not yield: the
+    8%/day bar matched 1 of the 23 pools a profitable ladder LP actually
+    worked. This replaced `balanced_tight` as the deploy default, which was long
+    a bleeding token by construction. See `docs/ROBINHOOD_CHAIN_PLAN.md` §4b.
+  - `StockLadder` (`ROBINHOOD_STOCK_LADDER`) — the same wall, `usdg_ladder`,
+    under the chain's **USDG-quoted tokenized equities** (nvda, gme, spacex).
+    Same gateway feed; a separate mode because every `Ladder` threshold is
+    wrong for a deep, low-vol book (0.2%/day vs 1.5%, $20k floor, 240-tick
+    rungs vs 1200). The stock universe spans **all three fee tiers** — of the 12
+    pools this mode has minted into, 3 were 0.05% (spacing 10), 6 were 0.3% (60),
+    3 were 1% (200) — and one underlying often lists at two or three at once, so
+    it can hold several position slots (no per-token cap yet). `rungWidth`
+    quantizes to whole spacings, so a 240-tick request collapses to 200 on the 1%
+    tier: covered drop per rung is per-tier, and the executor's ladder log line
+    is the only honest source for a wall's real width. It spends the wallet's
+    **USDG**, so sizing uses `RobinhoodSizeUSDG` (dollar units). §4c.
+
+  Modes are quote-pinned via `ModeParams.QuoteAsset` — a ladder's rungs and its
+  sizing must be the same asset, so a mode may not mix WETH- and USDG-quoted
+  pools in one batch. **USDG is 6 decimals, WETH is 18**: anything touching
+  amounts in `uni_executor.js` must go through `parseQ`/`fmtQ`, never
+  `parseEther` (the v4 executor uses `parseUnits`/`formatUnits` at `q.decimals`
+  for the same reason).
+
+  Both ladder modes screen v3 **and** v4 pools, and both executors mint the
+  shape. Its geometry lives in `assets/skill/scripts/uni_ladder.js`, required by
+  both — rung count/width/floor/ramp describe the thesis, not the protocol, and
+  `uni_monitor.py`'s `ladder stale` rule reads the same widths. Change it there,
+  never in one executor. §4d.
+
+  All four modes share `Screen` and every safety gate (GMGN OpenAPI
   `chain=robinhood` security + holder quality, Blockscout holders). The deploy
   pick also passes a supertrend/RSI entry-timing gate (`indicators.go`, the Go
   port of the skill's `local_indicators.py` — keep them in sync; fail-open,

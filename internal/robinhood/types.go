@@ -11,6 +11,9 @@
 //   - rh-mature (mature.go) — established pools still printing outsized
 //     fee/TVL, from Uniswap's own interface GraphQL gateway, which indexes
 //     nothing younger than about a day.
+//   - rh-ladder (trending.go) — the UNION of that gateway feed and a cached
+//     GeckoTerminal trending_pools page, because the gateway's leaderboard is
+//     not the venue's whole universe (measured 2026-08-05).
 //
 // Both share every downstream gate: Screen, the safety fetches (safety.go) and
 // the copycat guard (copycat.go).
