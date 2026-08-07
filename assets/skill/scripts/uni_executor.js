@@ -1195,6 +1195,26 @@ async function cmdClose(wallet, account) {
   const [token0, token1, liquidity] = [getAddress(p[2]), getAddress(p[3]), p[7]];
   const deadline = BigInt(Math.floor(Date.now() / 1000) + 120);
 
+  // Which asset this position must be unwound INTO, resolved BEFORE the
+  // decrease so the quote the position itself pays back can be measured. The
+  // token-side sell below reads the same `q`.
+  const entry = readEntry(id);
+  const q = resolveQuote({ token0, token1 }, entry?.quote || "");
+
+  // Quote held before the unwind, so decrease+collect's payout can be read as a
+  // balance delta — the same measurement the token side already uses below.
+  //
+  // This exists because a ONE-SIDED quote position (weth_below, every ladder
+  // rung) closes with nothing to sell, and reporting only the swap proceeds
+  // said its entire ticket had evaporated. Live proof, 2026-08-07: turnover
+  // position #616818 paid back its full 0.017466515519518273 WETH on-chain
+  // (DecreaseLiquidity/Collect amount0, amount1 = 0) and still printed
+  // weth_out "0". uni_monitor.py books that number as realized PnL, so the
+  // re-center circuit breaker recorded -0.0175 against the pool and declined
+  // every future re-center of it — disabling the one loop this thesis runs on.
+  const quoteBefore = DRY_RUN ? 0n
+    : await pub.readContract({ address: q.address, abi: erc20Abi, functionName: "balanceOf", args: [account.address] });
+
   if (liquidity > 0n) {
     await send(wallet, {
       address: NPM, abi: npmAbi, functionName: "decreaseLiquidity",
@@ -1208,6 +1228,11 @@ async function cmdClose(wallet, account) {
     account: wallet.account, chain,
   }, `collect #${id}`);
   await send(wallet, { address: NPM, abi: npmAbi, functionName: "burn", args: [id], account: wallet.account, chain }, `burn #${id}`);
+
+  // Measured HERE — after collect, before the token-side sell — so this is the
+  // position's own payout (principal + fees) and not the swap's.
+  const quoteFromPosition = DRY_RUN ? 0n
+    : (await pub.readContract({ address: q.address, abi: erc20Abi, functionName: "balanceOf", args: [account.address] })) - quoteBefore;
 
   // Sell the freed token side back to the position's quote asset unless told
   // otherwise, mirroring the Solana monitor's auto-swap-to-SOL on close.
@@ -1226,8 +1251,6 @@ async function cmdClose(wallet, account) {
   // has one (a USDG ladder must not be unwound into WETH — that would leave
   // the strategy's capital in the wrong asset and the next deploy unfunded),
   // else the pool's own quote side.
-  const entry = readEntry(id);
-  const q = resolveQuote({ token0, token1 }, entry?.quote || "");
   if (!hasFlag("no-swap-out") && !DRY_RUN) {
     const token = q.token;
     const bal = await pub.readContract({ address: token, abi: erc20Abi, functionName: "balanceOf", args: [account.address] });
@@ -1248,14 +1271,26 @@ async function cmdClose(wallet, account) {
       }
     }
   }
+  // Sum in base units, format once: adding two decimal strings would round the
+  // 6-decimal quote's cents away (the parseQ/fmtQ rule this file follows).
+  const totalQuoteOut = fmtQ(quoteFromPosition + (sold ? parseQ(sold.quote_out, q) : 0n), q);
+
   console.log(JSON.stringify({
     success: true, closed: id.toString(),
     swapped_out: !!sold,
     // weth_out keeps its name for uni_monitor.py's close journal (and the v4
     // executor prints the same pair of fields); quote_symbol is what says
     // whether those digits are ether or dollars.
-    weth_out: sold ? sold.quote_out : "0",
-    quote_out: sold ? sold.quote_out : "0",
+    //
+    // Both halves of the unwind, NOT just the sell: the position's own payout
+    // plus whatever the token side fetched. The two are broken out beside it
+    // because they answer different questions — a close where the position
+    // returned everything and sold nothing is a rung that was never traded
+    // into, while a close that is all swap proceeds is a rung that filled.
+    weth_out: totalQuoteOut,
+    quote_out: totalQuoteOut,
+    quote_from_position: fmtQ(quoteFromPosition, q),
+    quote_from_swap: sold ? sold.quote_out : "0",
     quote_symbol: q.symbol,
     stranded,
     gas_topup: gasTopup,

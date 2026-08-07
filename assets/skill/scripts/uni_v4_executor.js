@@ -1353,6 +1353,15 @@ async function cmdClose(wallet, account) {
   const q = QUOTES[quoteAddr.toLowerCase()] || { symbol: "?", decimals: 18, native: false };
 
   const tokenBalBefore = DRY_RUN ? 0n : await balanceOf(tokenAddr, account.address);
+  // Same delta measurement for the QUOTE side — see uni_executor.js's
+  // quoteBefore for why: a one-sided quote position (weth_below, ladder rungs)
+  // closes with nothing to sell, and reporting only the swap proceeds told
+  // uni_monitor.py the whole ticket was gone, which permanently tripped that
+  // pool's re-center circuit breaker. A native quote reads through the same
+  // balanceOf() helper, which routes address(0) to getBalance; the gas this
+  // close pays lands in that delta too, understating the payout by a few
+  // hundred gwei on a chain that prices gas at ~0.05 gwei.
+  const quoteBalBefore = DRY_RUN ? 0n : await balanceOf(quoteAddr, account.address);
 
   // BURN_POSITION removes all liquidity + accrued fees in one action and
   // TAKE_PAIR pays both currencies out — one tx replaces the v3 script's
@@ -1370,6 +1379,11 @@ async function cmdClose(wallet, account) {
   // Sell the freed token side back to the quote. Reports itself instead of
   // failing the close — the position is already gone (same lesson as v3:
   // a revert here must not journal success=false on a burned position).
+  // Measured after burn+take, before the sell, so this is the position's own
+  // payout (principal + fees) rather than the swap's.
+  const quoteFromPosition = DRY_RUN ? 0n
+    : (await balanceOf(quoteAddr, account.address)) - quoteBalBefore;
+
   let sold = null;
   let stranded = null;
   if (!hasFlag("no-swap-out") && !DRY_RUN) {
@@ -1395,12 +1409,21 @@ async function cmdClose(wallet, account) {
   let rewrapped = null;
   if (q.native && !DRY_RUN) rewrapped = await rewrapExcess(wallet, account);
 
+  const totalQuoteOut = formatUnits(
+    quoteFromPosition + (sold ? parseUnits(sold.quote_out, q.decimals) : 0n), q.decimals);
+
   console.log(JSON.stringify({
     success: true, closed: id.toString(), protocol: "v4",
     swapped_out: !!sold,
-    quote_out: sold ? sold.quote_out : "0", quote_symbol: q.symbol,
+    // Both halves of the unwind, matching uni_executor.js: the position's own
+    // payout plus whatever the token side fetched. Summed in base units and
+    // formatted once — adding two decimal strings would round a 6-decimal
+    // quote's cents away.
+    quote_out: totalQuoteOut, quote_symbol: q.symbol,
+    quote_from_position: formatUnits(quoteFromPosition, q.decimals),
+    quote_from_swap: sold ? sold.quote_out : "0",
     // v3-name alias for quote-agnostic consumers (uni_monitor.py close path).
-    weth_out: sold ? sold.quote_out : "0",
+    weth_out: totalQuoteOut,
     stranded, rewrapped, gas_topup: gasTopup,
   }));
 }
