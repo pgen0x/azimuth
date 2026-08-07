@@ -113,6 +113,46 @@ func (s *Seen) CooldownRemaining(ctx context.Context, symbol string) time.Durati
 	return d
 }
 
+// RobinhoodCooldown reports how long this pool (or its token) is still blocked
+// from re-entry, and why. Zero duration means clear.
+//
+// The keys are written by uni_monitor.py when a resting wall is run over —
+// rh:cooldown:pool:<pool> and rh:cooldown:token:<base>, the venue's port of the
+// Solana monitor's sol:dlmm:cooldown:* block. Only the FILL class of close
+// writes them: `ladder idle` and `ladder stale` are re-pins by design, and
+// cooling those off would switch the ladder modes off entirely.
+//
+// Both arguments are lowercased here because the two sides spell addresses
+// differently — GeckoTerminal returns mixed case, the monitor writes what the
+// executor reported — and a cooldown that missed on capitalization would read
+// as "clear" every time.
+//
+// Fails OPEN (returns 0) with no Redis backend or on any read error, matching
+// this venue's gate convention: the position cap and the screen still stand
+// between an unknown cooldown and a deploy.
+func (s *Seen) RobinhoodCooldown(ctx context.Context, pool, token string) (time.Duration, string) {
+	// Nil receiver included in the fail-open case: this is read from the deploy
+	// walk, which a caller may reach with no store wired at all (the scanner
+	// tests build a Scanner directly). A risk brake must not be the thing that
+	// panics the daemon.
+	if s == nil || s.rdb == nil {
+		return 0, ""
+	}
+	for _, k := range []struct{ kind, id string }{{"pool", pool}, {"token", token}} {
+		if k.id == "" {
+			continue
+		}
+		key := "rh:cooldown:" + k.kind + ":" + strings.ToLower(k.id)
+		d, err := s.rdb.TTL(ctx, key).Result()
+		if err != nil || d <= 0 {
+			continue
+		}
+		reason, _ := s.rdb.Get(ctx, key).Result()
+		return d, reason
+	}
+	return 0, ""
+}
+
 // CachedCandles reads a Robinhood pool's cached GeckoTerminal candle set into
 // out (a pointer, JSON-decoded) and reports whether it was served. ok=false
 // covers no Redis backend, no cached entry and an unreadable/undecodable value

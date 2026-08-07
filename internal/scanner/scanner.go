@@ -476,6 +476,19 @@ func (s *Scanner) robinhoodDeploy(ctx context.Context, mode string, batch []*rob
 				continue
 			}
 		}
+		// Re-entry cooldown, the Solana port. A pool that already ran one of our
+		// walls over is the single best predictor this venue offers of running
+		// over the next one: of 11 rung fills to 2026-08-07, six were a repeat
+		// in a pool that had filled before, and the repeats averaged -11.8%
+		// against -6.7% for the first. Checked BEFORE the entry-timing gate
+		// because that gate costs a GeckoTerminal request and this costs a local
+		// Redis read. Only fill-class closes write the key — see
+		// store.RobinhoodCooldown.
+		if cd, why := s.seen.RobinhoodCooldown(ctx, c.Pool, c.BaseAddress); cd > 0 {
+			log.Printf("scanner[%s]: %s (%s) skipped: re-entry cooldown %s left (%s)",
+				mode, c.BaseSymbol, c.Pool[:10], cd.Round(time.Minute), why)
+			continue
+		}
 		if sz := sizes[c.Pool]; sz.skip != "" {
 			// Only reachable when one batch mixes protocols whose executors report
 			// different assets (the v4 build reports USDG; an older v3 build may

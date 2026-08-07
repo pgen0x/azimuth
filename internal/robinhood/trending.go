@@ -260,6 +260,12 @@ func backfillZeros(dst, src Pool) Pool {
 	if dst.McapUSD == 0 {
 		dst.McapUSD = src.McapUSD
 	}
+	if dst.VolumeM15USD == 0 {
+		dst.VolumeM15USD = src.VolumeM15USD
+	}
+	if dst.TxM15 == (gtTxWindow{}) {
+		dst.TxM15 = src.TxM15
+	}
 	if dst.VolumeH1USD == 0 {
 		dst.VolumeH1USD = src.VolumeH1USD
 	}

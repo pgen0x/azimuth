@@ -346,6 +346,8 @@ func enrichFromGT(pools []Pool) error {
 		}
 		pools[i].FdvUSD = pfloat(a.FdvUSD)
 		pools[i].McapUSD = pfloat(a.MarketCapUSD)
+		pools[i].VolumeM15USD = pfloat(a.VolumeUSD.M15)
+		pools[i].TxM15 = a.Transactions.M15
 		pools[i].VolumeH1USD = pfloat(a.VolumeUSD.H1)
 		pools[i].TxH1 = a.Transactions.H1
 		pools[i].TxH24 = a.Transactions.H24

@@ -110,6 +110,28 @@ LADDER_STALE_TICKS = {
     "USDG": float(os.environ.get("UNI_LADDER_STALE_TICKS_USDG", "240")),
 }
 
+# --- ladder fill is a WALL event ------------------------------------------
+# A filled rung used to close alone, leaving the rest of the wall resting under
+# a market that had just proved it can come down. That is a limit-buy order
+# left under a falling knife, and the journal shows it being taken: of 11 fills
+# to 2026-08-07, SIX were a repeat fill in a pool that had already filled once,
+# and the repeats averaged -11.8% against -6.7% for the first fill of a wall.
+# One WETH pool filled three rungs in thirty minutes — -7.6%, then -12.0%, then
+# -40.6%. So the FIRST fill tears the whole wall down: the unfilled rungs are
+# still pure quote asset, and closing them costs no swap and no spread.
+#
+# This is the venue's version of the Solana monitor's pool-scope reaction to a
+# loss — there, a dump close cools the pool off; here it also has to retract the
+# resting orders, because unlike a DLMM position a ladder keeps buying after the
+# thesis has failed.
+#
+# The second half of the same lesson: a fill deep enough to be a collapse must
+# not wait for indicator confirmation. Confirmation is right for a shallow fill
+# (an un-filling rung reverts to WETH for free, which strictly beats crossing
+# the spread twice) and wrong for a -40% one, which is what the confirm-and-wait
+# path produced. Mirrors dlmm_monitor.py's emergency-SL carve-out.
+LADDER_FILL_HARD_PCT = float(os.environ.get("UNI_LADDER_FILL_HARD_PCT", "-8.0"))
+
 # --- ladder idle exit ------------------------------------------------------
 # Drift and fill are both PRICE rules, so a market that stops moving disarms
 # the whole ladder rulebook: a usdg_ladder minted on SPY at 16:56 ET — four
@@ -278,6 +300,30 @@ def is_ladder(s):
     return str((s or {}).get("strategy") or "").endswith("_ladder")
 
 
+def rung_fill_state(s):
+    """(filled, gap) for one rung, or (None, None) when the state read has no
+    ticks. `gap` is how far spot sits OUTSIDE the rung on the resting side, in
+    ticks; the stale rule measures drift from it.
+
+    Which tick direction fills the rung depends on token ordering, the same
+    invariant ladderBands() mints on: the quote as token0 means a RISING tick
+    makes the token cheaper, so the ladder sits above spot and fills upward.
+
+    Shared by ladder_decide (per rung) and ladder_walls (which needs to know
+    whether ANY rung of the wall has filled) — one definition, because a wall
+    breach that disagreed with the rung's own verdict would close the wall on a
+    tick the filled rung then declined to close on.
+    """
+    tick, lo, hi = (s or {}).get("tick"), (s or {}).get("tickLower"), (s or {}).get("tickUpper")
+    if tick is None or lo is None or hi is None:
+        return None, None
+    # quoteIs0 is the current field; wethIs0 is its pre-USDG name, still emitted
+    # by the executor (and the only one an older v4 build sends).
+    if bool(s.get("quoteIs0", s.get("wethIs0"))):
+        return tick >= hi, lo - tick
+    return tick <= lo, tick - hi
+
+
 def ladder_wall_key(ladder_id):
     """Monitor-state key for a wall's shared idle window. Keyed by `ladderId`
     alone: the executor mints it as `<pool>-<mintUnixTs>` and persists it in the
@@ -316,8 +362,20 @@ def ladder_walls(reads, krystal):
             "fees": 0.0, "fees_ok": True,
             "value": 0.0, "value_ok": True,
             "kry_fees": 0.0, "kry_value": 0.0, "kry_ok": True,
+            "breached": None,
         })
         w["rungs"].append(str(tid))
+        # A filled rung breaches the WHOLE wall — see the LADDER_FILL_HARD_PCT
+        # note. Records the lowest-indexed filled rung because that is the one
+        # nearest spot, i.e. the one the reason line should name. A rung whose
+        # state read carried no ticks contributes nothing either way: unknown is
+        # not a breach, and the rung's own ladder_decide holds it for the same
+        # reason.
+        filled, _ = rung_fill_state(s)
+        if filled:
+            r = s.get("rung") or 0
+            if w["breached"] is None or r < w["breached"]:
+                w["breached"] = r
         if s.get("ageMin") is not None:
             w["ages"].append(float(s["ageMin"]))
         if s.get("inRange"):
@@ -497,7 +555,10 @@ def judge_ladder_walls(walls, state, now, persist=True):
     for lid, w in walls.items():
         key = ladder_wall_key(lid)
         ps = state.setdefault(key, {}) if persist else dict(state.get(key) or {})
-        out[lid] = {"idle": ladder_idle_reason(w["state"], w["age_min"], ps, now, w["kry"])}
+        out[lid] = {
+            "idle": ladder_idle_reason(w["state"], w["age_min"], ps, now, w["kry"]),
+            "breached": w.get("breached"),
+        }
     return out
 
 
@@ -513,28 +574,37 @@ def ladder_decide(s, pnl, age_min, ps=None, now=None, kry=None, wall=None):
     tick, lo, hi = s.get("tick"), s.get("tickLower"), s.get("tickUpper")
     if tick is None or lo is None or hi is None:
         return None
-    # quoteIs0 is the current field; wethIs0 is its pre-USDG name, still emitted
-    # by the executor (and the only one an older v4 build sends).
-    quote_is0 = bool(s.get("quoteIs0", s.get("wethIs0")))
     qsym = s.get("quoteSymbol") or "WETH"
     stale_ticks = LADDER_STALE_TICKS.get(qsym, LADDER_STALE_TICKS["WETH"])
     rung = s.get("rung") or 0
     width = hi - lo
-    # Which tick direction fills the rung depends on token ordering, the same
-    # invariant ladderBands() mints on: the quote as token0 means a RISING tick
-    # makes the token cheaper, so the ladder sits above spot and fills upward.
-    if quote_is0:
-        filled, gap = tick >= hi, lo - tick
-    else:
-        filled, gap = tick <= lo, tick - hi
+    filled, gap = rung_fill_state(s)
 
     if filled:
         # Fully converted: this rung is now pure token inventory, which is the
-        # one thing the strategy exists to avoid holding. Sell it back. This is
-        # indicator-confirmable on purpose (see exit_confirmable) — if price
-        # recovers the rung un-fills back into WETH on its own, for free, so
-        # waiting out a bullish dip strictly beats crossing the spread twice.
+        # one thing the strategy exists to avoid holding. Sell it back.
+        #
+        # A SHALLOW fill is indicator-confirmable on purpose (see
+        # exit_confirmable) — if price recovers the rung un-fills back into WETH
+        # on its own, for free, so waiting out a bullish dip strictly beats
+        # crossing the spread twice. A deep one is not: the reason string below
+        # is outside the confirmable set, so it closes on this tick. The rung
+        # that printed -40.6% on 2026-08-07 was a confirm-and-wait on a token
+        # that never came back.
+        if pnl is not None and pnl <= LADDER_FILL_HARD_PCT:
+            return (f"emergency ladder fill {pnl:.1f}% <= {LADDER_FILL_HARD_PCT:.1f}% "
+                    f"(tick {tick} past [{lo},{hi}])")
         return f"ladder rung filled (tick {tick} past [{lo},{hi}])"
+
+    # An unfilled rung of a wall whose OTHER rung filled. The wall's thesis was
+    # that spot would oscillate above it, and a fill is that thesis failing —
+    # what remains is a resting bid under a market that just came down through
+    # one. Tear it down with the rest; it is still pure quote asset, so this
+    # close costs no swap and no spread (which is also why it never waits for
+    # indicator confirmation).
+    if wall is not None and wall.get("breached") is not None:
+        return (f"ladder wall breached (rung {wall['breached']} filled) — "
+                f"retracting the unfilled rungs")
 
     drift = gap - rung * width
     if drift > stale_ticks:
@@ -571,6 +641,14 @@ def exit_confirmable(reason):
     nothing, a round-trip through the pool costs the fee tier twice. "ladder
     stale" and "ladder idle" do not — dead capital does not get better by
     waiting, and an idle rung has already waited a full window.
+
+    Two ladder reasons are deliberately OUTSIDE the set, and both are named so
+    they cannot match the "ladder rung filled" prefix by accident:
+      * "emergency ladder fill" — a fill past LADDER_FILL_HARD_PCT. Deep enough
+        that waiting for a bullish confirmation is how -7.6% became -40.6%.
+      * "ladder wall breached" — retracting rungs that are still pure quote
+        asset. There is no sell to time: nothing is being dumped into weakness,
+        so confirmation could only delay a free withdrawal.
     """
     return reason.startswith(("trailing exit", "fast-out", "downtrend", "ladder rung filled"))
 
@@ -840,6 +918,72 @@ def journal_close(rec):
             f.write(json.dumps(rec) + "\n")
     except OSError as e:
         print(f"warn: could not journal close: {e}")
+
+
+# --- re-entry cooldown -----------------------------------------------------
+# Ported from dlmm_monitor.py's cooldown block, which the Robinhood venue never
+# had. Without it the scanner re-ladders a pool the moment its dedup TTL lapses,
+# and the journal shows what that costs: of 11 rung fills to 2026-08-07, six
+# were a REPEAT fill in a pool that had already run our wall over once, and the
+# repeats averaged -11.8% against -6.7% for the first.
+#
+# The Solana rule cools every close. This one cools only the FILL class, and the
+# difference is the strategy, not an oversight: `ladder idle` and `ladder stale`
+# are re-pins by design — the mode's normal operating loop is close-and-re-pin,
+# so cooling a pool off for those would switch the mode off. What earns a
+# cooldown is the pool proving it trends down THROUGH a resting wall.
+#
+# Written to the same Redis the daemon dedups in, because the daemon is what
+# enforces it (internal/store.Seen.RobinhoodCooldown); a monitor-local file
+# could not be read from the Go process. Best-effort throughout: Redis being
+# down must never block a close.
+COOLDOWN_POOL_SECS = int(os.environ.get("UNI_COOLDOWN_POOL_SECS", "14400"))    # 4h
+COOLDOWN_TOKEN_SECS = int(os.environ.get("UNI_COOLDOWN_TOKEN_SECS", "14400"))  # 4h
+COOLDOWN_STREAK_SECS = (86400, 259200)  # 2 losses in 7d -> 24h, 3+ -> 72h
+
+
+def redis_cmd(*args):
+    """Run one redis-cli command against the daemon's instance. Returns stdout
+    stripped, or None if Redis is unreachable/absent — every caller treats that
+    as "no cooldown recorded", which fails OPEN by design: a cooldown is a
+    risk brake, and a broken brake must not also break the close path."""
+    addr = os.environ.get("REDIS_ADDR", "127.0.0.1:6379")
+    host, _, port = addr.partition(":")
+    try:
+        r = subprocess.run(["redis-cli", "-h", host or "127.0.0.1", "-p", port or "6379"] + [str(a) for a in args],
+                           capture_output=True, text=True, timeout=5)
+        return r.stdout.strip() if r.returncode == 0 else None
+    except (OSError, subprocess.SubprocessError) as e:
+        print(f"warn: redis {args[0] if args else '?'} failed: {e}")
+        return None
+
+
+def cool_off(pool, token, reason, pnl):
+    """Cool a pool (and its token) off after a wall was run over.
+
+    `token` may be None on an older state read — the pool key still lands, which
+    is the one that matters: a ladder is re-pinned per POOL, and the token key
+    only widens the block to that token's other pools.
+    """
+    if not any(reason.startswith(p) for p in ("ladder rung filled", "emergency ladder fill", "ladder wall breached")):
+        return
+    secs = COOLDOWN_POOL_SECS
+    tkey = f"rh:loss_streak:{str(token).lower()}" if token else None
+    if tkey and (pnl is None or pnl < 0):
+        redis_cmd("incr", tkey)
+        redis_cmd("expire", tkey, 604800)  # the streak's own 7d window
+        try:
+            streak = int(redis_cmd("get", tkey) or 1)
+        except ValueError:
+            streak = 1
+        if streak >= 2:
+            secs = COOLDOWN_STREAK_SECS[1] if streak >= 3 else COOLDOWN_STREAK_SECS[0]
+            print(f"monitor: repeat loss #{streak} in 7d on {token} — cooldown escalated to {secs // 3600}h")
+    redis_cmd("set", f"rh:cooldown:pool:{str(pool).lower()}", reason[:120], "ex", secs)
+    if token:
+        redis_cmd("set", f"rh:cooldown:token:{str(token).lower()}", reason[:120], "ex",
+                  max(secs, COOLDOWN_TOKEN_SECS))
+    print(f"monitor: re-entry cooldown {secs // 3600}h on pool {pool}")
 
 
 def sweep_stranded(proto, executor):
@@ -1220,6 +1364,10 @@ def main():
         if closed:
             state.pop(skey, None)
             live.discard(skey)
+            # Only a real, executed close cools a pool off — a failed close
+            # leaves the wall standing, and blocking re-entry to a pool we are
+            # still in would be the wrong brake on the wrong thing.
+            cool_off(pool, s.get("token"), reason, pnl)
             msg = f"🔴 Robinhood LP closed {pair} (#{tid})\n{reason}\npnl {pnl_str} peak {peak:.1f}%"
             if stranded:
                 msg += (f"\n⚠️ {stranded.get('symbol', '?')} NOT sold — {stranded.get('reason', '?')}"

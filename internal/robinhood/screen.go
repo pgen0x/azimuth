@@ -23,8 +23,34 @@ type ModeParams struct {
 	MinFeeTVLDay  float64 // projected daily fee/TVL % floor (volume pace x fee tier)
 	MinTxH1       int     // swaps in the last hour (wash guard with MinBuyersH1)
 	MinBuyersH1   int     // unique buyers in the last hour
-	MinFdvUSD     float64 // FDV sanity floor
-	MaxFdvUSD     float64 // FDV sanity ceiling (0 disables): fake-priced pools show absurd FDV
+
+	// Live-window flow gates, the port of Solana Pulse's (MinFeeActiveTVL,
+	// MinVolumeUSD) pair. Zero-disabled like the rest, so a mode that omits them
+	// opts out — set them explicitly.
+	//
+	// They exist because an h1 gate cannot tell a book that is trading from one
+	// that traded 50 minutes ago, and for a resting bid wall that difference is
+	// the entire outcome. Of 102 ladder closes to 2026-08-07, 91 were `ladder
+	// idle` or `ladder stale` — the wall earned EXACTLY ZERO and re-pinned on a
+	// timer. Every one of those pools cleared MinTxH1/MinFeeTVLDay at mint.
+	//
+	// Calibrated 2026-08-07 against the 20 distinct pools this venue's ladders
+	// actually minted into, re-read from GeckoTerminal. The five whose wall was
+	// ever traded into scored m15 fee/TVL 0.0010–0.0122% on 8–45 swaps; of the
+	// fifteen that stayed fee-dead, ten had literally zero m15 volume and the
+	// five exceptions failed one of the two floors (nvda/USDG: 156 swaps but
+	// 0.0006% — a deep book on the 0.05% tier pays a wall nothing). The pair
+	// separates that sample perfectly; n=20 is small, so treat it as a soak
+	// starting point, not a proven bar.
+	//
+	// MinVolumeM15USD is the dust guard MinFeeTVLM15Pct cannot be: a $737-reserve
+	// pool (this venue's collapsed launch template) reads an enormous fee/TVL on
+	// a handful of dollars of flow.
+	MinTxM15        int     // swaps in the last 15 minutes
+	MinVolumeM15USD float64 // raw 15m volume floor (USD)
+	MinFeeTVLM15Pct float64 // fee/TVL % over the 15m window (window-scoped, NOT a daily rate)
+	MinFdvUSD       float64 // FDV sanity floor
+	MaxFdvUSD       float64 // FDV sanity ceiling (0 disables): fake-priced pools show absurd FDV
 
 	// QuoteAsset pins the mode to ONE quote-side asset (lowercase address; ""
 	// accepts any whitelisted quote). Ladder modes must set it: a ladder's
@@ -164,6 +190,15 @@ var Ladder = ModeParams{
 	MinTxH1:     30,
 	MinBuyersH1: 10,
 
+	// Live-window floors — see the ModeParams field comment for the 20-pool
+	// calibration. Identical across all three ladder modes on purpose: the
+	// question they ask ("is this book trading right now, and does its tier pay
+	// a wall for it?") has nothing to do with which universe the pool is in, and
+	// the observed separation held for memecoin and equity pools alike.
+	MinTxM15:        8,
+	MinVolumeM15USD: 400,
+	MinFeeTVLM15Pct: 0.0010,
+
 	MinFdvUSD: 20000,
 	MaxFdvUSD: 50_000_000,
 }
@@ -232,6 +267,15 @@ var PulseLadder = ModeParams{
 	// so these exist to drop dead books, not to rank live ones.
 	MinTxH1:     30,
 	MinBuyersH1: 10,
+
+	// Ladder's live-window floors. This mode needs them MORE than the others,
+	// not less: a first-day pool can die between the launch sweep that
+	// registered it and the cycle that screens it, and three of the eight WETH
+	// pools it laddered on 2026-08-06/07 had collapsed to a $321-$737 reserve
+	// with zero flow by the time they were re-read.
+	MinTxM15:        8,
+	MinVolumeM15USD: 400,
+	MinFeeTVLM15Pct: 0.0010,
 
 	MinFdvUSD: 20000,
 	MaxFdvUSD: 50_000_000,
@@ -315,6 +359,23 @@ var StockLadder = ModeParams{
 	// as a fully-dead-pool guard.
 	MinTxH1:     10,
 	MinBuyersH1: 3,
+
+	// The same live-window floors as the WETH ladders, and the equity sample is
+	// what shows they are not a memecoin-only bar: of the 12 USDG pools this
+	// mode minted into, the only two whose wall was ever traded (spacex/USDG
+	// 0.05% and cashcat/USDG 1%) cleared both, while nvda/USDG 0.05% — 156
+	// swaps in 15 minutes on a $728k book — fails the fee floor at 0.0006%,
+	// correctly: 156 swaps that pay a wall nothing are not flow this mode wants.
+	//
+	// Market hours are the risk to watch in the soak. These pools legitimately
+	// go quiet overnight, and unlike the h1 floors above (deliberately loose for
+	// that reason) a 15m window will read a closed session as a dead book. That
+	// is arguably right — a wall parked into a closed session earns nothing
+	// either — but if the soak shows it starves the mode, the fix is a session
+	// filter, not a lower floor.
+	MinTxM15:        8,
+	MinVolumeM15USD: 400,
+	MinFeeTVLM15Pct: 0.0010,
 
 	// FDV gates OFF on purpose (both zero-disabled). A tokenized equity's FDV
 	// is a function of the wrapper's token supply, not of a float anyone can
@@ -421,6 +482,30 @@ func Screen(p Pool, mp ModeParams, now time.Time) (*Candidate, string) {
 		return nil, fmt.Sprintf("buyers %d < %d", p.TxH1.Buyers, mp.MinBuyersH1)
 	}
 
+	// Live-window flow, the Solana Pulse port. Everything above this line can be
+	// satisfied by a book that stopped trading 50 minutes ago; these three cannot.
+	// A ladder is why they exist — a bid wall on a stalled book earns zero and
+	// re-pins on a timer — so they are set only on the ladder modes and stay
+	// zero-disabled elsewhere.
+	txM15 := p.TxM15.Buys + p.TxM15.Sells
+	if mp.MinTxM15 > 0 && txM15 < mp.MinTxM15 {
+		return nil, fmt.Sprintf("m15 txns %d < %d", txM15, mp.MinTxM15)
+	}
+	if p.VolumeM15USD < mp.MinVolumeM15USD {
+		return nil, fmt.Sprintf("m15 volume $%.0f < $%.0f", p.VolumeM15USD, mp.MinVolumeM15USD)
+	}
+	// Window-scoped, NOT annualized: this is the fee the WHOLE pool paid its LPs
+	// in the last 15 minutes as a percent of its reserve. Comparing it to
+	// MinFeeTVLDay is a units error — the daily gate above answers "does this
+	// book earn?", this one answers "is it earning right now?".
+	feeTVLM15 := 0.0
+	if p.ReserveUSD > 0 {
+		feeTVLM15 = (p.VolumeM15USD * p.FeePct / 100) / p.ReserveUSD * 100
+	}
+	if feeTVLM15 < mp.MinFeeTVLM15Pct {
+		return nil, fmt.Sprintf("m15 fee/TVL %.4f%% < %.4f%%", feeTVLM15, mp.MinFeeTVLM15Pct)
+	}
+
 	// Honeypot heuristic, pre-GMGN: real two-sided flow must include sells.
 	// Many buys and literally zero sells over an hour is the classic
 	// cannot-sell shape; reject before spending safety-gate budget on it.
@@ -472,6 +557,9 @@ func Screen(p Pool, mp ModeParams, now time.Time) (*Candidate, string) {
 		ReserveUSD:   p.ReserveUSD,
 		FdvUSD:       p.FdvUSD,
 		McapUSD:      p.McapUSD,
+		VolumeM15USD: p.VolumeM15USD,
+		TxM15:        txM15,
+		FeeTVLM15Pct: feeTVLM15,
 		VolumeH1USD:  p.VolumeH1USD,
 		VolumeH24USD: p.VolumeH24USD,
 		FeeTVLDayPct: feeTVLDay,

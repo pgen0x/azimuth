@@ -484,6 +484,41 @@ real 23-pool set:
 Mature would have picked **1 of 23**; Fresh **0**. Hence `robinhood.Ladder`:
 same gateway feed, screened on churn (1.5%/day, $10k–$2M, ≥0.3% tier, 24h+).
 
+#### Live-window gates (2026-08-07) — the Solana pulse port
+
+Every gate above reads an hour or a day of history, and none of them can tell a
+book that is trading from one that traded 50 minutes ago. For a resting bid wall
+that is the whole outcome: of **102 ladder closes**, **91** were `ladder idle` or
+`ladder stale` — the wall earned exactly **zero** and re-pinned on a timer — and
+every one of those pools cleared `MinTxH1` and `MinFeeTVLDay` at mint.
+
+So all three ladder modes now also gate on the live 15-minute window, the port of
+Solana `Pulse`'s `(MinFeeActiveTVL, MinVolumeUSD)` pair: `MinTxM15` 8,
+`MinVolumeM15USD` $400, `MinFeeTVLM15Pct` 0.0010% (window-scoped, **not** a daily
+rate). 15m rather than pulse's 5m because this chain mints ~6 pools a minute and
+a 5m window is mostly noise. Costs no extra request — GeckoTerminal already
+returns `volume_usd.m15` and `transactions.m15` in the payloads both feeds fetch.
+
+Calibrated against the **20 distinct pools the ladders actually minted into**,
+re-read from GeckoTerminal:
+
+| pool set | m15 fee/TVL | m15 swaps | verdict |
+|---|---|---|---|
+| wall ever traded into (5) | 0.0010–0.0122% | 8–45 | all 5 pass |
+| stayed fee-dead (15) | 10 read exactly 0 | ≤5 for 4 of the other 5 | all 15 rejected |
+
+The one loud exception is the informative one: `nvda/USDG 0.05%` did **156 swaps
+in 15 minutes** and still fails, at 0.0006% — a deep book on a thin tier pays a
+wall nothing, so traffic is not flow. `MinVolumeM15USD` is the dust guard the
+ratio cannot be: this venue's collapsed launch template ($321–$737 of reserve)
+reads an enormous fee/TVL on a handful of dollars.
+
+n=20 is a starting point, not a proven bar. The risk to watch in the soak is
+`rh-usdg-ladder`: equities legitimately go quiet overnight, and unlike the h1
+floors (deliberately loose for that reason) a 15m window reads a closed session
+as a dead book. If it starves the mode, the fix is a session filter, not a lower
+floor.
+
 ### Implementation
 
 - `uni_executor.js` — `weth_ladder` strategy: `ladderSizes()` (linear ramp,
@@ -500,6 +535,30 @@ same gateway feed, screened on churn (1.5%/day, $10k–$2M, ≥0.3% tier, 24h+).
   < `UNI_LADDER_IDLE_MIN_PCT` across `UNI_LADDER_IDLE_WINDOW` while parked out
   of range → the wall is not being traded into, re-pin). Hard SL kept as a
   backstop only.
+- **A fill is a WALL event** (2026-08-07). The first rung that converts closes
+  every rung of that `ladderId` — `ladder wall breached` — instead of leaving
+  the rest resting under a market that just proved it comes down through them.
+  The unfilled rungs are still pure quote asset, so retracting them costs no
+  swap and no spread, and the rule never waits for indicator confirmation.
+  Read off the close journal: of 11 fills, SIX were a repeat in a pool that had
+  already filled once, and the repeats averaged **-11.8%** against -6.7% for
+  the first fill of a wall. One WETH pool filled three rungs inside 30 minutes
+  at -7.6%, -12.0%, then -40.6%.
+- A fill past `UNI_LADDER_FILL_HARD_PCT` (-8%) closes as
+  `emergency ladder fill` and skips indicator confirmation, mirroring
+  `dlmm_monitor.py`'s emergency-SL carve-out. Confirming a shallow fill is
+  right — an un-filling rung reverts to quote for free — and confirming a
+  collapse is how -7.6% became -40.6%.
+- **Re-entry cooldown** (`cool_off()`, the port of `dlmm_monitor.py`'s cooldown
+  block). A fill-class close writes `rh:cooldown:pool:<pool>` and
+  `rh:cooldown:token:<base>` to the daemon's Redis for
+  `UNI_COOLDOWN_POOL_SECS` (4h), escalating on repeat losses inside 7 days
+  (2 → 24h, 3+ → 72h); the daemon reads them in the deploy walk via
+  `store.RobinhoodCooldown`, before the entry-timing gate so a blocked pool
+  costs no GeckoTerminal request. `ladder idle` and `ladder stale` write
+  NOTHING — those are the mode's normal re-pin loop, and cooling them off would
+  switch the ladder modes off entirely. That carve-out is the one deliberate
+  divergence from the Solana rule, which cools every close.
 - The *idle* rule exists because *filled* and *stale* are both PRICE rules: a
   market that stops moving disarms the entire rulebook. A `usdg_ladder` minted
   on SPY at 16:56 ET — four minutes after the US cash close — held 5.6h with

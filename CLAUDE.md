@@ -117,7 +117,14 @@ one pass per enabled mode per `POLL_INTERVAL`.
     an equity ladder held 5.6h fee-dead overnight before it existed), not
     SL/TP, and a rung is
     out-of-range **by design** — the fee-dead OOR timeout must never apply to
-    it. Discovery is the **union of two feeds** (`trending.go`): `Mature`'s
+    it. A **fill is a wall event, not a rung event** (2026-08-07): the first
+    rung to convert closes every rung of that `ladderId` (`ladder wall
+    breached`), because the rest are resting bids under a market that just came
+    down through one — six of eleven observed fills were a repeat in a pool
+    that had already filled, averaging -11.8% against -6.7% for the first. A
+    fill past `UNI_LADDER_FILL_HARD_PCT` skips indicator confirmation, and a
+    fill-class close (never `idle`/`stale`, which ARE the re-pin loop) writes a
+    Redis re-entry cooldown the daemon reads at deploy time. Discovery is the **union of two feeds** (`trending.go`): `Mature`'s
     gateway feed plus the cached GeckoTerminal `trending_pools` page, which
     carries v3 pools the gateway does not index at all. The page costs no extra
     GT request while `Fresh` runs — `discover.go` already fetches it and now
@@ -177,6 +184,14 @@ one pass per enabled mode per `POLL_INTERVAL`.
   both — rung count/width/floor/ramp describe the thesis, not the protocol, and
   `uni_monitor.py`'s `ladder stale` rule reads the same widths. Change it there,
   never in one executor. §4d.
+
+  All three ladder modes also gate on the **live 15-minute window**
+  (`MinTxM15` / `MinVolumeM15USD` / `MinFeeTVLM15Pct`) — the port of Solana
+  `Pulse`'s `(MinFeeActiveTVL, MinVolumeUSD)` pair, and the fix for the mode's
+  dominant failure: 91 of 102 ladder closes earned exactly zero, and every one
+  of those pools passed the h1 and 24h gates at mint. `MinFeeTVLM15Pct` is
+  window-scoped, NOT annualized — comparing it to `MinFeeTVLDay` is a units
+  error. Costs no extra request (GT already returns `volume_usd.m15`).
 
   All four modes share `Screen` and every safety gate (GMGN OpenAPI
   `chain=robinhood` security + holder quality, Blockscout holders). The deploy

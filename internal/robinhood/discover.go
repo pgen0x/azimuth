@@ -265,6 +265,8 @@ func mapGTPools(data []gtPool, tokens map[string]gtToken) []Pool {
 			ReserveUSD:    pfloat(gp.Attrs.ReserveUSD),
 			FdvUSD:        pfloat(gp.Attrs.FdvUSD),
 			McapUSD:       pfloat(gp.Attrs.MarketCapUSD),
+			VolumeM15USD:  pfloat(gp.Attrs.VolumeUSD.M15),
+			TxM15:         gp.Attrs.Transactions.M15,
 			VolumeH1USD:   pfloat(gp.Attrs.VolumeUSD.H1),
 			VolumeH24USD:  pfloat(gp.Attrs.VolumeUSD.H24),
 			TxH1:          gp.Attrs.Transactions.H1,
