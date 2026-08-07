@@ -392,6 +392,49 @@ def rung_fill_state(s):
     return tick <= lo, tick - hi
 
 
+def rung_drift(s, rung_offset=0.0):
+    """How far spot has moved AWAY from the pin this rung was laid around, in
+    ticks. Negative means it moved toward the rung (or into it). None when the
+    state read can answer neither way.
+
+    Measuring from the pin rather than from the band edge is the fix for the
+    2026-08-07 re-center loop. ladderBands() places the near edge one spacing off
+    spot and then quantizes to the spacing, so the edge is born
+    `spacing..2*spacing` away — 200-400 ticks on the 1% tier, where the pool's
+    spacing is 200. TURNOVER_STALE_TICKS is 300, i.e. INSIDE that range, so any
+    mint whose rounding landed above it was stale the instant it existed: same
+    tick, same band, same gap, re-center, repeat. One rung did that eight times in
+    ten minutes on an unchanged commit, each cycle paying gas and reporting a
+    376-tick "drift" the market never made.
+
+    `entryTick` (both executors journal it since this fix) is the exact zero.
+    Where it is missing — every position minted before it — the fallback
+    subtracts the WORST-CASE birth offset, 2*spacing, from the edge distance.
+    Conservative on purpose: it re-centers slightly late rather than looping.
+
+    Direction follows rung_fill_state's invariant: quote-as-token0 rests ABOVE
+    spot, so it is a FALLING tick that abandons it. Signing this matters — an
+    unsigned |drift| would re-center a rung that price had walked into, which is
+    the one state where it is earning.
+    """
+    tick = (s or {}).get("tick")
+    if tick is None:
+        return None
+    entry_tick = s.get("entryTick")
+    if entry_tick is not None:
+        if bool(s.get("quoteIs0", s.get("wethIs0"))):
+            return float(entry_tick - tick)
+        return float(tick - entry_tick)
+    _, gap = rung_fill_state(s)
+    if gap is None:
+        return None
+    try:
+        spacing = float(s.get("tickSpacing") or 0)
+    except (TypeError, ValueError):
+        spacing = 0.0
+    return float(gap) - rung_offset - 2.0 * spacing
+
+
 def ladder_wall_key(ladder_id):
     """Monitor-state key for a wall's shared idle window. Keyed by `ladderId`
     alone: the executor mints it as `<pool>-<mintUnixTs>` and persists it in the
@@ -657,7 +700,7 @@ def ladder_decide(s, pnl, age_min, ps=None, now=None, kry=None, wall=None):
     stale_ticks = LADDER_STALE_TICKS.get(qsym, LADDER_STALE_TICKS["WETH"])
     rung = s.get("rung") or 0
     width = hi - lo
-    filled, gap = rung_fill_state(s)
+    filled, _ = rung_fill_state(s)
 
     if filled:
         # Fully converted: this rung is now pure token inventory, which is the
@@ -685,8 +728,12 @@ def ladder_decide(s, pnl, age_min, ps=None, now=None, kry=None, wall=None):
         return (f"ladder wall breached (rung {wall['breached']} filled) — "
                 f"retracting the unfilled rungs")
 
-    drift = gap - rung * width
-    if drift > stale_ticks:
+    # Drift from the wall's PIN, not from this rung's edge. rung_drift() prefers
+    # the journaled entryTick, which already accounts for the rung's own offset
+    # (every rung of a wall shares one pin); the `rung * width` argument is only
+    # consumed by its pre-entryTick fallback, where the edge is all there is.
+    drift = rung_drift(s, rung * width)
+    if drift is not None and drift > stale_ticks:
         # Spot ran away: the wall is too far under the market to be traded into,
         # so it is dead capital. Tear it down and let the scanner re-pin at the
         # new price.
@@ -990,7 +1037,7 @@ def turnover_decide(s, pnl, age_min, ps=None, now=None, kry=None):
         return None
     qsym = s.get("quoteSymbol") or "WETH"
     stale_ticks = TURNOVER_STALE_TICKS.get(qsym, TURNOVER_STALE_TICKS["WETH"])
-    filled, gap = rung_fill_state(s)
+    filled, _ = rung_fill_state(s)
 
     if filled:
         # Same two tiers as a ladder fill and for the same reason: a shallow
@@ -1001,11 +1048,13 @@ def turnover_decide(s, pnl, age_min, ps=None, now=None, kry=None):
                     f"(tick {tick} past [{lo},{hi}])")
         return f"turnover rung filled (tick {tick} past [{lo},{hi}])"
 
-    # Drift. `gap` is how far spot sits outside the band on the resting side;
-    # with a single rung there is no rung offset to subtract, so it IS the
-    # drift. A rung minted one spacing off spot starts at roughly zero.
-    if gap is not None and gap > stale_ticks:
-        return (f"turnover re-center: spot drifted {gap:.0f} ticks past the rung "
+    # Drift, measured from the tick the rung was pinned to — NOT from its band
+    # edge, which is born one to two tick-spacings away and would read that
+    # birth offset as a move. See rung_drift(); this is what the 2026-08-07
+    # re-center loop was.
+    drift = rung_drift(s)
+    if drift is not None and drift > stale_ticks:
+        return (f"turnover re-center: spot drifted {drift:.0f} ticks past the rung "
                 f"(> {stale_ticks:.0f})")
 
     idle = ladder_idle_reason(s, age_min, ps, now, kry, label="turnover re-center — idle")

@@ -711,6 +711,12 @@ async function cmdDeployLadder(wallet, account, strategy) {
       quote: q.address, quoteSymbol: q.symbol, quoteDecimals: q.decimals,
       quoteIn: fmtQ(entryQuote, q), wethIn: fmtQ(entryQuote, q),
       ladderId, rung: rung < 0 ? null : rung, rungs,
+      // Spot at the moment the wall was laid — the ONLY honest zero for drift.
+      // The band edges are not: ladderBands() pins one spacing off spot and then
+      // quantizes, so rung 0's near edge is born spacing..2*spacing away from
+      // `tick`, and a drift rule that measures from the edge reads that birth
+      // offset as market movement. See uni_monitor.py's rung_drift().
+      entryTick: tick,
       committedQuote: fmtQ(rung < 0 ? 0n : sizes[rung], q),
       used0: inc.args.amount0.toString(), used1: inc.args.amount1.toString(),
       ts: Math.floor(Date.now() / 1000),
@@ -944,6 +950,12 @@ async function cmdDeploy(wallet, account) {
     quoteIn: fmtQ(entryQuote, q), wethIn: fmtQ(entryQuote, q),
     committedQuote: fmtQ(amountQuote, q),
     used0: used0.toString(), used1: used1.toString(),
+    // Spot the band was built around — `mintSt` is the SAME sample both branches
+    // laid their ticks from (post-swap for balanced_tight, the pre-mint read for
+    // weth_below), so this is the price the position was centred on, not a
+    // second read that has already moved. Drift is measured from here; a band
+    // edge cannot serve, see the note in cmdDeployLadder's journal write.
+    entryTick: Number(mintSt.tick),
     ts: Math.floor(Date.now() / 1000),
   });
   const inRange = Number(mintSt.tick) >= tickLower && Number(mintSt.tick) < tickUpper;
@@ -1132,6 +1144,13 @@ async function cmdState(account) {
     ladderId: entry?.ladderId || null,
     rung: entry?.rung ?? null,
     rungs: entry?.rungs ?? null,
+    // The pin this position was centred on, and the pool's tick quantum. Both
+    // exist for one rule: drift. `entryTick` gives it an exact zero; where it is
+    // missing (every position minted before 2026-08-07) `tickSpacing` lets
+    // uni_monitor.py subtract the band's WORST-CASE birth offset instead of
+    // reading it as a move the market never made.
+    entryTick: entry?.entryTick ?? null,
+    tickSpacing: Number(st.tickSpacing),
     // quoteIs0 is what ladder_decide reads to know which tick direction fills
     // a rung; wethIs0 stays as its pre-USDG alias so an older monitor build
     // against a WETH ladder keeps working.

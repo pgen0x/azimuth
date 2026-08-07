@@ -908,6 +908,11 @@ async function cmdDeployLadder(wallet, account, strategy) {
       quoteIn: formatUnits(entryQuoteRaw, q.decimals),
       wethIn: formatUnits(entryQuoteRaw, q.decimals),
       ladderId, rung: info.rung, rungs,
+      // Spot the wall was laid around — drift's only honest zero. buildWall()
+      // reprices off the CURRENT sample on every mint retry, so the tick that
+      // actually shaped these bands is the post-mint one, not the sample taken
+      // before the retry loop. See uni_monitor.py's rung_drift().
+      entryTick: stAfter.tick,
       committedQuote: formatUnits(info.size, q.decimals),
       liquidity: info.liquidity.toString(),
       used0: used0.toString(), used1: used1.toString(),
@@ -1162,6 +1167,11 @@ async function cmdDeploy(wallet, account) {
     quoteIn: formatUnits(entryQuoteRaw, q.decimals),
     committedQuote: formatUnits(amountQuote, q.decimals),
     liquidity: liquidity.toString(),
+    // Spot the band was centred on. buildMint() rederives ticks from whatever
+    // sample the winning mint attempt read, so `stAfter` — not the pre-retry
+    // `entryTick` local above — is the price this position was actually pinned
+    // to. Drift measures from here; a band edge cannot, see cmdDeployLadder.
+    entryTick: stAfter.tick,
     ts: Math.floor(Date.now() / 1000),
   });
   const inRange = stAfter.tick >= tickLower && stAfter.tick < tickUpper;
@@ -1274,6 +1284,13 @@ async function cmdState() {
     ladderId: entry?.ladderId || null,
     rung: entry?.rung ?? null,
     rungs: entry?.rungs ?? null,
+    // The pin this position was centred on, and the pool's tick quantum — both
+    // feed the drift rule. `entryTick` is its exact zero; `tickSpacing` is the
+    // fallback for positions minted before the field existed, letting
+    // uni_monitor.py subtract the band's worst-case birth offset rather than
+    // read it as market movement.
+    entryTick: entry?.entryTick ?? null,
+    tickSpacing: Number(key.tickSpacing),
     // quoteIs0 is what ladder_decide reads to know which tick direction fills a
     // rung; wethIs0 is its pre-USDG alias.
     quoteIs0: qSide === 0,
