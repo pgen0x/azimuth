@@ -614,6 +614,12 @@ func (s *Scanner) pollRobinhood(ctx context.Context, mp robinhood.ModeParams, fe
 		// keys disjoint from Solana pool keys in the shared store.
 		poolKey := "rh:" + mp.Mode + ":" + cand.Pool
 		seenTTL := s.cfg.RobinhoodSeenTTL
+		if mp.Mode == robinhood.Turnover.Mode {
+			// A re-pinning mode must be able to re-signal the pool it just left
+			// — see TurnoverSeenTTL. Fill-class closes are held off by the
+			// deploy-time cooldown, not by this window.
+			seenTTL = robinhood.TurnoverSeenTTL
+		}
 		if mp.Mode == robinhood.StockLadder.Mode {
 			// A re-pin exit wants its own pool back, not a different one — see
 			// RobinhoodStockSeenTTL. The stock universe is small enough that

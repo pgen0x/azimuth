@@ -137,9 +137,10 @@ var Mature = ModeParams{
 	MaxFdvUSD: 50_000_000,
 }
 
-// Turnover is the port of Solana's `turnover` thesis to this venue: hold a
-// TIGHT two-sided range in a pool whose book actually oscillates, collect the
-// fee on every crossing, and re-center the moment price leaves the range.
+// Turnover is the port of Solana's `turnover` thesis to this venue: park ONE
+// one-sided WETH rung (`weth_below`, pinned in scanner.sizeFor) adjacent to
+// spot in a pool whose book actually oscillates, and re-pin it the moment
+// price drifts off it or it stops earning, rather than closing it.
 //
 // It exists because the ladder answer to "never own the token" turned out to
 // cost the entire product. Across 104 live ladder rung closes (2026-08-04 →
@@ -150,20 +151,24 @@ var Mature = ModeParams{
 // it, and on this venue's books that did not happen often enough to pay for
 // the times it did.
 //
-// This mode inverts that: it owns inventory and is paid for crossings rather
-// than for a wall being run over. The bleed that killed `balanced_tight`
-// (-15.04%/trade) is not the shape — uni_executor.js:1119 records the real
-// cause, that a two-sided position was closed by the 30m out-of-range timeout
-// half an hour after minting. A churn strategy with no churn realizes every
-// drift as a loss. The re-center loop in uni_monitor.py is what this mode
-// needs to work at all, and it did not exist on this venue until now.
+// The diagnosis is NOT that one-sided does not work. The on-chain fee meter
+// shows the rung NEAREST spot earning (GME rung 0: 0.002039 USDG/214m) while
+// the outer rungs of the same wall read exactly zero — two thirds of a ladder's
+// capital sat where the market never came. This mode concentrates the commit in
+// the one rung that earns and keeps it there; the re-center loop in
+// uni_monitor.py is what this mode needs to work at all, and it did not exist
+// on this venue until now. It still never owns the token, so `balanced_tight`
+// (-15.04%/trade holding the memecoin) stays out by construction.
 //
-// Band is deliberately Solana turnover's (internal/meteora/screen.go), which
-// is the only calibrated churn screen either venue has: TVL 10k-150k, and a
-// fee pace that a 30m 0.15% fee/TVL floor annualizes to (~7.2%/day). Sitting
-// BELOW rh-mature's 8% is the point — mature holds for days and must out-earn
-// its own inventory bleed, while this mode's holding period is minutes and its
-// income is fee_pct x crossings, not yield.
+// The band STARTED as Solana turnover's verbatim (TVL 10k-150k, ~7.2%/day) on
+// the argument that it is the only calibrated churn screen either venue has.
+// That transplant failed on contact: 101 consecutive cycles on 2026-08-07
+// produced zero candidates, because Solana's numbers describe a venue whose
+// pool count is three orders of magnitude larger. Every threshold below is now
+// calibrated against a census of this venue's own live gateway feed (103
+// WETH-quoted token pools, same day). The thesis is unchanged — mature holds
+// for days and must out-earn its own inventory bleed, while this mode's holding
+// period is minutes and its income is fee_pct x crossings, not yield.
 var Turnover = ModeParams{
 	Mode: "rh-turnover",
 
@@ -180,45 +185,87 @@ var Turnover = ModeParams{
 	MinAge: 1 * time.Hour,
 	MaxAge: 0,
 
-	// Solana turnover's band verbatim. The ceiling is load-bearing, not a
-	// sanity bound: our fee share is our liquidity over the pool's, so a deep
-	// book pays a small position nothing however much it churns.
+	// The ceiling is still load-bearing — our fee share is our liquidity over
+	// the pool's — but Solana's $150k was the wrong number for THIS venue's
+	// book. Census of the live gateway feed, 2026-08-07: of 103 WETH-quoted
+	// token pools, every pool with real flow sat ABOVE the cap (CASHCAT $645k /
+	// 523 tx per h1, INDEX $382k / 220, WOOF $341k / 265, HMM $192k / 122 — the
+	// last the only pool in the whole feed clearing the m15 fee floor outright).
+	// Below the cap the survivors were the quiet half of the venue. $500k keeps
+	// the deep-book protection where it matters (CASHCAT v3 at $5.09M and v4 at
+	// $808k stay out) while admitting the churn this mode is named for.
 	MinReserveUSD: 10000,
-	MaxReserveUSD: 150000,
+	MaxReserveUSD: 500000,
 
 	MinFeePct: 0.25,
 
-	// ~7%/day, measured over REALIZED 24h volume rather than an extrapolated
-	// hour — a mode selecting for sustained crossings must not buy a pool that
-	// had one busy hour.
-	MinFeeTVLDay: 7.0,
+	// Measured over REALIZED 24h volume rather than an extrapolated hour — a
+	// mode selecting for sustained crossings must not buy a pool that had one
+	// busy hour.
+	//
+	// 3%, not the 7% this shipped with. mature.go's prefilter applies this bar
+	// BEFORE the enrichment call, so it is the first cut in the funnel, and at
+	// 7% it was cutting the mode's own thesis away: on 2026-08-07 only 2 of the
+	// 59 in-band pools cleared it, and neither survived Screen (101 consecutive
+	// cycles, zero candidates). Worse, it rejected pools that pass every live
+	// gate — PONS v3 ($61k, 265 tx per h1, 110 per m15, m15 fee/TVL 0.082) died
+	// here on a 4.4%/day average. A mode that buys churn NOW must not pre-screen
+	// on a 24h mean; the m15 gates below are what judge whether it is trading.
+	MinFeeTVLDay: 3.0,
 	FeePaceH24:   true,
 
-	// The churn gates proper, and the reason this is not just Mature with a
-	// lower bar. Solana turnover wants 20 swaps / 15 unique traders per 30m
-	// window; per hour that is 40/30, and this venue's books are thinner, so
-	// these track rh-mature's 60/20 rather than doubling Solana's.
-	MinTxH1:     60,
-	MinBuyersH1: 20,
+	// The churn gates proper. These tracked rh-mature's 60/20 on the assumption
+	// that a churn mode needs MORE flow than a hold mode; the 2026-08-07 census
+	// says the venue does not have it to give. Of the two pools that reached
+	// Screen, LILUNI died at 18 tx per h1 while printing a 12.9%/day pace — a
+	// pool can pay a tight range on a dozen crossings when the fee tier is 1%.
+	// Ladder's 30/10 is the floor that survived contact with this book, and it
+	// is still a real gate: it is what drops the $195-a-day template pools.
+	MinTxH1:     30,
+	MinBuyersH1: 10,
 
-	// Live-window gates. Unlike the ladder modes — whose m15 floors were read
-	// off wall-traffic, i.e. how often a RESTING bid got hit — a two-sided
-	// position is paid per crossing while it holds inventory, so its floor is
-	// the honest window-scoped share of the daily bar: MinFeeTVLDay / 96
-	// fifteen-minute windows = 0.073%. A pool that cannot clear its own daily
-	// pace over the last 15 minutes is not currently oscillating, whatever its
-	// 24h number says.
+	// Live-window gates: is this pool trading RIGHT NOW, as opposed to having
+	// traded at some point in the last day.
+	//
+	// 0.073% was MinFeeTVLDay / 96 fifteen-minute windows — the daily bar
+	// restated per window, which demands a pool sustain its own 24h average in
+	// the current 15 minutes. Nothing does, in either direction: FRONG carried a
+	// 12.1%/day pace (0.126% per window on average) and read 0.019% live, 6x
+	// under itself. Measured across the 2026-08-07 census, 0.073% passed exactly
+	// one pool of the top 30 by fee pace. 0.02% is the empirical floor that
+	// separates a book with flow from a dead one on THIS venue, and it stays an
+	// order of magnitude above the ladders' 0.0010% — a wall only needs to be
+	// hit, a range has to be crossed.
 	//
 	// MinVolumeM15USD is Solana Pulse's $500 raw-window floor, and does the job
 	// MinFeeTVLM15Pct cannot: this venue's collapsed-launch template ($737
-	// reserves) prints a huge fee/TVL on a few dollars of flow.
-	MinTxM15:        20,
+	// reserves) prints a huge fee/TVL on a few dollars of flow. It is the gate
+	// carrying the dust rejection now that the fee floor is loosened — keep it.
+	MinTxM15:        8,
 	MinVolumeM15USD: 500,
-	MinFeeTVLM15Pct: 0.073,
+	MinFeeTVLM15Pct: 0.02,
 
 	MinFdvUSD: 20000,
 	MaxFdvUSD: 50_000_000,
 }
+
+// TurnoverSeenTTL is this mode's dedup window, deliberately far shorter than
+// the venue default and deliberately NOT an env var — it is a property of the
+// thesis, not an operator knob.
+//
+// A re-centering mode wants ITS OWN pool back. The venue's 6h default assumes
+// an entry is a one-shot: signal a pool, hold it, never look at it again. Under
+// turnover the opposite is true — the pool that just closed on drift is, by the
+// screen's own reckoning, still the best oscillating book available. Measured
+// 2026-08-07, minutes after the mode's first three positions closed: 8 pools
+// passed every gate and all 8 were deduped, so the mode sat idle with a funded
+// wallet and nothing to do for six hours.
+//
+// Re-entry safety does NOT come from this window; it comes from the Redis
+// cooldown a fill-class close writes and the deploy path reads. A close that
+// filled is blocked from re-entry regardless of what this says, while a close
+// that merely drifted or went idle is exactly what should come back.
+const TurnoverSeenTTL = 15 * time.Minute
 
 // Ladder is the weth_ladder mode: pools worth parking a one-sided WETH bid
 // wall under. Unlike Fresh and Mature — which buy the token and are therefore
