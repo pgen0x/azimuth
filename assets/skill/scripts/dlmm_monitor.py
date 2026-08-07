@@ -164,12 +164,29 @@ RUG_M5_PCT = -20.0
 FEE_STALL_WINDOW_MINUTES = 30.0
 FEE_STALL_MIN_PCT = 0.02
 FEE_STALL_MIN_AGE_MINUTES = 45.0
-# Permanent rug blacklist floor: a realized close at or below this is rug
-# territory — no re-entry thesis survives it. The mint (and the deployer
-# wallet, when deploy metadata carries one) goes into a permanent Redis set
-# the pipeline checks before any deploy. Ported from the reference bot's
-# token-blacklist / dev-blocklist, auto-added instead of agent-curated.
+# Rug blacklist floor: a realized close at or below this is rug territory — no
+# re-entry thesis survives it in the near term. The mint goes into a TTL'd
+# Redis key and the deployer wallet (when deploy metadata carries one) into a
+# permanent Redis set, both checked by the pipeline before any deploy. Ported
+# from the reference bot's token-blacklist / dev-blocklist, auto-added instead
+# of agent-curated.
 RUG_BLACKLIST_PNL_PCT = -30.0
+# Mint blacklist TTL. This was a permanent SADD until 2026-08-07. Discovery
+# recycles a small pool of tickers cycle after cycle, so a monotonic blocklist
+# only ever shrinks the deployable universe — given enough rugs it starves the
+# mode out entirely, and the failure is silent (every batch simply reports no
+# candidate). A mint earns a block while the rug is live and holders are still
+# bleeding; a week on it is a dead ticker that will not clear the screen
+# anyway. The deployer set stays permanent: a wallet that rugs once is a rug
+# factory, and unlike a mint it can mint again.
+RUG_BLACKLIST_TTL_SEC = int(float(os.environ.get("RUG_BLACKLIST_TTL_DAYS", "7")) * 86400)
+
+
+def rug_blacklist_mint_key(mint):
+    """Per-mint blacklist key. One key per mint rather than one shared set, so
+    each entry expires on its own clock — the same reason the daemon's Seen
+    dedup uses SetNX per pool instead of SAdd+Expire over a set."""
+    return f"sol:dlmm:blocklist:mint:{mint}"
 
 def mint_cooldown_key(meta):
     """Mint-keyed twin of the symbol re-entry cooldown. The symbol key is
@@ -181,8 +198,8 @@ def mint_cooldown_key(meta):
     return f"sol:dlmm:cooldown:mint:{mint}" if mint and mint != SOL_MINT else None
 
 def maybe_blacklist_rug(meta, pnl_pct, rug_event=None):
-    """Add the mint (and deployer, if known) to the permanent rug blacklists
-    when a close realizes <= RUG_BLACKLIST_PNL_PCT, OR when the caller passes
+    """Add the mint (TTL'd) and deployer (permanent), if known, to the rug
+    blacklists when a close realizes <= RUG_BLACKLIST_PNL_PCT, OR when the caller passes
     rug_event (a short reason string) for a close that is rug evidence on its
     own regardless of realized PnL — e.g. the RUG_M5_PCT velocity gate firing.
     A fast reaction can book a tiny/near-zero PnL on a token that just
@@ -198,8 +215,13 @@ def maybe_blacklist_rug(meta, pnl_pct, rug_event=None):
     reason = rug_event or f"{pnl_pct:+.1f}% close"
     mint = (meta or {}).get("base_mint", "")
     if mint and mint != SOL_MINT:
-        run_command(f"redis-cli sadd sol:dlmm:blocklist:mint \"{mint}\"")
-        print(f"⛔ RUG BLACKLIST: mint {mint[:8]}… permanently blocked ({reason})")
+        # SETEX, not SADD: re-blacklisting an already-blocked mint refreshes its
+        # window, which is what we want — a rug that keeps rugging keeps its ban.
+        run_command(
+            f"redis-cli setex \"{rug_blacklist_mint_key(mint)}\" {RUG_BLACKLIST_TTL_SEC} \"{reason[:120]}\""
+        )
+        days = RUG_BLACKLIST_TTL_SEC / 86400
+        print(f"⛔ RUG BLACKLIST: mint {mint[:8]}… blocked for {days:.0f}d ({reason})")
     dev = (meta or {}).get("dev", "")
     if dev:
         run_command(f"redis-cli sadd sol:dlmm:blocklist:dev \"{dev}\"")

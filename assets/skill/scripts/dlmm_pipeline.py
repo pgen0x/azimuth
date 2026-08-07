@@ -556,6 +556,16 @@ def fetch_live_fee_tvl(pool_address, timeframe="24h"):
 MAX_ENTRY_H6_DROP = -12.0    # reject if 6h price change below this
 MAX_ENTRY_H24_DROP = -25.0   # reject if 24h price change below this
 
+# Pool-memory floor: summed PnL across a pool's last 10 closes at or below this
+# blocks re-entry. The gate fired on ANY negative sum until 2026-08-07, which
+# made it a coin flip dressed as a memory — a pool that churns to a fraction of
+# a percent below break-even reads identically to one that actually bled, and
+# since most closes land near flat the fractional case is the common one. A
+# pool we neither learned from nor lost on is not evidence; only a real
+# cumulative loss is. Sum, not mean, on purpose: ten small losses are a
+# bleeding pool even though each one is forgettable.
+POOL_MEMORY_NET_FLOOR_PCT = float(os.environ.get("POOL_MEMORY_NET_FLOOR_PCT", "-10.0"))
+
 def get_momentum(mint):
     """Returns (m5_pct, h1_pct, h6_pct, h24_pct) price change from DexScreener, or
     (None, None, None, None) on failure. Screens ALL candidates, not just the winner."""
@@ -1142,11 +1152,15 @@ def main():
             if mint_cd and mint_cd != "(nil)":
                 print(f"Skipping {c['name']} - mint cooldown active (reason: {mint_cd[:60]})")
                 continue
-            # Permanent rug blacklist (mint) — set by the monitor on
-            # catastrophic closes. SISMEMBER returns "1"/"0".
-            bl_mint, _, _ = run_command(f"redis-cli sismember sol:dlmm:blocklist:mint \"{c['base_mint']}\"")
-            if bl_mint and bl_mint.strip() == "1":
-                print(f"Skipping {c['name']} - mint is on the permanent rug blacklist")
+            # Rug blacklist (mint) — set by the monitor on catastrophic closes
+            # as one TTL'd key per mint (RUG_BLACKLIST_TTL_DAYS, default 7d).
+            # It was a permanent SADD until 2026-08-07; see the monitor's
+            # RUG_BLACKLIST_TTL_SEC comment for why it had to start expiring.
+            bl_mint, _, _ = run_command(f"redis-cli get \"sol:dlmm:blocklist:mint:{c['base_mint']}\"")
+            if bl_mint and bl_mint != "(nil)":
+                bl_ttl, _, _ = run_command(f"redis-cli ttl \"sol:dlmm:blocklist:mint:{c['base_mint']}\"")
+                ttl_h = int(bl_ttl) // 3600 if bl_ttl and bl_ttl.lstrip("-").isdigit() else "?"
+                print(f"Skipping {c['name']} - mint is rug-blacklisted ({ttl_h}h remaining, reason: {bl_mint[:60]})")
                 continue
         # Dev blocklist (ported from the reference bot's dev-blocklist): the
         # daemon ships the Jupiter deployer wallet as `dev`; a deployer that
@@ -1164,8 +1178,8 @@ def main():
             continue
         # Pool memory: closes on this exact pool are journaled to
         # sol:dlmm:history:pool:<pool> by the monitor. Two or more past closes
-        # that net out negative = this pool has already cost us — hard skip.
-        # No history (fresh pool) passes untouched.
+        # netting at or below POOL_MEMORY_NET_FLOOR_PCT = this pool has really
+        # cost us — hard skip. No history (fresh pool) passes untouched.
         hist_raw, _, _ = run_command(f"redis-cli lrange \"sol:dlmm:history:pool:{c['pool']}\" 0 9")
         if hist_raw and hist_raw != "(nil)":
             past_pnls = []
@@ -1174,7 +1188,7 @@ def main():
                     past_pnls.append(float(json.loads(line).get("pnl_pct", 0)))
                 except (ValueError, json.JSONDecodeError):
                     continue
-            if len(past_pnls) >= 2 and sum(past_pnls) < 0:
+            if len(past_pnls) >= 2 and sum(past_pnls) <= POOL_MEMORY_NET_FLOOR_PCT:
                 print(f"Skipping {c['name']} - pool memory: {len(past_pnls)} past closes net {sum(past_pnls):+.1f}% PnL")
                 continue
         # Momentum screen across ALL candidates (not just deploy winner).
