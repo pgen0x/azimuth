@@ -462,3 +462,105 @@ func TestEveryLadderModeSetsTheLiveWindowGates(t *testing.T) {
 		}
 	}
 }
+
+// rh-turnover exists because the ladder screens found churn and then earned
+// nothing from it (104 closes, zero fee-positive). The mode must therefore
+// accept the oscillating mid-band pool that Mature's yield bar rejects, while
+// still demanding LIVE flow — the m15 pair is what separates a book trading now
+// from one that traded fifty minutes ago.
+func TestTurnoverTakesOscillatingPoolsMatureRejects(t *testing.T) {
+	now := time.Now()
+	p := Pool{
+		Address:      "0xc4a21f9d6485fc5893dd4a491b320a83daf4da1d",
+		Name:         "OSC / WETH 1%",
+		Dex:          "uniswap-v3-robinhood",
+		CreatedAt:    now.Add(-8 * 24 * time.Hour),
+		BaseAddress:  "0x21028be78e8f521214d24328715c1a8aadbac5a8",
+		BaseSymbol:   "OSC",
+		QuoteAddress: WETH,
+		QuoteSymbol:  "WETH",
+		FeePct:       1,
+		ReserveUSD:   132000,
+		FdvUSD:       1800000,
+		// 990000 * 1% / 132000 = 7.5%/day — over Turnover's 7.0 floor, under
+		// Mature's 8. Both read the realized 24h window (FeePaceH24).
+		VolumeH24USD: 990000,
+		VolumeH1USD:  41250,
+		TxH1:         gtTxWindow{Buys: 40, Sells: 35, Buyers: 22, Sellers: 18},
+		// m15 at the h1 rate: $10312 on $132k of reserve at 1% = 0.078%/15m,
+		// just over the 0.073 window-scoped floor (MinFeeTVLDay / 96).
+		VolumeM15USD: 10312,
+		TxM15:        gtTxWindow{Buys: 12, Sells: 10, Buyers: 8, Sellers: 7},
+		ChangeM5Pct:  1, ChangeH1Pct: 2, ChangeH6Pct: 3, ChangeH24Pct: 5,
+	}
+
+	if _, reason := Screen(p, Mature, now); reason == "" {
+		t.Fatal("Mature accepted a 7.5%/day pool; its 8%/day bar is what makes rh-turnover necessary")
+	}
+
+	cand, reason := Screen(p, Turnover, now)
+	if reason != "" {
+		t.Fatalf("Turnover rejected a pool matching its reference profile: %s", reason)
+	}
+	if cand.Mode != "rh-turnover" {
+		t.Errorf("Mode = %q, want rh-turnover", cand.Mode)
+	}
+}
+
+// The dominant ladder failure was a pool that cleared every 24h gate and then
+// sat untraded. Turnover holds inventory, so a dead live window is worse for it
+// than for a resting wall: it pays no fee AND carries the token.
+func TestTurnoverRejectsDeadLiveWindow(t *testing.T) {
+	now := time.Now()
+	p := Pool{
+		Address:      "0xdeadfeed00000000000000000000000000000001",
+		Name:         "STALE / WETH 1%",
+		Dex:          "uniswap-v3-robinhood",
+		CreatedAt:    now.Add(-8 * 24 * time.Hour),
+		BaseAddress:  "0x21028be78e8f521214d24328715c1a8aadbac5a8",
+		BaseSymbol:   "STALE",
+		QuoteAddress: WETH,
+		QuoteSymbol:  "WETH",
+		FeePct:       1,
+		ReserveUSD:   132000,
+		FdvUSD:       1800000,
+		VolumeH24USD: 990000, // 7.5%/day on the 24h window: passes
+		VolumeH1USD:  41250,
+		TxH1:         gtTxWindow{Buys: 40, Sells: 35, Buyers: 22, Sellers: 18},
+		VolumeM15USD: 0, // ...but nothing has traded in the last 15 minutes
+		TxM15:        gtTxWindow{},
+		ChangeM5Pct:  0, ChangeH1Pct: 2, ChangeH6Pct: 3, ChangeH24Pct: 5,
+	}
+	if _, reason := Screen(p, Turnover, now); reason == "" {
+		t.Fatal("Turnover accepted a pool with a dead 15m window — the exact ladder failure it replaces")
+	}
+}
+
+// The mode spends WETH and mints a WETH-denominated two-sided range. A
+// USDG-quoted equity in this batch would be sized in one asset and minted in
+// another, and its deep low-vol book crosses a tight range too rarely anyway.
+func TestTurnoverRejectsUsdgQuotedPools(t *testing.T) {
+	now := time.Now()
+	p := Pool{
+		Address:      "0xdeadfeed00000000000000000000000000000002",
+		Name:         "NVDA / USDG 0.3%",
+		Dex:          "uniswap-v3-robinhood",
+		CreatedAt:    now.Add(-8 * 24 * time.Hour),
+		BaseAddress:  "0x21028be78e8f521214d24328715c1a8aadbac5a8",
+		BaseSymbol:   "NVDA",
+		QuoteAddress: USDG,
+		QuoteSymbol:  "USDG",
+		FeePct:       0.3,
+		ReserveUSD:   132000,
+		FdvUSD:       1800000,
+		VolumeH24USD: 3300000,
+		VolumeH1USD:  137500,
+		TxH1:         gtTxWindow{Buys: 40, Sells: 35, Buyers: 22, Sellers: 18},
+		VolumeM15USD: 34375,
+		TxM15:        gtTxWindow{Buys: 12, Sells: 10, Buyers: 8, Sellers: 7},
+		ChangeM5Pct:  1, ChangeH1Pct: 2, ChangeH6Pct: 3, ChangeH24Pct: 5,
+	}
+	if _, reason := Screen(p, Turnover, now); reason == "" {
+		t.Fatal("Turnover accepted a USDG-quoted pool despite its WETH quote pin")
+	}
+}

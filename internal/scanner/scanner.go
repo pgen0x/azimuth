@@ -134,12 +134,13 @@ func (s *Scanner) Run(ctx context.Context) {
 	// (guard-secrets.sh), so this line is the operator's ONLY way to confirm a
 	// config edit actually took effect. A silently-wrong strategy here spends
 	// real money on the wrong shape.
-	log.Printf("scanner: started (interval=%v, casual=%v, multiday=%v, turnover=%v, pulse=%v, momentum=%v, robinhood=%v, rh-mature=%v, rh-ladder=%v, rh-usdg-ladder=%v, rh-pulse-ladder=%v)",
+	log.Printf("scanner: started (interval=%v, casual=%v, multiday=%v, turnover=%v, pulse=%v, momentum=%v, robinhood=%v, rh-mature=%v, rh-ladder=%v, rh-usdg-ladder=%v, rh-pulse-ladder=%v, rh-turnover=%v)",
 		s.cfg.PollInterval, s.cfg.EnableCasual, s.cfg.EnableMultiday, s.cfg.EnableTurnover, s.cfg.EnablePulse,
 		s.cfg.EnableMomentumGate, s.cfg.EnableRobinhood, s.cfg.EnableRobinhoodMature, s.cfg.EnableRobinhoodLadder,
-		s.cfg.EnableRobinhoodStockLadder, s.cfg.EnableRobinhoodPulseLadder)
+		s.cfg.EnableRobinhoodStockLadder, s.cfg.EnableRobinhoodPulseLadder, s.cfg.EnableRobinhoodTurnover)
 	if s.cfg.EnableRobinhood || s.cfg.EnableRobinhoodMature || s.cfg.EnableRobinhoodLadder ||
-		s.cfg.EnableRobinhoodStockLadder || s.cfg.EnableRobinhoodPulseLadder {
+		s.cfg.EnableRobinhoodStockLadder || s.cfg.EnableRobinhoodPulseLadder ||
+		s.cfg.EnableRobinhoodTurnover {
 		modes := make([]string, 0, len(s.cfg.RobinhoodDeployModes))
 		for m := range s.cfg.RobinhoodDeployModes {
 			modes = append(modes, m)
@@ -213,6 +214,21 @@ func (s *Scanner) pollAll(ctx context.Context) {
 		// prefilter and Screen.
 		s.pollRobinhood(ctx, robinhood.StockLadder, func(now time.Time) ([]robinhood.Pool, error) {
 			return robinhood.FetchMaturePools(robinhood.StockLadder, now)
+		})
+	}
+	if s.cfg.EnableRobinhoodTurnover {
+		// The gateway feed a fourth time, prefiltered with the turnover band.
+		// Same cost argument as rh-usdg-ladder: the prefilter is what holds the
+		// GeckoTerminal enrich to ONE request, and it can only be tuned to one
+		// mode's gates, so the modes cannot share a fetch.
+		//
+		// Ordered BEFORE the pulse ladder deliberately. rh-turnover is the
+		// venue's earning thesis as of 2026-08-07 and the ladders are the
+		// comparison arm, so when the GeckoTerminal budget runs short it must be
+		// a ladder that starves, not this (see the rate-limit note in gtlimit.go
+		// — the mode that runs last is the one a spent budget starves first).
+		s.pollRobinhood(ctx, robinhood.Turnover, func(now time.Time) ([]robinhood.Pool, error) {
+			return robinhood.FetchMaturePools(robinhood.Turnover, now)
 		})
 	}
 	if s.cfg.EnableRobinhoodPulseLadder {
@@ -335,6 +351,16 @@ func (s *Scanner) sizeFor(c *robinhood.Candidate, bal robinhood.Balances) deploy
 	sz.strategy = s.cfg.RobinhoodDeployStrategy
 	if sz.strategy == "weth_ladder" && sz.unit == "USDG" {
 		sz.strategy = "usdg_ladder"
+	}
+	// rh-turnover's shape is intrinsic to its thesis, not an operator choice:
+	// the mode screens for pools that OSCILLATE and is paid per crossing, which
+	// only a two-sided range collects. Minting a one-sided ladder into a
+	// turnover candidate would screen on churn and then earn nothing from it —
+	// exactly the pairing that produced 104 zero-fee ladder closes. So the mode
+	// pins the strategy rather than inheriting ROBINHOOD_DEPLOY_STRATEGY, the
+	// same way the quote asset pins it above.
+	if c.Mode == robinhood.Turnover.Mode {
+		sz.strategy = "balanced_tight"
 	}
 	sz.amount = robinhood.ComputeDeployAmount(sz.sizeBal, sz.sizeCfg)
 	if sz.amount <= 0 {

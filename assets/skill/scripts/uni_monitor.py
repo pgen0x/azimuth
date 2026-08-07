@@ -74,6 +74,54 @@ DOWNTREND_PNL_PCT = -5.0
 MAX_OOR_MINUTES = 30.0             # out-of-range this long -> close (fee-dead)
 MIN_AGE_MIN_BEFORE_SL = 5.0        # grace so a fresh mint's settling isn't an SL
 
+# --- turnover (churn) mode -------------------------------------------------
+# Port of Solana turnover's exit half (dlmm_monitor.py). The mode holds a TIGHT
+# two-sided range and is paid per crossing, so its rulebook differs from every
+# other strategy here in ONE structural way: an out-of-range break is not an
+# exit, it is a RE-CENTER. Close, re-mint around the new price, keep earning.
+#
+# This is the leg the venue never had, and its absence is what killed
+# balanced_tight at -15.04%/trade — uni_executor.js:1119 records a two-sided
+# position being closed by the 30m OOR timeout half an hour after minting. A
+# churn strategy with no churn realizes every drift as a loss instead of
+# collecting the fee on the way back.
+TURNOVER_STRATEGY = "balanced_tight"
+
+# 2 minutes, matching Solana's TURNOVER_MAX_OOR_MINUTES. An out-of-range
+# turnover position is idle capital, not a thesis playing out, and the 60s loop
+# makes this cadence real. The thesis modes' 30m patience is exactly wrong
+# here: every minute out of range is a minute paying no fee.
+TURNOVER_MAX_OOR_MINUTES = float(os.environ.get("UNI_TURNOVER_MAX_OOR_MIN", "2"))
+
+# 1.2 / 0.6, again Solana's. The 5.0/1.5 pair above is sized for PRICE moves; a
+# fee-capture position's entire win lives in the 1-2.5% band, so a 5% trigger
+# never arms and the mode's only profitable exit becomes an accidental pump-out.
+TURNOVER_TRAILING_TRIGGER_PCT = float(os.environ.get("UNI_TURNOVER_TRAILING_TRIGGER_PCT", "1.2"))
+TURNOVER_TRAILING_DROP_PCT = float(os.environ.get("UNI_TURNOVER_TRAILING_DROP_PCT", "0.6"))
+
+# Re-center circuit breaker, both halves ported from dlmm_monitor.py. The
+# cumulative one is primary: re-centering only pays if the crossings cover the
+# gas and the spread, and a pool that keeps drifting one way bleeds a little on
+# every cycle. Once 24h of realized re-center PnL in a pool drops below the
+# floor, that pool stops re-centering and takes a normal exit. The count cap is
+# the backstop against a pathological oscillation burning gas.
+#
+# The floor is in the position's QUOTE asset, so it is 0.004 WETH for a
+# WETH-quoted pool — this mode is WETH-pinned (robinhood.Turnover), so there is
+# no unit ambiguity to resolve here the way there is in sizing.
+TURNOVER_CB_LOSS_QUOTE = float(os.environ.get("UNI_TURNOVER_CB_LOSS_QUOTE", "-0.004"))
+TURNOVER_MAX_RECENTERS_24H = int(os.environ.get("UNI_TURNOVER_MAX_RECENTERS", "20"))
+
+# Fee compounding: claim while in range and let the proceeds fund the next
+# mint. Divergence from Solana worth naming — dlmm_monitor.py compounds fees
+# back INTO the live position, which on v3/v4 would need an increaseLiquidity
+# path neither executor has. Here `collect` moves fees to the wallet and the
+# re-center loop redeploys them within minutes, which for a strategy whose
+# holding period IS minutes is the same capital recycling by another route.
+# Threshold is a share of position value so it scales with size; below it the
+# gas costs more than the claim recovers.
+TURNOVER_COMPOUND_MIN_PCT = float(os.environ.get("UNI_TURNOVER_COMPOUND_MIN_PCT", "0.5"))
+
 # Pre-exit indicator confirmation — the Solana monitor's supertrend timing
 # check (dlmm_monitor.py step 7), applied to this venue's non-emergency exits:
 # a trailing/fast-out/downtrend close is postponed while the indicators still
@@ -842,17 +890,38 @@ def fetch_eth_usd():
         return None
 
 
-def trailing_floor_pct(peak):
+def trailing_floor_pct(peak, drop=None):
     """Profit-ratchet floor — identical shape to dlmm_monitor.py: tight near
     activation, locks progressively more as the peak grows, gives big winners
-    room instead of a flat drop that caps every win."""
+    room instead of a flat drop that caps every win.
+
+    `drop` overrides the near-activation band's flat drop. Turnover passes its
+    own 0.6: with a 1.2% trigger every one of its peaks lands in that bottom
+    band, and the default 1.5 would put the floor BELOW zero — a ratchet that
+    can only fire at a loss is not a take-profit. The upper tiers are shared
+    unchanged; a turnover position that somehow peaks past 5% has stopped being
+    a fee-capture trade and can use the wider ladder.
+    """
     if peak >= 20.0:
         return max(14.0, peak * 0.70)
     if peak >= 10.0:
         return max(6.0, peak - 4.0)
     if peak >= 5.0:
         return max(2.0, peak - 2.5)
-    return peak - TRAILING_DROP_PCT
+    return peak - (TRAILING_DROP_PCT if drop is None else drop)
+
+
+def is_turnover(s):
+    """True when this position is an rh-turnover mint.
+
+    Keyed on the strategy string the executors stamp into their entry journal,
+    the same way is_ladder keys on the `_ladder` suffix. A position minted
+    before this mode existed carries `balanced_tight` too — which is correct,
+    not a bug: the re-center loop is what that strategy always needed, and
+    applying it to a legacy position is strictly better than the 30m OOR
+    timeout that has been closing them at a loss.
+    """
+    return (s or {}).get("strategy") == TURNOVER_STRATEGY
 
 
 def decide(pnl, peak, in_range, age_min, oor_min, m5, h1, s=None, ps=None, now=None,
@@ -883,6 +952,17 @@ def decide(pnl, peak, in_range, age_min, oor_min, m5, h1, s=None, ps=None, now=N
         return None
     if s is not None and is_ladder(s):
         return ladder_decide(s, pnl, age_min, ps, now, kry, wall)
+    # Turnover keeps this rulebook — it holds inventory and every risk rule here
+    # applies to it — but re-scopes the two constants whose thesis-mode values
+    # are wrong for a churn trade: the trailing pair (a 5% trigger never arms on
+    # a position whose whole win is 1-2.5%) and the OOR fuse (2m, because out of
+    # range is a re-center signal, not a patience test). The reason string is
+    # what routes the close: `turnover re-center` is read by the caller, which
+    # re-mints instead of walking away.
+    turnover = s is not None and is_turnover(s)
+    trail_trigger = TURNOVER_TRAILING_TRIGGER_PCT if turnover else TRAILING_TRIGGER_PCT
+    trail_drop = TURNOVER_TRAILING_DROP_PCT if turnover else None
+    oor_limit = TURNOVER_MAX_OOR_MINUTES if turnover else MAX_OOR_MINUTES
     if pnl is not None:
         # Emergency SL — bypasses the age grace.
         if pnl <= STOP_LOSS_PCT - EMERGENCY_SL_BUFFER_PCT:
@@ -894,8 +974,8 @@ def decide(pnl, peak, in_range, age_min, oor_min, m5, h1, s=None, ps=None, now=N
         if pnl >= TAKE_PROFIT_PCT:
             return f"take profit {pnl:.1f}% >= {TAKE_PROFIT_PCT:.1f}%"
         # Trailing profit ratchet (armed once peak clears the trigger).
-        if peak >= TRAILING_TRIGGER_PCT:
-            floor = trailing_floor_pct(peak)
+        if peak >= trail_trigger:
+            floor = trailing_floor_pct(peak, trail_drop)
             if pnl < floor and pnl >= TRAILING_MIN_LOCK_PCT:
                 return f"trailing exit {pnl:.1f}% < floor {floor:.1f}% (peak {peak:.1f}%)"
             # Fast-out velocity: armed + still locked + a steep 5m dump that
@@ -905,8 +985,13 @@ def decide(pnl, peak, in_range, age_min, oor_min, m5, h1, s=None, ps=None, now=N
         # Sustained downtrend: underwater AND token in steady 1h decline.
         if h1 is not None and h1 <= DOWNTREND_1H_PCT and pnl <= DOWNTREND_PNL_PCT:
             return f"downtrend 1h {h1:.1f}% + pnl {pnl:.1f}%"
-    # Out-of-range timeout — fee-dead capital past the patience window.
-    if not in_range and oor_min >= MAX_OOR_MINUTES:
+    # Out-of-range timeout — fee-dead capital past the patience window. For
+    # turnover this is the mode's normal operating loop rather than an exit:
+    # the caller re-mints around the new price. Named distinctly so it can be
+    # routed (and so a close journal can tell a re-center from a give-up).
+    if not in_range and oor_min >= oor_limit:
+        if turnover:
+            return f"turnover re-center ({oor_min:.0f}m out of range >= {oor_limit:.0f}m)"
         return f"out of range {oor_min:.0f}m >= {MAX_OOR_MINUTES:.0f}m"
     return None
 
@@ -984,6 +1069,128 @@ def cool_off(pool, token, reason, pnl):
         redis_cmd("set", f"rh:cooldown:token:{str(token).lower()}", reason[:120], "ex",
                   max(secs, COOLDOWN_TOKEN_SECS))
     print(f"monitor: re-entry cooldown {secs // 3600}h on pool {pool}")
+
+
+# --- turnover re-center loop ----------------------------------------------
+# The mode's profit engine, and the one leg this venue never had. A turnover
+# position that leaves its range is closed and IMMEDIATELY re-minted around the
+# new price, so the capital goes back to earning instead of sitting in the
+# wallet until the scanner happens to signal the pool again.
+#
+# Read from the daemon's own env so a re-center mints the SAME geometry the
+# scanner would: the whole point is that this is the same position continuing,
+# not a second, differently-shaped bet.
+TURNOVER_RANGE_PCT = float(os.environ.get("ROBINHOOD_RANGE_PCT", "10"))
+TURNOVER_SLIPPAGE_PCT = float(os.environ.get("ROBINHOOD_SLIPPAGE_PCT", "5"))
+
+CB_RECENTER_KEY = "rh:turnover:recenters:{}"
+CB_PNL_KEY = "rh:turnover:pnl:{}"
+CB_WINDOW_SECS = 86400
+
+
+def _f(v):
+    """float(v) or None — executor amounts arrive as strings, and a missing one
+    must not raise inside the close path."""
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def cb_record(pool, realized_quote):
+    """Book one re-center and its realized PnL into the pool's 24h window.
+
+    Both keys carry their own rolling TTL, so the window is per-pool and
+    independent — the same per-key discipline internal/store/store.go documents
+    for the dedup set, and for the same reason: one shared key would let a busy
+    pool refresh a quiet pool's window forever.
+    """
+    rk, pk = CB_RECENTER_KEY.format(pool), CB_PNL_KEY.format(pool)
+    redis_cmd("incr", rk)
+    redis_cmd("expire", rk, CB_WINDOW_SECS)
+    if realized_quote is not None:
+        redis_cmd("incrbyfloat", pk, f"{realized_quote:.9f}")
+        redis_cmd("expire", pk, CB_WINDOW_SECS)
+
+
+def recenter_ok(pool):
+    """(allowed, why) for re-centering this pool — the ported circuit breaker.
+
+    Fails CLOSED, which is the opposite of cool_off's rule above and is
+    deliberate. A cooldown is a brake on the close path, so a broken brake must
+    not also break closing. A re-center is OPTIONAL EXTRA WORK on top of a close
+    that has already happened: if we cannot read the window, we cannot know
+    whether this pool has been bleeding on every cycle, and the safe answer to
+    that is to take the normal exit and let the scanner re-signal the pool
+    through the full screen.
+    """
+    raw_n = redis_cmd("get", CB_RECENTER_KEY.format(pool))
+    if raw_n is None:
+        return False, "circuit breaker unreadable (redis down) — normal exit"
+    try:
+        n = int(raw_n) if raw_n else 0
+    except ValueError:
+        n = 0
+    if n >= TURNOVER_MAX_RECENTERS_24H:
+        return False, f"re-center cap {n}/{TURNOVER_MAX_RECENTERS_24H} in 24h"
+    raw_p = redis_cmd("get", CB_PNL_KEY.format(pool))
+    try:
+        realized = float(raw_p) if raw_p else 0.0
+    except ValueError:
+        realized = 0.0
+    if realized <= TURNOVER_CB_LOSS_QUOTE:
+        return False, (f"circuit breaker: 24h re-center PnL {realized:+.5f} "
+                       f"<= {TURNOVER_CB_LOSS_QUOTE:+.5f} floor")
+    return True, f"{n}/{TURNOVER_MAX_RECENTERS_24H} re-centers, 24h PnL {realized:+.5f}"
+
+
+def recenter(executor, pool, amount, quote, pair):
+    """Re-mint a turnover position around the current price. Returns True on a
+    confirmed mint.
+
+    `amount` is the quote-asset proceeds of the close we just did, so the
+    position compounds by construction: fees collected on the way out are part
+    of what gets re-deployed. That is also why compounding needs no
+    increaseLiquidity path here — see TURNOVER_COMPOUND_MIN_PCT.
+    """
+    if amount is None or amount <= 0:
+        print(f"monitor: re-center skipped for {pair} — close returned no quote proceeds")
+        return False
+    args = ["deploy", "--pool", pool, "--amount", f"{amount:.9f}".rstrip("0"),
+            "--strategy", TURNOVER_STRATEGY,
+            "--range-pct", f"{TURNOVER_RANGE_PCT:g}",
+            "--slippage", f"{TURNOVER_SLIPPAGE_PCT:g}"]
+    if quote:
+        args += ["--quote", quote]
+    out, err = run_executor(executor, args)
+    if err or not out or not out.get("success"):
+        print(f"monitor: RE-CENTER FAILED {pair}: {err or (out or {}).get('error') or 'no payload'}")
+        return False
+    print(f"monitor: RE-CENTERED {pair} -> #{out.get('tokenId')} "
+          f"({amount:.6f} redeployed, range ±{TURNOVER_RANGE_PCT:g}%)")
+    return True
+
+
+def compound_fees(executor, tid, s, proto):
+    """Claim fees on an in-range turnover position so they fund the next mint.
+
+    Only worth a transaction when the pending fee is a real share of the
+    position — below TURNOVER_COMPOUND_MIN_PCT the gas costs more than the
+    claim recovers. Best-effort: a failed collect is not an error, the fees
+    stay pending and the next re-center's close collects them anyway.
+    """
+    fees, val = s.get("feesQuote"), s.get("valueWeth")
+    if fees is None or not val or val <= 0:
+        return
+    pct = float(fees) / float(val) * 100.0
+    if pct < TURNOVER_COMPOUND_MIN_PCT:
+        return
+    out, err = run_executor(executor, ["collect", "--id", str(tid)])
+    if err or not out or not out.get("success"):
+        print(f"monitor: compound collect failed {proto} #{tid}: {err or 'no payload'}")
+        return
+    print(f"monitor: COMPOUNDED {proto} #{tid} — claimed {fees} "
+          f"({pct:.2f}% of position), funds the next re-center")
 
 
 def sweep_stranded(proto, executor):
@@ -1333,6 +1540,12 @@ def main():
               f"m5={m5} h1={h1} -> {reason or 'HOLD'}")
 
         if not reason:
+            # An in-range turnover position that is holding is also EARNING —
+            # claim once the pending fee is worth its gas so it funds the next
+            # mint. Only here: a position with a close reason is about to have
+            # its fees collected by the close itself.
+            if is_turnover(s) and in_range and not DRY_RUN:
+                compound_fees(executor, tid, s, proto)
             continue
 
         if DRY_RUN:
@@ -1368,7 +1581,29 @@ def main():
             # leaves the wall standing, and blocking re-entry to a pool we are
             # still in would be the wrong brake on the wrong thing.
             cool_off(pool, s.get("token"), reason, pnl)
-            msg = f"🔴 Robinhood LP closed {pair} (#{tid})\n{reason}\npnl {pnl_str} peak {peak:.1f}%"
+            # Turnover's re-center: the close was half of one operation, so
+            # finish it before reporting. Only a plain drift close re-centers —
+            # an SL, a downtrend or a trailing exit is the position telling us
+            # the pool changed, and re-minting into that is how a churn loop
+            # turns into a bag-holding loop. (Mirrors dlmm_monitor.py's
+            # is_oor_rebalance, which excludes exactly the same classes.)
+            recentered = False
+            if reason.startswith("turnover re-center"):
+                realized = None
+                ent, got = s.get("entryWeth"), (out or {}).get("weth_out")
+                try:
+                    if ent is not None and got is not None:
+                        realized = float(got) - float(ent)
+                except (TypeError, ValueError):
+                    realized = None
+                cb_record(pool, realized)
+                allowed, why = recenter_ok(pool)
+                if allowed:
+                    recentered = recenter(executor, pool, _f(got), s.get("quote"), pair)
+                else:
+                    print(f"monitor: re-center declined for {pair}: {why}")
+            verb = "♻️ re-centered" if recentered else "🔴 closed"
+            msg = f"{verb} Robinhood LP {pair} (#{tid})\n{reason}\npnl {pnl_str} peak {peak:.1f}%"
             if stranded:
                 msg += (f"\n⚠️ {stranded.get('symbol', '?')} NOT sold — {stranded.get('reason', '?')}"
                         f"\ntoken {stranded.get('token')}\nqueued for sweep")

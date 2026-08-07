@@ -118,6 +118,17 @@ type Config struct {
 	// WETH balance rh-ladder does, so running both splits one wallet across two
 	// age bands. Off by default; see robinhood.PulseLadder.
 	EnableRobinhoodPulseLadder bool
+	// EnableRobinhoodTurnover turns on the venue's SIXTH mode (rh-turnover):
+	// the port of Solana's turnover thesis — a TIGHT two-sided range in an
+	// oscillating pool, re-centered on every out-of-range break instead of
+	// closed. It replaces the ladder modes as the venue's deploy strategy
+	// (2026-08-07): 104 live ladder rung closes produced zero fee-positive
+	// exits, while turnover is the only churn loop either venue has run at a
+	// profit. Shares rh-mature's gateway feed and every safety gate, and needs
+	// uni_monitor.py's re-center loop to work at all — without it this is
+	// balanced_tight, which lost 15%/trade. Off by default; see
+	// robinhood.Turnover.
+	EnableRobinhoodTurnover bool
 	// RobinhoodDiscoverURL overrides the GeckoTerminal new_pools endpoint
 	// (empty = the package default). The public tier allows 30 req/min.
 	// Applies to the Fresh mode only; rh-mature has its own source.
@@ -373,6 +384,7 @@ func loadConfig() Config {
 
 		EnableRobinhoodStockLadder: getbool("ROBINHOOD_STOCK_LADDER", false),
 		EnableRobinhoodPulseLadder: getbool("ROBINHOOD_PULSE_LADDER", false),
+		EnableRobinhoodTurnover:    getbool("ROBINHOOD_TURNOVER", false),
 
 		RobinhoodDiscoverURL: getenv("ROBINHOOD_DISCOVER_URL", ""),
 		RobinhoodWebhook:     getbool("ROBINHOOD_WEBHOOK", false),
@@ -383,7 +395,7 @@ func loadConfig() Config {
 		// ladder is "usdg-ladder". It is NOT in the default set: the USDG rungs
 		// spend a balance the wallet may not hold, and enabling discovery for it
 		// should not silently enable spending.
-		RobinhoodDeployModes:   getmodes("ROBINHOOD_DEPLOY_MODES", "fresh,mature,ladder"),
+		RobinhoodDeployModes:   getmodes("ROBINHOOD_DEPLOY_MODES", "fresh,mature,ladder,turnover"),
 		RobinhoodExecutorCmd:   getenv("ROBINHOOD_EXECUTOR_CMD", ""),
 		RobinhoodV4ExecutorCmd: getenv("ROBINHOOD_V4_EXECUTOR_CMD", ""),
 		RobinhoodDeployTimeout: getdur("ROBINHOOD_DEPLOY_TIMEOUT", 2*time.Minute),

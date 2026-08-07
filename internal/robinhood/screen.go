@@ -137,10 +137,97 @@ var Mature = ModeParams{
 	MaxFdvUSD: 50_000_000,
 }
 
+// Turnover is the port of Solana's `turnover` thesis to this venue: hold a
+// TIGHT two-sided range in a pool whose book actually oscillates, collect the
+// fee on every crossing, and re-center the moment price leaves the range.
+//
+// It exists because the ladder answer to "never own the token" turned out to
+// cost the entire product. Across 104 live ladder rung closes (2026-08-04 →
+// 08-07) there were ZERO fee-positive exits: 63 closed `ladder idle` (the
+// monitor's own certification that the wall earned < 0.02% over 90m), 30
+// closed `ladder stale` at a median 23m, and the 11 that filled averaged
+// -9.48%. A resting one-sided bid only earns when the market trades THROUGH
+// it, and on this venue's books that did not happen often enough to pay for
+// the times it did.
+//
+// This mode inverts that: it owns inventory and is paid for crossings rather
+// than for a wall being run over. The bleed that killed `balanced_tight`
+// (-15.04%/trade) is not the shape — uni_executor.js:1119 records the real
+// cause, that a two-sided position was closed by the 30m out-of-range timeout
+// half an hour after minting. A churn strategy with no churn realizes every
+// drift as a loss. The re-center loop in uni_monitor.py is what this mode
+// needs to work at all, and it did not exist on this venue until now.
+//
+// Band is deliberately Solana turnover's (internal/meteora/screen.go), which
+// is the only calibrated churn screen either venue has: TVL 10k-150k, and a
+// fee pace that a 30m 0.15% fee/TVL floor annualizes to (~7.2%/day). Sitting
+// BELOW rh-mature's 8% is the point — mature holds for days and must out-earn
+// its own inventory bleed, while this mode's holding period is minutes and its
+// income is fee_pct x crossings, not yield.
+var Turnover = ModeParams{
+	Mode: "rh-turnover",
+
+	// WETH-quoted. Sizing and the position must be the same asset for the same
+	// reason the ladders pin (see QuoteAsset) — and the equities that make up
+	// the USDG universe are the WRONG book for this thesis anyway: a deep,
+	// low-volatility stock pool crosses a tight range rarely, which is the one
+	// thing this mode is paid for.
+	QuoteAsset: WETH,
+
+	// Needs enough history to prove the book oscillates rather than that it
+	// launched. No ceiling: an oscillating pool does not expire on a clock, and
+	// the fee-pace gate expires it on evidence.
+	MinAge: 1 * time.Hour,
+	MaxAge: 0,
+
+	// Solana turnover's band verbatim. The ceiling is load-bearing, not a
+	// sanity bound: our fee share is our liquidity over the pool's, so a deep
+	// book pays a small position nothing however much it churns.
+	MinReserveUSD: 10000,
+	MaxReserveUSD: 150000,
+
+	MinFeePct: 0.25,
+
+	// ~7%/day, measured over REALIZED 24h volume rather than an extrapolated
+	// hour — a mode selecting for sustained crossings must not buy a pool that
+	// had one busy hour.
+	MinFeeTVLDay: 7.0,
+	FeePaceH24:   true,
+
+	// The churn gates proper, and the reason this is not just Mature with a
+	// lower bar. Solana turnover wants 20 swaps / 15 unique traders per 30m
+	// window; per hour that is 40/30, and this venue's books are thinner, so
+	// these track rh-mature's 60/20 rather than doubling Solana's.
+	MinTxH1:     60,
+	MinBuyersH1: 20,
+
+	// Live-window gates. Unlike the ladder modes — whose m15 floors were read
+	// off wall-traffic, i.e. how often a RESTING bid got hit — a two-sided
+	// position is paid per crossing while it holds inventory, so its floor is
+	// the honest window-scoped share of the daily bar: MinFeeTVLDay / 96
+	// fifteen-minute windows = 0.073%. A pool that cannot clear its own daily
+	// pace over the last 15 minutes is not currently oscillating, whatever its
+	// 24h number says.
+	//
+	// MinVolumeM15USD is Solana Pulse's $500 raw-window floor, and does the job
+	// MinFeeTVLM15Pct cannot: this venue's collapsed-launch template ($737
+	// reserves) prints a huge fee/TVL on a few dollars of flow.
+	MinTxM15:        20,
+	MinVolumeM15USD: 500,
+	MinFeeTVLM15Pct: 0.073,
+
+	MinFdvUSD: 20000,
+	MaxFdvUSD: 50_000_000,
+}
+
 // Ladder is the weth_ladder mode: pools worth parking a one-sided WETH bid
 // wall under. Unlike Fresh and Mature — which buy the token and are therefore
 // betting on it — a ladder holds only WETH until the market trades down into
 // a rung, so what it needs from a pool is CHURN, not yield.
+//
+// SUPERSEDED 2026-08-07 by Turnover (above) on 104 closes with zero winners.
+// Kept screening correctly rather than deleted: it is the only comparison
+// point if the turnover loop underperforms.
 //
 // That inverts the usual threshold logic and is why this mode exists at all
 // rather than reusing Mature. Mature demands 8%/day because it holds inventory

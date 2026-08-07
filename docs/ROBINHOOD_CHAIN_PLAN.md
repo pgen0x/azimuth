@@ -863,6 +863,85 @@ asset, so a pulse-discovered WETH pool gets the same 1200-tick rungs rh-ladder
 mints. If the soak shows a first-day pool wants a different wall, the knob to
 add is per-strategy geometry — not a second WETH constant.
 
+## 4f. `rh-turnover` — the ladders' replacement (2026-08-07)
+
+### The verdict on the ladder
+
+Three days of live ladder trading, read off `memories/uni_closes.jsonl`
+(2026-08-04 10:49 → 2026-08-07 08:39, 104 rung closes, all real):
+
+| close class | n | mean PnL | winners | exactly 0.00% | median age |
+|---|---|---|---|---|---|
+| `ladder idle` | 63 | −0.01% | 0 | 58 | 91m |
+| `ladder stale` | 30 | −0.00% | 0 | 30 | 23m |
+| `ladder rung filled` | 11 | **−9.48%** | 0 | 0 | 48m |
+
+**Zero fee-positive exits in 104 closes.** 88 returned principal unchanged.
+Net realized was negative in both quote assets, before counting the gas on 104
+mints and 104 closes, which the journal does not carry. (Absolute wallet
+figures stay in the private profile journal, per the repo's sanitization rule.)
+
+The exit reasons are the diagnosis, not just the outcome. `ladder idle` fires
+only when the wall earned < 0.02% over a 90m window — 63 of those is the
+monitor certifying fee-death 61% of the time. `ladder stale` closed at a median
+23m, i.e. re-pinned before it could earn. The 11 that filled are the only
+closes that moved money, all down.
+
+The thesis was that a resting one-sided bid is paid for oscillation while never
+owning the token. The first half did not happen on these books often enough to
+pay for the second half when it did. The payoff was inverted: capped upside
+that never printed, uncapped downside that did (one rung, −40.61%).
+
+### Why turnover, and why it is not a return to `balanced_tight`
+
+`balanced_tight` lost 15.04%/trade and was replaced by the ladder in §4b. The
+shape was not the problem. `uni_executor.js:1119` records what was: a two-sided
+position closed by the **30m out-of-range timeout** half an hour after minting.
+A churn strategy with no churn realizes every drift as a loss instead of
+collecting the fee on the way back.
+
+So the port is not the shape, it is the **loop**, and the loop is what this
+venue never had. `uni_monitor.py` had one close path and no redeploy path at
+all — zero matches for rebalance / re-center / reseed / compound. Solana's
+turnover engine is: 2-minute OOR fuse → close → re-mint around the new price →
+repeat, with fee compounding and a cumulative-PnL circuit breaker.
+
+### What landed
+
+| leg | value | rationale |
+|---|---|---|
+| screen (`robinhood.Turnover`) | TVL $10k–150k, 7%/day pace, 60 tx/20 buyers h1 | Solana turnover's band verbatim — the only calibrated churn screen either venue has |
+| live-window gate | 20 tx / $500 / 0.073% per m15 | 0.073 = `MinFeeTVLDay / 96`, the honest window-scoped share of the daily bar |
+| OOR fuse | 2m | out of range is a re-center signal, not a patience test |
+| trailing | 1.2% / 0.6% | at the default 1.5 drop a 1.2 peak floors at **−0.3%** — a ratchet that can only fire at a loss |
+| circuit breaker | −0.004 WETH or 20 re-centers per pool / 24h | re-centering only pays if crossings cover gas + spread |
+| compounding | `collect` at 0.5% of position | no `increaseLiquidity` path on either executor; the re-center redeploys it within minutes |
+
+Routing rules that make the loop a loop rather than a churn of exits:
+`turnover re-center` is excluded from `exit_confirmable` (confirmation would
+break the cadence) and from `cool_off` (a cooldown would switch the mode off),
+and it is the **only** reason that re-mints — SL, downtrend and trailing closes
+are the pool telling us it changed. Same exclusions as `dlmm_monitor.py`'s
+`is_oor_rebalance`.
+
+The circuit breaker fails **CLOSED**, inverting `cool_off`'s rule. A cooldown
+is a brake on the close path so a broken brake must not break closing; a
+re-center is optional work *after* a close already succeeded, so an unreadable
+window means take the normal exit and let the scanner re-screen the pool.
+
+### Status
+
+Built and live 2026-08-07. Ladder modes disabled at the same cutover at the
+operator's direction, so there is **no control arm** — the comparison is
+against the 104-close ladder record above, not a concurrent run. `Ladder`,
+`StockLadder` and `PulseLadder` still screen correctly and are one env toggle
+from returning.
+
+Unproven: the re-center loop has never run on this venue. The numbers to watch
+in the first day are the ratio of `turnover re-center` to SL/trailing closes
+(the loop working vs. the loop bleeding), realized PnL per re-center against
+gas, and whether the circuit breaker trips on any pool.
+
 ## 5. Deliverable order
 
 | # | Deliverable | Depends on |

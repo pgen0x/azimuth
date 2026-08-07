@@ -166,6 +166,38 @@ one pass per enabled mode per `POLL_INTERVAL`.
     first-day pool wants a different wall, add per-strategy geometry, not a
     second WETH constant.
 
+  - `Turnover` (`ROBINHOOD_TURNOVER`) — **the venue's earning thesis as of
+    2026-08-07**, and the port of Solana `turnover`: a TIGHT two-sided WETH
+    range (`balanced_tight`) in an oscillating pool, **re-centered** on every
+    out-of-range break rather than closed. It replaced the ladders on evidence,
+    not taste — 104 live ladder rung closes produced **zero** fee-positive
+    exits (63 `ladder idle`, 30 `ladder stale`, 11 fills averaging −9.48%),
+    because a resting one-sided bid only earns when the market trades *through*
+    it. The mode pins its own strategy in `sizeFor` instead of inheriting
+    `ROBINHOOD_DEPLOY_STRATEGY`: screening for churn and then minting a shape
+    that cannot collect it is the exact pairing that produced those 104 zeros.
+    Shares `Mature`'s gateway feed with a turnover-band prefilter, and is polled
+    BEFORE the ladders so a spent GeckoTerminal budget starves the comparison
+    arm first.
+
+    Its whole viability is the **re-center loop in `uni_monitor.py`**, which
+    this venue did not have until now, and whose absence is what killed
+    `balanced_tight` at −15.04%/trade — `uni_executor.js:1119` records
+    two-sided positions closed by the 30m OOR timeout half an hour after
+    minting. A churn strategy with no churn realizes every drift as a loss.
+    So: `turnover re-center` is a distinct close reason, deliberately NOT in
+    `exit_confirmable` (indicator confirmation would break the cadence) and NOT
+    in `cool_off` (cooling the pool would switch the mode off), and it is the
+    ONLY reason that re-mints — an SL/downtrend/trailing close is the pool
+    telling us it changed, and re-minting into that turns a churn loop into a
+    bag-holding loop. Mirrors `dlmm_monitor.py`'s `is_oor_rebalance` exclusions.
+    Guarded by a per-pool 24h circuit breaker (`rh:turnover:{recenters,pnl}:<pool>`)
+    that fails **CLOSED** — unlike `cool_off`, a re-center is optional work on
+    top of an already-completed close, so an unreadable window means take the
+    normal exit. Fee compounding is `collect`-to-wallet, not Solana's in-place
+    increase: neither executor has an `increaseLiquidity` path, and a loop whose
+    holding period is minutes recycles the fees into the next mint anyway.
+
   Modes are quote-pinned via `ModeParams.QuoteAsset` — a ladder's rungs and its
   sizing must be the same asset, so a mode may not mix WETH- and USDG-quoted
   pools in one batch. The pin goes through `quotePinMatch`, not an address
