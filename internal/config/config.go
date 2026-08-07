@@ -119,15 +119,15 @@ type Config struct {
 	// age bands. Off by default; see robinhood.PulseLadder.
 	EnableRobinhoodPulseLadder bool
 	// EnableRobinhoodTurnover turns on the venue's SIXTH mode (rh-turnover):
-	// the port of Solana's turnover thesis — a TIGHT two-sided range in an
-	// oscillating pool, re-centered on every out-of-range break instead of
-	// closed. It replaces the ladder modes as the venue's deploy strategy
-	// (2026-08-07): 104 live ladder rung closes produced zero fee-positive
-	// exits, while turnover is the only churn loop either venue has run at a
-	// profit. Shares rh-mature's gateway feed and every safety gate, and needs
-	// uni_monitor.py's re-center loop to work at all — without it this is
-	// balanced_tight, which lost 15%/trade. Off by default; see
-	// robinhood.Turnover.
+	// the port of Solana's turnover thesis — ONE one-sided quote rung
+	// (weth_below) resting adjacent to spot in an oscillating pool, re-pinned
+	// when price drifts off it or it stops earning instead of closed. It
+	// replaces the ladder modes as the venue's deploy strategy (2026-08-07):
+	// 104 live ladder rung closes produced zero fee-positive exits, because
+	// two thirds of a wall's capital sits in rungs the market never reaches.
+	// Shares rh-mature's gateway feed and every safety gate, and needs
+	// uni_monitor.py's re-center loop to work at all — a resting bid nobody
+	// re-pins is just the ladder again. Off by default; see robinhood.Turnover.
 	EnableRobinhoodTurnover bool
 	// RobinhoodDiscoverURL overrides the GeckoTerminal new_pools endpoint
 	// (empty = the package default). The public tier allows 30 req/min.
@@ -207,6 +207,8 @@ type Config struct {
 	RobinhoodMinGasEth float64
 	// RobinhoodDeployStrategy is the uni_executor.js mint strategy:
 	// "balanced_tight" (two-sided, swaps half) or "weth_below" (one-sided).
+	// rh-turnover ignores it and pins weth_below in scanner.sizeFor — its shape
+	// is part of the thesis, not an operator knob.
 	RobinhoodDeployStrategy string
 	RobinhoodRangePct       float64
 	RobinhoodSlippagePct    float64

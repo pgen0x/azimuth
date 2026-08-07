@@ -75,29 +75,49 @@ MAX_OOR_MINUTES = 30.0             # out-of-range this long -> close (fee-dead)
 MIN_AGE_MIN_BEFORE_SL = 5.0        # grace so a fresh mint's settling isn't an SL
 
 # --- turnover (churn) mode -------------------------------------------------
-# Port of Solana turnover's exit half (dlmm_monitor.py). The mode holds a TIGHT
-# two-sided range and is paid per crossing, so its rulebook differs from every
-# other strategy here in ONE structural way: an out-of-range break is not an
-# exit, it is a RE-CENTER. Close, re-mint around the new price, keep earning.
+# Port of Solana turnover's exit half (dlmm_monitor.py). The mode is paid per
+# crossing, so its rulebook differs from every other strategy here in ONE
+# structural way: leaving the band is not an exit, it is a RE-CENTER. Close,
+# re-mint at the new price, keep earning. That loop is the leg this venue never
+# had, and its absence is what killed the old two-sided balanced_tight at
+# -15.04%/trade — uni_executor.js records positions closed by the 30m OOR
+# timeout half an hour after minting. A churn strategy with no churn realizes
+# every drift as a loss instead of collecting the fee on the way back.
 #
-# This is the leg the venue never had, and its absence is what killed
-# balanced_tight at -15.04%/trade — uni_executor.js:1119 records a two-sided
-# position being closed by the 30m OOR timeout half an hour after minting. A
-# churn strategy with no churn realizes every drift as a loss instead of
-# collecting the fee on the way back.
-TURNOVER_STRATEGY = "balanced_tight"
+# The SHAPE is one-sided (2026-08-07, operator correction). Solana's
+# select_batch_strategy() ends in an unconditional `return "sol_bidask"`: every
+# mode there, turnover included, holds zero token at entry. balanced_tight
+# pre-swapped half the commit into the memecoin, which is the exposure this
+# venue has been losing money on, and it is not what the churn loop needed.
+#
+# One v3/v4 constraint the Solana port cannot carry over, and it is why this
+# mode does NOT get a 2-minute OOR fuse: DLMM lets a one-sided position include
+# the active bin (sol_bidask sets upper_bin = active_bin), so it is single-sided
+# AND earning at mint. Uniswap cannot — one-sided quote needs the band entirely
+# on one side of spot, and a straddling range computes
+# liquidity = min(L(amount), L(0)) = 0. So a weth_below rung ALWAYS rests out of
+# range, and an OOR fuse would close and re-mint it every two minutes forever.
+# Drift and fee-death replace it; see turnover_decide.
+TURNOVER_STRATEGY = "weth_below"
 
-# 2 minutes, matching Solana's TURNOVER_MAX_OOR_MINUTES. An out-of-range
-# turnover position is idle capital, not a thesis playing out, and the 60s loop
-# makes this cadence real. The thesis modes' 30m patience is exactly wrong
-# here: every minute out of range is a minute paying no fee.
-TURNOVER_MAX_OOR_MINUTES = float(os.environ.get("UNI_TURNOVER_MAX_OOR_MIN", "2"))
+# Drift, in ticks, before the rung is re-pinned — the turnover twin of
+# LADDER_STALE_TICKS below, and half the rung width for the same reason a
+# ladder's is one full rung width: a wall is judged stale when spot has cleared
+# the depth it was willing to buy, and a single rung has half a wall's patience
+# because re-pinning it costs one mint, not five. Keep each entry at half its
+# UNI_TURNOVER_RUNG_TICKS* twin in uni_ladder.js — the executor mints the width,
+# this judges drift against it, and the pair only means something together.
+TURNOVER_STALE_TICKS = {
+    "WETH": float(os.environ.get("UNI_TURNOVER_STALE_TICKS", "300")),
+    "USDG": float(os.environ.get("UNI_TURNOVER_STALE_TICKS_USDG", "60")),
+}
 
-# 1.2 / 0.6, again Solana's. The 5.0/1.5 pair above is sized for PRICE moves; a
-# fee-capture position's entire win lives in the 1-2.5% band, so a 5% trigger
-# never arms and the mode's only profitable exit becomes an accidental pump-out.
-TURNOVER_TRAILING_TRIGGER_PCT = float(os.environ.get("UNI_TURNOVER_TRAILING_TRIGGER_PCT", "1.2"))
-TURNOVER_TRAILING_DROP_PCT = float(os.environ.get("UNI_TURNOVER_TRAILING_DROP_PCT", "0.6"))
+# A fill past this closes without waiting for indicator confirmation, exactly as
+# LADDER_FILL_HARD_PCT does for a rung — same rule, same number by default,
+# separate knob because a re-pinning single rung and a five-rung wall can want
+# different patience once there is live data to separate them.
+TURNOVER_FILL_HARD_PCT = float(os.environ.get("UNI_TURNOVER_FILL_HARD_PCT",
+                                              os.environ.get("UNI_LADDER_FILL_HARD_PCT", "-8.0")))
 
 # Re-center circuit breaker, both halves ported from dlmm_monitor.py. The
 # cumulative one is primary: re-centering only pays if the crossings cover the
@@ -473,7 +493,7 @@ def wall_of(s, verdicts):
     return verdicts.get(str(lid)) if lid else None
 
 
-def _idle_window(ps, now, kind, level, basis=None):
+def _idle_window(ps, now, kind, level, basis=None, label="ladder idle"):
     """Snapshot-and-compare a monotonic `level` over LADDER_IDLE_WINDOW_MIN,
     judged against `basis` (defaults to the snapshot itself, i.e. relative
     growth). Returns a close reason, or None to hold — rolling the window
@@ -481,7 +501,12 @@ def _idle_window(ps, now, kind, level, basis=None):
 
     `ps` is the WALL's state dict for a laddered rung (ladder_wall_key), so one
     window covers the whole wall; only a rung with no ladderId still snapshots
-    into its own position state."""
+    into its own position state.
+
+    `label` prefixes the reason. Turnover passes its own so its verdict reads as
+    a re-center rather than a teardown: the reason string is what the close path
+    routes on, and the two modes react to fee-death differently — a ladder is
+    torn down, a turnover rung is re-pinned."""
     skey, tkey = f"idle_{kind}_snap", f"idle_{kind}_at"
     snap, snap_at = ps.get(skey), ps.get(tkey)
     if snap is None or snap_at is None or level < float(snap):
@@ -498,14 +523,20 @@ def _idle_window(ps, now, kind, level, basis=None):
     if growth_pct >= LADDER_IDLE_MIN_PCT:
         ps[skey], ps[tkey] = level, now
         return None
-    return (f"ladder idle: +{growth_pct:.4f}% {kind} in {window_min:.0f}m "
-            f"(< {LADDER_IDLE_MIN_PCT}%) — wall untraded, re-pin")
+    return (f"{label}: +{growth_pct:.4f}% {kind} in {window_min:.0f}m "
+            f"(< {LADDER_IDLE_MIN_PCT}%) — untraded, re-pin")
 
 
-def ladder_idle_reason(s, age_min, ps, now, kry=None):
+def ladder_idle_reason(s, age_min, ps, now, kry=None, label="ladder idle"):
     """Close reason when a resting WALL has earned nothing across a full window,
     or None. Rolls the measurement window forward in `ps` as a side effect —
     `now` is a unix time.
+
+    `label` is the reason prefix, so rh-turnover's single rung can reuse this
+    whole meter stack and still emit a reason the close path routes to a
+    re-center (see turnover_decide). Everything else about the rule is
+    shape-independent: a resting one-sided bid that has earned nothing is dead
+    capital whether it is one of five rungs or the only one.
 
     Callers pass the WALL AGGREGATE, not one rung (ladder_walls / see the
     LADDER-SCOPED block above): `s` is the wall's summed meters, `age_min` its
@@ -552,11 +583,11 @@ def ladder_idle_reason(s, age_min, ps, now, kry=None):
     # each added a new idle_* state key, restarting the 90m window from zero and
     # leaving a fee-dead SPY wall parked 6.7h that no rule could release.
     if kry and kry.get("fees_usd") == 0 and age_min >= LADDER_IDLE_WINDOW_MIN:
-        return (f"ladder idle: zero fees in {age_min:.0f}m since mint "
-                f"(>= {LADDER_IDLE_WINDOW_MIN:.0f}m) — wall untraded, re-pin")
+        return (f"{label}: zero fees in {age_min:.0f}m since mint "
+                f"(>= {LADDER_IDLE_WINDOW_MIN:.0f}m) — untraded, re-pin")
 
     if kry and kry.get("fees_usd") is not None and kry.get("value_usd"):
-        return _idle_window(ps, now, "fee", kry["fees_usd"], kry["value_usd"])
+        return _idle_window(ps, now, "fee", kry["fees_usd"], kry["value_usd"], label=label)
 
     # Meter 2: on-chain uncollected fees. Same two-stage shape as Krystal
     # (absolute zero judged on age, then a growth window), and the same units
@@ -571,11 +602,11 @@ def ladder_idle_reason(s, age_min, ps, now, kry=None):
     fees_q = s.get("feesQuote")
     if fees_q is not None:
         if fees_q == 0 and age_min >= LADDER_IDLE_WINDOW_MIN:
-            return (f"ladder idle: zero on-chain fees in {age_min:.0f}m since mint "
-                    f"(>= {LADDER_IDLE_WINDOW_MIN:.0f}m) — wall untraded, re-pin")
+            return (f"{label}: zero on-chain fees in {age_min:.0f}m since mint "
+                    f"(>= {LADDER_IDLE_WINDOW_MIN:.0f}m) — untraded, re-pin")
         value_q = s.get("valueWeth")
         if value_q:
-            return _idle_window(ps, now, "chain_fee", fees_q, value_q)
+            return _idle_window(ps, now, "chain_fee", fees_q, value_q, label=label)
 
     value = s.get("valueWeth")  # quote units despite the name (executor contract)
     if value is None or value <= 0:
@@ -584,7 +615,7 @@ def ladder_idle_reason(s, age_min, ps, now, kry=None):
         # Mid-conversion: value tracks price, not fees. Rebaseline and wait.
         ps["idle_value_snap"], ps["idle_value_at"] = value, now
         return None
-    return _idle_window(ps, now, "value", value)
+    return _idle_window(ps, now, "value", value, label=label)
 
 
 def judge_ladder_walls(walls, state, now, persist=True):
@@ -697,8 +728,16 @@ def exit_confirmable(reason):
       * "ladder wall breached" — retracting rungs that are still pure quote
         asset. There is no sell to time: nothing is being dumped into weakness,
         so confirmation could only delay a free withdrawal.
+
+    "turnover rung filled" joins for the ladder fill's reason, and its emergency
+    twin stays out for the ladder emergency's. "turnover re-center" is outside
+    the set and must stay outside it: that close is half of a close-and-re-mint,
+    the rung is still pure quote asset, and postponing it on a bullish read
+    would stall the loop the mode's whole edge depends on — the same carve-out
+    dlmm_monitor.py makes for its OOR rebalance.
     """
-    return reason.startswith(("trailing exit", "fast-out", "downtrend", "ladder rung filled"))
+    return reason.startswith(("trailing exit", "fast-out", "downtrend",
+                              "ladder rung filled", "turnover rung filled"))
 
 
 def run_executor(executor, args, close_auth=False):
@@ -890,38 +929,94 @@ def fetch_eth_usd():
         return None
 
 
-def trailing_floor_pct(peak, drop=None):
+def trailing_floor_pct(peak):
     """Profit-ratchet floor — identical shape to dlmm_monitor.py: tight near
     activation, locks progressively more as the peak grows, gives big winners
-    room instead of a flat drop that caps every win.
-
-    `drop` overrides the near-activation band's flat drop. Turnover passes its
-    own 0.6: with a 1.2% trigger every one of its peaks lands in that bottom
-    band, and the default 1.5 would put the floor BELOW zero — a ratchet that
-    can only fire at a loss is not a take-profit. The upper tiers are shared
-    unchanged; a turnover position that somehow peaks past 5% has stopped being
-    a fee-capture trade and can use the wider ladder.
-    """
+    room instead of a flat drop that caps every win."""
     if peak >= 20.0:
         return max(14.0, peak * 0.70)
     if peak >= 10.0:
         return max(6.0, peak - 4.0)
     if peak >= 5.0:
         return max(2.0, peak - 2.5)
-    return peak - (TRAILING_DROP_PCT if drop is None else drop)
+    return peak - TRAILING_DROP_PCT
 
 
 def is_turnover(s):
     """True when this position is an rh-turnover mint.
 
     Keyed on the strategy string the executors stamp into their entry journal,
-    the same way is_ladder keys on the `_ladder` suffix. A position minted
-    before this mode existed carries `balanced_tight` too — which is correct,
-    not a bug: the re-center loop is what that strategy always needed, and
-    applying it to a legacy position is strictly better than the 30m OOR
-    timeout that has been closing them at a loss.
+    the same way is_ladder keys on the `_ladder` suffix.
+
+    Deliberately does NOT match `balanced_tight`. A position minted before the
+    2026-08-07 correction is two-sided and holds token, so every rule
+    turnover_decide skips (trailing, the OOR fuse) is a rule that shape still
+    needs; routing it here would judge a token-bearing position by a rulebook
+    that assumes pure quote. Those keep the default path unchanged.
     """
     return (s or {}).get("strategy") == TURNOVER_STRATEGY
+
+
+def turnover_decide(s, pnl, age_min, ps=None, now=None, kry=None):
+    """Close reason for an rh-turnover rung (weth_below), or None to hold.
+
+    Deliberately the LADDER rulebook, not the position one, because the shape is
+    a ladder rung: one resting one-sided quote-asset bid, out of range by
+    design, holding no token. Every rule in `decide` below assumes inventory
+    that can be stopped out of or trailed, and none of them can fire correctly
+    on pure quote — which is why the rung reuses rung_fill_state() and
+    ladder_idle_reason() rather than getting a second implementation of both.
+
+    Where it diverges from ladder_decide is the RESPONSE, not the test:
+
+      filled   -> exit. The rung converted to token, which is the one thing this
+                  strategy exists not to hold. Cooled off, not re-pinned: the
+                  market came down through our bid, and re-pinning under it is
+                  the repeat-fill pattern that averaged -11.8% on the ladder.
+      stale    -> RE-CENTER. Spot ran up away from the band. On a ladder that is
+                  a teardown; here it is the loop's normal operating cycle and
+                  the close path re-mints at the new price.
+      idle     -> RE-CENTER. Nobody traded the band for a full window. Same
+                  verb as stale on purpose: the mode's premise is that this pool
+                  churns, and a pin that collected nothing was in the wrong
+                  place. The circuit breaker (recenter_ok) is what stops this
+                  from looping forever in a pool that has stopped moving.
+
+    There is no wall: a turnover mint is a single position with no `ladderId`,
+    so `ps` is its own state dict and the idle window is its own.
+    """
+    tick, lo, hi = s.get("tick"), s.get("tickLower"), s.get("tickUpper")
+    if tick is None or lo is None or hi is None:
+        return None
+    qsym = s.get("quoteSymbol") or "WETH"
+    stale_ticks = TURNOVER_STALE_TICKS.get(qsym, TURNOVER_STALE_TICKS["WETH"])
+    filled, gap = rung_fill_state(s)
+
+    if filled:
+        # Same two tiers as a ladder fill and for the same reason: a shallow
+        # fill can un-fill back into quote for free, so it waits for indicator
+        # confirmation, and a deep one cannot afford to.
+        if pnl is not None and pnl <= TURNOVER_FILL_HARD_PCT:
+            return (f"emergency turnover fill {pnl:.1f}% <= {TURNOVER_FILL_HARD_PCT:.1f}% "
+                    f"(tick {tick} past [{lo},{hi}])")
+        return f"turnover rung filled (tick {tick} past [{lo},{hi}])"
+
+    # Drift. `gap` is how far spot sits outside the band on the resting side;
+    # with a single rung there is no rung offset to subtract, so it IS the
+    # drift. A rung minted one spacing off spot starts at roughly zero.
+    if gap is not None and gap > stale_ticks:
+        return (f"turnover re-center: spot drifted {gap:.0f} ticks past the rung "
+                f"(> {stale_ticks:.0f})")
+
+    idle = ladder_idle_reason(s, age_min, ps, now, kry, label="turnover re-center — idle")
+    if idle:
+        return idle
+
+    # Backstop. A rung mid-conversion carries some token, so the hard SL still
+    # applies — but the fill rule above should always get there first.
+    if pnl is not None and pnl <= STOP_LOSS_PCT and (age_min is None or age_min >= MIN_AGE_MIN_BEFORE_SL):
+        return f"stop loss {pnl:.1f}% <= {STOP_LOSS_PCT:.1f}%"
+    return None
 
 
 def decide(pnl, peak, in_range, age_min, oor_min, m5, h1, s=None, ps=None, now=None,
@@ -938,7 +1033,8 @@ def decide(pnl, peak, in_range, age_min, oor_min, m5, h1, s=None, ps=None, now=N
     position rulebook would be closed by the fee-dead OOR timeout 30 minutes
     after minting, which is the one failure this branch exists to prevent.
     Positions minted before the ladder existed carry no strategy field and keep
-    the original path unchanged.
+    the original path unchanged. `weth_below` (rh-turnover) is routed to
+    turnover_decide for the same structural reason: it is a one-sided rung too.
 
     `wall` is only read on that ladder branch (see ladder_decide). A position
     with no `ladderId` — every non-ladder strategy, and any pre-ladderId mint —
@@ -952,17 +1048,14 @@ def decide(pnl, peak, in_range, age_min, oor_min, m5, h1, s=None, ps=None, now=N
         return None
     if s is not None and is_ladder(s):
         return ladder_decide(s, pnl, age_min, ps, now, kry, wall)
-    # Turnover keeps this rulebook — it holds inventory and every risk rule here
-    # applies to it — but re-scopes the two constants whose thesis-mode values
-    # are wrong for a churn trade: the trailing pair (a 5% trigger never arms on
-    # a position whose whole win is 1-2.5%) and the OOR fuse (2m, because out of
-    # range is a re-center signal, not a patience test). The reason string is
-    # what routes the close: `turnover re-center` is read by the caller, which
-    # re-mints instead of walking away.
-    turnover = s is not None and is_turnover(s)
-    trail_trigger = TURNOVER_TRAILING_TRIGGER_PCT if turnover else TRAILING_TRIGGER_PCT
-    trail_drop = TURNOVER_TRAILING_DROP_PCT if turnover else None
-    oor_limit = TURNOVER_MAX_OOR_MINUTES if turnover else MAX_OOR_MINUTES
+    # Turnover (weth_below) is a one-sided resting bid, so it leaves by the
+    # ladder's rules with the ladder's fee-death meters — see turnover_decide.
+    # It must never reach the rulebook below: an out-of-range weth_below rung is
+    # normal (v3/v4 cannot mint one-sided across spot), so the OOR timeout would
+    # close every one of them on the fuse, which is the exact failure the ladder
+    # branch above exists to prevent.
+    if s is not None and is_turnover(s):
+        return turnover_decide(s, pnl, age_min, ps, now, kry)
     if pnl is not None:
         # Emergency SL — bypasses the age grace.
         if pnl <= STOP_LOSS_PCT - EMERGENCY_SL_BUFFER_PCT:
@@ -974,8 +1067,8 @@ def decide(pnl, peak, in_range, age_min, oor_min, m5, h1, s=None, ps=None, now=N
         if pnl >= TAKE_PROFIT_PCT:
             return f"take profit {pnl:.1f}% >= {TAKE_PROFIT_PCT:.1f}%"
         # Trailing profit ratchet (armed once peak clears the trigger).
-        if peak >= trail_trigger:
-            floor = trailing_floor_pct(peak, trail_drop)
+        if peak >= TRAILING_TRIGGER_PCT:
+            floor = trailing_floor_pct(peak)
             if pnl < floor and pnl >= TRAILING_MIN_LOCK_PCT:
                 return f"trailing exit {pnl:.1f}% < floor {floor:.1f}% (peak {peak:.1f}%)"
             # Fast-out velocity: armed + still locked + a steep 5m dump that
@@ -985,13 +1078,8 @@ def decide(pnl, peak, in_range, age_min, oor_min, m5, h1, s=None, ps=None, now=N
         # Sustained downtrend: underwater AND token in steady 1h decline.
         if h1 is not None and h1 <= DOWNTREND_1H_PCT and pnl <= DOWNTREND_PNL_PCT:
             return f"downtrend 1h {h1:.1f}% + pnl {pnl:.1f}%"
-    # Out-of-range timeout — fee-dead capital past the patience window. For
-    # turnover this is the mode's normal operating loop rather than an exit:
-    # the caller re-mints around the new price. Named distinctly so it can be
-    # routed (and so a close journal can tell a re-center from a give-up).
-    if not in_range and oor_min >= oor_limit:
-        if turnover:
-            return f"turnover re-center ({oor_min:.0f}m out of range >= {oor_limit:.0f}m)"
+    # Out-of-range timeout — fee-dead capital past the patience window.
+    if not in_range and oor_min >= MAX_OOR_MINUTES:
         return f"out of range {oor_min:.0f}m >= {MAX_OOR_MINUTES:.0f}m"
     return None
 
@@ -1044,13 +1132,22 @@ def redis_cmd(*args):
 
 
 def cool_off(pool, token, reason, pnl):
-    """Cool a pool (and its token) off after a wall was run over.
+    """Cool a pool (and its token) off after a resting bid was run over.
 
     `token` may be None on an older state read — the pool key still lands, which
-    is the one that matters: a ladder is re-pinned per POOL, and the token key
-    only widens the block to that token's other pools.
+    is the one that matters: a bid is re-pinned per POOL, and the token key only
+    widens the block to that token's other pools.
+
+    FILL reasons only, never a re-center. A fill is the market coming down
+    THROUGH our bid, and the ladder journal is unambiguous about re-pinning
+    under one: six of eleven fills were a repeat in a pool that had already
+    filled, averaging -11.8% against -6.7% for the first. A re-center is the
+    opposite event — the pin was in the wrong place and nothing was bought —
+    and cooling the pool off there would switch the mode off after one cycle.
     """
-    if not any(reason.startswith(p) for p in ("ladder rung filled", "emergency ladder fill", "ladder wall breached")):
+    if not any(reason.startswith(p) for p in ("ladder rung filled", "emergency ladder fill",
+                                              "ladder wall breached", "turnover rung filled",
+                                              "emergency turnover fill")):
         return
     secs = COOLDOWN_POOL_SECS
     tkey = f"rh:loss_streak:{str(token).lower()}" if token else None
@@ -1077,12 +1174,12 @@ def cool_off(pool, token, reason, pnl):
 # new price, so the capital goes back to earning instead of sitting in the
 # wallet until the scanner happens to signal the pool again.
 #
-# Read from the daemon's own env so a re-center mints the SAME geometry the
-# scanner would: the whole point is that this is the same position continuing,
-# not a second, differently-shaped bet.
-TURNOVER_RANGE_PCT = float(os.environ.get("ROBINHOOD_RANGE_PCT", "10"))
-TURNOVER_SLIPPAGE_PCT = float(os.environ.get("ROBINHOOD_SLIPPAGE_PCT", "5"))
-
+# The re-mint carries no geometry arguments on purpose. A weth_below rung's
+# width comes from UNI_TURNOVER_RUNG_TICKS inside the executor (uni_ladder.js),
+# which is the same number the scanner's mint used and the same one
+# TURNOVER_STALE_TICKS above judges drift against — passing a --range-pct here
+# would be a third copy that only this path could get wrong. There is no swap,
+# so there is no slippage to set either.
 CB_RECENTER_KEY = "rh:turnover:recenters:{}"
 CB_PNL_KEY = "rh:turnover:pnl:{}"
 CB_WINDOW_SECS = 86400
@@ -1157,9 +1254,7 @@ def recenter(executor, pool, amount, quote, pair):
         print(f"monitor: re-center skipped for {pair} — close returned no quote proceeds")
         return False
     args = ["deploy", "--pool", pool, "--amount", f"{amount:.9f}".rstrip("0"),
-            "--strategy", TURNOVER_STRATEGY,
-            "--range-pct", f"{TURNOVER_RANGE_PCT:g}",
-            "--slippage", f"{TURNOVER_SLIPPAGE_PCT:g}"]
+            "--strategy", TURNOVER_STRATEGY]
     if quote:
         args += ["--quote", quote]
     out, err = run_executor(executor, args)
@@ -1167,7 +1262,7 @@ def recenter(executor, pool, amount, quote, pair):
         print(f"monitor: RE-CENTER FAILED {pair}: {err or (out or {}).get('error') or 'no payload'}")
         return False
     print(f"monitor: RE-CENTERED {pair} -> #{out.get('tokenId')} "
-          f"({amount:.6f} redeployed, range ±{TURNOVER_RANGE_PCT:g}%)")
+          f"({amount:.6f} redeployed, ticks [{out.get('tickLower')},{out.get('tickUpper')}])")
     return True
 
 
@@ -1540,10 +1635,17 @@ def main():
               f"m5={m5} h1={h1} -> {reason or 'HOLD'}")
 
         if not reason:
-            # An in-range turnover position that is holding is also EARNING —
-            # claim once the pending fee is worth its gas so it funds the next
-            # mint. Only here: a position with a close reason is about to have
-            # its fees collected by the close itself.
+            # Claim a turnover rung's fees once they are worth their own gas, so
+            # they fund the next mint. Only on a HOLD: a position with a close
+            # reason is about to have its fees collected by the close anyway.
+            #
+            # `in_range` is rare for this shape and that is correct, not a
+            # missed case — a weth_below rung is out of range by construction
+            # and earns nothing while it sits there, so there is nothing to
+            # compound. It reads in-range only while being traded THROUGH, which
+            # is exactly the moment fees are accruing. The bulk of the
+            # compounding is elsewhere: a re-center redeploys the close's own
+            # proceeds, fees included (see recenter()).
             if is_turnover(s) and in_range and not DRY_RUN:
                 compound_fees(executor, tid, s, proto)
             continue
@@ -1582,11 +1684,13 @@ def main():
             # still in would be the wrong brake on the wrong thing.
             cool_off(pool, s.get("token"), reason, pnl)
             # Turnover's re-center: the close was half of one operation, so
-            # finish it before reporting. Only a plain drift close re-centers —
-            # an SL, a downtrend or a trailing exit is the position telling us
-            # the pool changed, and re-minting into that is how a churn loop
-            # turns into a bag-holding loop. (Mirrors dlmm_monitor.py's
-            # is_oor_rebalance, which excludes exactly the same classes.)
+            # finish it before reporting. ONLY the two re-center reasons
+            # (drift and fee-death) re-mint — a fill or the backstop SL is the
+            # position telling us the pool changed, and re-pinning a bid under a
+            # market that just came down through one is how a churn loop turns
+            # into a bag-holding loop. (Mirrors dlmm_monitor.py's
+            # is_oor_rebalance, which excludes exactly the same classes; the
+            # `cool_off` above has already blocked re-entry on those.)
             recentered = False
             if reason.startswith("turnover re-center"):
                 realized = None

@@ -126,6 +126,32 @@ func TestUnfundableBatchSpendsNoEntryTimingRequests(t *testing.T) {
 	}
 }
 
+// rh-turnover's entry SHAPE is part of its thesis, so it must not be reachable
+// from ROBINHOOD_DEPLOY_STRATEGY. This has been got wrong twice in one day: the
+// mode shipped as `balanced_tight` on 2026-08-07, which pre-swaps half the
+// commit into the memecoin — the exposure that lost 15.04%/trade and the exact
+// thing a churn screen must not buy. The config here is deliberately set to
+// weth_ladder (the ladder default) so the test fails if the pin is ever dropped
+// and the mode silently inherits it.
+func TestTurnoverPinsOneSidedStrategy(t *testing.T) {
+	s := newTestScanner(&fakeRunner{enabled: true})
+	bal := robinhood.Balances{ETH: 0.01, WETH: 1}
+
+	c := wethCandidate("0xpool1aaaaaaaaaa", "AAA")
+	c.Mode = robinhood.Turnover.Mode
+	if got := s.sizeFor(c, bal).strategy; got != "weth_below" {
+		t.Errorf("rh-turnover strategy = %q, want weth_below (one rung, holds no token)", got)
+	}
+
+	// Every other mode still inherits the configured strategy — the pin is
+	// turnover's alone, not a global override.
+	other := wethCandidate("0xpool2bbbbbbbbbb", "BBB")
+	other.Mode = robinhood.Ladder.Mode
+	if got := s.sizeFor(other, bal).strategy; got != "weth_ladder" {
+		t.Errorf("rh-ladder strategy = %q, want the configured weth_ladder", got)
+	}
+}
+
 // Too little gas is the other unfundable shape: the wallet can be WETH-rich and
 // still unable to pay for the mint, and that answer is just as independent of
 // which candidate wins.

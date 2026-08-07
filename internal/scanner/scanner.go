@@ -352,15 +352,23 @@ func (s *Scanner) sizeFor(c *robinhood.Candidate, bal robinhood.Balances) deploy
 	if sz.strategy == "weth_ladder" && sz.unit == "USDG" {
 		sz.strategy = "usdg_ladder"
 	}
-	// rh-turnover's shape is intrinsic to its thesis, not an operator choice:
-	// the mode screens for pools that OSCILLATE and is paid per crossing, which
-	// only a two-sided range collects. Minting a one-sided ladder into a
-	// turnover candidate would screen on churn and then earn nothing from it —
-	// exactly the pairing that produced 104 zero-fee ladder closes. So the mode
-	// pins the strategy rather than inheriting ROBINHOOD_DEPLOY_STRATEGY, the
-	// same way the quote asset pins it above.
+	// rh-turnover's shape is intrinsic to its thesis, not an operator choice, so
+	// the mode pins it rather than inheriting ROBINHOOD_DEPLOY_STRATEGY — the
+	// same way the quote asset pins it above. `weth_below` is ONE one-sided
+	// quote rung resting adjacent to spot, re-pinned by uni_monitor.py whenever
+	// price drifts off it or it stops earning.
+	//
+	// Not a ladder, and not two-sided, and both halves of that are evidence:
+	// 104 live ladder closes earned zero because two thirds of the capital sat
+	// in rungs the market never traded into, while `balanced_tight` pre-swaps
+	// half the commit into the memecoin and lost 15.04%/trade holding it. Solana
+	// settled the same question in select_batch_strategy(), which ends in an
+	// unconditional `return "sol_bidask"` — every mode there, turnover included,
+	// enters holding zero token. What turnover adds over the ladder is not the
+	// shape but the re-center loop, which is what the churn screen was always
+	// paying for.
 	if c.Mode == robinhood.Turnover.Mode {
-		sz.strategy = "balanced_tight"
+		sz.strategy = "weth_below"
 	}
 	sz.amount = robinhood.ComputeDeployAmount(sz.sizeBal, sz.sizeCfg)
 	if sz.amount <= 0 {

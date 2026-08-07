@@ -508,8 +508,10 @@ func TestTurnoverTakesOscillatingPoolsMatureRejects(t *testing.T) {
 }
 
 // The dominant ladder failure was a pool that cleared every 24h gate and then
-// sat untraded. Turnover holds inventory, so a dead live window is worse for it
-// than for a resting wall: it pays no fee AND carries the token.
+// sat untraded — 91 of 102 closes earned exactly zero. Turnover is even less
+// tolerant of that than a wall is: it commits everything to ONE rung and its
+// only response to a dead window is to re-pin, so a pool that has stopped
+// trading does not just idle, it burns gas discovering that on a loop.
 func TestTurnoverRejectsDeadLiveWindow(t *testing.T) {
 	now := time.Now()
 	p := Pool{

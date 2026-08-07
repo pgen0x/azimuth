@@ -42,7 +42,8 @@ const { privateKeyToAccount } = require("viem/accounts");
 // why it is a module and not a copy in each executor. Relative to THIS file, so
 // it resolves inside the symlinked scripts/ dir exactly as it does in-repo.
 const {
-  LADDER_RUNGS, ladderGeom, rungWidth, ladderSizes, ladderBands, ladderSpan,
+  LADDER_RUNGS, ladderGeom, turnoverGeom, rungWidth, ladderSizes, ladderBands,
+  ladderSpan,
 } = require("./uni_ladder.js");
 
 const SCRIPT_DIR = path.dirname(path.isAbsolute(process.argv[1]) ? process.argv[1] : path.resolve(process.argv[1]));
@@ -968,6 +969,9 @@ async function cmdDeploy(wallet, account) {
   const spacing = key.tickSpacing;
   const entryTick = st.tick;
   const bandTicks = Math.max(pctToTicks(rangePct), spacing);
+  // Only weth_below reads this; resolved up here because buildMint() is a
+  // closure that reprices on a failed mint and must not re-parse arguments.
+  const turnoverRungTicks = parseInt(arg("rung-ticks", "") || turnoverGeom(q).rungTicks, 10);
 
   let amount0 = 0n, amount1 = 0n, swapped = 0n, tokenBal = 0n;
 
@@ -995,8 +999,12 @@ async function cmdDeploy(wallet, account) {
     else { amount0 = tokenBal; amount1 = amountQuote - half; }
   } else if (strategy === "weth_below") {
     // One-sided quote band adjacent to the tick (name kept from the v3
-    // executor for config compatibility; here it means "quote below").
+    // executor for config compatibility; here it means "quote below"). No swap,
+    // so nothing about the entry can move the price and buildMint() below can
+    // place the band from whatever tick the mint attempt reads.
     if (quoteIs0) amount0 = amountQuote; else amount1 = amountQuote;
+    console.log(`turnover rung: ${rungWidth(spacing, turnoverRungTicks)} ticks wide `
+      + `(spacing ${spacing}, requested ${turnoverRungTicks}) on the bid side of tick ${entryTick}`);
   } else {
     throw new Error(`unknown strategy ${strategy}`);
   }
@@ -1029,13 +1037,16 @@ async function cmdDeploy(wallet, account) {
     if (strategy === "balanced_tight") {
       tickLower = roundToSpacing(st.tick - bandTicks, spacing, false);
       tickUpper = roundToSpacing(st.tick + bandTicks, spacing, true);
-    } else if (quoteIs0) {
-      // currency0 inventory is consumed as the tick RISES: band above.
-      tickLower = roundToSpacing(st.tick + spacing, spacing, true);
-      tickUpper = roundToSpacing(st.tick + spacing + 2 * bandTicks, spacing, true);
     } else {
-      tickUpper = roundToSpacing(st.tick - spacing, spacing, false);
-      tickLower = roundToSpacing(st.tick - spacing - 2 * bandTicks, spacing, false);
+      // weth_below — rh-turnover's one-sided rung. A ladder of ONE, laid by the
+      // shared ladderBands() so the bid-side direction invariant and the width
+      // the monitor judges drift against have a single definition across both
+      // executors (see uni_ladder.js). Width is TURNOVER_RUNG_TICKS, not
+      // --range-pct: the band is the depth we accept being traded into before
+      // re-pinning, not a tolerance around a price.
+      const [band] = ladderBands(st.tick, spacing, quoteIs0, 1, turnoverRungTicks);
+      tickLower = band.tickLower;
+      tickUpper = band.tickUpper;
     }
     const sqrtA = getSqrtRatioAtTick(tickLower);
     const sqrtB = getSqrtRatioAtTick(tickUpper);

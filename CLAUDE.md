@@ -167,36 +167,56 @@ one pass per enabled mode per `POLL_INTERVAL`.
     second WETH constant.
 
   - `Turnover` (`ROBINHOOD_TURNOVER`) — **the venue's earning thesis as of
-    2026-08-07**, and the port of Solana `turnover`: a TIGHT two-sided WETH
-    range (`balanced_tight`) in an oscillating pool, **re-centered** on every
-    out-of-range break rather than closed. It replaced the ladders on evidence,
-    not taste — 104 live ladder rung closes produced **zero** fee-positive
-    exits (63 `ladder idle`, 30 `ladder stale`, 11 fills averaging −9.48%),
-    because a resting one-sided bid only earns when the market trades *through*
-    it. The mode pins its own strategy in `sizeFor` instead of inheriting
-    `ROBINHOOD_DEPLOY_STRATEGY`: screening for churn and then minting a shape
-    that cannot collect it is the exact pairing that produced those 104 zeros.
+    2026-08-07**, and the port of Solana `turnover`: **ONE one-sided WETH rung**
+    (`weth_below`) resting adjacent to spot in an oscillating pool, **re-pinned**
+    when price drifts off it or it stops earning, rather than closed. It
+    replaced the ladders on evidence, not taste — 104 live ladder rung closes
+    produced **zero** fee-positive exits (63 `ladder idle`, 30 `ladder stale`,
+    11 fills averaging −9.48%). The diagnosis is *not* "one-sided doesn't work":
+    the on-chain fee meter shows the rung NEAREST spot earning (GME rung 0:
+    0.002039 USDG/214m) while outer rungs read exactly 0. Two thirds of a wall's
+    capital sat where the market never came. One rung concentrates it there, and
+    the re-pin loop is what keeps it there. The mode pins its own strategy in
+    `sizeFor` instead of inheriting `ROBINHOOD_DEPLOY_STRATEGY`; that pin is also
+    what keeps `balanced_tight` — which pre-swaps half the commit into the
+    memecoin and lost −15.04%/trade holding it — out of a mode screened for
+    churn. Solana settled the same question: `select_batch_strategy()` ends in an
+    unconditional `return "sol_bidask"`, every mode single-sided.
     Shares `Mature`'s gateway feed with a turnover-band prefilter, and is polled
     BEFORE the ladders so a spent GeckoTerminal budget starves the comparison
     arm first.
 
+    **Geometry is `uni_ladder.js`'s `TURNOVER_RUNG_TICKS`** (600 WETH ticks,
+    ~5.8% of covered drop — half a ladder rung, because a re-pinned rung buys
+    density where a wall buys depth), laid by the same `ladderBands()` with
+    `rungs=1` so the bid-side direction invariant has one implementation. It is
+    **out of range by design and there is no OOR fuse**: v3/v4 cannot mint
+    one-sided liquidity across spot (a straddling range computes
+    `liquidity = min(L(amount), L(0)) = 0`), unlike DLMM's `sol_bidask` which
+    includes the active bin — so a 2-minute fuse would close and re-mint forever.
+    `turnover_decide` therefore reuses the LADDER rulebook — `rung_fill_state`,
+    `ladder_idle_reason` — and only the *response* differs:
+
+    | test | ladder | turnover |
+    |---|---|---|
+    | filled | close + cooldown | close + cooldown (never re-pin under a market that just came down through the bid) |
+    | drift > stale ticks | tear down | **re-center** |
+    | earned nothing in a window | tear down | **re-center** |
+
     Its whole viability is the **re-center loop in `uni_monitor.py`**, which
-    this venue did not have until now, and whose absence is what killed
-    `balanced_tight` at −15.04%/trade — `uni_executor.js:1119` records
-    two-sided positions closed by the 30m OOR timeout half an hour after
-    minting. A churn strategy with no churn realizes every drift as a loss.
-    So: `turnover re-center` is a distinct close reason, deliberately NOT in
-    `exit_confirmable` (indicator confirmation would break the cadence) and NOT
-    in `cool_off` (cooling the pool would switch the mode off), and it is the
-    ONLY reason that re-mints — an SL/downtrend/trailing close is the pool
-    telling us it changed, and re-minting into that turns a churn loop into a
-    bag-holding loop. Mirrors `dlmm_monitor.py`'s `is_oor_rebalance` exclusions.
-    Guarded by a per-pool 24h circuit breaker (`rh:turnover:{recenters,pnl}:<pool>`)
-    that fails **CLOSED** — unlike `cool_off`, a re-center is optional work on
-    top of an already-completed close, so an unreadable window means take the
-    normal exit. Fee compounding is `collect`-to-wallet, not Solana's in-place
-    increase: neither executor has an `increaseLiquidity` path, and a loop whose
-    holding period is minutes recycles the fees into the next mint anyway.
+    this venue did not have until now. Both re-center reasons share the
+    `turnover re-center` prefix, which is what the close path routes on: they
+    are deliberately NOT in `exit_confirmable` (confirmation would stall the
+    cadence, and the rung is pure quote so there is no sell to time) and NOT in
+    `cool_off` (cooling the pool would switch the mode off), and they are the
+    ONLY reasons that re-mint. Mirrors `dlmm_monitor.py`'s `is_oor_rebalance`
+    exclusions. Guarded by a per-pool 24h circuit breaker
+    (`rh:turnover:{recenters,pnl}:<pool>`) that fails **CLOSED** — unlike
+    `cool_off`, a re-center is optional work on top of an already-completed
+    close, so an unreadable window means take the normal exit. Fee compounding
+    is `collect`-to-wallet, not Solana's in-place increase: neither executor has
+    an `increaseLiquidity` path, and a loop whose holding period is minutes
+    recycles the fees into the next mint anyway.
 
   Modes are quote-pinned via `ModeParams.QuoteAsset` — a ladder's rungs and its
   sizing must be the same asset, so a mode may not mix WETH- and USDG-quoted

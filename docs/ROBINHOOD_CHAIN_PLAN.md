@@ -892,19 +892,50 @@ owning the token. The first half did not happen on these books often enough to
 pay for the second half when it did. The payoff was inverted: capped upside
 that never printed, uncapped downside that did (one rung, −40.61%).
 
-### Why turnover, and why it is not a return to `balanced_tight`
+### Why turnover, and why it is neither the wall nor `balanced_tight`
 
-`balanced_tight` lost 15.04%/trade and was replaced by the ladder in §4b. The
-shape was not the problem. `uni_executor.js:1119` records what was: a two-sided
-position closed by the **30m out-of-range timeout** half an hour after minting.
-A churn strategy with no churn realizes every drift as a loss instead of
-collecting the fee on the way back.
+The port is not a shape, it is the **loop**, and the loop is what this venue
+never had. `uni_monitor.py` had one close path and no redeploy path at all —
+zero matches for rebalance / re-center / reseed / compound. Solana's turnover
+engine is: leave the band → close → re-mint at the new price → repeat, with fee
+compounding and a cumulative-PnL circuit breaker. Every ladder close above was a
+walk-away; not one was a re-pin the daemon performed itself.
 
-So the port is not the shape, it is the **loop**, and the loop is what this
-venue never had. `uni_monitor.py` had one close path and no redeploy path at
-all — zero matches for rebalance / re-center / reseed / compound. Solana's
-turnover engine is: 2-minute OOR fuse → close → re-mint around the new price →
-repeat, with fee compounding and a cumulative-PnL circuit breaker.
+Two shapes were ruled out on evidence, and it is worth being precise about which
+evidence kills which:
+
+- **`balanced_tight`** pre-swaps half the commit into the memecoin, so the
+  position is LONG a token on a chain where tokens bleed. −15.04%/trade. Solana
+  reached the same verdict a month earlier: `select_batch_strategy()` ends in an
+  unconditional `return "sol_bidask"` — every mode there, turnover included,
+  enters holding zero token. (A stale docstring line above that return said
+  "turnover keeps its tight two-sided range" and misled the first cut of this
+  port on 2026-08-07; it has been corrected in place.)
+- **The five-rung wall** was not wrong for being one-sided. The on-chain fee
+  meter (§4b) shows rung 0 earning while rungs 1–2 read exactly 0 — GME rung 0
+  took 0.002039 USDG in 214m, NVDA rung 0 0.000297 in 136m, every outer rung
+  nothing. Two thirds of the capital sat below a market that never came for it.
+
+So the shape is **one rung**: all of the commit at the tick-spacing boundary
+adjacent to spot, where the fees demonstrably were, re-pinned by the loop
+whenever spot leaves it.
+
+### Geometry, and why there is no OOR fuse
+
+`weth_below` is a ladder of one — same `ladderBands()` in `uni_ladder.js` with
+`rungs=1`, so the bid-side direction invariant has a single implementation
+across both executors. Width is `TURNOVER_RUNG_TICKS` (600 WETH / 120 USDG),
+**half** a ladder rung: a wall buys depth it hopes to still be standing in after
+a fall, a re-pinned rung buys density it can collect from now.
+
+One-sided on Uniswap ALWAYS rests out of range — one-sided token0 needs
+`tickLower >= currentTick`, and a straddling range computes
+`liquidity = min(L(amount), L(0)) = 0`. DLMM has no such constraint
+(`sol_bidask` sets `upper_bin = active_bin`, single-sided *and* earning at mint),
+so Solana's 2-minute OOR fuse **cannot** be ported: it would close and re-mint
+this rung every two minutes forever. Drift and fee-death replace it, which is
+why `turnover_decide` reuses the ladder's `rung_fill_state` and
+`ladder_idle_reason` rather than the position rulebook.
 
 ### What landed
 
@@ -912,17 +943,21 @@ repeat, with fee compounding and a cumulative-PnL circuit breaker.
 |---|---|---|
 | screen (`robinhood.Turnover`) | TVL $10k–150k, 7%/day pace, 60 tx/20 buyers h1 | Solana turnover's band verbatim — the only calibrated churn screen either venue has |
 | live-window gate | 20 tx / $500 / 0.073% per m15 | 0.073 = `MinFeeTVLDay / 96`, the honest window-scoped share of the daily bar |
-| OOR fuse | 2m | out of range is a re-center signal, not a patience test |
-| trailing | 1.2% / 0.6% | at the default 1.5 drop a 1.2 peak floors at **−0.3%** — a ratchet that can only fire at a loss |
+| shape | `weth_below`, 1 rung, 600 ticks (WETH) | the only rung of a wall that ever earned; pinned in `sizeFor`, not an operator knob |
+| re-pin on drift | 300 ticks (half the rung width) | spot has cleared the depth we were willing to buy; a single rung has half a wall's patience because re-pinning costs one mint |
+| re-pin on fee-death | ladder's own 45m/90m/0.02% window | a resting bid that earned nothing was in the wrong place, whatever the price did |
+| fill | exit + cooldown, hard tier at −8% | 6 of 11 ladder fills were a repeat in a pool that had already filled, averaging −11.8% vs −6.7% |
 | circuit breaker | −0.004 WETH or 20 re-centers per pool / 24h | re-centering only pays if crossings cover gas + spread |
 | compounding | `collect` at 0.5% of position | no `increaseLiquidity` path on either executor; the re-center redeploys it within minutes |
 
-Routing rules that make the loop a loop rather than a churn of exits:
-`turnover re-center` is excluded from `exit_confirmable` (confirmation would
-break the cadence) and from `cool_off` (a cooldown would switch the mode off),
-and it is the **only** reason that re-mints — SL, downtrend and trailing closes
-are the pool telling us it changed. Same exclusions as `dlmm_monitor.py`'s
-`is_oor_rebalance`.
+Routing rules that make the loop a loop rather than a churn of exits: both
+re-center reasons share the `turnover re-center` prefix and are excluded from
+`exit_confirmable` (confirmation would break the cadence, and a pure-quote rung
+has no sell to time) and from `cool_off` (a cooldown would switch the mode off).
+They are the **only** reasons that re-mint — a fill or the backstop SL is the
+pool telling us it changed, and re-pinning a bid under a market that just came
+down through one is the repeat-fill pattern above. Same exclusions as
+`dlmm_monitor.py`'s `is_oor_rebalance`.
 
 The circuit breaker fails **CLOSED**, inverting `cool_off`'s rule. A cooldown
 is a brake on the close path so a broken brake must not break closing; a
@@ -931,16 +966,25 @@ window means take the normal exit and let the scanner re-screen the pool.
 
 ### Status
 
-Built and live 2026-08-07. Ladder modes disabled at the same cutover at the
-operator's direction, so there is **no control arm** — the comparison is
-against the 104-close ladder record above, not a concurrent run. `Ladder`,
-`StockLadder` and `PulseLadder` still screen correctly and are one env toggle
-from returning.
+Built 2026-08-07, **not yet run live**. The first cut that day shipped the wrong
+entry shape (`balanced_tight`); the operator caught it, set
+`ROBINHOOD_TURNOVER=false`, and the one-sided rebuild in this section is what
+replaced it. Everything else from that first cut — screen, circuit breaker,
+compounding, live-window gate — was correct and stands.
 
-Unproven: the re-center loop has never run on this venue. The numbers to watch
-in the first day are the ratio of `turnover re-center` to SL/trailing closes
-(the loop working vs. the loop bleeding), realized PnL per re-center against
-gas, and whether the circuit breaker trips on any pool.
+Ladder modes are disabled at the same cutover at the operator's direction, so
+there is **no control arm** — the comparison is against the 104-close ladder
+record above, not a concurrent run. `Ladder`, `StockLadder` and `PulseLadder`
+still screen correctly and are one env toggle from returning.
+
+Unproven, and worth stating plainly: the re-center loop has never run on this
+venue, and the one-rung shape has never been minted here. The numbers to watch
+in the first day are the ratio of `turnover re-center` closes to fills (the loop
+working vs. the loop being run over), realized PnL per re-center against gas,
+whether the circuit breaker trips on any pool, and — the question the ladder
+answered badly — whether a single rung earns anything at all before it is
+re-pinned. If drift re-pins fire much faster than fees accrue,
+`UNI_TURNOVER_STALE_TICKS` is too tight, not the thesis.
 
 ## 5. Deliverable order
 

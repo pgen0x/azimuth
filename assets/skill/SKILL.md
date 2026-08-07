@@ -120,7 +120,10 @@ so one funded identity serves both venues). `DRY_RUN=true` skips all sends.
 *   `uni_executor.js address` — derived EVM address (fund this with bridged ETH)
 *   `uni_executor.js balance` / `wrap --amount 0.05` — ETH/WETH balances, ETH→WETH
 *   `uni_executor.js quote --pool 0x..` — pool tick/fee/price state
-*   `uni_executor.js deploy --pool 0x.. --amount 0.01 [--strategy balanced_tight|weth_below] [--range-pct 10] [--slippage 5]`
+*   `uni_executor.js deploy --pool 0x.. --amount 0.01 [--strategy balanced_tight|weth_below|weth_ladder|usdg_ladder] [--range-pct 10] [--slippage 5] [--rung-ticks N]`
+    *   `weth_below` = rh-turnover's single one-sided quote rung. Ignores
+        `--range-pct`/`--slippage`: its width is `UNI_TURNOVER_RUNG_TICKS`
+        (`uni_ladder.js`, overridable with `--rung-ticks`) and it never swaps.
 *   `uni_executor.js positions` / `collect --id N` / `close --id N [--no-swap-out]`
 
 ---

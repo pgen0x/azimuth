@@ -840,9 +840,13 @@ def select_batch_strategy(c, mode):
     half, single_sided_reseed swapped ALL of it); community consensus
     (SOL Decoder "safest", Goose DAO ~90% green days) is
     SOL-only bid-ask below price: entry holds zero token, dumps fill bins
-    at discounts while printing fees, pumps leave 100% SOL frozen. Turnover
-    keeps its tight two-sided range — its thesis is fee capture from
-    oscillation around the active bin, not directional meme exposure.
+    at discounts while printing fees, pumps leave 100% SOL frozen.
+
+    EVERY mode returns sol_bidask, turnover included — see the 2026-07-25 note
+    below, which is why. (This paragraph used to end "turnover keeps its tight
+    two-sided range"; that line outlived the change directly beneath it and on
+    2026-08-07 it misled a port of this function to the Robinhood venue into
+    shipping a two-sided entry. Read the return statement, not the prose.)
     """
     # 2026-07-25: turnover now uses sol_bidask too. Its old balanced_tight
     # entry pre-swapped HALF the deploy into base token, so a dumping fee-capture

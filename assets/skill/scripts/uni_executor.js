@@ -48,7 +48,8 @@ const { privateKeyToAccount } = require("viem/accounts");
 // for why it is a module and not a copy in each executor. Relative to THIS file,
 // so it resolves inside the symlinked scripts/ dir exactly as it does in-repo.
 const {
-  LADDER_RUNGS, ladderGeom, rungWidth, ladderSizes, ladderBands, ladderSpan,
+  LADDER_RUNGS, ladderGeom, turnoverGeom, rungWidth, ladderSizes, ladderBands,
+  ladderSpan,
 } = require("./uni_ladder.js");
 
 // Same profile resolution as dlmm_executor.js: process.argv[1], not __dirname,
@@ -803,19 +804,27 @@ async function cmdDeploy(wallet, account) {
   } else if (strategy === "weth_below") {
     // One-sided quote-asset band adjacent to the current tick (bid side): no
     // swap, pure fee capture that converts to the token only if price crosses
-    // in. Direction depends on token ordering: quote-as-token0 inventory is
-    // consumed as the tick RISES, so its band sits above the current tick;
-    // quote-as-token1 the reverse. (Name kept for the config contract — it is
-    // a single-rung ladder, and the ladder strategies superseded it.)
-    if (quoteIs0) {
-      tickLower = roundToSpacing(tick + spacing, spacing, true);
-      tickUpper = roundToSpacing(tick + spacing + 2 * bandTicks, spacing, true);
-      amount0 = amountQuote;
-    } else {
-      tickUpper = roundToSpacing(tick - spacing, spacing, false);
-      tickLower = roundToSpacing(tick - spacing - 2 * bandTicks, spacing, false);
-      amount1 = amountQuote;
-    }
+    // in. This is rh-turnover's entry shape, and it is LITERALLY a ladder of
+    // one — same ladderBands() call the wall uses, with rungs=1 — so the
+    // direction invariant (quote-as-token0 fills as the tick RISES, so its band
+    // sits above spot; quote-as-token1 the reverse) has exactly one
+    // implementation on this venue rather than a second copy that can drift
+    // out of agreement with uni_monitor.py's fill rule.
+    //
+    // Width comes from TURNOVER_RUNG_TICKS, not --range-pct. The band is not a
+    // tolerance around a price we are betting on, it is the depth we are
+    // willing to be traded into before re-pinning, and the monitor judges drift
+    // against that same number. --range-pct is still accepted (and ignored)
+    // here so the deploy contract stays one shape for every strategy.
+    const rungTicks = parseInt(arg("rung-ticks", "") || turnoverGeom(q).rungTicks, 10);
+    const [band] = ladderBands(tick, spacing, quoteIs0, 1, rungTicks);
+    tickLower = band.tickLower;
+    tickUpper = band.tickUpper;
+    if (quoteIs0) amount0 = amountQuote; else amount1 = amountQuote;
+    const { dropPct } = ladderSpan([band]);
+    console.log(`turnover rung: [${tickLower},${tickUpper}] `
+      + `${rungWidth(spacing, rungTicks)} ticks wide (spacing ${spacing}, requested ${rungTicks}) `
+      + `— covers ${dropPct.toFixed(2)}% from spot tick ${tick}`);
   } else {
     throw new Error(`unknown strategy ${strategy}`);
   }
