@@ -342,14 +342,14 @@ func FetchPulsePools(mp ModeParams, now time.Time) ([]Pool, error) {
 	// no other feed here indexes. Age-filtered against the same window so a
 	// three-day-old trending pool cannot enter through this mode's back door.
 	extra := make([]Pool, 0)
-	for _, p := range ladderEligible(trendingSnapshot(now), mp) {
+	for _, p := range feedEligible(trendingSnapshot(now), mp) {
 		if inWindow(p, mp, now) {
 			extra = append(extra, p)
 		}
 	}
 
 	carried := watchWindow(mp, now)
-	eligible := ladderEligible(carried, mp)
+	eligible := feedEligible(carried, mp)
 	candidates := mergeFeeds(eligible, extra)
 	if len(candidates) == 0 {
 		// Logged, not silent. A cycle that returns nothing has three very

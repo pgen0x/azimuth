@@ -254,7 +254,7 @@ func TestLadderEligible(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := ladderEligible([]Pool{tc.pool}, tc.mode)
+			got := feedEligible([]Pool{tc.pool}, tc.mode)
 			if (len(got) == 1) != tc.want {
 				t.Fatalf("eligible=%v (n=%d), want %v", len(got) == 1, len(got), tc.want)
 			}
@@ -266,7 +266,7 @@ func TestLadderEligible(t *testing.T) {
 // fixture: the USDG/nvda pool survives the DEX filter and must still never
 // reach the WETH ladder's batch.
 func TestLadderEligibleRejectsUsdgFromTrendingPage(t *testing.T) {
-	eligible := ladderEligible(parseTrendingFixture(t), Ladder)
+	eligible := feedEligible(parseTrendingFixture(t), Ladder)
 	if len(eligible) != 1 {
 		t.Fatalf("eligible=%d, want 1 (only the WETH v3 pool)", len(eligible))
 	}

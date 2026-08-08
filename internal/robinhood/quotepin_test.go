@@ -55,13 +55,13 @@ func TestLadderEligibleAcceptsNativeETHPool(t *testing.T) {
 	usdgSide.QuoteAddress = USDG
 	usdgSide.QuoteSymbol = "USDG"
 
-	got := addrsOf(ladderEligible([]Pool{native, usdgSide}, PulseLadder))
+	got := addrsOf(feedEligible([]Pool{native, usdgSide}, PulseLadder))
 	if len(got) != 1 || got[0] != "0xnative" {
 		t.Fatalf("want only the native-ETH pool eligible for a WETH ladder, got %v", got)
 	}
 }
 
-// Screen is the gate the scanner runs; the pin must agree with ladderEligible
+// Screen is the gate the scanner runs; the pin must agree with feedEligible
 // or a pool clears discovery and dies one layer later.
 func TestScreenAcceptsNativeETHQuote(t *testing.T) {
 	now := time.Now()

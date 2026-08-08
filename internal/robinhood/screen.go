@@ -66,6 +66,22 @@ type ModeParams struct {
 	// mature mode must not buy. Fresh leaves it false — a pool minutes old has
 	// no 24h history to measure, so extrapolating is the only option it has.
 	FeePaceH24 bool
+
+	// RankByFeeDensity reshapes the pick score (see score) for modes whose
+	// income is fee_tier x crossings rather than yield on inventory: fee density
+	// counts twice and pool DEPTH stops counting at all.
+	//
+	// The default score rewards a deeper book, which is right for a mode holding
+	// inventory for days — depth is the exit liquidity it will need. For a
+	// re-pinned rung it is backwards: our fee share is our liquidity over the
+	// pool's, so every extra dollar of someone else's TVL dilutes the position
+	// while contributing nothing to the crossings that pay it. The default
+	// ranking preferred a $500k book over a $58k one at the same fee pace, which
+	// is preferring the pool that pays us less.
+	//
+	// This changes the ORDER of pools that already passed every gate; it is not
+	// a gate and cannot admit anything MinReserveUSD and the flow floors reject.
+	RankByFeeDensity bool
 }
 
 // Fresh is the starter mode: young Uniswap v3 WETH pools already showing
@@ -213,6 +229,14 @@ var Turnover = ModeParams{
 	// on a 24h mean; the m15 gates below are what judge whether it is trading.
 	MinFeeTVLDay: 3.0,
 	FeePaceH24:   true,
+
+	// Rank the survivors on fee density, not on depth (see RankByFeeDensity).
+	// This mode holds a rung for minutes and is paid per crossing, so a deeper
+	// book is strictly worse — it dilutes our share of the same flow. Turned on
+	// together with the ranked discovery feed (ranked.go), because ordering the
+	// candidates correctly is worth nothing while the best ones never reach the
+	// batch.
+	RankByFeeDensity: true,
 
 	// The churn gates proper. These tracked rh-mature's 60/20 on the assumption
 	// that a churn mode needs MORE flow than a hold mode; the 2026-08-07 census
@@ -702,7 +726,7 @@ func Screen(p Pool, mp ModeParams, now time.Time) (*Candidate, string) {
 		SellersH1:    p.TxH1.Sellers,
 		ChangeM5Pct:  p.ChangeM5Pct,
 		ChangeH1Pct:  p.ChangeH1Pct,
-		Score:        score(p, feeTVLDay),
+		Score:        score(p, feeTVLDay, mp),
 	}, ""
 }
 
@@ -710,13 +734,33 @@ func Screen(p Pool, mp ModeParams, now time.Time) (*Candidate, string) {
 // sub-scores (turnover, participation, fee pace, liquidity), mirroring the
 // Solana degen score's balance-enforcing shape — any zero sub-score zeroes
 // the whole score.
-func score(p Pool, feeTVLDay float64) float64 {
+// The score is what the scanner argmaxes over (pickOrder), so it decides WHICH
+// screened pool gets the wallet. mp.RankByFeeDensity swaps the liquidity term
+// for a second, heavier fee-density term — see that field for why depth is a
+// cost rather than a virtue under a churn thesis.
+func score(p Pool, feeTVLDay float64, mp ModeParams) float64 {
 	if p.ReserveUSD <= 0 {
 		return 0
 	}
 	sTurnover := clamp01((p.VolumeH1USD / p.ReserveUSD) / targetTurnoverH1)
 	sBuyers := clamp01(float64(p.TxH1.Buyers) / targetBuyersH1)
 	sFees := clamp01(feeTVLDay / targetFeeDayPct)
+	if mp.RankByFeeDensity {
+		// Fee density squared, in place of the liquidity term. Squared rather
+		// than merely un-weighted because a geometric mean of four terms flattens
+		// exactly the axis being selected on: across the seven pools that cleared
+		// this mode's band on 2026-08-08 (3.1%/day to 7.1%/day, a 2.3x spread)
+		// the fee sub-score moved 0.12 to 0.28, while a fourth root compressed
+		// that into a 1.24x score difference. Squaring restores the ordering to
+		// something close to the ratio the pools actually differ by.
+		//
+		// MinReserveUSD is what keeps this honest, and it is load-bearing here:
+		// with depth no longer scored, nothing else in this function would prefer
+		// a $20k pool to the $172-of-TVL husks the ranked feed surfaces
+		// (ranked.go), which post four-digit turnover precisely because they hold
+		// nothing.
+		return math.Pow(sTurnover*sBuyers*sFees*sFees, 0.25) * 100
+	}
 	sLiq := clamp01(math.Log10(p.ReserveUSD) / math.Log10(targetReserveUSD))
 	return math.Pow(sTurnover*sBuyers*sFees*sLiq, 0.25) * 100
 }

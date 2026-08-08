@@ -413,6 +413,36 @@ function hasFlag(name) { return process.argv.includes(`--${name}`); }
 
 const pub = createPublicClient({ chain, transport: http(RPC_URL) });
 
+// --- gas meter -------------------------------------------------------------
+// The v3 executor's meter, verbatim in behaviour — see uni_executor.js for why
+// it exists (the venue churned ~200 transactions a day with no gas accounting
+// at all, so the loop's net could not be computed). Duplicated rather than
+// shared through uni_ladder.js because that module is GEOMETRY: it describes
+// the thesis and must stay free of client and receipt concerns. What these two
+// copies must keep identical is the payload FIELD NAMES, not the code.
+const gasMeter = { wei: 0n, txs: 0 };
+
+function noteGas(rcpt, label) {
+  if (!rcpt || rcpt.gasUsed == null) return rcpt;
+  // A missing effectiveGasPrice reads as "unpriced", never as free.
+  const price = rcpt.effectiveGasPrice == null ? null : BigInt(rcpt.effectiveGasPrice);
+  const used = BigInt(rcpt.gasUsed);
+  gasMeter.txs += 1;
+  if (price === null) {
+    console.log(`gas: ${label} used=${used} price=unavailable (uncounted)`);
+    return rcpt;
+  }
+  const cost = used * price;
+  gasMeter.wei += cost;
+  console.log(`gas: ${label} used=${used} cost=${formatEther(cost)} ETH ` +
+    `(run total ${formatEther(gasMeter.wei)} ETH over ${gasMeter.txs} tx)`);
+  return rcpt;
+}
+
+function gasReport() {
+  return { gasTxs: gasMeter.txs, gasWei: gasMeter.wei.toString(), gasEth: formatEther(gasMeter.wei) };
+}
+
 async function send(wallet, req, label) {
   if (DRY_RUN) {
     console.log(`[dry-run] would send: ${label}`);
@@ -426,7 +456,10 @@ async function send(wallet, req, label) {
     .then((g) => (g * 130n) / 100n)
     .catch(() => undefined);
   const hash = await wallet.writeContract(gas ? { ...req, gas } : req);
-  const rcpt = await pub.waitForTransactionReceipt({ hash, timeout: 120_000 });
+  const rcpt = noteGas(await pub.waitForTransactionReceipt({ hash, timeout: 120_000 }), label);
+  // Metered BEFORE the revert check: a reverted transaction still burns its
+  // gas, and a meter that only counted successes would understate exactly the
+  // failures worth knowing about.
   if (rcpt.status !== "success") throw new Error(`${label} reverted: ${hash}`);
   console.log(`${label}: ${hash}`);
   return { hash, rcpt };
@@ -846,7 +879,7 @@ async function cmdDeployLadder(wallet, account, strategy) {
       ({ bands, rungInfo, unlockData } = buildWall());
       hash = await mintOnce();
     }
-    rcpt = await pub.waitForTransactionReceipt({ hash, timeout: 120_000 });
+    rcpt = noteGas(await pub.waitForTransactionReceipt({ hash, timeout: 120_000 }), "ladder mint");
     if (rcpt.status !== "success") throw new Error(`ladder mint reverted: ${hash}`);
   } catch (e) {
     // Nothing to unwind: the ladder never swapped, so every unit is still quote
@@ -942,6 +975,7 @@ async function cmdDeployLadder(wallet, account, strategy) {
     positions: opened, tx: hash,
     quoteIn: formatUnits(totalIn, q.decimals),
     committedQuote: formatUnits(amountQuote, q.decimals),
+    ...gasReport(),
   }));
 }
 
@@ -1092,7 +1126,7 @@ async function cmdDeploy(wallet, account) {
       ({ tickLower, tickUpper, sqrtA, sqrtB, liquidity, unlockData } = buildMint());
       hash = await mintOnce();
     }
-    rcpt = await pub.waitForTransactionReceipt({ hash, timeout: 120_000 });
+    rcpt = noteGas(await pub.waitForTransactionReceipt({ hash, timeout: 120_000 }), "mint");
     if (rcpt.status !== "success") throw new Error(`mint reverted: ${hash}`);
   } catch (e) {
     // The mint never landed: no position exists, only the swap leg is at
@@ -1181,6 +1215,7 @@ async function cmdDeploy(wallet, account) {
   console.log(JSON.stringify({
     success: true, pool: poolId, protocol: "v4", strategy, tokenId, tickLower, tickUpper, tx: hash,
     quote: q.symbol, quoteIn: formatUnits(entryQuoteRaw, q.decimals), committedQuote: formatUnits(amountQuote, q.decimals), inRange,
+    ...gasReport(),
   }));
 }
 
@@ -1344,7 +1379,7 @@ async function cmdCollect(wallet, account) {
     address: POSM, abi: posmAbi, functionName: "modifyLiquidities",
     args: [unlockData, deadline], account: wallet.account, chain,
   }, `collect #${id}`);
-  console.log(JSON.stringify({ success: true, tokenId: id.toString() }));
+  console.log(JSON.stringify({ success: true, tokenId: id.toString(), ...gasReport() }));
 }
 
 async function cmdClose(wallet, account) {
@@ -1442,6 +1477,9 @@ async function cmdClose(wallet, account) {
     // v3-name alias for quote-agnostic consumers (uni_monitor.py close path).
     weth_out: totalQuoteOut,
     stranded, rewrapped, gas_topup: gasTopup,
+    // Realized gas for THIS close, journaled by uni_monitor.py — see the same
+    // field on the v3 close payload.
+    ...gasReport(),
   }));
 }
 

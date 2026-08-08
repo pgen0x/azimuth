@@ -182,9 +182,27 @@ one pass per enabled mode per `POLL_INTERVAL`.
     memecoin and lost −15.04%/trade holding it — out of a mode screened for
     churn. Solana settled the same question: `select_batch_strategy()` ends in an
     unconditional `return "sol_bidask"`, every mode single-sided.
-    Shares `Mature`'s gateway feed with a turnover-band prefilter, and is polled
-    BEFORE the ladders so a spent GeckoTerminal budget starves the comparison
-    arm first.
+    Discovery is the **union of two feeds** (`ranked.go`): `Mature`'s gateway
+    feed with a turnover-band prefilter, plus GeckoTerminal's plain pool list
+    sorted by 24h volume (`/pools?sort=h24_volume_usd_desc`, 2 pages, cached and
+    rate-limited exactly like `trending.go`). The gateway ranks by TVL, which
+    sorts hardest for the deep books where a small position earns least; a churn
+    mode is paid `fee_tier x volume`, so it needs a volume ranking. Measured
+    2026-08-08: of the 19 pools this mode minted into over the preceding two
+    days, only **2** appeared anywhere in the venue's top 60 by volume — it was
+    screening a fringe of the book and calling it the book. The ranked page's
+    head is full of things that must never be minted (WETH/USDG with no token
+    side, `pons-v2-dex`, sub-$500-TVL husks posting four-digit turnover), so
+    `mapGTPools` drops the wrong DEXes and `Screen` drops the rest: this is a
+    ranking, never a gate. Polled BEFORE the ladders so a spent GeckoTerminal
+    budget starves the comparison arm first.
+
+    Ranking is also this mode's own: `RankByFeeDensity` replaces the score's
+    liquidity term with a second, squared fee-density term. Depth is a virtue
+    for a mode holding inventory for days (it is the exit liquidity it will
+    need) and a cost for a re-pinned rung (our fee share is our liquidity over
+    the pool's), so the default ranking was preferring the pool that pays us
+    less. `MinReserveUSD` is what keeps the husks out once depth stops scoring.
 
     **Geometry is `uni_ladder.js`'s `TURNOVER_RUNG_TICKS`** (600 WETH ticks,
     ~5.8% of covered drop — half a ladder rung, because a re-pinned rung buys
@@ -217,6 +235,28 @@ one pass per enabled mode per `POLL_INTERVAL`.
     is `collect`-to-wallet, not Solana's in-place increase: neither executor has
     an `increaseLiquidity` path, and a loop whose holding period is minutes
     recycles the fees into the next mint anyway.
+
+    **No fill reason is confirmable** — `exit_confirmable` now holds only the
+    two-sided momentum exits (`trailing exit` / `fast-out` / `downtrend`).
+    Fills were confirmable until 2026-08-08 on the sound argument that an
+    un-filling rung costs nothing while a round trip costs the fee tier twice;
+    218 closes refute it. A fill that closed on its own rule averaged
+    **-3.81%** (n=5); one postponed here first averaged **-9.77%** (n=9), and
+    six of those nine are in the postponement log, held by a bullish
+    supertrend/RSI read until they crossed the -8% hard floor. 422 postponements
+    in three days bought back nothing. A fill IS token inventory, which is the
+    one thing a one-sided strategy exists never to hold, so it is hard risk like
+    SL/TP and the fee-dead OOR timeout.
+
+    **Gas is metered** (`noteGas` / `gasReport` in both executors, journaled by
+    `uni_monitor.py` as `gas_eth` / `gas_txs`). It was measured nowhere before
+    2026-08-08 while the loop churned ~200 tx/day, so the venue's net was
+    always fee income minus fill losses minus a guess. Metered BEFORE the revert
+    check — a reverted tx still burns gas — and gas is always ETH even for a
+    USDG-quoted position, so it deliberately does not follow `quote_symbol`.
+    The two executors keep separate copies; what must stay identical is the
+    payload FIELD NAMES, not the code (`uni_ladder.js` is geometry and stays
+    free of receipt concerns).
 
   Modes are quote-pinned via `ModeParams.QuoteAsset` — a ladder's rungs and its
   sizing must be the same asset, so a mode may not mix WETH- and USDG-quoted

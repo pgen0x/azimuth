@@ -706,13 +706,12 @@ def ladder_decide(s, pnl, age_min, ps=None, now=None, kry=None, wall=None):
         # Fully converted: this rung is now pure token inventory, which is the
         # one thing the strategy exists to avoid holding. Sell it back.
         #
-        # A SHALLOW fill is indicator-confirmable on purpose (see
-        # exit_confirmable) — if price recovers the rung un-fills back into WETH
-        # on its own, for free, so waiting out a bullish dip strictly beats
-        # crossing the spread twice. A deep one is not: the reason string below
-        # is outside the confirmable set, so it closes on this tick. The rung
-        # that printed -40.6% on 2026-08-07 was a confirm-and-wait on a token
-        # that never came back.
+        # NEITHER depth waits for indicator confirmation any more — both reason
+        # strings below are outside the confirmable set (see exit_confirmable
+        # for the 218-close measurement that removed the shallow one). The
+        # split survives only to mark how bad the fill was in the journal, and
+        # to keep the deep case unmistakable: the rung that printed -40.6% on
+        # 2026-08-07 was a confirm-and-wait on a token that never came back.
         if pnl is not None and pnl <= LADDER_FILL_HARD_PCT:
             return (f"emergency ladder fill {pnl:.1f}% <= {LADDER_FILL_HARD_PCT:.1f}% "
                     f"(tick {tick} past [{lo},{hi}])")
@@ -762,29 +761,53 @@ def exit_confirmable(reason):
     rules (SL, TP, fee-dead OOR) close unconditionally, mirroring the Solana
     monitor's is_emergency carve-out.
 
-    "ladder rung filled" joins the confirmable set because its close is a SELL
-    into weakness that the market may undo for us: an un-filling rung costs
-    nothing, a round-trip through the pool costs the fee tier twice. "ladder
-    stale" and "ladder idle" do not — dead capital does not get better by
-    waiting, and an idle rung has already waited a full window.
+    NO fill reason is confirmable, on either strategy. Both "ladder rung filled"
+    and "turnover rung filled" used to be, on the argument that the close is a
+    SELL into weakness the market may undo for us: an un-filling rung costs
+    nothing, a round-trip through the pool costs the fee tier twice. The
+    argument is sound and this venue refutes it anyway. Measured over the 218
+    closes to 2026-08-08:
 
-    Two ladder reasons are deliberately OUTSIDE the set, and both are named so
-    they cannot match the "ladder rung filled" prefix by accident:
+      * a fill that closed on its own rule    -3.81%/trade  (n=5)
+      * a fill that was POSTPONED here first  -9.77%/trade  (n=9)
+
+    and six of those nine appear in the postponement log first, held by a
+    bullish supertrend/RSI read until they crossed the -8% hard floor and closed
+    as "emergency turnover fill" instead. (Position ids deliberately omitted —
+    they are traceable to the wallet on-chain; grep the monitor journal for
+    "exit postponed" to re-derive the set.)
+    The un-fill this gate waits for is real but rare;
+    what it reliably buys is the difference between a shallow fill and a hard
+    one, ~6 points, on two thirds of every fill the venue produces. There were
+    422 postponement events in the three days to 2026-08-08 and they bought
+    back nothing.
+
+    A fill means the rung is now token inventory, which is the ONE thing a
+    one-sided strategy exists never to hold. Treat it as hard risk, like SL/TP
+    and the fee-dead OOR timeout: close on the tick that observes it.
+
+    Two ladder reasons were already outside the set for related reasons, and
+    both are named so they cannot match the "ladder rung filled" prefix by
+    accident:
       * "emergency ladder fill" — a fill past LADDER_FILL_HARD_PCT. Deep enough
         that waiting for a bullish confirmation is how -7.6% became -40.6%.
+        Now merely the deep END of a rule that no longer waits at any depth.
       * "ladder wall breached" — retracting rungs that are still pure quote
         asset. There is no sell to time: nothing is being dumped into weakness,
         so confirmation could only delay a free withdrawal.
 
-    "turnover rung filled" joins for the ladder fill's reason, and its emergency
-    twin stays out for the ladder emergency's. "turnover re-center" is outside
-    the set and must stay outside it: that close is half of a close-and-re-mint,
-    the rung is still pure quote asset, and postponing it on a bullish read
-    would stall the loop the mode's whole edge depends on — the same carve-out
-    dlmm_monitor.py makes for its OOR rebalance.
+    "ladder stale" and "ladder idle" stay out too — dead capital does not get
+    better by waiting, and an idle rung has already waited a full window.
+    "turnover re-center" is outside the set and must stay outside it: that close
+    is half of a close-and-re-mint, the rung is still pure quote asset, and
+    postponing it on a bullish read would stall the loop the mode's whole edge
+    depends on — the same carve-out dlmm_monitor.py makes for its OOR rebalance.
+
+    What remains confirmable is only the momentum-shaped exits of a TWO-SIDED
+    position, where the monitor really is choosing when to dump a bag it already
+    holds and a dip is not yet a dump.
     """
-    return reason.startswith(("trailing exit", "fast-out", "downtrend",
-                              "ladder rung filled", "turnover rung filled"))
+    return reason.startswith(("trailing exit", "fast-out", "downtrend"))
 
 
 def run_executor(executor, args, close_auth=False):
@@ -1333,8 +1356,14 @@ def compound_fees(executor, tid, s, proto):
     if err or not out or not out.get("success"):
         print(f"monitor: compound collect failed {proto} #{tid}: {err or 'no payload'}")
         return
+    # Gas beside the claim, not in a separate line: a compound is only worth
+    # doing while the fee exceeds what collecting it costs, and that comparison
+    # is unreadable if the two numbers land in different log entries.
+    # TURNOVER_COMPOUND_MIN_PCT is a percentage guess at this; the pair below is
+    # the measurement that can eventually replace it.
+    gas = (out or {}).get("gasEth")
     print(f"monitor: COMPOUNDED {proto} #{tid} — claimed {fees} "
-          f"({pct:.2f}% of position), funds the next re-center")
+          f"({pct:.2f}% of position), gas {gas or 'unmetered'}, funds the next re-center")
 
 
 def sweep_stranded(proto, executor):
@@ -1724,6 +1753,17 @@ def main():
             "weth_out": (out or {}).get("weth_out"),
             "quote_symbol": (out or {}).get("quote_symbol", qsym),
             "stranded": stranded,
+            # Realized gas for the close transaction(s), in ETH, straight from
+            # the executor's receipt meter. None on any build predating it.
+            #
+            # Journaled because the venue's ledger cannot be closed without it:
+            # fee income and fill losses were both measurable from this file,
+            # gas never was, so every net figure to 2026-08-08 carried an
+            # estimate in place of its third term. Gas is always ETH even when
+            # the position is USDG-quoted — it is the chain's fee token, not the
+            # pool's quote — so it deliberately does NOT follow quote_symbol.
+            "gas_eth": (out or {}).get("gasEth"),
+            "gas_txs": (out or {}).get("gasTxs"),
         })
         if closed:
             state.pop(skey, None)

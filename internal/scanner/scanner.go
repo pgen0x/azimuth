@@ -217,10 +217,19 @@ func (s *Scanner) pollAll(ctx context.Context) {
 		})
 	}
 	if s.cfg.EnableRobinhoodTurnover {
-		// The gateway feed a fourth time, prefiltered with the turnover band.
-		// Same cost argument as rh-usdg-ladder: the prefilter is what holds the
-		// GeckoTerminal enrich to ONE request, and it can only be tuned to one
-		// mode's gates, so the modes cannot share a fetch.
+		// TWO sources unioned (FetchTurnoverPools): the gateway feed a fourth
+		// time, prefiltered with the turnover band, PLUS GeckoTerminal's pool
+		// list ranked by 24h volume. Same cost argument as rh-usdg-ladder for
+		// the gateway half — the prefilter is what holds that enrich to ONE
+		// request, and it can only be tuned to one mode's gates, so the modes
+		// cannot share a fetch.
+		//
+		// The ranked half is THIS mode's, not the ladders'. A churn thesis is
+		// paid in fee_tier x volume, while the gateway ranks by TVL, which sorts
+		// hardest for the deep books where a small position earns least. The
+		// measurement that forced it: of the 19 pools this mode minted into over
+		// 2026-08-07..08, only 2 appear anywhere in the venue's top 60 by volume
+		// (ranked.go).
 		//
 		// Ordered BEFORE the pulse ladder deliberately. rh-turnover is the
 		// venue's earning thesis as of 2026-08-07 and the ladders are the
@@ -228,7 +237,7 @@ func (s *Scanner) pollAll(ctx context.Context) {
 		// a ladder that starves, not this (see the rate-limit note in gtlimit.go
 		// — the mode that runs last is the one a spent budget starves first).
 		s.pollRobinhood(ctx, robinhood.Turnover, func(now time.Time) ([]robinhood.Pool, error) {
-			return robinhood.FetchMaturePools(robinhood.Turnover, now)
+			return robinhood.FetchTurnoverPools(robinhood.Turnover, now)
 		})
 	}
 	if s.cfg.EnableRobinhoodPulseLadder {

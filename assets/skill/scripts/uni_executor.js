@@ -343,6 +343,48 @@ function hasFlag(name) { return process.argv.includes(`--${name}`); }
 
 const pub = createPublicClient({ chain, transport: http(RPC_URL) });
 
+// --- gas meter -------------------------------------------------------------
+// Every receipt this process waits on funnels through noteGas(), which is the
+// venue's ONLY source of realized gas cost. It existed nowhere before
+// 2026-08-08: the strategy churns ~200 transactions a day (a close and a mint
+// per re-center, plus a collect per compound) and not one of them was priced,
+// so "does this loop out-earn its own gas" was an unanswerable question. A
+// back-of-envelope at the chain's observed 0.028 gwei put gas at roughly half
+// of gross fee income, which is either fine or fatal depending on a number
+// nobody had.
+//
+// Reported in the command's JSON payload (gasEth/gasWei/gasTxs) rather than
+// only logged, so uni_monitor.py can journal it per close and the ledger
+// becomes arithmetic instead of an estimate. Wei is carried as a STRING: the
+// payload crosses a JSON boundary into Python and Go, where a large integer is
+// fine but a float would silently lose the low digits.
+const gasMeter = { wei: 0n, txs: 0 };
+
+function noteGas(rcpt, label) {
+  if (!rcpt || rcpt.gasUsed == null) return rcpt;
+  // effectiveGasPrice is absent on some L2 receipt shapes; a missing price must
+  // read as "unpriced", never as free — count the tx and log the gap.
+  const price = rcpt.effectiveGasPrice == null ? null : BigInt(rcpt.effectiveGasPrice);
+  const used = BigInt(rcpt.gasUsed);
+  gasMeter.txs += 1;
+  if (price === null) {
+    console.log(`gas: ${label} used=${used} price=unavailable (uncounted)`);
+    return rcpt;
+  }
+  const cost = used * price;
+  gasMeter.wei += cost;
+  console.log(`gas: ${label} used=${used} cost=${formatEther(cost)} ETH ` +
+    `(run total ${formatEther(gasMeter.wei)} ETH over ${gasMeter.txs} tx)`);
+  return rcpt;
+}
+
+// gasReport spreads into a command's result payload. Always present, so a
+// consumer can tell "this build reports gas and spent nothing" (0 tx) from
+// "this build predates the meter" (fields absent).
+function gasReport() {
+  return { gasTxs: gasMeter.txs, gasWei: gasMeter.wei.toString(), gasEth: formatEther(gasMeter.wei) };
+}
+
 async function send(wallet, req, label) {
   if (DRY_RUN) {
     console.log(`[dry-run] would send: ${label}`);
@@ -357,7 +399,10 @@ async function send(wallet, req, label) {
     .then((g) => (g * 130n) / 100n)
     .catch(() => undefined);
   const hash = await wallet.writeContract(gas ? { ...req, gas } : req);
-  const rcpt = await pub.waitForTransactionReceipt({ hash, timeout: 120_000 });
+  const rcpt = noteGas(await pub.waitForTransactionReceipt({ hash, timeout: 120_000 }), label);
+  // Metered BEFORE the revert check on purpose: a reverted transaction still
+  // burns its gas, and a meter that only counted successes would understate
+  // exactly the failures worth knowing about.
   if (rcpt.status !== "success") throw new Error(`${label} reverted: ${hash}`);
   console.log(`${label}: ${hash}`);
   return hash;
@@ -672,7 +717,7 @@ async function cmdDeployLadder(wallet, account, strategy) {
       address: NPM, abi: npmAbi, functionName: "multicall", args: [calls],
       account: wallet.account, chain,
     });
-    rcpt = await pub.waitForTransactionReceipt({ hash, timeout: 120_000 });
+    rcpt = noteGas(await pub.waitForTransactionReceipt({ hash, timeout: 120_000 }), "ladder mint");
     if (rcpt.status !== "success") throw new Error(`ladder mint reverted: ${hash}`);
   } catch (e) {
     // Nothing to unwind: the ladder never swapped, so every unit is still quote
@@ -732,6 +777,7 @@ async function cmdDeployLadder(wallet, account, strategy) {
     quote: q.address, quoteSymbol: q.symbol,
     positions: opened, tx: hash, quoteIn: fmtQ(totalIn, q),
     committedQuote: fmtQ(amountQuote, q),
+    ...gasReport(),
   }));
 }
 
@@ -862,7 +908,7 @@ async function cmdDeploy(wallet, account) {
   let hash, rcpt;
   try {
     hash = await wallet.writeContract({ address: NPM, abi: npmAbi, functionName: "mint", args: [mintArgs], account: wallet.account, chain });
-    rcpt = await pub.waitForTransactionReceipt({ hash, timeout: 120_000 });
+    rcpt = noteGas(await pub.waitForTransactionReceipt({ hash, timeout: 120_000 }), "mint");
     if (rcpt.status !== "success") throw new Error(`mint reverted: ${hash}`);
   } catch (e) {
     // The mint never landed, so no position exists and the only capital at risk
@@ -966,6 +1012,7 @@ async function cmdDeploy(wallet, account) {
     success: true, pool, strategy, tokenId, tickLower, tickUpper, tx: hash,
     quote: q.address, quoteSymbol: q.symbol,
     quoteIn: fmtQ(entryQuote, q), committedQuote: fmtQ(amountQuote, q), inRange,
+    ...gasReport(),
   }));
 }
 
@@ -1192,7 +1239,7 @@ async function cmdCollect(wallet, account) {
     args: [{ tokenId: id, recipient: account.address, amount0Max: maxUint128, amount1Max: maxUint128 }],
     account: wallet.account, chain,
   }, `collect #${id}`);
-  console.log(JSON.stringify({ success: true, tokenId: id.toString() }));
+  console.log(JSON.stringify({ success: true, tokenId: id.toString(), ...gasReport() }));
 }
 
 async function cmdClose(wallet, account) {
@@ -1313,6 +1360,10 @@ async function cmdClose(wallet, account) {
     quote_symbol: q.symbol,
     stranded,
     gas_topup: gasTopup,
+    // Realized gas for THIS close (decrease+collect+burn, plus the exit swap
+    // when the rung filled). uni_monitor.py journals it, which is what turns
+    // "fees minus fills minus an estimate" into a closed ledger.
+    ...gasReport(),
   }));
 }
 
