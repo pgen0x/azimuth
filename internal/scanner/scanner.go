@@ -645,6 +645,18 @@ func (s *Scanner) pollRobinhood(ctx context.Context, mp robinhood.ModeParams, fe
 			continue
 		}
 
+		// Sticky contract-security verdict, checked BEFORE any enrichment call:
+		// a token this gate has already convicted must not be re-screened at all,
+		// and skipping it here also saves the two GMGN requests and the Blockscout
+		// one. GMGN's answer flaps — BLINK read honeypot on ten cycles and unknown
+		// on two, and the fail-open arm minted into it on both of those.
+		if r := s.seen.SecurityBlacklisted(ctx, cand.BaseAddress); r != "" {
+			secRejected++
+			log.Printf("scanner[%s]: %s (%s) rejected on security (recorded): %s",
+				mp.Mode, cand.BaseSymbol, cand.Pool[:10], r)
+			continue
+		}
+
 		// Blockscout holder floor (fail-open on fetch failure).
 		if n, ok := robinhood.FetchHolders(cand.BaseAddress); ok {
 			if s.cfg.RobinhoodMinHolders > 0 && n < s.cfg.RobinhoodMinHolders {
@@ -663,6 +675,9 @@ func (s *Scanner) pollRobinhood(ctx context.Context, mp robinhood.ModeParams, fe
 			if sec, ok := robinhood.FetchSecurity(s.cfg.GmgnAPIKey, cand.BaseAddress, now.Unix()); ok {
 				if r := robinhood.SecurityReject(sec); r != "" {
 					secRejected++
+					// Record the conviction so the next cycle's "unknown" cannot
+					// undo it — see Seen.SecurityBlacklisted.
+					s.seen.BlacklistSecurity(ctx, cand.BaseAddress, r)
 					log.Printf("scanner[%s]: %s (%s) rejected on security: %s",
 						mp.Mode, cand.BaseSymbol, cand.Pool[:10], r)
 					continue
