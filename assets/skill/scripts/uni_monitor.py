@@ -1937,6 +1937,12 @@ def main():
             "weth_out": (out or {}).get("weth_out"),
             "quote_symbol": (out or {}).get("quote_symbol", qsym),
             "stranded": stranded,
+            # Set when the token side could not be transferred out of the pool
+            # at all (a honeypot reverting `collect` with `TF`) and was left as
+            # tokensOwed on a husk NFT. Unlike `stranded` there is nothing to
+            # retry — the value never reached the wallet — so this is a write-off
+            # the ledger has to see rather than a job for `sweep`.
+            "unclaimed": (out or {}).get("unclaimed"),
             # Realized gas for the close transaction(s), in ETH, straight from
             # the executor's receipt meter. None on any build predating it.
             #

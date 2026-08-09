@@ -1263,9 +1263,29 @@ async function cmdState(account) {
 async function cmdPositions(account) {
   const n = await pub.readContract({ address: NPM, abi: npmAbi, functionName: "balanceOf", args: [account.address] });
   const out = [];
+  // Husks: liquidity gone AND nothing owed on the quote side. Such an NFT is
+  // permanent — a honeypot that reverts the token leg of `collect` leaves its
+  // tokensOwed unclaimable forever, and NPM.burn refuses to retire a position
+  // with either side still owed (which is why collectPosition's partial path
+  // has to leave it standing). Nothing about it is actionable: no liquidity to
+  // close, no quote asset to recover, no way to burn it. Listing it would hand
+  // uni_monitor.py a row it re-closes every single tick, each pass "succeeding"
+  // at collecting zero and paying gas for the privilege.
+  //
+  // The test is QUOTE-side-owed, not owed-at-all: a position caught between its
+  // decrease and its collect has zero liquidity and still owes us the quote, so
+  // it stays listed and its close finishes normally.
+  const husks = [];
   for (let i = 0n; i < n; i++) {
     const id = await pub.readContract({ address: NPM, abi: npmAbi, functionName: "tokenOfOwnerByIndex", args: [account.address, i] });
     const p = await pub.readContract({ address: NPM, abi: npmAbi, functionName: "positions", args: [id] });
+    if (p[7] === 0n) {
+      const q = resolveQuote({ token0: p[2], token1: p[3] }, readEntry(id)?.quote || "");
+      if ((getAddress(p[2]) === q.address ? p[10] : p[11]) === 0n) {
+        husks.push(id.toString());
+        continue;
+      }
+    }
     out.push({
       tokenId: id.toString(), token0: p[2], token1: p[3], fee: Number(p[4]),
       tickLower: Number(p[5]), tickUpper: Number(p[6]), liquidity: p[7].toString(),
@@ -1281,19 +1301,74 @@ async function cmdPositions(account) {
     out.filter((p) => p.liquidity !== "0")
       .map((p) => `${p.token0}-${p.token1}-${p.fee}`.toLowerCase()),
   ).size;
-  console.log(JSON.stringify({ address: account.address, count: Number(n), ladders, positions: out }));
+  console.log(JSON.stringify({ address: account.address, count: Number(n), ladders, positions: out, husks }));
+}
+
+// collectPosition withdraws a position's owed balances, falling back to the
+// quote side alone when the token side cannot move.
+//
+// `collect` pays out BOTH sides in one call: UniswapV3Pool.collect runs a
+// TransferHelper.safeTransfer per non-zero amount, so a token that refuses to
+// be transferred reverts the whole call with `TF` and takes our quote asset
+// hostage with it. Live proof, 2026-08-09: #634693 (BLINK — a pool the security
+// gate convicted as a honeypot 20 minutes after the mint) had already run its
+// decreaseLiquidity, leaving 0.006857890871263797 WETH and 18.198 BLINK sitting
+// as tokensOwed, and every collect for the next 75 minutes reverted `TF`. The
+// WETH was transferable the whole time; it was blocked only by its co-passenger.
+//
+// The pool skips the transfer entirely for a zero request, so asking for the
+// quote side alone is a collect the honeypot has no say in. What that costs is
+// the burn: NPM.burn requires BOTH owed balances at zero, so a token side left
+// as tokensOwed means the husk NFT has to stay too. Cheap trade — a
+// zero-liquidity NFT costs nothing to hold, and the quote asset is the capital.
+//
+// Only the TOKEN side is ever surrendered. If the quote side is what reverts,
+// the retry throws like any other failed close: there is nothing to rescue.
+async function collectPosition(wallet, account, id, quoteIsToken0, label = `collect #${id}`) {
+  const req = { tokenId: id, recipient: account.address, amount0Max: maxUint128, amount1Max: maxUint128 };
+  const call = (args, lbl) => send(wallet, {
+    address: NPM, abi: npmAbi, functionName: "collect", args: [args],
+    account: wallet.account, chain,
+  }, lbl);
+
+  try {
+    await call(req, label);
+    return { partial: false, reason: null };
+  } catch (e) {
+    const reason = (e.shortMessage || e.message || "reverted")
+      .split("\n").map((s) => s.trim()).filter(Boolean).slice(0, 2).join(" — ").slice(0, 140);
+    await call({
+      ...req,
+      amount0Max: quoteIsToken0 ? maxUint128 : 0n,
+      amount1Max: quoteIsToken0 ? 0n : maxUint128,
+    }, `${label} (quote side only)`);
+    console.error(`warn: ${label} reverted (${reason}) — recovered the quote side; token side left as tokensOwed`);
+    return { partial: true, reason };
+  }
+}
+
+// Which side of the pair the position settles in, as the flag collectPosition
+// needs. Reads the entry journal's quote first for the same reason cmdClose
+// does: a USDG-quoted position must not be resolved into WETH.
+async function quoteSideOf(id) {
+  const [, , token0, token1] = await pub.readContract({
+    address: NPM, abi: npmAbi, functionName: "positions", args: [id],
+  });
+  const q = resolveQuote({ token0, token1 }, readEntry(id)?.quote || "");
+  return { q, quoteIsToken0: getAddress(token0) === q.address };
 }
 
 async function cmdCollect(wallet, account) {
   const id = BigInt(arg("id", "0"));
   if (id <= 0n) throw new Error("--id required");
   await ensureGas(wallet, account);
-  await send(wallet, {
-    address: NPM, abi: npmAbi, functionName: "collect",
-    args: [{ tokenId: id, recipient: account.address, amount0Max: maxUint128, amount1Max: maxUint128 }],
-    account: wallet.account, chain,
-  }, `collect #${id}`);
-  console.log(JSON.stringify({ success: true, tokenId: id.toString(), ...gasReport() }));
+  const { q, quoteIsToken0 } = await quoteSideOf(id);
+  const collected = await collectPosition(wallet, account, id, quoteIsToken0);
+  console.log(JSON.stringify({
+    success: true, tokenId: id.toString(), quote_symbol: q.symbol,
+    partial: collected.partial, collect_error: collected.reason,
+    ...gasReport(),
+  }));
 }
 
 async function cmdClose(wallet, account) {
@@ -1342,12 +1417,13 @@ async function cmdClose(wallet, account) {
       account: wallet.account, chain,
     }, `decrease #${id}`);
   }
-  await send(wallet, {
-    address: NPM, abi: npmAbi, functionName: "collect",
-    args: [{ tokenId: id, recipient: account.address, amount0Max: maxUint128, amount1Max: maxUint128 }],
-    account: wallet.account, chain,
-  }, `collect #${id}`);
-  await send(wallet, { address: NPM, abi: npmAbi, functionName: "burn", args: [id], account: wallet.account, chain }, `burn #${id}`);
+  const collected = await collectPosition(wallet, account, id, getAddress(token0) === q.address);
+  // A partial collect leaves the token side owed, and NPM.burn requires BOTH
+  // owed balances at zero — so the husk NFT stays. Burning was never the point
+  // of a close; getting the quote asset back out was.
+  if (!collected.partial) {
+    await send(wallet, { address: NPM, abi: npmAbi, functionName: "burn", args: [id], account: wallet.account, chain }, `burn #${id}`);
+  }
 
   // Measured HERE — after collect, before the token-side sell — so this is the
   // position's own payout (principal + fees) and not the swap's.
@@ -1413,6 +1489,13 @@ async function cmdClose(wallet, account) {
     quote_from_swap: sold ? sold.quote_out : "0",
     quote_symbol: q.symbol,
     stranded,
+    // Set when the token side could not be transferred out of the pool and was
+    // abandoned as tokensOwed on a husk NFT. Deliberately NOT a `stranded`
+    // entry: a stranded bag is one sitting in the wallet that `sweep` can keep
+    // re-offering, and this one never reached the wallet — sweep would read a
+    // zero balance and retire it as sold. It is reported so the close is
+    // honest about what it left behind, not so anything retries it.
+    unclaimed: collected.partial ? { tokenId: id.toString(), reason: collected.reason } : null,
     gas_topup: gasTopup,
     // Realized gas for THIS close (decrease+collect+burn, plus the exit swap
     // when the rung filled). uni_monitor.py journals it, which is what turns
