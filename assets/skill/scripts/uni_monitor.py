@@ -91,6 +91,38 @@ MIN_AGE_MIN_BEFORE_SL = 5.0        # grace so a fresh mint's settling isn't an S
 # once instead of failing silently.
 MAX_CLOSE_FAILURES = int(os.environ.get("UNI_MAX_CLOSE_FAILURES", "5"))
 
+# --- ask side: the second leg of a round trip -------------------------------
+# A turnover bid that fills is holding the token. Until 2026-08-09 that bag was
+# market-sold on the spot, which cost -4.9% per fill and WAS this venue's entire
+# deficit: the 13 untouched rungs earned +0.00039 ETH between them while 5 fills
+# lost -0.00231. Breakeven needed a fill rate under 6.1%; the measured rate was
+# 27.8%. Tuning the bid cannot close a 4.6x gap, because moving the rung away
+# from spot to fill less also earns less — the two move together.
+#
+# So the fill stops being an exit and becomes the halfway point: re-list the bag
+# as a resting ASK above spot (`token_above`) and sell it into the bounce,
+# earning the fee tier a second time on the way out. A wallet running this shape
+# on the same chain fills MORE often than we do (34%) and still reports a high
+# winrate, because a fill there is inventory to be cycled rather than a loss to
+# be booked.
+ASK_STRATEGY = "token_above"
+
+# The bag stop. An ask rung has no natural floor — if the token keeps falling it
+# just sits there holding it, which is exactly how `balanced_tight` lost
+# -15.04%/trade. The instant sell we are replacing WAS a stop-loss, so the ask
+# must carry an explicit one or the change trades a small certain loss for an
+# unbounded one.
+#
+# Measured from the ask position's OWN entry, which both executors mark at the
+# mint tick — i.e. the price the bid was filled at, not the price the bid was
+# placed at. -8% matches UNI_LADDER_FILL_HARD_PCT, the floor the postponement
+# log showed fills crossing anyway.
+ASK_BAG_STOP_PCT = float(os.environ.get("UNI_ASK_BAG_STOP_PCT", "-8.0"))
+
+# Re-list is off by default. It is a live-funds behaviour change on a venue with
+# a losing record, so it ships dark and the operator turns it on.
+ASK_RELIST_ENABLED = os.environ.get("UNI_ASK_RELIST", "").lower() == "true"
+
 # --- turnover (churn) mode -------------------------------------------------
 # Port of Solana turnover's exit half (dlmm_monitor.py). The mode is paid per
 # crossing, so its rulebook differs from every other strategy here in ONE
@@ -385,7 +417,7 @@ def is_ladder(s):
     return str((s or {}).get("strategy") or "").endswith("_ladder")
 
 
-def rung_fill_state(s):
+def rung_fill_state(s, side="bid"):
     """(filled, gap) for one rung, or (None, None) when the state read has no
     ticks. `gap` is how far spot sits OUTSIDE the rung on the resting side, in
     ticks; the stale rule measures drift from it.
@@ -393,6 +425,11 @@ def rung_fill_state(s):
     Which tick direction fills the rung depends on token ordering, the same
     invariant ladderBands() mints on: the quote as token0 means a RISING tick
     makes the token cheaper, so the ladder sits above spot and fills upward.
+
+    `side` mirrors ladderBands()'s argument, and the direction is the same
+    equality-of-two-booleans: an ASK rung rests on the opposite side of spot and
+    therefore fills on the opposite move. Reading an ask rung with the bid rule
+    would report it filled the moment it was minted.
 
     Shared by ladder_decide (per rung) and ladder_walls (which needs to know
     whether ANY rung of the wall has filled) — one definition, because a wall
@@ -404,12 +441,12 @@ def rung_fill_state(s):
         return None, None
     # quoteIs0 is the current field; wethIs0 is its pre-USDG name, still emitted
     # by the executor (and the only one an older v4 build sends).
-    if bool(s.get("quoteIs0", s.get("wethIs0"))):
+    if (side == "bid") == bool(s.get("quoteIs0", s.get("wethIs0"))):
         return tick >= hi, lo - tick
     return tick <= lo, tick - hi
 
 
-def rung_drift(s, rung_offset=0.0):
+def rung_drift(s, rung_offset=0.0, side="bid"):
     """How far spot has moved AWAY from the pin this rung was laid around, in
     ticks. Negative means it moved toward the rung (or into it). None when the
     state read can answer neither way.
@@ -439,10 +476,10 @@ def rung_drift(s, rung_offset=0.0):
         return None
     entry_tick = s.get("entryTick")
     if entry_tick is not None:
-        if bool(s.get("quoteIs0", s.get("wethIs0"))):
+        if (side == "bid") == bool(s.get("quoteIs0", s.get("wethIs0"))):
             return float(entry_tick - tick)
         return float(tick - entry_tick)
-    _, gap = rung_fill_state(s)
+    _, gap = rung_fill_state(s, side)
     if gap is None:
         return None
     try:
@@ -1044,6 +1081,60 @@ def is_turnover(s):
     return (s or {}).get("strategy") == TURNOVER_STRATEGY
 
 
+def is_ask(s):
+    """True when this position is the ask half of a turnover round trip."""
+    return (s or {}).get("strategy") == ASK_STRATEGY
+
+
+def ask_decide(s, pnl, age_min, ps=None, now=None, kry=None):
+    """Close reason for a resting ask rung (token_above), or None to hold.
+
+    The turnover rulebook with the roles reversed. This rung holds TOKEN and is
+    waiting to be paid in quote, so:
+
+      filled  -> DONE, and the good outcome. Price came up through the ask, the
+                 bag sold into it at our price, and the round trip closed having
+                 earned the fee tier on both legs. Plain close, no re-list: we
+                 are back to pure quote, which is where a turnover entry starts.
+      bag stop-> the token kept falling instead. This is the ONLY hard risk rule
+                 an ask has, and it is why ASK_BAG_STOP_PCT exists — without it
+                 the position is an unbounded hold. Never confirmable, never
+                 re-listed: same class as SL.
+      drift   -> RE-CENTER. Spot walked away from the ask, so the offer is too
+                 far above the market to ever be hit. Re-list nearer.
+      idle    -> RE-CENTER, same reasoning as the bid's.
+
+    Note the asymmetry with turnover_decide: there a fill is the bad case and
+    drift is routine; here a fill is the WHOLE POINT. Same two tests, opposite
+    verdicts, which is exactly why this is a separate function rather than a
+    flag on that one.
+    """
+    tick, lo, hi = s.get("tick"), s.get("tickLower"), s.get("tickUpper")
+    if tick is None or lo is None or hi is None:
+        return None
+    qsym = s.get("quoteSymbol") or "WETH"
+    stale_ticks = TURNOVER_STALE_TICKS.get(qsym, TURNOVER_STALE_TICKS["WETH"])
+
+    filled, _ = rung_fill_state(s, side="ask")
+    if filled:
+        return f"ask rung sold (tick {tick} past [{lo},{hi}])"
+
+    # Hard bag stop, before the re-center rules: a token in free fall must be
+    # dumped, not re-listed lower, or each re-list just chases it down.
+    if pnl is not None and pnl <= ASK_BAG_STOP_PCT:
+        return f"ask bag stop {pnl:.1f}% <= {ASK_BAG_STOP_PCT:.1f}%"
+
+    drift = rung_drift(s, side="ask")
+    if drift is not None and drift > stale_ticks:
+        return (f"ask re-center: spot drifted {drift:.0f} ticks past the rung "
+                f"(> {stale_ticks:.0f})")
+
+    idle = ladder_idle_reason(s, age_min, ps, now, kry, label="ask re-center — idle")
+    if idle:
+        return idle
+    return None
+
+
 def turnover_decide(s, pnl, age_min, ps=None, now=None, kry=None):
     """Close reason for an rh-turnover rung (weth_below), or None to hold.
 
@@ -1137,6 +1228,11 @@ def decide(pnl, peak, in_range, age_min, oor_min, m5, h1, s=None, ps=None, now=N
         return None
     if s is not None and is_ladder(s):
         return ladder_decide(s, pnl, age_min, ps, now, kry, wall)
+    # The ask half of a turnover round trip: holds token, rests above spot, and
+    # its fill is the SUCCESS case. Routed before turnover_decide because it is
+    # not a bid and every rule there would read it backwards.
+    if s is not None and is_ask(s):
+        return ask_decide(s, pnl, age_min, ps, now, kry)
     # Turnover (weth_below) is a one-sided resting bid, so it leaves by the
     # ladder's rules with the ladder's fee-death meters — see turnover_decide.
     # It must never reach the rulebook below: an out-of-range weth_below rung is
@@ -1352,6 +1448,61 @@ def recenter(executor, pool, amount, quote, pair):
         return False
     print(f"monitor: RE-CENTERED {pair} -> #{out.get('tokenId')} "
           f"({amount:.6f} redeployed, ticks [{out.get('tickLower')},{out.get('tickUpper')}])")
+    return True
+
+
+def is_fill_close(reason):
+    """True for the reasons that mean the bid converted to token.
+
+    Both tiers, because both leave the same thing in the wallet: a bag. The
+    emergency tier only skips indicator confirmation, it does not change what
+    the position turned into.
+    """
+    r = reason or ""
+    return r.startswith("turnover rung filled") or r.startswith("emergency turnover fill")
+
+
+def wants_relist(reason, s):
+    """True when this close should keep the token and re-list it as an ask.
+
+    Two cases, both of which end holding token:
+      - a turnover BID that filled (the round trip's halfway point), and
+      - an ASK that is being re-centered (still unsold, just mispriced).
+
+    Explicitly NOT `ask bag stop` — that reason exists to get rid of the bag, so
+    re-listing on it would defeat the only hard risk rule the ask half has. And
+    not `ask rung sold`: that one already ended in quote.
+    """
+    if not ASK_RELIST_ENABLED:
+        return False
+    if is_turnover(s) and is_fill_close(reason):
+        return True
+    return is_ask(s) and (reason or "").startswith("ask re-center")
+
+
+def relist_ask(executor, pool, quote, pair):
+    """Mint a resting ask over the token bag the close just left in the wallet.
+
+    Takes no amount: `token_above` lists the whole balance by construction,
+    because the position exists to unload exactly that inventory. That also
+    sidesteps the decimals trap — the bag is token units, and every amount the
+    monitor otherwise handles is quote units.
+
+    A failure here is not fatal and must not be retried into: the close already
+    succeeded, so the bag is simply sitting in the wallet where the executor's
+    own `sweep` path can still sell it. Reported loudly because a silent failure
+    would look exactly like a successful re-list until the next tick.
+    """
+    args = ["deploy", "--pool", pool, "--strategy", ASK_STRATEGY]
+    if quote:
+        args += ["--quote", quote]
+    out, err = run_executor(executor, args)
+    if err or not out or not out.get("success"):
+        print(f"monitor: RE-LIST FAILED {pair}: {err or (out or {}).get('error') or 'no payload'} "
+              f"— bag left in wallet for sweep")
+        return False
+    print(f"monitor: RE-LISTED {pair} -> ask #{out.get('tokenId')} "
+          f"ticks [{out.get('tickLower')},{out.get('tickUpper')}]")
     return True
 
 
@@ -1758,7 +1909,14 @@ def main():
             print(f"monitor: [dry-run] would close {proto} #{tid}: {reason}")
             continue
 
-        out, cerr = run_executor(executor, ["close", "--id", str(tid)], close_auth=True)
+        # Keeping the token is what makes the re-list possible at all: the
+        # executor's close sells the freed token side by default, and that sale
+        # IS the -4.9% we are trying to stop paying.
+        relist = wants_relist(reason, s)
+        close_args = ["close", "--id", str(tid)]
+        if relist:
+            close_args.append("--no-swap-out")
+        out, cerr = run_executor(executor, close_args, close_auth=True)
         closed = out and out.get("success")
         # A close can succeed while its token->WETH sell fails (rugged pool,
         # sell tax): the liquidity is out and the NFT burned, but the token side
@@ -1807,8 +1965,14 @@ def main():
             # into a bag-holding loop. (Mirrors dlmm_monitor.py's
             # is_oor_rebalance, which excludes exactly the same classes; the
             # `cool_off` above has already blocked re-entry on those.)
+            # The ask leg. Runs before the re-center branch and returns through
+            # the same `recentered` flag purely for the report verb; the two are
+            # mutually exclusive by construction (wants_relist never matches a
+            # `turnover re-center` reason).
             recentered = False
-            if reason.startswith("turnover re-center"):
+            if relist:
+                recentered = relist_ask(executor, pool, s.get("quote"), pair)
+            elif reason.startswith("turnover re-center"):
                 realized = None
                 ent, got = s.get("entryWeth"), (out or {}).get("weth_out")
                 try:
@@ -1830,7 +1994,8 @@ def main():
                     recentered = recenter(executor, pool, _f(got), s.get("quote"), pair)
                 else:
                     print(f"monitor: re-center declined for {pair}: {why}")
-            verb = "♻️ re-centered" if recentered else "🔴 closed"
+            verb = ("📤 re-listed as ask" if (relist and recentered)
+                    else "♻️ re-centered" if recentered else "🔴 closed")
             msg = f"{verb} Robinhood LP {pair} (#{tid})\n{reason}\npnl {pnl_str} peak {peak:.1f}%"
             if stranded:
                 msg += (f"\n⚠️ {stranded.get('symbol', '?')} NOT sold — {stranded.get('reason', '?')}"

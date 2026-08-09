@@ -211,28 +211,43 @@ function ladderSizes(amountRaw, rungs, q) {
   return { sizes, rungs: n };
 }
 
-// ladderBands lays `rungs` contiguous, non-overlapping ranges on the BID side
-// of `tick` — the side where the token is CHEAPER than spot, so each rung is a
-// resting quote-asset bid that only converts if price comes down to it.
+// ladderBands lays `rungs` contiguous, non-overlapping ranges on ONE side of
+// `tick`, holding a single asset:
 //
-// Which tick direction that is depends on token ordering: the pool price is
-// token1/token0, so with the QUOTE as token0 a RISING tick means more token per
-// unit of quote (token cheaper) and the ladder goes up; with the quote as token1
-// it goes down. Getting this backwards would mint an ask ladder that sells token
-// we do not hold — on v3 the mint would take nothing and refund, and on v4 it
-// reverts against the token side's zero amountMax — so this is a correctness
-// invariant, not a preference.
+//   side="bid" (default) — the side where the token is CHEAPER than spot, so
+//     each rung is a resting QUOTE bid that converts to token only if price
+//     comes down to it. Every ladder and the turnover rung use this.
+//   side="ask" — the mirror: the side where the token is DEARER than spot, so
+//     each rung is a resting TOKEN offer that converts back to quote only if
+//     price comes up to it. This is what a filled bid is re-listed as, so the
+//     round trip is buy-low/sell-high instead of buy-low/market-dump.
+//
+// Which tick direction either side is depends on token ordering: the pool price
+// is token1/token0, so with the QUOTE as token0 a RISING tick means more token
+// per unit of quote (token cheaper) and the BID side goes up; with the quote as
+// token1 it goes down. The ask side is the opposite in both cases, which is why
+// `up` below is the equality of two booleans rather than two copies of the loop.
+//
+// Getting this backwards mints a band against an asset we do not hold — on v3
+// the mint takes nothing and refunds, on v4 it reverts against that side's zero
+// amountMax — so this is a correctness invariant, not a preference. It is also
+// why the side is an explicit argument: a caller that means "sell this bag"
+// must say so, never infer it from whichever balance happens to be non-zero.
 //
 // Rungs are returned inner-first (index 0 nearest spot) to line up with
 // ladderSizes()'s smallest-first ramp.
-function ladderBands(tick, spacing, quoteIs0, rungs, rungTicks) {
+function ladderBands(tick, spacing, quoteIs0, rungs, rungTicks, side = "bid") {
+  if (side !== "bid" && side !== "ask") throw new Error(`ladderBands: bad side ${side}`);
   const w = rungWidth(spacing, rungTicks);
   const round = (t, up) => (up ? Math.ceil(t / spacing) : Math.floor(t / spacing)) * spacing;
   const bands = [];
-  if (quoteIs0) {
-    // Start one spacing ABOVE spot so rung 0 is adjacent but never straddles: a
-    // straddling rung would demand both tokens and take only part of the quote
-    // offered.
+  // Bid with quote-as-token0 ascends; flipping either the side or the ordering
+  // flips the direction, so "both true or both false" is what ascending means.
+  const up = (side === "bid") === Boolean(quoteIs0);
+  if (up) {
+    // Start one spacing AWAY from spot so rung 0 is adjacent but never
+    // straddles: a straddling rung would demand both tokens and take only part
+    // of the single asset offered.
     const base = round(tick + spacing, true);
     for (let k = 0; k < rungs; k++) {
       bands.push({ tickLower: base + k * w, tickUpper: base + (k + 1) * w });

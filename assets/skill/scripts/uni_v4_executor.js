@@ -998,11 +998,15 @@ async function cmdDeploy(wallet, account) {
   if (!q) throw new Error(`quote side ${quoteAddr} not in whitelist`);
   const quoteIs0 = qSide === 0;
 
-  const amountQuote = parseUnits(arg("amount", "0"), q.decimals);
-  if (amountQuote <= 0n) throw new Error(`--amount required (${q.symbol} units)`);
+  // token_above is funded from the TOKEN side, so --amount (quote units) does
+  // not describe it; its size is --token-amount, or the whole bag. It also must
+  // NOT call ensureNative: there is no quote leg to fund.
+  const isAsk = strategy === "token_above";
+  const amountQuote = isAsk ? 0n : parseUnits(arg("amount", "0"), q.decimals);
+  if (!isAsk && amountQuote <= 0n) throw new Error(`--amount required (${q.symbol} units)`);
 
   await ensureGas(wallet, account);
-  if (q.native) await ensureNative(wallet, account, amountQuote);
+  if (q.native && !isAsk) await ensureNative(wallet, account, amountQuote);
 
   let st = await slot0(poolId);
   const spacing = key.tickSpacing;
@@ -1012,7 +1016,7 @@ async function cmdDeploy(wallet, account) {
   // closure that reprices on a failed mint and must not re-parse arguments.
   const turnoverRungTicks = parseInt(arg("rung-ticks", "") || turnoverGeom(q).rungTicks, 10);
 
-  let amount0 = 0n, amount1 = 0n, swapped = 0n, tokenBal = 0n;
+  let amount0 = 0n, amount1 = 0n, swapped = 0n, tokenBal = 0n, askToken = 0n;
 
   if (strategy === "balanced_tight") {
     // Swap first, band around the post-swap tick — same staleness rationale
@@ -1044,6 +1048,28 @@ async function cmdDeploy(wallet, account) {
     if (quoteIs0) amount0 = amountQuote; else amount1 = amountQuote;
     console.log(`turnover rung: ${rungWidth(spacing, turnoverRungTicks)} ticks wide `
       + `(spacing ${spacing}, requested ${turnoverRungTicks}) on the bid side of tick ${entryTick}`);
+  } else if (strategy === "token_above") {
+    // The mirror of weth_below: a one-sided TOKEN band on the ASK side. Second
+    // leg of a round trip, not an entry — see the v3 executor's copy of this
+    // comment for why market-dumping a filled rung was the whole deficit.
+    //
+    // No swap here either, so buildMint() may reprice freely. Note the token is
+    // never native: on this venue the NATIVE side is always the quote (ether),
+    // so an ask bag is an ERC-20 and the permit2 block below covers it with no
+    // special case.
+    const tdec = Number(await pub.readContract({
+      address: tokenAddr, abi: erc20Abi, functionName: "decimals",
+    }).catch(() => 18));
+    const want = arg("token-amount", "");
+    const askAmt = want
+      ? parseUnits(String(want), tdec)
+      : (DRY_RUN ? parseUnits("1", tdec) : await balanceOf(tokenAddr, account.address));
+    if (askAmt <= 0n) throw new Error("token_above: no token balance to list");
+    if (quoteIs0) amount1 = askAmt; else amount0 = askAmt;
+    askToken = askAmt;
+    console.log(`ask rung: ${rungWidth(spacing, turnoverRungTicks)} ticks wide `
+      + `(spacing ${spacing}, requested ${turnoverRungTicks}) on the ask side of tick ${entryTick}, `
+      + `listing ${formatUnits(askAmt, tdec)} token`);
   } else {
     throw new Error(`unknown strategy ${strategy}`);
   }
@@ -1083,7 +1109,11 @@ async function cmdDeploy(wallet, account) {
       // executors (see uni_ladder.js). Width is TURNOVER_RUNG_TICKS, not
       // --range-pct: the band is the depth we accept being traded into before
       // re-pinning, not a tolerance around a price.
-      const [band] = ladderBands(st.tick, spacing, quoteIs0, 1, turnoverRungTicks);
+      // token_above is the same rung on the other side of spot, so it shares
+      // this branch and differs only in `side` — one width, one direction
+      // invariant, both executors.
+      const [band] = ladderBands(st.tick, spacing, quoteIs0, 1, turnoverRungTicks,
+        strategy === "token_above" ? "ask" : "bid");
       tickLower = band.tickLower;
       tickUpper = band.tickUpper;
     }
@@ -1101,7 +1131,8 @@ async function cmdDeploy(wallet, account) {
   let { tickLower, tickUpper, sqrtA, sqrtB, liquidity, unlockData } = buildMint();
 
   if (DRY_RUN) {
-    console.log(`🧪 DRY RUN DEPLOY pool=${poolId} strategy=${strategy} ticks=[${tickLower},${tickUpper}] amount=${formatUnits(amountQuote, q.decimals)} ${q.symbol}`);
+    console.log(`🧪 DRY RUN DEPLOY pool=${poolId} strategy=${strategy} ticks=[${tickLower},${tickUpper}] `
+      + (askToken > 0n ? "listing token bag (ask side)" : `amount=${formatUnits(amountQuote, q.decimals)} ${q.symbol}`));
     console.log(JSON.stringify({ success: true, dryRun: true, pool: poolId, protocol: "v4", strategy, tickLower, tickUpper, quote: q.symbol }));
     return;
   }
@@ -1193,13 +1224,19 @@ async function cmdDeploy(wallet, account) {
   const stAfter = await slot0(poolId);
   const [used0, used1] = amountsForLiquidity(stAfter.sqrtPriceX96, sqrtA, sqrtB, liquidity);
   const entryQuoteRaw = valueInQuote(used0, used1, stAfter.sqrtPriceX96, quoteIs0);
-  const idle = amountQuote - entryQuoteRaw;
+  // What we set out to commit, in quote terms. An ask rung commits a TOKEN bag,
+  // not a quote amount, so its commitment is that bag marked at the mint tick —
+  // the price the bid was filled at, which is also what the -8% bag stop is
+  // measured from. Using amountQuote (0n) would report "of 0 committed" and
+  // hand the monitor a zero cost basis.
+  const committedQuote = askToken > 0n ? entryQuoteRaw : amountQuote;
+  const idle = committedQuote - entryQuoteRaw;
   journalEntry({
     tokenId, pool: poolId, protocol: "v4", key,
     quote: quoteAddr, quoteSymbol: q.symbol, quoteDecimals: q.decimals,
     tickLower, tickUpper, strategy,
     quoteIn: formatUnits(entryQuoteRaw, q.decimals),
-    committedQuote: formatUnits(amountQuote, q.decimals),
+    committedQuote: formatUnits(committedQuote, q.decimals),
     liquidity: liquidity.toString(),
     // Spot the band was centred on. buildMint() rederives ticks from whatever
     // sample the winning mint attempt read, so `stAfter` — not the pre-retry
@@ -1209,12 +1246,12 @@ async function cmdDeploy(wallet, account) {
     ts: Math.floor(Date.now() / 1000),
   });
   const inRange = stAfter.tick >= tickLower && stAfter.tick < tickUpper;
-  console.log(`position value ${formatUnits(entryQuoteRaw, q.decimals)} ${q.symbol} of ${formatUnits(amountQuote, q.decimals)} committed `
+  console.log(`position value ${formatUnits(entryQuoteRaw, q.decimals)} ${q.symbol} of ${formatUnits(committedQuote, q.decimals)} committed `
     + `(${formatUnits(idle > 0n ? idle : 0n, q.decimals)} left in wallet), ${inRange ? "IN range" : "OUT OF range"} at tick ${stAfter.tick}`);
   console.log(`🚀 DEPLOYED pool=${poolId} strategy=${strategy} position=${tokenId} tx=${hash}`);
   console.log(JSON.stringify({
     success: true, pool: poolId, protocol: "v4", strategy, tokenId, tickLower, tickUpper, tx: hash,
-    quote: q.symbol, quoteIn: formatUnits(entryQuoteRaw, q.decimals), committedQuote: formatUnits(amountQuote, q.decimals), inRange,
+    quote: q.symbol, quoteIn: formatUnits(entryQuoteRaw, q.decimals), committedQuote: formatUnits(committedQuote, q.decimals), inRange,
     ...gasReport(),
   }));
 }

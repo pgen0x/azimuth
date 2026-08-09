@@ -802,13 +802,16 @@ async function cmdDeploy(wallet, account) {
   const q = resolveQuote(st, arg("quote", ""));
   const quoteIs0 = q.isToken0;
   const token = q.token;
-  const amountQuote = parseQ(arg("amount", "0"), q);
-  if (amountQuote <= 0n) throw new Error(`--amount required (${q.symbol})`);
+  // token_above is funded from the TOKEN side, so --amount (quote units) does
+  // not describe it at all; its size is --token-amount, or the whole bag.
+  const isAsk = strategy === "token_above";
+  const amountQuote = isAsk ? 0n : parseQ(arg("amount", "0"), q);
+  if (!isAsk && amountQuote <= 0n) throw new Error(`--amount required (${q.symbol})`);
   const spacing = Number(st.tickSpacing);
   const tick = Number(st.tick);
   const bandTicks = Math.max(pctToTicks(rangePct), spacing);
 
-  let tickLower, tickUpper, amount0 = 0n, amount1 = 0n, swapped = 0n;
+  let tickLower, tickUpper, amount0 = 0n, amount1 = 0n, swapped = 0n, askToken = 0n;
   // Pool state the band is built from and the cost basis is priced at.
   // balanced_tight replaces it with a post-swap read; weth_below never swaps.
   let mintSt = st;
@@ -877,12 +880,55 @@ async function cmdDeploy(wallet, account) {
     console.log(`turnover rung: [${tickLower},${tickUpper}] `
       + `${rungWidth(spacing, rungTicks)} ticks wide (spacing ${spacing}, requested ${rungTicks}) `
       + `— covers ${dropPct.toFixed(2)}% from spot tick ${tick}`);
+  } else if (strategy === "token_above") {
+    // The mirror of weth_below: a one-sided TOKEN band adjacent to spot on the
+    // ASK side. This is the SECOND LEG of a round trip, not an entry. A bid rung
+    // that filled is holding the token, and re-listing it above spot sells it
+    // back into a bounce while earning the fee tier a second time, instead of
+    // market-dumping it at whatever the dip prints — that dump was -4.9% per
+    // fill and the entire deficit of this venue's 2026-08-09 ledger, against
+    // +0.003% earned per untouched rung.
+    //
+    // Same width and the same ladderBands() as the bid, with side="ask": the
+    // round trip should be symmetric, and a separate width here would be a
+    // second number for uni_monitor.py's drift rule to disagree with.
+    //
+    // Size is the whole bag by default, not a fraction: this position exists to
+    // get rid of exactly this inventory. --token-amount overrides for tests.
+    const tdec = Number(await pub.readContract({
+      address: token, abi: erc20Abi, functionName: "decimals",
+    }).catch(() => 18));
+    const want = arg("token-amount", "");
+    const askAmt = want
+      ? parseUnits(String(want), tdec)
+      : (DRY_RUN
+        ? parseUnits("1", tdec)
+        : await pub.readContract({
+          address: token, abi: erc20Abi, functionName: "balanceOf", args: [account.address],
+        }));
+    if (askAmt <= 0n) throw new Error("token_above: no token balance to list");
+    const rungTicks = parseInt(arg("rung-ticks", "") || turnoverGeom(q).rungTicks, 10);
+    const [band] = ladderBands(tick, spacing, quoteIs0, 1, rungTicks, "ask");
+    tickLower = band.tickLower;
+    tickUpper = band.tickUpper;
+    if (quoteIs0) amount1 = askAmt; else amount0 = askAmt;
+    askToken = askAmt;
+    const { dropPct } = ladderSpan([band]);
+    console.log(`ask rung: [${tickLower},${tickUpper}] `
+      + `${rungWidth(spacing, rungTicks)} ticks wide (spacing ${spacing}, requested ${rungTicks}) `
+      + `— covers ${dropPct.toFixed(2)}% from spot tick ${tick}, `
+      + `listing ${formatUnits(askAmt, tdec)} token`);
   } else {
     throw new Error(`unknown strategy ${strategy}`);
   }
 
-  await ensureAllowance(wallet, account.address, q.address, NPM, quoteIs0 ? amount0 : amount1);
-  if (swapped > 0n) await ensureAllowance(wallet, account.address, token, NPM, quoteIs0 ? amount1 : amount0);
+  // The ask rung offers no quote at all, so its approve is the token's.
+  if (askToken > 0n) {
+    await ensureAllowance(wallet, account.address, token, NPM, askToken);
+  } else {
+    await ensureAllowance(wallet, account.address, q.address, NPM, quoteIs0 ? amount0 : amount1);
+    if (swapped > 0n) await ensureAllowance(wallet, account.address, token, NPM, quoteIs0 ? amount1 : amount0);
+  }
 
   const deadline = BigInt(Math.floor(Date.now() / 1000) + 120);
   // A two-sided strategy demands a two-sided fill: each side must take at least
@@ -901,7 +947,8 @@ async function cmdDeploy(wallet, account) {
   };
 
   if (DRY_RUN) {
-    console.log(`🧪 DRY RUN DEPLOY pool=${pool} strategy=${strategy} ticks=[${tickLower},${tickUpper}] amount=${fmtQ(amountQuote, q)} ${q.symbol}`);
+    console.log(`🧪 DRY RUN DEPLOY pool=${pool} strategy=${strategy} ticks=[${tickLower},${tickUpper}] `
+      + (askToken > 0n ? `listing token bag (ask side)` : `amount=${fmtQ(amountQuote, q)} ${q.symbol}`));
     console.log(JSON.stringify({ success: true, dryRun: true, pool, strategy, tickLower, tickUpper, quoteSymbol: q.symbol }));
     return;
   }
@@ -988,13 +1035,20 @@ async function cmdDeploy(wallet, account) {
   const used0 = inc ? inc.args.amount0 : amount0;
   const used1 = inc ? inc.args.amount1 : amount1;
   const entryQuote = valueInQuote(used0, used1, mintSt.sqrtPriceX96, quoteIs0);
-  const idleQuote = amountQuote - entryQuote;
+  // What we set out to commit, in quote terms. The ask rung commits a TOKEN bag,
+  // not a quote amount, so its commitment is that bag marked at the mint tick —
+  // which is the fill price the bid converted at. Reporting `amountQuote` (0n)
+  // here would print "of 0 committed" and hand the monitor a cost basis of zero.
+  // It also fixes what the -8% bag stop is measured FROM: the price we were
+  // filled at, not the price the original bid was placed at.
+  const committedQuote = askToken > 0n ? entryQuote : amountQuote;
+  const idleQuote = committedQuote - entryQuote;
   journalEntry({
     tokenId, pool, token0: st.token0, token1: st.token1, fee: Number(st.fee),
     tickLower, tickUpper, strategy,
     quote: q.address, quoteSymbol: q.symbol, quoteDecimals: q.decimals,
     quoteIn: fmtQ(entryQuote, q), wethIn: fmtQ(entryQuote, q),
-    committedQuote: fmtQ(amountQuote, q),
+    committedQuote: fmtQ(committedQuote, q),
     used0: used0.toString(), used1: used1.toString(),
     // Spot the band was built around — `mintSt` is the SAME sample both branches
     // laid their ticks from (post-swap for balanced_tight, the pre-mint read for
@@ -1005,13 +1059,13 @@ async function cmdDeploy(wallet, account) {
     ts: Math.floor(Date.now() / 1000),
   });
   const inRange = Number(mintSt.tick) >= tickLower && Number(mintSt.tick) < tickUpper;
-  console.log(`position value ${fmtQ(entryQuote, q)} ${q.symbol} of ${fmtQ(amountQuote, q)} committed `
+  console.log(`position value ${fmtQ(entryQuote, q)} ${q.symbol} of ${fmtQ(committedQuote, q)} committed `
     + `(${fmtQ(idleQuote, q)} left in wallet), ${inRange ? "IN range" : "OUT OF range"} at tick ${mintSt.tick}`);
   console.log(`🚀 DEPLOYED pool=${pool} strategy=${strategy} position=${tokenId} tx=${hash}`);
   console.log(JSON.stringify({
     success: true, pool, strategy, tokenId, tickLower, tickUpper, tx: hash,
     quote: q.address, quoteSymbol: q.symbol,
-    quoteIn: fmtQ(entryQuote, q), committedQuote: fmtQ(amountQuote, q), inRange,
+    quoteIn: fmtQ(entryQuote, q), committedQuote: fmtQ(committedQuote, q), inRange,
     ...gasReport(),
   }));
 }
