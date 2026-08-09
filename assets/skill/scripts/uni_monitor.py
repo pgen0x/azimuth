@@ -74,6 +74,23 @@ DOWNTREND_PNL_PCT = -5.0
 MAX_OOR_MINUTES = 30.0             # out-of-range this long -> close (fee-dead)
 MIN_AGE_MIN_BEFORE_SL = 5.0        # grace so a fresh mint's settling isn't an SL
 
+# Consecutive failed close attempts after which a position is declared
+# UNCLOSABLE and skipped for the rest of this process's life.
+#
+# Some closes can never succeed. On 2026-08-09 position #634693 (BLINK, a pool
+# the security gate convicted as a honeypot 20 minutes after the mint) failed
+# `collect` with `TF` — the token blocks transfers, so the withdraw can never
+# settle — and the loop retried it every 40s for 75 minutes: 78 attempts, 78
+# journal rows, and a share of every tick. Retrying is right for the transient
+# case (a reverted tx, a stale nonce, a busy RPC) and useless for the permanent
+# one, and nothing in the error text separates them — so the cap is the
+# separator: a few retries cover the transient, the cap covers the rest.
+#
+# The position stays open on-chain; this only stops the monitor from spending
+# every tick on it. Recovery is manual, which is why tripping the cap alerts
+# once instead of failing silently.
+MAX_CLOSE_FAILURES = int(os.environ.get("UNI_MAX_CLOSE_FAILURES", "5"))
+
 # --- turnover (churn) mode -------------------------------------------------
 # Port of Solana turnover's exit half (dlmm_monitor.py). The mode is paid per
 # crossing, so its rulebook differs from every other strategy here in ONE
@@ -1640,6 +1657,15 @@ def main():
         qsym = s.get("quoteSymbol") or "WETH"
 
         ps = state.setdefault(skey, {"peak_pnl": 0.0, "oor_since": None})
+
+        # Give up on a position whose close can never land, BEFORE any of the
+        # per-tick work (momentum fetch, indicator read, decide) it would only
+        # feed into another doomed attempt. See MAX_CLOSE_FAILURES.
+        if ps.get("close_fails", 0) >= MAX_CLOSE_FAILURES:
+            print(f"monitor: {proto} #{tid} UNCLOSABLE — skipped "
+                  f"({ps['close_fails']} failed closes)")
+            continue
+
         lid = s.get("ladderId")
         if lid:
             # Persist which wall this rung belongs to so the prune below can keep
@@ -1766,6 +1792,7 @@ def main():
             "gas_txs": (out or {}).get("gasTxs"),
         })
         if closed:
+            ps.pop("close_fails", None)
             state.pop(skey, None)
             live.discard(skey)
             # Only a real, executed close cools a pool off — a failed close
@@ -1815,7 +1842,19 @@ def main():
             print(f"monitor: CLOSED {proto} #{tid}: {reason}"
                   + (f" [STRANDED {stranded.get('symbol')}]" if stranded else ""))
         else:
-            print(f"monitor: CLOSE FAILED {proto} #{tid}: {cerr}")
+            # Count consecutive failures on this position. Reset on any success
+            # above, so a pool that closes fine after a transient revert never
+            # accumulates toward the cap.
+            fails = ps.get("close_fails", 0) + 1
+            ps["close_fails"] = fails
+            print(f"monitor: CLOSE FAILED {proto} #{tid} ({fails}/{MAX_CLOSE_FAILURES}): {cerr}")
+            if fails >= MAX_CLOSE_FAILURES:
+                # Alert exactly once — the skip at the top of the loop means
+                # this branch cannot be reached again for this position.
+                alert(f"⛔ Robinhood LP {pair} (#{tid}) UNCLOSABLE\n"
+                      f"{fails} failed closes, last: {cerr}\n"
+                      f"position left open on-chain — needs manual recovery")
+                print(f"monitor: {proto} #{tid} marked UNCLOSABLE after {fails} failed closes")
 
     # Drop peak/oor state for positions no longer open (closed elsewhere) —
     # but never for an executor whose positions read failed this tick: its
