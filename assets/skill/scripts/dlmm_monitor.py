@@ -81,6 +81,16 @@ OOR_DOWNSIDE_MAX_MINUTES = 5
 # fee-capture capital, so it re-centers after minutes — not the multi-hour
 # patience of the thesis modes. The 20s monitor loop makes this cadence real.
 TURNOVER_MAX_OOR_MINUTES = 2
+# ...but that fuse was applied to BOTH directions, which is the mistake the
+# thesis modes already fixed with OOR_DOWNSIDE_MAX_MINUTES. SOL-side OOR is
+# frozen SOL — nothing decays — so the fuse only trades an immediate re-pin
+# against the chance price walks back INTO range (fees resume) or keeps
+# running (pump-out). Measured over the 24h to 2026-08-10: turnover's six
+# SOL-side OOR closes averaged +0.01% — it exits before a single fee accrues —
+# while the reference bot waiting 5m on the same event averaged +0.04% and the
+# pumps it held instead of cutting averaged +0.38% (n=10). Token-side keeps
+# the 2m fuse: there the position IS a falling token bag.
+TURNOVER_SOL_SIDE_OOR_MINUTES = 5
 # Turnover rebalance circuit breaker: re-centers stop once the pool's cumulative
 # realized PnL across rebalance closes (24h window) drops below this many SOL.
 # Replaces a count cap as the primary guard — the count backstop stays at 20/24h.
@@ -340,6 +350,7 @@ def load_soul_dlmm_params():
         "MAX_OOR_MINUTES": int(MAX_OOR_MINUTES),
         "OOR_DOWNSIDE_MAX_MINUTES": int(OOR_DOWNSIDE_MAX_MINUTES),
         "TURNOVER_MAX_OOR_MINUTES": int(TURNOVER_MAX_OOR_MINUTES),
+        "TURNOVER_SOL_SIDE_OOR_MINUTES": int(TURNOVER_SOL_SIDE_OOR_MINUTES),
         "TURNOVER_CB_LOSS_SOL": float(TURNOVER_CB_LOSS_SOL),
         "MIN_AGE_BEFORE_YIELD_CHECK": float(MIN_AGE_BEFORE_YIELD_CHECK),
         "MIN_FEE_TVL_24H_LIMIT": float(MIN_FEE_TVL_24H_LIMIT),
@@ -420,6 +431,8 @@ def load_soul_dlmm_params():
                 params["TRAILING_DROP_PCT"] = val
             elif "Max Bins Pumped Above" in name:
                 params["MAX_BINS_PUMPED_ABOVE"] = int(val)
+            elif "Turnover SOL-Side OOR Minutes" in name:
+                params["TURNOVER_SOL_SIDE_OOR_MINUTES"] = int(val)
             elif "Turnover Max OOR Minutes" in name:
                 params["TURNOVER_MAX_OOR_MINUTES"] = int(val)
             elif "Turnover CB Loss SOL" in name:
@@ -714,11 +727,12 @@ def main():
     max_oor_minutes = params["MAX_OOR_MINUTES"]
     oor_downside_max_minutes = params["OOR_DOWNSIDE_MAX_MINUTES"]
     turnover_max_oor_minutes = params["TURNOVER_MAX_OOR_MINUTES"]
+    turnover_sol_side_oor_minutes = params["TURNOVER_SOL_SIDE_OOR_MINUTES"]
     min_age_before_yield_check = params["MIN_AGE_BEFORE_YIELD_CHECK"]
     min_fee_tvl_24h_limit = params["MIN_FEE_TVL_24H_LIMIT"]
     min_exit_liquidity_usd = params["MIN_EXIT_LIQUIDITY_USD"]
     
-    print(f"Loaded SOUL.md parameters -> SL: {stop_loss_pct:.1f}%, Trailing TP Trigger: {trailing_trigger_pct:.1f}%, Trailing TP Drop: {trailing_drop_pct:.1f}%, Trailing TP (turnover): {turnover_trailing_trigger_pct:.1f}%/{turnover_trailing_drop_pct:.1f}%, Max Bins Pumped Above: {max_bins_pumped_above}, Max OOR: {max_oor_minutes}m (turnover {turnover_max_oor_minutes}m), Min Age for Yield Check: {min_age_before_yield_check:.1f}m, Min Fee/TVL: {min_fee_tvl_24h_limit:.2f}%")
+    print(f"Loaded SOUL.md parameters -> SL: {stop_loss_pct:.1f}%, Trailing TP Trigger: {trailing_trigger_pct:.1f}%, Trailing TP Drop: {trailing_drop_pct:.1f}%, Trailing TP (turnover): {turnover_trailing_trigger_pct:.1f}%/{turnover_trailing_drop_pct:.1f}%, Max Bins Pumped Above: {max_bins_pumped_above}, Max OOR: {max_oor_minutes}m (turnover {turnover_max_oor_minutes}m token-side / {turnover_sol_side_oor_minutes}m SOL-side), Min Age for Yield Check: {min_age_before_yield_check:.1f}m, Min Fee/TVL: {min_fee_tvl_24h_limit:.2f}%")
     
     # --reset-trailing: reset peak_pnl + trailing_active after a standalone fee claim
     if cli.reset_trailing:
@@ -1294,7 +1308,12 @@ def main():
         oor_sol_side = (oor_below if sol_is_x_pos else oor_above)
         oor_token_side = (oor_above if sol_is_x_pos else oor_below)
         if meta.get("mode") == "turnover":
-            oor_limit_minutes = turnover_max_oor_minutes
+            # Asymmetric here too: token-side is a decaying bag (fast fuse),
+            # SOL-side is frozen SOL that may yet walk back into range or pump
+            # out. Direction unknown (no bin data) falls back to the fast fuse,
+            # which is what the mode did for both directions until 2026-08-10.
+            oor_limit_minutes = (turnover_sol_side_oor_minutes if oor_sol_side
+                                 else turnover_max_oor_minutes)
         elif oor_token_side:
             oor_limit_minutes = min(max_oor_minutes, oor_downside_max_minutes)
         else:
@@ -1342,9 +1361,14 @@ def main():
             # back before earning resumes. Bank it now. Checked after the
             # countdown so this reason wins over the plain OOR reason (routes
             # as a profitable exit: 15m cooldown, no rebalance re-center).
-            # Turnover exempt — its OOR close IS the re-center trigger.
-            if (oor_sol_side and pnl_pct >= OOR_UPSIDE_TP_PCT
-                    and meta.get("mode") != "turnover"):
+            # Turnover was exempt on the grounds that its OOR close IS the
+            # re-center trigger — true, but that argument only held while its
+            # fuse was 2m in both directions and the two events coincided.
+            # With the SOL-side fuse at 5m (above) a banked pump-out now has
+            # minutes in which to hand the win back, so turnover takes the lock
+            # as well; it still re-centers, because a profitable close is
+            # exactly what is_turnover_churn routes back into the loop.
+            if oor_sol_side and pnl_pct >= OOR_UPSIDE_TP_PCT:
                 close_reason = (f"OOR SOL-side profit lock ({pnl_pct:+.2f}% >= +{OOR_UPSIDE_TP_PCT}% "
                                 f"with position fully in SOL) — banking the frozen win")
         else:

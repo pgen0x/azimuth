@@ -68,7 +68,7 @@ MODE_DEFAULTS = {
         "MIN_MCAP_USD": 150000.0,
         "MIN_HOLDERS": 500,
         "TIMEFRAME": "5m",
-        "MAX_POSITIONS": 2,
+        "MAX_POSITIONS": 4,
     },
 }
 
@@ -882,7 +882,7 @@ def main():
     min_mcap = params["MIN_MCAP_USD"]
     min_holders = params["MIN_HOLDERS"]
     timeframe = params.get("TIMEFRAME", "24h")
-    max_positions = params.get("MAX_POSITIONS", 2)
+    max_positions = params.get("MAX_POSITIONS", 4)
 
     scaled_min_fee, scaled_min_vol = get_scaled_thresholds(timeframe, min_fee_tvl)
     print(f"Mode={mode} Timeframe={timeframe} | TVL>=${min_tvl:,.0f} Fee/TVL>={scaled_min_fee:.2f}% Organic>={min_organic:.0f} Mcap>=${min_mcap:,.0f} Holders>={min_holders} MaxPos={max_positions}")

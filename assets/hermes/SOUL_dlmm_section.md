@@ -22,13 +22,13 @@ Pipeline supports three modes with **isolated position budgets** — each mode's
 *   Turnover Min TVL: $5,000 / Max TVL: $300,000
 *   Turnover Min Fee/TVL (30m window): 0.15% (~7%/day pace)
 *   Turnover Min Base Fee: 1.0% (degen fee tier; fee income is the thesis, not price)
-*   Turnover Min Mcap: $1,000,000
+*   Turnover Min Mcap: $150,000 (the daemon's own screen passes 150k-10M; a higher floor here is a second, silent screen over what discovery already found. It ran at $1,000,000 until 2026-08-10 and cost the mode its entry rate — 18 opens in 24h against a reference bot's 50 on the same band, off 2-9 pools per cycle)
 *   Turnover Min Holders: 500
 *   Turnover Max Positions: 2
 *   Prefer tight ranges around active bin (balanced_tight two-sided) — profit is fee_pct × turnover, so stay in range; exit on turnover decay, not price targets
 
 ### Shared Ingestion Gates
-*   Minimum Base Organic Score: 75
+*   Minimum Base Organic Score: 60 (GLOBAL, not per-mode — it re-screens every pool the daemon already cleared at organic >= 50/60, so a higher value here starves entries across all modes at once. Was 75 until 2026-08-10; the escalation rule below still raises it during a losing streak)
 *   Slippage: 1000 (bps, e.g. 10% slippage tolerance)
 
 ### Entry Conviction & Learning
@@ -50,7 +50,8 @@ Pipeline supports three modes with **isolated position budgets** — each mode's
 *   Max Bins Pumped Above: 10 (exit if active bin exceeds upper bin by this count)
 *   Max Out of Range Minutes: 30 (UPSIDE fuse only — above range the position is 100% SOL with PnL frozen, so patience is free; a banked gain ≥ +1.5% closes immediately via the OOR-upside profit lock)
 *   OOR Downside Max Minutes: 5 (asymmetric fast fuse — below range every bin has filled into a token bag losing value each tick; sell everything before the decay compounds. The one-shot green-5m-candle recovery grace still applies; close routes through the dump path: 2h cooldown, no re-center)
-*   Turnover Max OOR Minutes: 2 (turnover-mode fast fuse — an OOR turnover position is idle fee-capture capital, so it closes into a re-center after minutes instead of the long fuse above)
+*   Turnover Max OOR Minutes: 2 (turnover-mode fast fuse, TOKEN side only — below range every bin has filled into a decaying bag, so it closes into a re-center after minutes instead of the long fuse above)
+*   Turnover SOL-Side OOR Minutes: 5 (the same fuse on the SOL side, where nothing decays. Running the 2m fuse in both directions cost the mode its upside: over the 24h to 2026-08-10 its six SOL-side OOR closes averaged +0.01% — out before a fee accrued — while the same event waited out to 5m elsewhere averaged +0.04%, and the pumps held rather than cut averaged +0.38%. The +1.5% OOR-upside profit lock now applies to turnover too, and a profitable close still routes back into the re-center)
 *   Turnover CB Loss SOL: -0.05 (turnover rebalance circuit breaker — once a pool's cumulative realized PnL across rebalance closes in the last 24h drops below this many SOL, re-centering stops and normal exit + cooldown applies; count backstop 20/24h)
 *   Min Age for Yield Check: 60 minutes
 *   Min 24h Fee/TVL for Yield Check: 1.0% (exit if age exceeds minimum and fee/TVL drops below this)
