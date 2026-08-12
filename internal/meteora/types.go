@@ -125,9 +125,9 @@ type Candidate struct {
 	GlobalFeesSOL *float64 `json:"global_fees_sol,omitempty"`
 
 	// Deployer wallet from the Jupiter asset record. The pipeline checks it
-	// against the sol:dlmm:blocklist:dev Redis set before any deploy and
-	// stores it in position metadata so a rug close can blocklist the dev.
-	// Empty = unknown (fail-open).
+	// against the TTL'd sol:dlmm:blocklist:dev:<wallet> Redis key before any
+	// deploy and stores it in position metadata so a rug close can blocklist
+	// the dev. Empty = unknown (fail-open).
 	Dev string `json:"dev,omitempty"`
 
 	// Pool memory summary from the monitor's close journal

@@ -1168,12 +1168,18 @@ def main():
                 continue
         # Dev blocklist (ported from the reference bot's dev-blocklist): the
         # daemon ships the Jupiter deployer wallet as `dev`; a deployer that
-        # already rugged us never gets a second deploy. Missing dev = unknown,
-        # passes (fail-open).
+        # already rugged us does not get another deploy for the window the
+        # monitor set. Missing dev = unknown, passes (fail-open).
+        # One TTL'd key per wallet, not a SADD set — it was the latter until
+        # 2026-08-12, which meant every wallet it ever held was banned forever;
+        # see DEV_BLOCKLIST_TTL_SEC in the monitor for what that cost.
         if c.get("dev"):
-            bl_dev, _, _ = run_command(f"redis-cli sismember sol:dlmm:blocklist:dev \"{c['dev']}\"")
-            if bl_dev and bl_dev.strip() == "1":
-                print(f"Skipping {c['name']} - deployer {c['dev'][:8]}… is on the dev blocklist")
+            bl_dev, _, _ = run_command(f"redis-cli get \"sol:dlmm:blocklist:dev:{c['dev']}\"")
+            if bl_dev and bl_dev != "(nil)":
+                dev_ttl, _, _ = run_command(f"redis-cli ttl \"sol:dlmm:blocklist:dev:{c['dev']}\"")
+                dev_ttl_h = int(dev_ttl) // 3600 if dev_ttl and dev_ttl.lstrip("-").isdigit() else "?"
+                print(f"Skipping {c['name']} - deployer {c['dev'][:8]}… is dev-blocklisted "
+                      f"({dev_ttl_h}h remaining, reason: {bl_dev[:60]})")
                 continue
         # Pool-level cooldown (repeat-deploy churn guard, set post-deploy below).
         pool_cd, _, _ = run_command(f"redis-cli get \"sol:dlmm:cooldown:pool:{c['pool']}\"")
@@ -1642,7 +1648,8 @@ def main():
         "amount_y": amount_y,
         "mode": mode,
         # Deployer wallet (daemon-enriched, may be absent) — a rug close adds
-        # it to sol:dlmm:blocklist:dev so this deployer never deploys us again.
+        # it to sol:dlmm:blocklist:dev:<wallet> so this deployer gets no further
+        # deploy for DEV_BLOCKLIST_TTL_DAYS.
         "dev": winner.get("dev", ""),
         # Entry-time signal snapshot — the monitor copies this into the close
         # journal so dlmm_weights.py can learn which signals predict winners.

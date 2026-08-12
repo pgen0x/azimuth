@@ -44,19 +44,20 @@ Pipeline supports three modes with **isolated position budgets** — each mode's
 *   Indicators Preset: supertrend_break (timing presets)
 
 ### Exit Parameters
-*   Hard Stop-Loss: -25.0% (deep backstop only — the fast rails below own the tail: rug velocity gate at -20%/5m, downside-OOR fast fuse, fee-pace-death exit. Widened from -15 on 2026-07-19: portfolio-API ground truth showed tight SLs realized -14..-24% anyway after gaps+slippage while wicking out recoverable ladder positions. Grace applies only to a young in-range position with fee/TVL ≥ 10%; an EMERGENCY floor 3pp below this always closes immediately — bypasses grace, AI holds, indicator timing, and report-only mode)
+*   Hard Stop-Loss: -8.0% (unconditional floor — no trend confirmation, no second leg. Tightened from -25.0 on 2026-08-12: the wide floor assumed the fast rails owned the tail, but the sustained-downtrend rail needs a 1h trend to confirm and so fired at -15.64% and -8.34% on a rule written for -5%, leaving nothing unconditional between -5% and -25%. Six closes produced a full day's loss while 33 others returned ~0. Grace applies only to a young in-range position with fee/TVL ≥ 10%; an EMERGENCY floor 3pp below this always closes immediately — bypasses grace, AI holds, indicator timing, and report-only mode)
+*   Downtrend PnL-Only Floor: -6.0% (the sustained-downtrend exit on PnL alone, no 1h confirmation — sits between the confirmed -5% rule and the hard SL. Fixed in monitor, not read from here; listed so the exit ordering is legible: confirmed downtrend -5%, unconfirmed -6%, hard floor -8%, emergency -11%)
 *   Trailing TP Trigger: 3.0% (activate trailing exits once profit exceeds this; tune against your own close history — set too high, trailing never activates before another rule cuts the position)
 *   Trailing TP Drop: 1.5% (floor below peak before the first ratchet tier; above +5% peak the monitor's profit ratchet takes over: peak ≥5% locks +2%, ≥10% locks +6%, ≥20% locks 70% of peak)
 *   Max Bins Pumped Above: 10 (exit if active bin exceeds upper bin by this count)
 *   Max Out of Range Minutes: 30 (UPSIDE fuse only — above range the position is 100% SOL with PnL frozen, so patience is free; a banked gain ≥ +1.5% closes immediately via the OOR-upside profit lock)
 *   OOR Downside Max Minutes: 5 (asymmetric fast fuse — below range every bin has filled into a token bag losing value each tick; sell everything before the decay compounds. The one-shot green-5m-candle recovery grace still applies; close routes through the dump path: 2h cooldown, no re-center)
-*   Turnover Max OOR Minutes: 2 (turnover-mode fast fuse, TOKEN side only — below range every bin has filled into a decaying bag, so it closes into a re-center after minutes instead of the long fuse above)
+*   Turnover Max OOR Minutes: 5 (turnover-mode fast fuse, TOKEN side — below range every bin has filled into a decaying bag, so it closes into a re-center rather than riding the long fuse above. Raised 2 -> 5 on 2026-08-12, matching the SOL-side value below: the measurement that set that one was never direction-specific, and all 21 token-side OOR closes in the preceding 24h fired at 2.1-2.2m for an average of +0.0006 SOL — the fuse was round-tripping capital for zero before a fee could accrue, paying gas and slippage each trip)
 *   Turnover SOL-Side OOR Minutes: 5 (the same fuse on the SOL side, where nothing decays. Running the 2m fuse in both directions cost the mode its upside: over the 24h to 2026-08-10 its six SOL-side OOR closes averaged +0.01% — out before a fee accrued — while the same event waited out to 5m elsewhere averaged +0.04%, and the pumps held rather than cut averaged +0.38%. The +1.5% OOR-upside profit lock now applies to turnover too, and a profitable close still routes back into the re-center)
 *   Turnover CB Loss SOL: -0.05 (turnover rebalance circuit breaker — once a pool's cumulative realized PnL across rebalance closes in the last 24h drops below this many SOL, re-centering stops and normal exit + cooldown applies; count backstop 20/24h)
 *   Min Age for Yield Check: 60 minutes
 *   Min 24h Fee/TVL for Yield Check: 1.0% (exit if age exceeds minimum and fee/TVL drops below this)
 *   Min Exit Liquidity: $7,000 (exit if live pool liquidity drains below this after entry — can't exit cleanly; set below the $10k entry TVL gate so fresh positions never trip it)
-*   Rug Velocity Gate (fixed in monitor): 5m candle ≤ -20% → EMERGENCY close, same class as the emergency SL floor — this fast rail is what lets the hard SL sit wide
+*   Rug Velocity Gate (fixed in monitor): 5m candle ≤ -20% → EMERGENCY close, same class as the emergency SL floor. It used to be the argument for a wide hard SL; since 2026-08-12 it is a complement to a tight one — it catches the token dying faster than any PnL threshold can, while the SL catches the ordinary bleed it was never built to see
 *   Fee-Pace-Death Exit (fixed in monitor): after 45m age, unclaimed-fee growth < 0.02% of position value across a 30m window (≈ <1%/day pace) → rotate the capital out; skips trailing-armed winners, re-baselines on fee claims
 *   Permanent Rug Blacklist (fixed in monitor, 2026-07-22): fires on a realized close ≤ -30% PnL, OR on any close whose reason names a rug pattern (e.g. the velocity gate above) regardless of realized PnL — a fast reaction can book a near-zero loss on a token that just cratered, and that crater alone is rug evidence
 
@@ -71,7 +72,7 @@ interactive/gateway agent, and any manual action:
     in-range, high-fee winner is the single worst error I can make (it is the Joby-class bug).
 *   **Do not discretionarily close** an empty-`triggered_rules` position unless `5m price <= -3%`
     (real dump) OR `break_even_days >= 5`. A mild pullback (e.g. -2.9% 5m) is NOT a close trigger.
-*   **Hard floor:** `pnl_pct < -25%` (the Hard Stop-Loss above) always closes; a 5m candle
+*   **Hard floor:** `pnl_pct < -8%` (the Hard Stop-Loss above) always closes; a 5m candle
     ≤ -20% (rug velocity gate) always closes; thin-liquidity (< Min Exit Liquidity) always
     closes (can't exit later is worse than forgone fees).
 
