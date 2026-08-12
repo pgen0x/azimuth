@@ -5,6 +5,41 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.4.0](https://github.com/pgen0x/azimuth/compare/v2.3.0...v2.4.0) (2026-08-12)
+
+
+### Features
+
+* **robinhood:** carry launches forward for a first-day WETH ladder ([f9bc7c9](https://github.com/pgen0x/azimuth/commit/f9bc7c9f530bd19c35b1c6c7ac7a1e87db2cf36b))
+* **robinhood:** carry the pulse registry across restarts ([37afe46](https://github.com/pgen0x/azimuth/commit/37afe46ce49fa99287cc0b05dc5e5317ac57413b))
+* **robinhood:** rank the book by churn, and stop nursing a filled rung ([8fe0c03](https://github.com/pgen0x/azimuth/commit/8fe0c03b4834f9870126587c8fe1932b1f84d15d))
+* **robinhood:** re-list a filled rung as an ask instead of dumping it ([6e68b77](https://github.com/pgen0x/azimuth/commit/6e68b775160972a9db7a022660555ae20eb213fe))
+* **robinhood:** replace the ladders with a churn loop that re-centers ([c3ad3dc](https://github.com/pgen0x/azimuth/commit/c3ad3dcafcc52bbf6479e48d3d233a10c8839c41))
+
+
+### Bug Fixes
+
+* **robinhood:** a honeypot verdict must outlive the cycle that saw it ([1672201](https://github.com/pgen0x/azimuth/commit/16722012cbc3c6f7b51e7cde2b1190050c1c6e70))
+* **robinhood:** a one-sided close pays back in quote, not in swap proceeds ([d7f393e](https://github.com/pgen0x/azimuth/commit/d7f393ed0594ec633ea48d20a952fd57b4457c55))
+* **robinhood:** a WETH pin means ether, not the wrapper ([c8ee1a8](https://github.com/pgen0x/azimuth/commit/c8ee1a893173beb157d5caf6241143ce5d697d8f))
+* **robinhood:** give up on a close that can never land ([829087b](https://github.com/pgen0x/azimuth/commit/829087b021851694d8b0cd259b344008dc78f1bc))
+* **robinhood:** make the ladder answer for the walls nobody trades ([55b8526](https://github.com/pgen0x/azimuth/commit/55b8526f42760720b76b9d7681a79def040353c2))
+* **robinhood:** measure a rung's drift from its pin, not from its edge ([a22c6e6](https://github.com/pgen0x/azimuth/commit/a22c6e68809f2bff7138f61e0f6cc2d7f0542e3c))
+* **robinhood:** recalibrate turnover gates against this venue's own book ([f67c53d](https://github.com/pgen0x/azimuth/commit/f67c53dfea471db705c89d4dfa5343ee82a5e626))
+* **robinhood:** replace the ladders with a re-centering turnover rung, and make its closes honest ([4b52d80](https://github.com/pgen0x/azimuth/commit/4b52d8005b94fa34707c9ccfa336bfd5fea5a7c1))
+* **robinhood:** rescue the quote side when a honeypot holds collect hostage ([29f8763](https://github.com/pgen0x/azimuth/commit/29f87634fb543466928b44f1cfe7d9a571907d33))
+* **robinhood:** stop a broke wallet from silencing its own candidates ([f20bde6](https://github.com/pgen0x/azimuth/commit/f20bde69bb75cca7b71ba0dd6f3f160bd3d0f10e))
+* **robinhood:** stop the pulse sweep from starving its own feed ([09f7d54](https://github.com/pgen0x/azimuth/commit/09f7d54ea54f979adab6955b25e4da8402ac8ff4))
+* **robinhood:** turnover rests one rung where the fees were ([578cffe](https://github.com/pgen0x/azimuth/commit/578cffe7411b9744dd3f0d3baded077e2dfbf895))
+* **solana:** let the blocklists and the loss floor both expire ([c47b4f6](https://github.com/pgen0x/azimuth/commit/c47b4f67316625bdf00ff3d26ea8962b4f09f217))
+* **solana:** let the rug blacklist and pool memory forget ([1ce32d4](https://github.com/pgen0x/azimuth/commit/1ce32d4f531064b53955bb0c0b912b0f71189927))
+* **turnover:** stop cutting the SOL side of the book two minutes early ([3eaecf6](https://github.com/pgen0x/azimuth/commit/3eaecf6bb1468f23e266769299a5be2271cae2c5))
+
+
+### Performance Improvements
+
+* **robinhood:** tick the exit loop at 20s, not ~84s ([e5575f4](https://github.com/pgen0x/azimuth/commit/e5575f4b4394a026c26b03dabfdf1ab41fbac07c))
+
 ## [2.3.0](https://github.com/pgen0x/azimuth/compare/v2.2.0...v2.3.0) (2026-08-06)
 
 
