@@ -57,6 +57,32 @@ var quoteAssets = map[string]bool{
 	NativeETH: true,
 }
 
+// isEtherQuote reports whether an address is one of the two spellings of ether
+// on this venue: the ERC-20 wrapper (v3) and the zero address (v4 pools ether
+// natively). They are one asset, and both data sources call it "WETH".
+func isEtherQuote(addr string) bool {
+	return strings.EqualFold(addr, WETH) || strings.EqualFold(addr, NativeETH)
+}
+
+// quotePinMatch reports whether a pool's quote side satisfies a mode's
+// QuoteAsset pin. Exact match, EXCEPT that the two ether spellings satisfy each
+// other — a pin on WETH means "this mode LPs against ether", not "against the
+// ERC-20 wrapper specifically".
+//
+// This is not a widening of thesis; it is what the rest of the stack already
+// assumed. sizeFor sizes native-ETH pools off the WETH balance because the v4
+// executor unwraps on demand (ensureNativeFunds) and rewraps after a close, and
+// the v4 ladder was DRY_RUN-verified against a native-ETH pool. Only the pin
+// disagreed — and it decided everything, because the launch feed is almost
+// entirely v4: of 70 pools carried by the pulse registry on 2026-08-07, 68 were
+// native-ETH and 2 were wrapped. The mode could see 3% of its own universe.
+func quotePinMatch(poolQuote, pin string) bool {
+	if strings.EqualFold(poolQuote, pin) {
+		return true
+	}
+	return isEtherQuote(poolQuote) && isEtherQuote(pin)
+}
+
 // orientQuote returns p with its quote side guaranteed to be a whitelisted
 // quote asset, swapping base/quote when a source put the quote asset on the
 // base side (GeckoTerminal lists USDG base-side in USDG/memecoin pools; the
@@ -103,11 +129,13 @@ type gtPoolAttrs struct {
 	} `json:"price_change_percentage"`
 
 	Transactions struct {
+		M15 gtTxWindow `json:"m15"`
 		H1  gtTxWindow `json:"h1"`
 		H24 gtTxWindow `json:"h24"`
 	} `json:"transactions"`
 
 	VolumeUSD struct {
+		M15 string `json:"m15"`
 		H1  string `json:"h1"`
 		H24 string `json:"h24"`
 	} `json:"volume_usd"`
@@ -176,6 +204,15 @@ type Pool struct {
 	FdvUSD     float64
 	McapUSD    float64
 
+	// The m15 window is the venue's answer to Solana pulse's 5m window: proof
+	// the book is trading NOW, not that it traded sometime in the last hour. A
+	// ladder is the mode that needs it — a wall parked on a book whose flow
+	// stopped 50 minutes ago earns nothing and re-pins on a timer. 15m rather
+	// than pulse's 5m because this chain mints ~6 pools a minute and a 5m window
+	// is mostly sampling noise; m15 is the tightest window that still resolves.
+	VolumeM15USD float64
+	TxM15        gtTxWindow
+
 	VolumeH1USD  float64
 	VolumeH24USD float64
 	TxH1         gtTxWindow
@@ -215,6 +252,9 @@ type Candidate struct {
 	ReserveUSD   float64 `json:"reserve_usd"`
 	FdvUSD       float64 `json:"fdv_usd"`
 	McapUSD      float64 `json:"mcap_usd"`
+	VolumeM15USD float64 `json:"volume_m15_usd"`
+	TxM15        int     `json:"tx_m15"`
+	FeeTVLM15Pct float64 `json:"fee_tvl_m15_pct"` // fee/TVL % over the LIVE 15m window (ladder flow proof)
 	VolumeH1USD  float64 `json:"volume_h1_usd"`
 	VolumeH24USD float64 `json:"volume_h24_usd"`
 	FeeTVLDayPct float64 `json:"fee_tvl_day_pct"` // daily fee/TVL %: h1 pace extrapolated (rh-fresh) or realized 24h volume (rh-mature)

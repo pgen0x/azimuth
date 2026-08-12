@@ -484,6 +484,41 @@ real 23-pool set:
 Mature would have picked **1 of 23**; Fresh **0**. Hence `robinhood.Ladder`:
 same gateway feed, screened on churn (1.5%/day, $10k–$2M, ≥0.3% tier, 24h+).
 
+#### Live-window gates (2026-08-07) — the Solana pulse port
+
+Every gate above reads an hour or a day of history, and none of them can tell a
+book that is trading from one that traded 50 minutes ago. For a resting bid wall
+that is the whole outcome: of **102 ladder closes**, **91** were `ladder idle` or
+`ladder stale` — the wall earned exactly **zero** and re-pinned on a timer — and
+every one of those pools cleared `MinTxH1` and `MinFeeTVLDay` at mint.
+
+So all three ladder modes now also gate on the live 15-minute window, the port of
+Solana `Pulse`'s `(MinFeeActiveTVL, MinVolumeUSD)` pair: `MinTxM15` 8,
+`MinVolumeM15USD` $400, `MinFeeTVLM15Pct` 0.0010% (window-scoped, **not** a daily
+rate). 15m rather than pulse's 5m because this chain mints ~6 pools a minute and
+a 5m window is mostly noise. Costs no extra request — GeckoTerminal already
+returns `volume_usd.m15` and `transactions.m15` in the payloads both feeds fetch.
+
+Calibrated against the **20 distinct pools the ladders actually minted into**,
+re-read from GeckoTerminal:
+
+| pool set | m15 fee/TVL | m15 swaps | verdict |
+|---|---|---|---|
+| wall ever traded into (5) | 0.0010–0.0122% | 8–45 | all 5 pass |
+| stayed fee-dead (15) | 10 read exactly 0 | ≤5 for 4 of the other 5 | all 15 rejected |
+
+The one loud exception is the informative one: `nvda/USDG 0.05%` did **156 swaps
+in 15 minutes** and still fails, at 0.0006% — a deep book on a thin tier pays a
+wall nothing, so traffic is not flow. `MinVolumeM15USD` is the dust guard the
+ratio cannot be: this venue's collapsed launch template ($321–$737 of reserve)
+reads an enormous fee/TVL on a handful of dollars.
+
+n=20 is a starting point, not a proven bar. The risk to watch in the soak is
+`rh-usdg-ladder`: equities legitimately go quiet overnight, and unlike the h1
+floors (deliberately loose for that reason) a 15m window reads a closed session
+as a dead book. If it starves the mode, the fix is a session filter, not a lower
+floor.
+
 ### Implementation
 
 - `uni_executor.js` — `weth_ladder` strategy: `ladderSizes()` (linear ramp,
@@ -500,6 +535,30 @@ same gateway feed, screened on churn (1.5%/day, $10k–$2M, ≥0.3% tier, 24h+).
   < `UNI_LADDER_IDLE_MIN_PCT` across `UNI_LADDER_IDLE_WINDOW` while parked out
   of range → the wall is not being traded into, re-pin). Hard SL kept as a
   backstop only.
+- **A fill is a WALL event** (2026-08-07). The first rung that converts closes
+  every rung of that `ladderId` — `ladder wall breached` — instead of leaving
+  the rest resting under a market that just proved it comes down through them.
+  The unfilled rungs are still pure quote asset, so retracting them costs no
+  swap and no spread, and the rule never waits for indicator confirmation.
+  Read off the close journal: of 11 fills, SIX were a repeat in a pool that had
+  already filled once, and the repeats averaged **-11.8%** against -6.7% for
+  the first fill of a wall. One WETH pool filled three rungs inside 30 minutes
+  at -7.6%, -12.0%, then -40.6%.
+- A fill past `UNI_LADDER_FILL_HARD_PCT` (-8%) closes as
+  `emergency ladder fill` and skips indicator confirmation, mirroring
+  `dlmm_monitor.py`'s emergency-SL carve-out. Confirming a shallow fill is
+  right — an un-filling rung reverts to quote for free — and confirming a
+  collapse is how -7.6% became -40.6%.
+- **Re-entry cooldown** (`cool_off()`, the port of `dlmm_monitor.py`'s cooldown
+  block). A fill-class close writes `rh:cooldown:pool:<pool>` and
+  `rh:cooldown:token:<base>` to the daemon's Redis for
+  `UNI_COOLDOWN_POOL_SECS` (4h), escalating on repeat losses inside 7 days
+  (2 → 24h, 3+ → 72h); the daemon reads them in the deploy walk via
+  `store.RobinhoodCooldown`, before the entry-timing gate so a blocked pool
+  costs no GeckoTerminal request. `ladder idle` and `ladder stale` write
+  NOTHING — those are the mode's normal re-pin loop, and cooling them off would
+  switch the ladder modes off entirely. That carve-out is the one deliberate
+  divergence from the Solana rule, which cools every close.
 - The *idle* rule exists because *filled* and *stale* are both PRICE rules: a
   market that stops moving disarms the entire rulebook. A `usdg_ladder` minted
   on SPY at 16:56 ET — four minutes after the US cash close — held 5.6h with
@@ -731,6 +790,201 @@ ticks and caps round-tripping. **A live v4 ladder mint has not run**: no
 USDG-quoted v4 pool appears in any batch the daemon has logged (all 51 are
 ETH/WETH-quoted, consistent with the USDG universe being v3), and
 `ROBINHOOD_V4_EXECUTOR_CMD` is still unset. Setting it is what starts that soak.
+
+## 4e. `rh-pulse-ladder` — the same wall, one age band earlier (2026-08-06)
+
+`rh-ladder` cannot look at a pool younger than 24h. That floor is not a thesis
+choice, it is the Uniswap gateway's index boundary — and it means the venue's
+**highest-churn hours are unreachable**, which for a shape paid by churn and
+never holding the token is the wrong band to be excluded from.
+
+### The feed problem, measured
+
+The obvious fix — "screen `new_pools` and wait" — does not work here, and the
+reason is worth writing down because it is a property of this venue:
+
+> Sampled 2026-08-06: GeckoTerminal `new_pools` (2 pages) returned **33
+> WETH-quoted Uniswap pools and every single one was 1-5 minutes old**. Median
+> reserve $4.8k; the interesting tail was $21k-$27k with 79-153 h1 txns.
+
+The venue mints roughly **six WETH pools a minute**, so the launch feed only
+ever spans the last few minutes. There is no query, on any source this daemon
+has, that answers *"which WETH pools are three hours old"*. The band between the
+two feeds is not under-served; it is unaddressable.
+
+### The carried registry
+
+So `pulse.go` writes launches down. Every `FetchNewPools` sweep — rh-fresh's or
+this mode's own, whichever ran (`pulseRefresh`, the same sharing rule as the
+trending cache) — publishes into an in-memory registry keyed by pool address,
+holding **identity only**: address, protocol, currencies, fee tier, creation
+time. Each cycle:
+
+1. entries whose age has moved into `[MinAge, MaxAge)` are collected, unioned
+   with any in-window pool on the cached trending page,
+2. ranked by discovery-time reserve and cut to 30,
+3. **re-enriched in one `/pools/multi/` call** — the same per-cycle GT budget
+   every mature-family mode spends,
+4. and anything the enrich did not refresh is **dropped**, because a carried
+   entry's launch-minute numbers must never reach a gate.
+
+Retention is 24h (`watchKeep`), capped at 3000 entries, evicting oldest first —
+both bounds are the window itself, not tuning knobs.
+
+### Thresholds, and what backs them
+
+`PulseLadder.MaxAge == Ladder.MinAge` exactly, so the two modes hand off at 24h
+with no overlap; a test asserts it. Everything else is **first-pass and unbacked
+by outcomes** — unlike §4b's numbers, which came off a profitable LP's 23 real
+entries. Notable departures from `Ladder`:
+
+| gate | Ladder | PulseLadder | why |
+|---|---|---|---|
+| `MinAge` | 24h | 1h | cheapest "this launch survived" filter; a wall parked at minute 3 sits under an undiscovered price |
+| `MinFeePct` | 0.3% | 0.25% | the venue's v4 launch template mints at 0.25% — 20 of the 33 sampled pools |
+| `MinFeeTVLDay` | 1.5% realized | 4.0% extrapolated | a 6h-old pool's h24 volume IS its lifetime volume, so a realized pace understates it; `FeePaceH24=false` plus a higher bar keeps the two comparable |
+| `MinReserveUSD` | $10k | $10k | unchanged, and load-bearing here: in a $5k pool our rungs would BE the book |
+
+That last row is where the exit-liquidity calibration landed. Probing every live
+`Screen` passer on 2026-08-06 found **0 of 17** deploying-mode pools with zero
+active liquidity, but **5 of 5** young v4 pools did — and both a buy and a sell
+quote against them reverted `NotEnoughLiquidity`. Active liquidity also flips
+within minutes (two pools read non-zero, then zero five minutes later), so it is
+deliberately **not** a screen-time gate: it would be a snapshot of a value that
+changes before a mint lands. The reserve floor is the durable version of the
+same guard.
+
+### Status
+
+Wired, built, tested, `ROBINHOOD_PULSE_LADDER=false`. **No live entry yet** —
+the mode has never minted, and its thresholds are the soak's subject, not its
+conclusion. Geometry is untouched: `uni_ladder.js` keys rung width on the QUOTE
+asset, so a pulse-discovered WETH pool gets the same 1200-tick rungs rh-ladder
+mints. If the soak shows a first-day pool wants a different wall, the knob to
+add is per-strategy geometry — not a second WETH constant.
+
+## 4f. `rh-turnover` — the ladders' replacement (2026-08-07)
+
+### The verdict on the ladder
+
+Three days of live ladder trading, read off `memories/uni_closes.jsonl`
+(2026-08-04 10:49 → 2026-08-07 08:39, 104 rung closes, all real):
+
+| close class | n | mean PnL | winners | exactly 0.00% | median age |
+|---|---|---|---|---|---|
+| `ladder idle` | 63 | −0.01% | 0 | 58 | 91m |
+| `ladder stale` | 30 | −0.00% | 0 | 30 | 23m |
+| `ladder rung filled` | 11 | **−9.48%** | 0 | 0 | 48m |
+
+**Zero fee-positive exits in 104 closes.** 88 returned principal unchanged.
+Net realized was negative in both quote assets, before counting the gas on 104
+mints and 104 closes, which the journal does not carry. (Absolute wallet
+figures stay in the private profile journal, per the repo's sanitization rule.)
+
+The exit reasons are the diagnosis, not just the outcome. `ladder idle` fires
+only when the wall earned < 0.02% over a 90m window — 63 of those is the
+monitor certifying fee-death 61% of the time. `ladder stale` closed at a median
+23m, i.e. re-pinned before it could earn. The 11 that filled are the only
+closes that moved money, all down.
+
+The thesis was that a resting one-sided bid is paid for oscillation while never
+owning the token. The first half did not happen on these books often enough to
+pay for the second half when it did. The payoff was inverted: capped upside
+that never printed, uncapped downside that did (one rung, −40.61%).
+
+### Why turnover, and why it is neither the wall nor `balanced_tight`
+
+The port is not a shape, it is the **loop**, and the loop is what this venue
+never had. `uni_monitor.py` had one close path and no redeploy path at all —
+zero matches for rebalance / re-center / reseed / compound. Solana's turnover
+engine is: leave the band → close → re-mint at the new price → repeat, with fee
+compounding and a cumulative-PnL circuit breaker. Every ladder close above was a
+walk-away; not one was a re-pin the daemon performed itself.
+
+Two shapes were ruled out on evidence, and it is worth being precise about which
+evidence kills which:
+
+- **`balanced_tight`** pre-swaps half the commit into the memecoin, so the
+  position is LONG a token on a chain where tokens bleed. −15.04%/trade. Solana
+  reached the same verdict a month earlier: `select_batch_strategy()` ends in an
+  unconditional `return "sol_bidask"` — every mode there, turnover included,
+  enters holding zero token. (A stale docstring line above that return said
+  "turnover keeps its tight two-sided range" and misled the first cut of this
+  port on 2026-08-07; it has been corrected in place.)
+- **The five-rung wall** was not wrong for being one-sided. The on-chain fee
+  meter (§4b) shows rung 0 earning while rungs 1–2 read exactly 0 — GME rung 0
+  took 0.002039 USDG in 214m, NVDA rung 0 0.000297 in 136m, every outer rung
+  nothing. Two thirds of the capital sat below a market that never came for it.
+
+So the shape is **one rung**: all of the commit at the tick-spacing boundary
+adjacent to spot, where the fees demonstrably were, re-pinned by the loop
+whenever spot leaves it.
+
+### Geometry, and why there is no OOR fuse
+
+`weth_below` is a ladder of one — same `ladderBands()` in `uni_ladder.js` with
+`rungs=1`, so the bid-side direction invariant has a single implementation
+across both executors. Width is `TURNOVER_RUNG_TICKS` (600 WETH / 120 USDG),
+**half** a ladder rung: a wall buys depth it hopes to still be standing in after
+a fall, a re-pinned rung buys density it can collect from now.
+
+One-sided on Uniswap ALWAYS rests out of range — one-sided token0 needs
+`tickLower >= currentTick`, and a straddling range computes
+`liquidity = min(L(amount), L(0)) = 0`. DLMM has no such constraint
+(`sol_bidask` sets `upper_bin = active_bin`, single-sided *and* earning at mint),
+so Solana's 2-minute OOR fuse **cannot** be ported: it would close and re-mint
+this rung every two minutes forever. Drift and fee-death replace it, which is
+why `turnover_decide` reuses the ladder's `rung_fill_state` and
+`ladder_idle_reason` rather than the position rulebook.
+
+### What landed
+
+| leg | value | rationale |
+|---|---|---|
+| screen (`robinhood.Turnover`) | TVL $10k–150k, 7%/day pace, 60 tx/20 buyers h1 | Solana turnover's band verbatim — the only calibrated churn screen either venue has |
+| live-window gate | 20 tx / $500 / 0.073% per m15 | 0.073 = `MinFeeTVLDay / 96`, the honest window-scoped share of the daily bar |
+| shape | `weth_below`, 1 rung, 600 ticks (WETH) | the only rung of a wall that ever earned; pinned in `sizeFor`, not an operator knob |
+| re-pin on drift | 300 ticks (half the rung width) | spot has cleared the depth we were willing to buy; a single rung has half a wall's patience because re-pinning costs one mint |
+| re-pin on fee-death | ladder's own 45m/90m/0.02% window | a resting bid that earned nothing was in the wrong place, whatever the price did |
+| fill | exit + cooldown, hard tier at −8% | 6 of 11 ladder fills were a repeat in a pool that had already filled, averaging −11.8% vs −6.7% |
+| circuit breaker | −0.004 WETH or 20 re-centers per pool / 24h | re-centering only pays if crossings cover gas + spread |
+| compounding | `collect` at 0.5% of position | no `increaseLiquidity` path on either executor; the re-center redeploys it within minutes |
+
+Routing rules that make the loop a loop rather than a churn of exits: both
+re-center reasons share the `turnover re-center` prefix and are excluded from
+`exit_confirmable` (confirmation would break the cadence, and a pure-quote rung
+has no sell to time) and from `cool_off` (a cooldown would switch the mode off).
+They are the **only** reasons that re-mint — a fill or the backstop SL is the
+pool telling us it changed, and re-pinning a bid under a market that just came
+down through one is the repeat-fill pattern above. Same exclusions as
+`dlmm_monitor.py`'s `is_oor_rebalance`.
+
+The circuit breaker fails **CLOSED**, inverting `cool_off`'s rule. A cooldown
+is a brake on the close path so a broken brake must not break closing; a
+re-center is optional work *after* a close already succeeded, so an unreadable
+window means take the normal exit and let the scanner re-screen the pool.
+
+### Status
+
+Built 2026-08-07, **not yet run live**. The first cut that day shipped the wrong
+entry shape (`balanced_tight`); the operator caught it, set
+`ROBINHOOD_TURNOVER=false`, and the one-sided rebuild in this section is what
+replaced it. Everything else from that first cut — screen, circuit breaker,
+compounding, live-window gate — was correct and stands.
+
+Ladder modes are disabled at the same cutover at the operator's direction, so
+there is **no control arm** — the comparison is against the 104-close ladder
+record above, not a concurrent run. `Ladder`, `StockLadder` and `PulseLadder`
+still screen correctly and are one env toggle from returning.
+
+Unproven, and worth stating plainly: the re-center loop has never run on this
+venue, and the one-rung shape has never been minted here. The numbers to watch
+in the first day are the ratio of `turnover re-center` closes to fills (the loop
+working vs. the loop being run over), realized PnL per re-center against gas,
+whether the circuit breaker trips on any pool, and — the question the ladder
+answered badly — whether a single rung earns anything at all before it is
+re-pinned. If drift re-pins fire much faster than fees accrue,
+`UNI_TURNOVER_STALE_TICKS` is too tight, not the thesis.
 
 ## 5. Deliverable order
 

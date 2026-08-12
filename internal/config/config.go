@@ -109,6 +109,26 @@ type Config struct {
 	// with rh-ladder for gas but not for capital. Off by default; see
 	// robinhood.StockLadder.
 	EnableRobinhoodStockLadder bool
+	// EnableRobinhoodPulseLadder turns on the venue's FIFTH mode
+	// (rh-pulse-ladder): the same one-sided WETH bid wall as rh-ladder, aimed at
+	// memecoin pools in their FIRST DAY — the band between the launch feed and
+	// the gateway's 24h floor. It is the only mode that needs a carried
+	// registry, because new_pools scrolls a pool off within minutes and nothing
+	// else here indexes an eight-hour-old pool (pulse.go). It spends the same
+	// WETH balance rh-ladder does, so running both splits one wallet across two
+	// age bands. Off by default; see robinhood.PulseLadder.
+	EnableRobinhoodPulseLadder bool
+	// EnableRobinhoodTurnover turns on the venue's SIXTH mode (rh-turnover):
+	// the port of Solana's turnover thesis — ONE one-sided quote rung
+	// (weth_below) resting adjacent to spot in an oscillating pool, re-pinned
+	// when price drifts off it or it stops earning instead of closed. It
+	// replaces the ladder modes as the venue's deploy strategy (2026-08-07):
+	// 104 live ladder rung closes produced zero fee-positive exits, because
+	// two thirds of a wall's capital sits in rungs the market never reaches.
+	// Shares rh-mature's gateway feed and every safety gate, and needs
+	// uni_monitor.py's re-center loop to work at all — a resting bid nobody
+	// re-pins is just the ladder again. Off by default; see robinhood.Turnover.
+	EnableRobinhoodTurnover bool
 	// RobinhoodDiscoverURL overrides the GeckoTerminal new_pools endpoint
 	// (empty = the package default). The public tier allows 30 req/min.
 	// Applies to the Fresh mode only; rh-mature has its own source.
@@ -187,6 +207,8 @@ type Config struct {
 	RobinhoodMinGasEth float64
 	// RobinhoodDeployStrategy is the uni_executor.js mint strategy:
 	// "balanced_tight" (two-sided, swaps half) or "weth_below" (one-sided).
+	// rh-turnover ignores it and pins weth_below in scanner.sizeFor — its shape
+	// is part of the thesis, not an operator knob.
 	RobinhoodDeployStrategy string
 	RobinhoodRangePct       float64
 	RobinhoodSlippagePct    float64
@@ -363,6 +385,8 @@ func loadConfig() Config {
 		EnableRobinhoodLadder: getbool("ROBINHOOD_LADDER", false),
 
 		EnableRobinhoodStockLadder: getbool("ROBINHOOD_STOCK_LADDER", false),
+		EnableRobinhoodPulseLadder: getbool("ROBINHOOD_PULSE_LADDER", false),
+		EnableRobinhoodTurnover:    getbool("ROBINHOOD_TURNOVER", false),
 
 		RobinhoodDiscoverURL: getenv("ROBINHOOD_DISCOVER_URL", ""),
 		RobinhoodWebhook:     getbool("ROBINHOOD_WEBHOOK", false),
@@ -373,7 +397,7 @@ func loadConfig() Config {
 		// ladder is "usdg-ladder". It is NOT in the default set: the USDG rungs
 		// spend a balance the wallet may not hold, and enabling discovery for it
 		// should not silently enable spending.
-		RobinhoodDeployModes:   getmodes("ROBINHOOD_DEPLOY_MODES", "fresh,mature,ladder"),
+		RobinhoodDeployModes:   getmodes("ROBINHOOD_DEPLOY_MODES", "fresh,mature,ladder,turnover"),
 		RobinhoodExecutorCmd:   getenv("ROBINHOOD_EXECUTOR_CMD", ""),
 		RobinhoodV4ExecutorCmd: getenv("ROBINHOOD_V4_EXECUTOR_CMD", ""),
 		RobinhoodDeployTimeout: getdur("ROBINHOOD_DEPLOY_TIMEOUT", 2*time.Minute),

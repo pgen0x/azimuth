@@ -14,6 +14,10 @@
 // how a wall silently ends up re-pinning at a width it was never minted at. So:
 // one definition, required by both executors.
 //
+// The same argument covers `weth_below`, the ONE-rung turnover shape at the
+// bottom of this file: it is a ladder of one, laid by the same ladderBands(),
+// and uni_monitor.py judges its drift against the width defined here.
+//
 // Everything here is pure — no chain access, no protocol types. The `q` argument
 // is any quote descriptor carrying `{symbol, decimals}`, which both executors'
 // quote objects satisfy (v3's resolveQuote() result and v4's QUOTES entry).
@@ -100,6 +104,47 @@ const LADDER_MIN_RUNG = {
 LADDER_RUNG_TICKS.ETH = LADDER_RUNG_TICKS.WETH;
 LADDER_MIN_RUNG.ETH = LADDER_MIN_RUNG.WETH;
 
+// --- turnover: the SINGLE rung ---------------------------------------------
+// `weth_below` is the same one-sided resting bid as a ladder rung, minted ONE
+// at a time and re-pinned instead of stacked. It lives here rather than in the
+// executors for the same reason the ladder numbers do: uni_monitor.py's
+// `turnover re-center` drift rule (TURNOVER_STALE_TICKS) is judged against this
+// width, so a copy per executor plus a copy in the monitor is three chances to
+// re-pin at a width nothing was ever minted at.
+//
+// Why one rung and not five (2026-08-07): 104 live ladder closes produced zero
+// fee-positive exits, and the on-chain fee meter says why — the NEAR rung is
+// the only one that ever earned (GME rung 0: 0.002039 USDG/214m, while NVDA
+// rungs 1-2 and all three TSLA rungs read exactly 0). The ladder did not fail
+// for being one-sided; it failed because two thirds of the capital sat in rungs
+// the market never traded into. One rung puts all of it where the fees were.
+//
+// Narrower than a ladder rung on purpose (600 vs 1200 WETH ticks, ~5.8% of
+// covered drop vs ~11%). A ladder buys DEPTH — it wants to still be there after
+// a fall — while turnover buys DENSITY: range it cannot reach before the next
+// re-center is liquidity spread thin for nothing.
+//
+// The USDG figure is LATENT — robinhood.Turnover is WETH-pinned, and the
+// equities that make up the USDG universe are the wrong book for this thesis
+// (a deep, low-vol stock pool crosses a tight range rarely, which is the one
+// thing the mode is paid for). It is here so the shape has an answer if that is
+// ever revisited, and it carries the ladder's quantization trap: at the 1% tier
+// (spacing 200) a 120-tick request rounds UP to 200, so the rung covers ~2.0%
+// while UNI_TURNOVER_STALE_TICKS_USDG still judges drift at 60. Calibrate that
+// pair against the executor's log line, not the env var, before enabling it.
+const TURNOVER_RUNG_TICKS = {
+  WETH: parseInt(process.env.UNI_TURNOVER_RUNG_TICKS || "600", 10),
+  USDG: parseInt(process.env.UNI_TURNOVER_RUNG_TICKS_USDG || "120", 10),
+};
+TURNOVER_RUNG_TICKS.ETH = TURNOVER_RUNG_TICKS.WETH;
+
+// turnoverGeom is ladderGeom's one-rung sibling: same unknown-quote fallback,
+// no minRung (a single rung IS the whole commit, so there is nothing to drop to
+// keep it above dust — the deploy floor in the Go daemon is what guards that).
+function turnoverGeom(q) {
+  return { rungTicks: TURNOVER_RUNG_TICKS[q.symbol] ?? TURNOVER_RUNG_TICKS.WETH };
+}
+
 // ladderGeom resolves the per-quote geometry. Unknown quotes fall back to the
 // WETH numbers — silently minting a zero-width rung would be worse than an
 // approximation.
@@ -166,28 +211,43 @@ function ladderSizes(amountRaw, rungs, q) {
   return { sizes, rungs: n };
 }
 
-// ladderBands lays `rungs` contiguous, non-overlapping ranges on the BID side
-// of `tick` — the side where the token is CHEAPER than spot, so each rung is a
-// resting quote-asset bid that only converts if price comes down to it.
+// ladderBands lays `rungs` contiguous, non-overlapping ranges on ONE side of
+// `tick`, holding a single asset:
 //
-// Which tick direction that is depends on token ordering: the pool price is
-// token1/token0, so with the QUOTE as token0 a RISING tick means more token per
-// unit of quote (token cheaper) and the ladder goes up; with the quote as token1
-// it goes down. Getting this backwards would mint an ask ladder that sells token
-// we do not hold — on v3 the mint would take nothing and refund, and on v4 it
-// reverts against the token side's zero amountMax — so this is a correctness
-// invariant, not a preference.
+//   side="bid" (default) — the side where the token is CHEAPER than spot, so
+//     each rung is a resting QUOTE bid that converts to token only if price
+//     comes down to it. Every ladder and the turnover rung use this.
+//   side="ask" — the mirror: the side where the token is DEARER than spot, so
+//     each rung is a resting TOKEN offer that converts back to quote only if
+//     price comes up to it. This is what a filled bid is re-listed as, so the
+//     round trip is buy-low/sell-high instead of buy-low/market-dump.
+//
+// Which tick direction either side is depends on token ordering: the pool price
+// is token1/token0, so with the QUOTE as token0 a RISING tick means more token
+// per unit of quote (token cheaper) and the BID side goes up; with the quote as
+// token1 it goes down. The ask side is the opposite in both cases, which is why
+// `up` below is the equality of two booleans rather than two copies of the loop.
+//
+// Getting this backwards mints a band against an asset we do not hold — on v3
+// the mint takes nothing and refunds, on v4 it reverts against that side's zero
+// amountMax — so this is a correctness invariant, not a preference. It is also
+// why the side is an explicit argument: a caller that means "sell this bag"
+// must say so, never infer it from whichever balance happens to be non-zero.
 //
 // Rungs are returned inner-first (index 0 nearest spot) to line up with
 // ladderSizes()'s smallest-first ramp.
-function ladderBands(tick, spacing, quoteIs0, rungs, rungTicks) {
+function ladderBands(tick, spacing, quoteIs0, rungs, rungTicks, side = "bid") {
+  if (side !== "bid" && side !== "ask") throw new Error(`ladderBands: bad side ${side}`);
   const w = rungWidth(spacing, rungTicks);
   const round = (t, up) => (up ? Math.ceil(t / spacing) : Math.floor(t / spacing)) * spacing;
   const bands = [];
-  if (quoteIs0) {
-    // Start one spacing ABOVE spot so rung 0 is adjacent but never straddles: a
-    // straddling rung would demand both tokens and take only part of the quote
-    // offered.
+  // Bid with quote-as-token0 ascends; flipping either the side or the ordering
+  // flips the direction, so "both true or both false" is what ascending means.
+  const up = (side === "bid") === Boolean(quoteIs0);
+  if (up) {
+    // Start one spacing AWAY from spot so rung 0 is adjacent but never
+    // straddles: a straddling rung would demand both tokens and take only part
+    // of the single asset offered.
     const base = round(tick + spacing, true);
     for (let k = 0; k < rungs; k++) {
       bands.push({ tickLower: base + k * w, tickUpper: base + (k + 1) * w });
@@ -216,6 +276,8 @@ module.exports = {
   LADDER_RUNGS,
   LADDER_RUNG_TICKS,
   LADDER_MIN_RUNG,
+  TURNOVER_RUNG_TICKS,
+  turnoverGeom,
   ladderGeom,
   rungWidth,
   ladderSizes,

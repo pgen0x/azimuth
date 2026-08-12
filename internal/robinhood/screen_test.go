@@ -202,6 +202,10 @@ func TestLadderTakesChurnPoolsMatureRejects(t *testing.T) {
 		VolumeH24USD: 343200,
 		VolumeH1USD:  14300,
 		TxH1:         gtTxWindow{Buys: 25, Sells: 20, Buyers: 15, Sellers: 12},
+		// Live-window flow, at the h1 rate: $3575 of m15 volume on $132k of
+		// reserve at the 1% tier = 0.027%/15m, well over the 0.0010 floor.
+		VolumeM15USD: 3575,
+		TxM15:        gtTxWindow{Buys: 7, Sells: 5, Buyers: 5, Sellers: 4},
 		ChangeM5Pct:  1, ChangeH1Pct: 2, ChangeH6Pct: 3, ChangeH24Pct: 5,
 	}
 
@@ -243,6 +247,8 @@ func TestLadderAcceptsTheReserveBandMatureCapsOut(t *testing.T) {
 		VolumeH24USD: 1669686, // 1.6%/day — over Ladder's 1.5 floor, under Mature's 8
 		VolumeH1USD:  65000,
 		TxH1:         gtTxWindow{Buys: 40, Sells: 30, Buyers: 20, Sellers: 15},
+		VolumeM15USD: 16250,
+		TxM15:        gtTxWindow{Buys: 10, Sells: 8, Buyers: 7, Sellers: 5},
 		ChangeM5Pct:  0, ChangeH1Pct: 1, ChangeH6Pct: 2, ChangeH24Pct: 3,
 	}
 	if _, reason := Screen(p, Mature, now); !strings.Contains(reason, "reserve") {
@@ -274,8 +280,15 @@ func stockPool(now time.Time) Pool {
 		VolumeH1USD:  95000,
 		// Thin h1 flow on purpose: equities trade on market hours, and the
 		// mode's floors (10/3) exist to allow exactly this.
-		TxH1:        gtTxWindow{Buys: 8, Sells: 6, Buyers: 5, Sellers: 4},
-		ChangeM5Pct: 0.1, ChangeH1Pct: 0.4, ChangeH6Pct: -1, ChangeH24Pct: 2,
+		TxH1: gtTxWindow{Buys: 8, Sells: 6, Buyers: 5, Sellers: 4},
+		// Live-window flow at the h1 rate: $23,750/15m on $714k at the 0.05%
+		// tier = 0.0017%/15m, over the 0.0010 floor. The SAME pool read on
+		// 2026-08-07 did 156 swaps but only $9,004 of m15 volume — 0.0006% —
+		// and fails, which is the gate working: the tier is thin enough that
+		// heavy traffic still pays a wall nothing.
+		VolumeM15USD: 23750,
+		TxM15:        gtTxWindow{Buys: 5, Sells: 4, Buyers: 4, Sellers: 3},
+		ChangeM5Pct:  0.1, ChangeH1Pct: 0.4, ChangeH6Pct: -1, ChangeH24Pct: 2,
 	}
 }
 
@@ -379,5 +392,177 @@ func TestEquityProfileIsInvisibleToTheMemecoinModes(t *testing.T) {
 	if pace < StockLadder.MinFeeTVLDay {
 		t.Errorf("equity pace %.2f%%/day is under rh-usdg-ladder's own %.2f floor — the mode would screen nothing",
 			pace, StockLadder.MinFeeTVLDay)
+	}
+}
+
+// The live-window gates exist because of one number: of 102 ladder closes to
+// 2026-08-07, 91 were `ladder idle` or `ladder stale` — a wall that earned
+// EXACTLY ZERO and re-pinned on a timer. Every one of those pools cleared the
+// h1 flow floors and the daily fee pace at mint, because an hourly window
+// cannot tell a book that is trading from one that traded 50 minutes ago.
+//
+// This pins the two shapes that fooled the old screen, taken from the real
+// pools the ladders minted into (re-read from GeckoTerminal 2026-08-07).
+func TestLiveWindowGatesRejectTheFeeDeadProfiles(t *testing.T) {
+	now := time.Now()
+
+	// aapl / USDG 0.3%: a genuinely deep, genuinely still book. $183k of
+	// reserve, real 24h history, and zero flow in the last 15 minutes.
+	stalled := stockPool(now)
+	stalled.Name = "aapl / USDG 0.3%"
+	stalled.FeePct = 0.3
+	stalled.ReserveUSD = 183633
+	stalled.VolumeH24USD = 128543 // 0.21%/day — still over the mode's 0.2 floor
+	stalled.VolumeM15USD = 0
+	stalled.TxM15 = gtTxWindow{}
+	if _, reason := Screen(stalled, StockLadder, now); !strings.Contains(reason, "m15") {
+		t.Errorf("a book with zero 15m flow passed rh-usdg-ladder: %q", reason)
+	}
+
+	// nvda / USDG 0.05%: the opposite failure. 156 swaps in 15 minutes — the
+	// busiest book on the venue — but the tier is so thin against the reserve
+	// that a wall parked in it earns rounding error. Traffic is not flow.
+	thinTier := stockPool(now)
+	thinTier.ReserveUSD = 727569
+	thinTier.VolumeM15USD = 9004
+	thinTier.TxM15 = gtTxWindow{Buys: 70, Sells: 86, Buyers: 40, Sellers: 50}
+	_, reason := Screen(thinTier, StockLadder, now)
+	if !strings.Contains(reason, "m15 fee/TVL") {
+		t.Errorf("a 0.05%%-tier deep book passed on swap COUNT alone: %q", reason)
+	}
+
+	// And the dust guard: this venue's collapsed launch template reads an
+	// enormous fee/TVL because its reserve has evaporated, not because it
+	// trades. Three of the eight WETH pools laddered on 2026-08-06/07 had
+	// decayed into exactly this by the time they were re-read.
+	dust := stockPool(now)
+	dust.Name = "MANCER / WETH 1%"
+	dust.CreatedAt = now.Add(-6 * time.Hour) // inside rh-pulse-ladder's 1h-24h band
+	dust.QuoteAddress, dust.QuoteSymbol = WETH, "WETH"
+	dust.FeePct = 1
+	dust.ReserveUSD = 12000 // over PulseLadder's floor; the m15 flow is what is missing
+	dust.VolumeH24USD = 240000
+	dust.VolumeH1USD = 10000
+	dust.TxH1 = gtTxWindow{Buys: 20, Sells: 18, Buyers: 12, Sellers: 10}
+	dust.VolumeM15USD = 120 // clears the ratio floor (0.01%/15m), fails the raw one
+	dust.TxM15 = gtTxWindow{Buys: 5, Sells: 4, Buyers: 4, Sellers: 3}
+	if _, reason := Screen(dust, PulseLadder, now); !strings.Contains(reason, "m15") {
+		t.Errorf("a $120-per-15m book passed rh-pulse-ladder: %q", reason)
+	}
+}
+
+// Every deploying ladder mode must carry the live-window gates. A mode that
+// silently omits them opts out (they are zero-disabled like the rest of
+// ModeParams), and opting out is precisely how the fee-dead era happened.
+func TestEveryLadderModeSetsTheLiveWindowGates(t *testing.T) {
+	for _, mp := range []ModeParams{Ladder, PulseLadder, StockLadder} {
+		if mp.MinTxM15 == 0 || mp.MinVolumeM15USD == 0 || mp.MinFeeTVLM15Pct == 0 {
+			t.Errorf("%s has a zero-disabled live-window gate (tx %d, vol %.0f, fee %.4f)",
+				mp.Mode, mp.MinTxM15, mp.MinVolumeM15USD, mp.MinFeeTVLM15Pct)
+		}
+	}
+}
+
+// rh-turnover exists because the ladder screens found churn and then earned
+// nothing from it (104 closes, zero fee-positive). The mode must therefore
+// accept the oscillating mid-band pool that Mature's yield bar rejects, while
+// still demanding LIVE flow — the m15 pair is what separates a book trading now
+// from one that traded fifty minutes ago.
+func TestTurnoverTakesOscillatingPoolsMatureRejects(t *testing.T) {
+	now := time.Now()
+	p := Pool{
+		Address:      "0xc4a21f9d6485fc5893dd4a491b320a83daf4da1d",
+		Name:         "OSC / WETH 1%",
+		Dex:          "uniswap-v3-robinhood",
+		CreatedAt:    now.Add(-8 * 24 * time.Hour),
+		BaseAddress:  "0x21028be78e8f521214d24328715c1a8aadbac5a8",
+		BaseSymbol:   "OSC",
+		QuoteAddress: WETH,
+		QuoteSymbol:  "WETH",
+		FeePct:       1,
+		ReserveUSD:   132000,
+		FdvUSD:       1800000,
+		// 990000 * 1% / 132000 = 7.5%/day — over Turnover's 7.0 floor, under
+		// Mature's 8. Both read the realized 24h window (FeePaceH24).
+		VolumeH24USD: 990000,
+		VolumeH1USD:  41250,
+		TxH1:         gtTxWindow{Buys: 40, Sells: 35, Buyers: 22, Sellers: 18},
+		// m15 at the h1 rate: $10312 on $132k of reserve at 1% = 0.078%/15m,
+		// just over the 0.073 window-scoped floor (MinFeeTVLDay / 96).
+		VolumeM15USD: 10312,
+		TxM15:        gtTxWindow{Buys: 12, Sells: 10, Buyers: 8, Sellers: 7},
+		ChangeM5Pct:  1, ChangeH1Pct: 2, ChangeH6Pct: 3, ChangeH24Pct: 5,
+	}
+
+	if _, reason := Screen(p, Mature, now); reason == "" {
+		t.Fatal("Mature accepted a 7.5%/day pool; its 8%/day bar is what makes rh-turnover necessary")
+	}
+
+	cand, reason := Screen(p, Turnover, now)
+	if reason != "" {
+		t.Fatalf("Turnover rejected a pool matching its reference profile: %s", reason)
+	}
+	if cand.Mode != "rh-turnover" {
+		t.Errorf("Mode = %q, want rh-turnover", cand.Mode)
+	}
+}
+
+// The dominant ladder failure was a pool that cleared every 24h gate and then
+// sat untraded — 91 of 102 closes earned exactly zero. Turnover is even less
+// tolerant of that than a wall is: it commits everything to ONE rung and its
+// only response to a dead window is to re-pin, so a pool that has stopped
+// trading does not just idle, it burns gas discovering that on a loop.
+func TestTurnoverRejectsDeadLiveWindow(t *testing.T) {
+	now := time.Now()
+	p := Pool{
+		Address:      "0xdeadfeed00000000000000000000000000000001",
+		Name:         "STALE / WETH 1%",
+		Dex:          "uniswap-v3-robinhood",
+		CreatedAt:    now.Add(-8 * 24 * time.Hour),
+		BaseAddress:  "0x21028be78e8f521214d24328715c1a8aadbac5a8",
+		BaseSymbol:   "STALE",
+		QuoteAddress: WETH,
+		QuoteSymbol:  "WETH",
+		FeePct:       1,
+		ReserveUSD:   132000,
+		FdvUSD:       1800000,
+		VolumeH24USD: 990000, // 7.5%/day on the 24h window: passes
+		VolumeH1USD:  41250,
+		TxH1:         gtTxWindow{Buys: 40, Sells: 35, Buyers: 22, Sellers: 18},
+		VolumeM15USD: 0, // ...but nothing has traded in the last 15 minutes
+		TxM15:        gtTxWindow{},
+		ChangeM5Pct:  0, ChangeH1Pct: 2, ChangeH6Pct: 3, ChangeH24Pct: 5,
+	}
+	if _, reason := Screen(p, Turnover, now); reason == "" {
+		t.Fatal("Turnover accepted a pool with a dead 15m window — the exact ladder failure it replaces")
+	}
+}
+
+// The mode spends WETH and mints a WETH-denominated two-sided range. A
+// USDG-quoted equity in this batch would be sized in one asset and minted in
+// another, and its deep low-vol book crosses a tight range too rarely anyway.
+func TestTurnoverRejectsUsdgQuotedPools(t *testing.T) {
+	now := time.Now()
+	p := Pool{
+		Address:      "0xdeadfeed00000000000000000000000000000002",
+		Name:         "NVDA / USDG 0.3%",
+		Dex:          "uniswap-v3-robinhood",
+		CreatedAt:    now.Add(-8 * 24 * time.Hour),
+		BaseAddress:  "0x21028be78e8f521214d24328715c1a8aadbac5a8",
+		BaseSymbol:   "NVDA",
+		QuoteAddress: USDG,
+		QuoteSymbol:  "USDG",
+		FeePct:       0.3,
+		ReserveUSD:   132000,
+		FdvUSD:       1800000,
+		VolumeH24USD: 3300000,
+		VolumeH1USD:  137500,
+		TxH1:         gtTxWindow{Buys: 40, Sells: 35, Buyers: 22, Sellers: 18},
+		VolumeM15USD: 34375,
+		TxM15:        gtTxWindow{Buys: 12, Sells: 10, Buyers: 8, Sellers: 7},
+		ChangeM5Pct:  1, ChangeH1Pct: 2, ChangeH6Pct: 3, ChangeH24Pct: 5,
+	}
+	if _, reason := Screen(p, Turnover, now); reason == "" {
+		t.Fatal("Turnover accepted a USDG-quoted pool despite its WETH quote pin")
 	}
 }

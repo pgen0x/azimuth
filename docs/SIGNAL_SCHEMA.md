@@ -108,7 +108,7 @@ Every element of `payload` is one candidate pool with these fields:
 | `active_tvl` / `volume_active_tvl_ratio` / `unique_lps` / `positions_created` | the Degen Score inputs, exposed so the agent sees *why* a score is high or low |
 | `unverified` | the API reported `is_verified: false` and the mode allowed it through anyway (turnover only — casual/multiday still hard-reject). `score` already carries a ×0.85 haircut, so no further penalty is needed; treat it as a tie-break signal against an equally strong verified pool. **Absent** = verified or unknown, never unverified |
 | `bot_holders_pct` / `global_fees_sol` | Jupiter audit enrichment (audit gate). **May be absent** — absent means the audit fetch failed (fail-open); treat as unknown, never as zero |
-| `dev` | deployer wallet address from the Jupiter asset record. The pipeline hard-skips devs in the `sol:dlmm:blocklist:dev` Redis set and stores the value in position metadata so a rug close blocklists the dev permanently. **May be absent** — unknown deployer (fail-open) |
+| `dev` | deployer wallet address from the Jupiter asset record. The pipeline hard-skips devs holding a `sol:dlmm:blocklist:dev:<wallet>` Redis key and stores the value in position metadata so a rug close blocklists the dev for `DEV_BLOCKLIST_TTL_DAYS` (default 30d). **May be absent** — unknown deployer (fail-open) |
 | `prior_closes` / `prior_net_pnl_sol` | pool memory summary from the monitor's close journal (`sol:dlmm:history:pool:<pool>`, last 10 closes / 30d). **May be absent** — absent means no history (or non-Redis dedup backend), not a clean record. Negative net PnL = this pool cost us before |
 | `is_pvp` + `pvp_rival_name` / `pvp_rival_mint` / `pvp_rival_pool` / `pvp_rival_tvl` / `pvp_rival_holders` / `pvp_rival_fees_sol` | same-symbol rival detection: an established token (≥500 holders, ≥30 SOL fees) sharing this ticker has its own live DLMM pool (≥$5k TVL) — a ticker war. Advisory flag, never a daemon reject. **Absent** = no rival found or check failed (fail-open) |
 | `gmgn_smart_wallets` / `gmgn_kol_wallets` | GMGN holder quality (GMGN gate): count of smart-money wallets (proven profitable traders) and KOL/fund wallets currently holding. Higher = stronger conviction; 0 = nobody notable in yet. **May be absent** — fetch failed or gate disabled (fail-open); treat as unknown, never as zero |
@@ -180,6 +180,9 @@ deploy pick and stays observe-only.
   "reserve_usd": 23794.0,
   "fdv_usd": 297000.0,
   "mcap_usd": 0,
+  "volume_m15_usd": 1830.0,
+  "tx_m15": 14,
+  "fee_tvl_m15_pct": 0.0769,
   "volume_h1_usd": 7539.0,
   "volume_h24_usd": 7539.0,
   "fee_tvl_day_pct": 7.6,
@@ -215,6 +218,12 @@ Field notes:
 - `fee_tvl_day_pct` — projected daily fee/TVL %, computed as
   `volume_h1 x 24 x fee_pct / reserve` (GeckoTerminal exposes no fee field;
   v3 fees are deterministic).
+- `volume_m15_usd` / `tx_m15` / `fee_tvl_m15_pct` — the LIVE 15-minute window,
+  the port of Solana pulse's short-window gates. `fee_tvl_m15_pct` is
+  window-scoped, **not** annualized: it is the fee the whole pool paid its LPs
+  in the last 15 minutes as a percent of reserve, so it reads three orders of
+  magnitude below `fee_tvl_day_pct` and the two must never be compared. The
+  ladder modes gate on all three; the older modes leave them zero-disabled.
 - `holders` + all `gmgn_*` — enrichment, absent on fetch failure (fail-open);
   treat missing as unknown, never zero.
 - `protocol` — `"v3"` or `"v4"`. For v4 the `pool` field is the bytes32

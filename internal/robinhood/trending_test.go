@@ -34,10 +34,11 @@ const gtTrendingPage = `{
         "market_cap_usd": "430000.0",
         "price_change_percentage": {"m5": "0.4", "h1": "1.9", "h6": "-3.2", "h24": "7.5"},
         "transactions": {
+          "m15": {"buys": 11, "sells": 7, "buyers": 6, "sellers": 5},
           "h1":  {"buys": 40, "sells": 25, "buyers": 18, "sellers": 12},
           "h24": {"buys": 620, "sells": 480, "buyers": 210, "sellers": 160}
         },
-        "volume_usd": {"h1": "6000.0", "h24": "120000.0"}
+        "volume_usd": {"m15": "1500.0", "h1": "6000.0", "h24": "120000.0"}
       },
       "relationships": {
         "base_token":  {"data": {"id": "robinhood_lemon", "type": "token"}},
@@ -253,7 +254,7 @@ func TestLadderEligible(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := ladderEligible([]Pool{tc.pool}, tc.mode)
+			got := feedEligible([]Pool{tc.pool}, tc.mode)
 			if (len(got) == 1) != tc.want {
 				t.Fatalf("eligible=%v (n=%d), want %v", len(got) == 1, len(got), tc.want)
 			}
@@ -265,7 +266,7 @@ func TestLadderEligible(t *testing.T) {
 // fixture: the USDG/nvda pool survives the DEX filter and must still never
 // reach the WETH ladder's batch.
 func TestLadderEligibleRejectsUsdgFromTrendingPage(t *testing.T) {
-	eligible := ladderEligible(parseTrendingFixture(t), Ladder)
+	eligible := feedEligible(parseTrendingFixture(t), Ladder)
 	if len(eligible) != 1 {
 		t.Fatalf("eligible=%d, want 1 (only the WETH v3 pool)", len(eligible))
 	}
@@ -304,6 +305,9 @@ func TestTrendingPoolFieldParity(t *testing.T) {
 		{"ReserveUSD", p.ReserveUSD == 0},
 		{"FdvUSD", p.FdvUSD == 0},
 		{"McapUSD", p.McapUSD == 0},
+		{"VolumeM15USD", p.VolumeM15USD == 0},
+		{"TxM15.Buys", p.TxM15.Buys == 0},
+		{"TxM15.Sells", p.TxM15.Sells == 0},
 		{"VolumeH1USD", p.VolumeH1USD == 0},
 		{"VolumeH24USD", p.VolumeH24USD == 0},
 		{"TxH1.Buys", p.TxH1.Buys == 0},

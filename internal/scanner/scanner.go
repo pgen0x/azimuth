@@ -95,6 +95,7 @@ func New(cfg config.Config) *Scanner {
 	// REDIS_ADDR configured, *store.Seen answers "not cached" to every read and
 	// this is a no-op — no branch needed here.
 	robinhood.SetCandleStore(seen)
+	robinhood.SetWatchStore(seen)
 	return &Scanner{
 		cfg:     cfg,
 		seen:    seen,
@@ -133,11 +134,13 @@ func (s *Scanner) Run(ctx context.Context) {
 	// (guard-secrets.sh), so this line is the operator's ONLY way to confirm a
 	// config edit actually took effect. A silently-wrong strategy here spends
 	// real money on the wrong shape.
-	log.Printf("scanner: started (interval=%v, casual=%v, multiday=%v, turnover=%v, pulse=%v, momentum=%v, robinhood=%v, rh-mature=%v, rh-ladder=%v, rh-usdg-ladder=%v)",
+	log.Printf("scanner: started (interval=%v, casual=%v, multiday=%v, turnover=%v, pulse=%v, momentum=%v, robinhood=%v, rh-mature=%v, rh-ladder=%v, rh-usdg-ladder=%v, rh-pulse-ladder=%v, rh-turnover=%v)",
 		s.cfg.PollInterval, s.cfg.EnableCasual, s.cfg.EnableMultiday, s.cfg.EnableTurnover, s.cfg.EnablePulse,
 		s.cfg.EnableMomentumGate, s.cfg.EnableRobinhood, s.cfg.EnableRobinhoodMature, s.cfg.EnableRobinhoodLadder,
-		s.cfg.EnableRobinhoodStockLadder)
-	if s.cfg.EnableRobinhood || s.cfg.EnableRobinhoodMature || s.cfg.EnableRobinhoodLadder || s.cfg.EnableRobinhoodStockLadder {
+		s.cfg.EnableRobinhoodStockLadder, s.cfg.EnableRobinhoodPulseLadder, s.cfg.EnableRobinhoodTurnover)
+	if s.cfg.EnableRobinhood || s.cfg.EnableRobinhoodMature || s.cfg.EnableRobinhoodLadder ||
+		s.cfg.EnableRobinhoodStockLadder || s.cfg.EnableRobinhoodPulseLadder ||
+		s.cfg.EnableRobinhoodTurnover {
 		modes := make([]string, 0, len(s.cfg.RobinhoodDeployModes))
 		for m := range s.cfg.RobinhoodDeployModes {
 			modes = append(modes, m)
@@ -211,6 +214,42 @@ func (s *Scanner) pollAll(ctx context.Context) {
 		// prefilter and Screen.
 		s.pollRobinhood(ctx, robinhood.StockLadder, func(now time.Time) ([]robinhood.Pool, error) {
 			return robinhood.FetchMaturePools(robinhood.StockLadder, now)
+		})
+	}
+	if s.cfg.EnableRobinhoodTurnover {
+		// TWO sources unioned (FetchTurnoverPools): the gateway feed a fourth
+		// time, prefiltered with the turnover band, PLUS GeckoTerminal's pool
+		// list ranked by 24h volume. Same cost argument as rh-usdg-ladder for
+		// the gateway half — the prefilter is what holds that enrich to ONE
+		// request, and it can only be tuned to one mode's gates, so the modes
+		// cannot share a fetch.
+		//
+		// The ranked half is THIS mode's, not the ladders'. A churn thesis is
+		// paid in fee_tier x volume, while the gateway ranks by TVL, which sorts
+		// hardest for the deep books where a small position earns least. The
+		// measurement that forced it: of the 19 pools this mode minted into over
+		// 2026-08-07..08, only 2 appear anywhere in the venue's top 60 by volume
+		// (ranked.go).
+		//
+		// Ordered BEFORE the pulse ladder deliberately. rh-turnover is the
+		// venue's earning thesis as of 2026-08-07 and the ladders are the
+		// comparison arm, so when the GeckoTerminal budget runs short it must be
+		// a ladder that starves, not this (see the rate-limit note in gtlimit.go
+		// — the mode that runs last is the one a spent budget starves first).
+		s.pollRobinhood(ctx, robinhood.Turnover, func(now time.Time) ([]robinhood.Pool, error) {
+			return robinhood.FetchTurnoverPools(robinhood.Turnover, now)
+		})
+	}
+	if s.cfg.EnableRobinhoodPulseLadder {
+		// The only mode whose feed this venue cannot serve on demand. Its band
+		// (1h-24h) sits between new_pools, which scrolls a pool off in minutes,
+		// and the gateway, which starts at 24h — so FetchPulsePools reads a
+		// registry the launch sweeps have been filling all along (pulse.go).
+		// Ordered LAST for the reason rh-usdg-ladder trails rh-ladder: its enrich
+		// is one more GeckoTerminal request, and the mode that runs last is the
+		// one a spent budget starves first.
+		s.pollRobinhood(ctx, robinhood.PulseLadder, func(now time.Time) ([]robinhood.Pool, error) {
+			return robinhood.FetchPulsePools(robinhood.PulseLadder, now)
 		})
 	}
 }
@@ -322,6 +361,24 @@ func (s *Scanner) sizeFor(c *robinhood.Candidate, bal robinhood.Balances) deploy
 	if sz.strategy == "weth_ladder" && sz.unit == "USDG" {
 		sz.strategy = "usdg_ladder"
 	}
+	// rh-turnover's shape is intrinsic to its thesis, not an operator choice, so
+	// the mode pins it rather than inheriting ROBINHOOD_DEPLOY_STRATEGY — the
+	// same way the quote asset pins it above. `weth_below` is ONE one-sided
+	// quote rung resting adjacent to spot, re-pinned by uni_monitor.py whenever
+	// price drifts off it or it stops earning.
+	//
+	// Not a ladder, and not two-sided, and both halves of that are evidence:
+	// 104 live ladder closes earned zero because two thirds of the capital sat
+	// in rungs the market never traded into, while `balanced_tight` pre-swaps
+	// half the commit into the memecoin and lost 15.04%/trade holding it. Solana
+	// settled the same question in select_batch_strategy(), which ends in an
+	// unconditional `return "sol_bidask"` — every mode there, turnover included,
+	// enters holding zero token. What turnover adds over the ladder is not the
+	// shape but the re-center loop, which is what the churn screen was always
+	// paying for.
+	if c.Mode == robinhood.Turnover.Mode {
+		sz.strategy = "weth_below"
+	}
 	sz.amount = robinhood.ComputeDeployAmount(sz.sizeBal, sz.sizeCfg)
 	if sz.amount <= 0 {
 		sz.skip = fmt.Sprintf("%.5f %s balance cannot fund a %.5f floor position (reserve %.5f)",
@@ -330,7 +387,18 @@ func (s *Scanner) sizeFor(c *robinhood.Candidate, bal robinhood.Balances) deploy
 	return sz
 }
 
-func (s *Scanner) robinhoodDeploy(ctx context.Context, mode string, batch []*robinhood.Candidate) {
+// robinhoodDeploy returns whether the batch was CONSUMED — i.e. reached a
+// decision that depended on the candidates themselves (deployed, or rejected by
+// the picker / entry timing). It returns false when the blocker was wallet
+// state rather than the pools: at the position cap, an uncountable inventory,
+// an unreadable balance, a quote asset too thin to fund the floor, or an
+// executor that failed to mint. Those resolve on their own — a position
+// closes, a transfer lands, the next mint sticks — and the caller
+// unmarks the batch so the pools come back next cycle instead of serving their
+// full ROBINHOOD_SEEN_TTL in silence. Measured 2026-08-06: a 0-WETH wallet
+// silenced its only pulse-ladder candidate for six hours on a skip that cost
+// the pool nothing.
+func (s *Scanner) robinhoodDeploy(ctx context.Context, mode string, batch []*robinhood.Candidate) bool {
 	// Keep only candidates an enabled executor can actually mint: v3 pools
 	// need uni_executor.js, v4 poolIds need uni_v4_executor.js (Phase 7).
 	// With no v4 executor configured, v4 candidates stay observe-only —
@@ -345,7 +413,9 @@ func (s *Scanner) robinhoodDeploy(ctx context.Context, mode string, batch []*rob
 		log.Printf("scanner[%s]: %d candidate(s) excluded from deploy (no executor for their protocol)", mode, len(batch)-len(eligible))
 	}
 	if len(eligible) == 0 {
-		return
+		// Consumed: no enabled executor can ever mint these pools, so retrying
+		// them next cycle would only re-walk the same protocol mismatch.
+		return true
 	}
 
 	// Walk candidates in score order (copycats demoted: a same-symbol collision
@@ -371,7 +441,7 @@ func (s *Scanner) robinhoodDeploy(ctx context.Context, mode string, batch []*rob
 		inv, err := r.Inventory(ctx)
 		if err != nil {
 			log.Printf("scanner[%s]: DEPLOY SKIPPED (position count unknown, failing closed): %v", mode, err)
-			return
+			return false
 		}
 		open += inv.Ladders
 		for t, n := range inv.ByToken {
@@ -381,7 +451,7 @@ func (s *Scanner) robinhoodDeploy(ctx context.Context, mode string, batch []*rob
 	if open >= s.cfg.RobinhoodMaxOpenPositions {
 		log.Printf("scanner[%s]: DEPLOY SKIPPED %s (%s): at position cap %d/%d",
 			mode, eligible[0].BaseSymbol, eligible[0].Pool[:10], open, s.cfg.RobinhoodMaxOpenPositions)
-		return
+		return false
 	}
 
 	order := pickOrder(eligible)
@@ -411,7 +481,7 @@ func (s *Scanner) robinhoodDeploy(ctx context.Context, mode string, batch []*rob
 		bal, err := s.runnerFor(c).Balance(ctx)
 		if err != nil {
 			log.Printf("scanner[%s]: DEPLOY SKIPPED (balance unknown, failing closed): %v", mode, err)
-			return
+			return false
 		}
 		bals[key] = bal
 	}
@@ -432,7 +502,7 @@ func (s *Scanner) robinhoodDeploy(ctx context.Context, mode string, batch []*rob
 		// have reported.
 		c := order[0]
 		log.Printf("scanner[%s]: DEPLOY SKIPPED %s (%s): %s", mode, c.BaseSymbol, c.Pool[:10], sizes[c.Pool].skip)
-		return
+		return false
 	}
 
 	var best *robinhood.Candidate
@@ -448,6 +518,19 @@ func (s *Scanner) robinhoodDeploy(ctx context.Context, mode string, batch []*rob
 					mode, c.BaseSymbol, c.Pool[:10], h, n)
 				continue
 			}
+		}
+		// Re-entry cooldown, the Solana port. A pool that already ran one of our
+		// walls over is the single best predictor this venue offers of running
+		// over the next one: of 11 rung fills to 2026-08-07, six were a repeat
+		// in a pool that had filled before, and the repeats averaged -11.8%
+		// against -6.7% for the first. Checked BEFORE the entry-timing gate
+		// because that gate costs a GeckoTerminal request and this costs a local
+		// Redis read. Only fill-class closes write the key — see
+		// store.RobinhoodCooldown.
+		if cd, why := s.seen.RobinhoodCooldown(ctx, c.Pool, c.BaseAddress); cd > 0 {
+			log.Printf("scanner[%s]: %s (%s) skipped: re-entry cooldown %s left (%s)",
+				mode, c.BaseSymbol, c.Pool[:10], cd.Round(time.Minute), why)
+			continue
 		}
 		if sz := sizes[c.Pool]; sz.skip != "" {
 			// Only reachable when one batch mixes protocols whose executors report
@@ -472,8 +555,12 @@ func (s *Scanner) robinhoodDeploy(ctx context.Context, mode string, batch []*rob
 		break
 	}
 	if best == nil {
+		// Consumed on purpose, even though the per-token cap is wallet state: the
+		// entry-timing gate costs one OHLCV request per candidate, and unmarking
+		// here would re-spend that on the same pools every cycle — the GT budget
+		// this function's sizing order exists to protect.
 		log.Printf("scanner[%s]: DEPLOY SKIPPED — per-token cap and entry timing rejected all %d candidate(s)", mode, len(eligible))
-		return
+		return true
 	}
 	if best.IsCopycat {
 		log.Printf("scanner[%s]: DEPLOY PICK is a copycat (%s, %d share ticker %q) — no clean candidate this batch",
@@ -492,7 +579,7 @@ func (s *Scanner) robinhoodDeploy(ctx context.Context, mode string, batch []*rob
 	out, err := runner.Deploy(ctx, best.Pool, sz.amount, s.cfg.RobinhoodRangePct, s.cfg.RobinhoodSlippagePct, sz.strategy, sz.quote)
 	if err != nil {
 		log.Printf("scanner[%s]: DEPLOY FAILED %s (%s): %v\n%s", mode, best.BaseSymbol, best.Pool[:10], err, out)
-		return
+		return false
 	}
 	deployed := robinhood.Deployed(out)
 	summary := robinhood.Summarize(out)
@@ -502,6 +589,7 @@ func (s *Scanner) robinhoodDeploy(ctx context.Context, mode string, batch []*rob
 			log.Printf("scanner[%s]: report delivery failed: %v", mode, rerr)
 		}
 	}
+	return true
 }
 
 // rhFetcher is a mode's discovery source. It takes the cycle's clock so the
@@ -535,6 +623,12 @@ func (s *Scanner) pollRobinhood(ctx context.Context, mp robinhood.ModeParams, fe
 		// keys disjoint from Solana pool keys in the shared store.
 		poolKey := "rh:" + mp.Mode + ":" + cand.Pool
 		seenTTL := s.cfg.RobinhoodSeenTTL
+		if mp.Mode == robinhood.Turnover.Mode {
+			// A re-pinning mode must be able to re-signal the pool it just left
+			// — see TurnoverSeenTTL. Fill-class closes are held off by the
+			// deploy-time cooldown, not by this window.
+			seenTTL = robinhood.TurnoverSeenTTL
+		}
 		if mp.Mode == robinhood.StockLadder.Mode {
 			// A re-pin exit wants its own pool back, not a different one — see
 			// RobinhoodStockSeenTTL. The stock universe is small enough that
@@ -548,6 +642,18 @@ func (s *Scanner) pollRobinhood(ctx context.Context, mp robinhood.ModeParams, fe
 		}
 		if !fresh {
 			deduped++
+			continue
+		}
+
+		// Sticky contract-security verdict, checked BEFORE any enrichment call:
+		// a token this gate has already convicted must not be re-screened at all,
+		// and skipping it here also saves the two GMGN requests and the Blockscout
+		// one. GMGN's answer flaps — BLINK read honeypot on ten cycles and unknown
+		// on two, and the fail-open arm minted into it on both of those.
+		if r := s.seen.SecurityBlacklisted(ctx, cand.BaseAddress); r != "" {
+			secRejected++
+			log.Printf("scanner[%s]: %s (%s) rejected on security (recorded): %s",
+				mp.Mode, cand.BaseSymbol, cand.Pool[:10], r)
 			continue
 		}
 
@@ -569,6 +675,9 @@ func (s *Scanner) pollRobinhood(ctx context.Context, mp robinhood.ModeParams, fe
 			if sec, ok := robinhood.FetchSecurity(s.cfg.GmgnAPIKey, cand.BaseAddress, now.Unix()); ok {
 				if r := robinhood.SecurityReject(sec); r != "" {
 					secRejected++
+					// Record the conviction so the next cycle's "unknown" cannot
+					// undo it — see Seen.SecurityBlacklisted.
+					s.seen.BlacklistSecurity(ctx, cand.BaseAddress, r)
 					log.Printf("scanner[%s]: %s (%s) rejected on security: %s",
 						mp.Mode, cand.BaseSymbol, cand.Pool[:10], r)
 					continue
@@ -607,8 +716,15 @@ func (s *Scanner) pollRobinhood(ctx context.Context, mp robinhood.ModeParams, fe
 			// mirroring how Solana's DEPLOY_CMD bypasses its webhook. Gated
 			// per-mode by ROBINHOOD_DEPLOY_MODES — a mode outside the set
 			// (e.g. fresh while only mature trades) still journals below.
-			s.robinhoodDeploy(ctx, mp.Mode, batch)
-			sent = len(batch)
+			if s.robinhoodDeploy(ctx, mp.Mode, batch) {
+				sent = len(batch)
+			} else {
+				// Wallet state blocked the batch, not the pools — put them back so
+				// the next cycle re-offers them once a slot or the funding lands.
+				for _, k := range batchKeys {
+					s.seen.Unmark(ctx, k)
+				}
+			}
 		} else if !s.cfg.RobinhoodWebhook {
 			// Observe-only (Phase 1 default): journal the full payload so the
 			// gate thresholds can be calibrated from logs, without exposing the

@@ -154,7 +154,7 @@ func FetchLadderPools(mp ModeParams, now time.Time) ([]Pool, error) {
 	refreshTrending(now)
 
 	gateway, err := FetchMaturePools(mp, now)
-	extra := ladderEligible(trendingSnapshot(now), mp)
+	extra := feedEligible(trendingSnapshot(now), mp)
 	if err != nil {
 		if len(extra) == 0 {
 			return nil, err
@@ -170,12 +170,18 @@ func FetchLadderPools(mp ModeParams, now time.Time) ([]Pool, error) {
 	return merged, nil
 }
 
-// ladderEligible keeps only the cached trending pools this mode could ever
-// deploy into. It gates on IDENTITY, not on numbers: every threshold stays in
-// Screen so the cycle's reject tally still accounts for it. Dropping a pool
-// here makes it invisible, which is right for "no executor speaks this DEX" and
-// wrong for "this pool's fee pace is too low".
-func ladderEligible(pools []Pool, mp ModeParams) []Pool {
+// feedEligible keeps only the cached pools this mode could ever deploy into. It
+// gates on IDENTITY, not on numbers: every threshold stays in Screen so the
+// cycle's reject tally still accounts for it. Dropping a pool here makes it
+// invisible, which is right for "no executor speaks this DEX" and wrong for
+// "this pool's fee pace is too low".
+//
+// Named for the job rather than for one caller: it filters the trending cache
+// for the ladders (FetchLadderPools) and the volume ranking for rh-turnover
+// (FetchTurnoverPools, ranked.go). Both need the identical cut, because what it
+// rejects is a property of the VENUE — unmintable DEXes, hooked or dynamic-fee
+// v4 pools, pools with no token side — and not of either thesis.
+func feedEligible(pools []Pool, mp ModeParams) []Pool {
 	out := make([]Pool, 0, len(pools))
 	for _, p := range pools {
 		// Empty Protocol means the pool is on neither Uniswap v3 nor v4 —
@@ -199,7 +205,7 @@ func ladderEligible(pools []Pool, mp ModeParams) []Pool {
 		if quoteAssets[strings.ToLower(oriented.BaseAddress)] {
 			continue // WETH/USDG and friends: no token side at all
 		}
-		if mp.QuoteAsset != "" && !strings.EqualFold(oriented.QuoteAddress, mp.QuoteAsset) {
+		if mp.QuoteAsset != "" && !quotePinMatch(oriented.QuoteAddress, mp.QuoteAsset) {
 			continue
 		}
 		out = append(out, p)
@@ -259,6 +265,12 @@ func backfillZeros(dst, src Pool) Pool {
 	}
 	if dst.McapUSD == 0 {
 		dst.McapUSD = src.McapUSD
+	}
+	if dst.VolumeM15USD == 0 {
+		dst.VolumeM15USD = src.VolumeM15USD
+	}
+	if dst.TxM15 == (gtTxWindow{}) {
+		dst.TxM15 = src.TxM15
 	}
 	if dst.VolumeH1USD == 0 {
 		dst.VolumeH1USD = src.VolumeH1USD

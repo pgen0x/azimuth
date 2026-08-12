@@ -59,14 +59,23 @@ def get_meteora_portfolio_positions(wallet_address):
         return None, str(e)
 
 # Fallback only — SOUL.md section 9 "Hard Stop-Loss" overrides at runtime.
-# -25.0 since 2026-07-19 (was -12.0): portfolio-API ground truth showed the
-# -12 floor never protected the tail anyway (gaps + slippage realized
-# -14..-24%) while a wide sol_bidask ladder needs room to fill and recover.
-# Tail defense moves to the FAST rails — the rug velocity gate (RUG_M5_PCT),
-# the downside-OOR fast fuse, and the sustained-downtrend exit; the hard SL is
-# the deep backstop, per the wide-SL + fast-rug-gate consensus (SOL Decoder
-# recommends -50..-80 with wide ranges; vol-scaled clamps run -5..-50).
-STOP_LOSS_PCT = -25.0
+# -8.0 since 2026-08-12 (was -25.0, itself widened from -12.0 on 2026-07-19).
+# The -25 rested on tail defense living in the FAST rails — the rug velocity
+# gate, the downside-OOR fuse, the sustained-downtrend exit — with the SL as a
+# deep backstop. Measured over the 24h to 2026-08-12, that assumption failed:
+# the downtrend rail needs a 1h trend to confirm, which is slower than the dump
+# it exists to catch, so it fired at PnL -15.64% and -8.34% on a rule written
+# for -5%. Between -5% and -25% nothing closed unconditionally. Six closes
+# produced the entire day's loss while 33 others returned ~0.
+# -8.0 is the value used by a reference LP running the same screen and the same
+# trailing pair (1.2/0.6) at materially better win rate over the same window.
+# Its SL carries no confirmation leg either — that is the point: an
+# unconditional floor is what the fast rails were standing in for and could not
+# deliver. Caveat for whoever revisits this: that reference also runs an LLM
+# review over every open position on a 5m cadence, which this bot has no
+# equivalent of, so an unknown share of its edge is judgment rather than
+# threshold. Treat -8.0 as calibrated, not proven.
+STOP_LOSS_PCT = -8.0
 TAKE_PROFIT_PCT = 50.0
 MAX_OOR_MINUTES = 30
 # Asymmetric OOR (2026-07-19): the two OOR directions mean OPPOSITE things for
@@ -80,7 +89,25 @@ OOR_DOWNSIDE_MAX_MINUTES = 5
 # Turnover fast-cycle: an OOR turnover position is idle
 # fee-capture capital, so it re-centers after minutes — not the multi-hour
 # patience of the thesis modes. The 20s monitor loop makes this cadence real.
-TURNOVER_MAX_OOR_MINUTES = 2
+# 2 -> 5 on 2026-08-12, finishing the fix the SOL side already got below. The
+# measurement that set TURNOVER_SOL_SIDE_OOR_MINUTES was never direction-
+# specific: waiting to 5m beat cutting at 2m on the same event. The token side
+# kept 2m on the argument that here the bag really is decaying — but the
+# outcome does not support it. All 21 OOR closes in the 24h to 2026-08-12 fired
+# at 2.1-2.2m and averaged +0.0006 SOL: the fuse is not cutting losses, it is
+# round-tripping capital for zero before a fee can accrue, and each trip pays
+# gas and swap slippage that the close journal's pnl_sol never records.
+TURNOVER_MAX_OOR_MINUTES = 5
+# ...but that fuse was applied to BOTH directions, which is the mistake the
+# thesis modes already fixed with OOR_DOWNSIDE_MAX_MINUTES. SOL-side OOR is
+# frozen SOL — nothing decays — so the fuse only trades an immediate re-pin
+# against the chance price walks back INTO range (fees resume) or keeps
+# running (pump-out). Measured over the 24h to 2026-08-10: turnover's six
+# SOL-side OOR closes averaged +0.01% — it exits before a single fee accrues —
+# while the reference bot waiting 5m on the same event averaged +0.04% and the
+# pumps it held instead of cutting averaged +0.38% (n=10). Token-side keeps
+# the 2m fuse: there the position IS a falling token bag.
+TURNOVER_SOL_SIDE_OOR_MINUTES = 5
 # Turnover rebalance circuit breaker: re-centers stop once the pool's cumulative
 # realized PnL across rebalance closes (24h window) drops below this many SOL.
 # Replaces a count cap as the primary guard — the count backstop stays at 20/24h.
@@ -131,6 +158,17 @@ FAST_EXIT_M5_PCT = -3.0
 # slippage). Both thresholds must trip; missing DexScreener data never fires it.
 DOWNTREND_1H_PCT = -5.0
 DOWNTREND_PNL_PCT = -5.0
+# ...and a PnL-only leg that needs no trend confirmation. Requiring BOTH legs
+# made this rail structurally slower than what it guards against: an hour of
+# price history cannot confirm a dump that is minutes old, so the rule written
+# for -5% actually fired at -15.64% and -8.34% in the 24h to 2026-08-12, and
+# the DexScreener fail-open meant a missing h1 disarmed it entirely. This leg
+# fires on the position's own PnL alone, which is always known. Set between
+# DOWNTREND_PNL_PCT and the hard SL so the ordering is: confirmed downtrend at
+# -5%, unconfirmed at -6%, unconditional floor at -8%. It stays non-emergency
+# and keeps the "dump" routing (2h cooldown, no re-center) — the SL below is
+# still the backstop that no hold can defer.
+DOWNTREND_PNL_ONLY_PCT = -6.0
 # OOR-upside profit lock: above range the position is fully converted to SOL
 # (PnL frozen, fees stopped); at or above this banked gain, close immediately
 # instead of riding the OOR fuse and risking a retrace back into range.
@@ -164,12 +202,45 @@ RUG_M5_PCT = -20.0
 FEE_STALL_WINDOW_MINUTES = 30.0
 FEE_STALL_MIN_PCT = 0.02
 FEE_STALL_MIN_AGE_MINUTES = 45.0
-# Permanent rug blacklist floor: a realized close at or below this is rug
-# territory — no re-entry thesis survives it. The mint (and the deployer
-# wallet, when deploy metadata carries one) goes into a permanent Redis set
-# the pipeline checks before any deploy. Ported from the reference bot's
+# Rug blacklist floor: a realized close at or below this is rug territory — no
+# re-entry thesis survives it in the near term. The mint and the deployer wallet
+# (when deploy metadata carries one) each go into a TTL'd Redis key, both
+# checked by the pipeline before any deploy. Ported from the reference bot's
 # token-blacklist / dev-blocklist, auto-added instead of agent-curated.
 RUG_BLACKLIST_PNL_PCT = -30.0
+# Mint blacklist TTL. This was a permanent SADD until 2026-08-07. Discovery
+# recycles a small pool of tickers cycle after cycle, so a monotonic blocklist
+# only ever shrinks the deployable universe — given enough rugs it starves the
+# mode out entirely, and the failure is silent (every batch simply reports no
+# candidate). A mint earns a block while the rug is live and holders are still
+# bleeding; a week on it is a dead ticker that will not clear the screen
+# anyway.
+RUG_BLACKLIST_TTL_SEC = int(float(os.environ.get("RUG_BLACKLIST_TTL_DAYS", "7")) * 86400)
+# Deployer blocklist TTL. The deployer set stayed permanent when the mint
+# blacklist got its TTL on 2026-08-07, on the argument that a wallet which rugs
+# once is a rug factory and — unlike a mint — can mint again. That half-fix
+# reproduced the same starvation one level up. Measured 2026-08-12: the set held
+# 26 wallets at `ttl -1`, and TWO of them accounted for 99 rejected candidates,
+# including 4 of the 6 batches pulse sent that morning — while the comparison
+# agent, whose dev blocklist is empty, entered two of those same pools green.
+# A launchpad-scale deployer signs a large fraction of the venue's memecoins, so
+# banning it forever bans a slice of the universe forever, and the rejects are
+# silent exactly like the mint case. Longer than the mint window because the
+# deployer claim IS the stronger one; finite because stronger is not permanent.
+DEV_BLOCKLIST_TTL_SEC = int(float(os.environ.get("DEV_BLOCKLIST_TTL_DAYS", "30")) * 86400)
+
+
+def rug_blacklist_mint_key(mint):
+    """Per-mint blacklist key. One key per mint rather than one shared set, so
+    each entry expires on its own clock — the same reason the daemon's Seen
+    dedup uses SetNX per pool instead of SAdd+Expire over a set."""
+    return f"sol:dlmm:blocklist:mint:{mint}"
+
+def rug_blacklist_dev_key(dev):
+    """Per-deployer blacklist key. Replaces the `sol:dlmm:blocklist:dev` SET:
+    a set has no per-member expiry, so every wallet it ever held stayed banned
+    forever. Same one-key-per-entry shape as the mint blacklist above."""
+    return f"sol:dlmm:blocklist:dev:{dev}"
 
 def mint_cooldown_key(meta):
     """Mint-keyed twin of the symbol re-entry cooldown. The symbol key is
@@ -181,8 +252,8 @@ def mint_cooldown_key(meta):
     return f"sol:dlmm:cooldown:mint:{mint}" if mint and mint != SOL_MINT else None
 
 def maybe_blacklist_rug(meta, pnl_pct, rug_event=None):
-    """Add the mint (and deployer, if known) to the permanent rug blacklists
-    when a close realizes <= RUG_BLACKLIST_PNL_PCT, OR when the caller passes
+    """Add the mint (TTL'd) and deployer (permanent), if known, to the rug
+    blacklists when a close realizes <= RUG_BLACKLIST_PNL_PCT, OR when the caller passes
     rug_event (a short reason string) for a close that is rug evidence on its
     own regardless of realized PnL — e.g. the RUG_M5_PCT velocity gate firing.
     A fast reaction can book a tiny/near-zero PnL on a token that just
@@ -198,12 +269,23 @@ def maybe_blacklist_rug(meta, pnl_pct, rug_event=None):
     reason = rug_event or f"{pnl_pct:+.1f}% close"
     mint = (meta or {}).get("base_mint", "")
     if mint and mint != SOL_MINT:
-        run_command(f"redis-cli sadd sol:dlmm:blocklist:mint \"{mint}\"")
-        print(f"⛔ RUG BLACKLIST: mint {mint[:8]}… permanently blocked ({reason})")
+        # SETEX, not SADD: re-blacklisting an already-blocked mint refreshes its
+        # window, which is what we want — a rug that keeps rugging keeps its ban.
+        run_command(
+            f"redis-cli setex \"{rug_blacklist_mint_key(mint)}\" {RUG_BLACKLIST_TTL_SEC} \"{reason[:120]}\""
+        )
+        days = RUG_BLACKLIST_TTL_SEC / 86400
+        print(f"⛔ RUG BLACKLIST: mint {mint[:8]}… blocked for {days:.0f}d ({reason})")
     dev = (meta or {}).get("dev", "")
     if dev:
-        run_command(f"redis-cli sadd sol:dlmm:blocklist:dev \"{dev}\"")
-        print(f"⛔ RUG BLACKLIST: deployer {dev[:8]}… permanently blocked")
+        # SETEX per wallet, not SADD into a shared set: same reasoning as the
+        # mint above, and re-blacklisting a repeat offender refreshes its window
+        # rather than being a no-op — a deployer that keeps rugging keeps its ban.
+        run_command(
+            f"redis-cli setex \"{rug_blacklist_dev_key(dev)}\" {DEV_BLOCKLIST_TTL_SEC} \"{reason[:120]}\""
+        )
+        dev_days = DEV_BLOCKLIST_TTL_SEC / 86400
+        print(f"⛔ RUG BLACKLIST: deployer {dev[:8]}… blocked for {dev_days:.0f}d ({reason})")
 
 def send_event_alert(text):
     """Push an event alert straight to the operator via `hermes send` — script-side
@@ -318,6 +400,7 @@ def load_soul_dlmm_params():
         "MAX_OOR_MINUTES": int(MAX_OOR_MINUTES),
         "OOR_DOWNSIDE_MAX_MINUTES": int(OOR_DOWNSIDE_MAX_MINUTES),
         "TURNOVER_MAX_OOR_MINUTES": int(TURNOVER_MAX_OOR_MINUTES),
+        "TURNOVER_SOL_SIDE_OOR_MINUTES": int(TURNOVER_SOL_SIDE_OOR_MINUTES),
         "TURNOVER_CB_LOSS_SOL": float(TURNOVER_CB_LOSS_SOL),
         "MIN_AGE_BEFORE_YIELD_CHECK": float(MIN_AGE_BEFORE_YIELD_CHECK),
         "MIN_FEE_TVL_24H_LIMIT": float(MIN_FEE_TVL_24H_LIMIT),
@@ -398,6 +481,8 @@ def load_soul_dlmm_params():
                 params["TRAILING_DROP_PCT"] = val
             elif "Max Bins Pumped Above" in name:
                 params["MAX_BINS_PUMPED_ABOVE"] = int(val)
+            elif "Turnover SOL-Side OOR Minutes" in name:
+                params["TURNOVER_SOL_SIDE_OOR_MINUTES"] = int(val)
             elif "Turnover Max OOR Minutes" in name:
                 params["TURNOVER_MAX_OOR_MINUTES"] = int(val)
             elif "Turnover CB Loss SOL" in name:
@@ -692,11 +777,12 @@ def main():
     max_oor_minutes = params["MAX_OOR_MINUTES"]
     oor_downside_max_minutes = params["OOR_DOWNSIDE_MAX_MINUTES"]
     turnover_max_oor_minutes = params["TURNOVER_MAX_OOR_MINUTES"]
+    turnover_sol_side_oor_minutes = params["TURNOVER_SOL_SIDE_OOR_MINUTES"]
     min_age_before_yield_check = params["MIN_AGE_BEFORE_YIELD_CHECK"]
     min_fee_tvl_24h_limit = params["MIN_FEE_TVL_24H_LIMIT"]
     min_exit_liquidity_usd = params["MIN_EXIT_LIQUIDITY_USD"]
     
-    print(f"Loaded SOUL.md parameters -> SL: {stop_loss_pct:.1f}%, Trailing TP Trigger: {trailing_trigger_pct:.1f}%, Trailing TP Drop: {trailing_drop_pct:.1f}%, Trailing TP (turnover): {turnover_trailing_trigger_pct:.1f}%/{turnover_trailing_drop_pct:.1f}%, Max Bins Pumped Above: {max_bins_pumped_above}, Max OOR: {max_oor_minutes}m (turnover {turnover_max_oor_minutes}m), Min Age for Yield Check: {min_age_before_yield_check:.1f}m, Min Fee/TVL: {min_fee_tvl_24h_limit:.2f}%")
+    print(f"Loaded SOUL.md parameters -> SL: {stop_loss_pct:.1f}%, Trailing TP Trigger: {trailing_trigger_pct:.1f}%, Trailing TP Drop: {trailing_drop_pct:.1f}%, Trailing TP (turnover): {turnover_trailing_trigger_pct:.1f}%/{turnover_trailing_drop_pct:.1f}%, Max Bins Pumped Above: {max_bins_pumped_above}, Max OOR: {max_oor_minutes}m (turnover {turnover_max_oor_minutes}m token-side / {turnover_sol_side_oor_minutes}m SOL-side), Min Age for Yield Check: {min_age_before_yield_check:.1f}m, Min Fee/TVL: {min_fee_tvl_24h_limit:.2f}%")
     
     # --reset-trailing: reset peak_pnl + trailing_active after a standalone fee claim
     if cli.reset_trailing:
@@ -1272,7 +1358,12 @@ def main():
         oor_sol_side = (oor_below if sol_is_x_pos else oor_above)
         oor_token_side = (oor_above if sol_is_x_pos else oor_below)
         if meta.get("mode") == "turnover":
-            oor_limit_minutes = turnover_max_oor_minutes
+            # Asymmetric here too: token-side is a decaying bag (fast fuse),
+            # SOL-side is frozen SOL that may yet walk back into range or pump
+            # out. Direction unknown (no bin data) falls back to the fast fuse,
+            # which is what the mode did for both directions until 2026-08-10.
+            oor_limit_minutes = (turnover_sol_side_oor_minutes if oor_sol_side
+                                 else turnover_max_oor_minutes)
         elif oor_token_side:
             oor_limit_minutes = min(max_oor_minutes, oor_downside_max_minutes)
         else:
@@ -1320,9 +1411,14 @@ def main():
             # back before earning resumes. Bank it now. Checked after the
             # countdown so this reason wins over the plain OOR reason (routes
             # as a profitable exit: 15m cooldown, no rebalance re-center).
-            # Turnover exempt — its OOR close IS the re-center trigger.
-            if (oor_sol_side and pnl_pct >= OOR_UPSIDE_TP_PCT
-                    and meta.get("mode") != "turnover"):
+            # Turnover was exempt on the grounds that its OOR close IS the
+            # re-center trigger — true, but that argument only held while its
+            # fuse was 2m in both directions and the two events coincided.
+            # With the SOL-side fuse at 5m (above) a banked pump-out now has
+            # minutes in which to hand the win back, so turnover takes the lock
+            # as well; it still re-centers, because a profitable close is
+            # exactly what is_turnover_churn routes back into the loop.
+            if oor_sol_side and pnl_pct >= OOR_UPSIDE_TP_PCT:
                 close_reason = (f"OOR SOL-side profit lock ({pnl_pct:+.2f}% >= +{OOR_UPSIDE_TP_PCT}% "
                                 f"with position fully in SOL) — banking the frozen win")
         else:
@@ -1361,6 +1457,13 @@ def main():
                 and price_change_h1 <= DOWNTREND_1H_PCT and pnl_pct <= DOWNTREND_PNL_PCT):
             close_reason = (f"Sustained downtrend dump (1h {price_change_h1:+.1f}% <= {DOWNTREND_1H_PCT}% "
                             f"& PnL {pnl_pct:.2f}% <= {DOWNTREND_PNL_PCT}%) — exit before the SL floor")
+        # 5c-ii. The same exit on PnL alone, no trend confirmation required. The
+        # rule above cannot fire faster than DexScreener can confirm an hour of
+        # decline, and fails open when h1 is missing; this leg reads only the
+        # position's own PnL, so nothing can disarm it but the number recovering.
+        elif not close_reason and pnl_pct <= DOWNTREND_PNL_ONLY_PCT:
+            close_reason = (f"Downtrend dump, unconfirmed (PnL {pnl_pct:.2f}% <= "
+                            f"{DOWNTREND_PNL_ONLY_PCT}%, no 1h confirmation) — exit before the SL floor")
 
         # 5d. Fast-out velocity exit: the trailing ratchet floor is checked once
         # per tick, so a fast dump gaps THROUGH the floor and a "take-profit"

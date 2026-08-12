@@ -271,7 +271,7 @@ func prefilter(p Pool, mp ModeParams, now time.Time) bool {
 	}
 	// A quote-pinned mode (the ladders) cannot use the other quote's pools at
 	// all, so cutting them here buys enrichment-batch room rather than recall.
-	if mp.QuoteAsset != "" && !strings.EqualFold(p.QuoteAddress, mp.QuoteAsset) {
+	if mp.QuoteAsset != "" && !quotePinMatch(p.QuoteAddress, mp.QuoteAsset) {
 		return false
 	}
 	// Quote/quote pools (WETH/USDG) have no token side at all — Screen rejects
@@ -346,6 +346,8 @@ func enrichFromGT(pools []Pool) error {
 		}
 		pools[i].FdvUSD = pfloat(a.FdvUSD)
 		pools[i].McapUSD = pfloat(a.MarketCapUSD)
+		pools[i].VolumeM15USD = pfloat(a.VolumeUSD.M15)
+		pools[i].TxM15 = a.Transactions.M15
 		pools[i].VolumeH1USD = pfloat(a.VolumeUSD.H1)
 		pools[i].TxH1 = a.Transactions.H1
 		pools[i].TxH24 = a.Transactions.H24

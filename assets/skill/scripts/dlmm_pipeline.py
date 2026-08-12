@@ -68,7 +68,7 @@ MODE_DEFAULTS = {
         "MIN_MCAP_USD": 150000.0,
         "MIN_HOLDERS": 500,
         "TIMEFRAME": "5m",
-        "MAX_POSITIONS": 2,
+        "MAX_POSITIONS": 4,
     },
 }
 
@@ -556,6 +556,16 @@ def fetch_live_fee_tvl(pool_address, timeframe="24h"):
 MAX_ENTRY_H6_DROP = -12.0    # reject if 6h price change below this
 MAX_ENTRY_H24_DROP = -25.0   # reject if 24h price change below this
 
+# Pool-memory floor: summed PnL across a pool's last 10 closes at or below this
+# blocks re-entry. The gate fired on ANY negative sum until 2026-08-07, which
+# made it a coin flip dressed as a memory — a pool that churns to a fraction of
+# a percent below break-even reads identically to one that actually bled, and
+# since most closes land near flat the fractional case is the common one. A
+# pool we neither learned from nor lost on is not evidence; only a real
+# cumulative loss is. Sum, not mean, on purpose: ten small losses are a
+# bleeding pool even though each one is forgettable.
+POOL_MEMORY_NET_FLOOR_PCT = float(os.environ.get("POOL_MEMORY_NET_FLOOR_PCT", "-10.0"))
+
 def get_momentum(mint):
     """Returns (m5_pct, h1_pct, h6_pct, h24_pct) price change from DexScreener, or
     (None, None, None, None) on failure. Screens ALL candidates, not just the winner."""
@@ -830,9 +840,13 @@ def select_batch_strategy(c, mode):
     half, single_sided_reseed swapped ALL of it); community consensus
     (SOL Decoder "safest", Goose DAO ~90% green days) is
     SOL-only bid-ask below price: entry holds zero token, dumps fill bins
-    at discounts while printing fees, pumps leave 100% SOL frozen. Turnover
-    keeps its tight two-sided range — its thesis is fee capture from
-    oscillation around the active bin, not directional meme exposure.
+    at discounts while printing fees, pumps leave 100% SOL frozen.
+
+    EVERY mode returns sol_bidask, turnover included — see the 2026-07-25 note
+    below, which is why. (This paragraph used to end "turnover keeps its tight
+    two-sided range"; that line outlived the change directly beneath it and on
+    2026-08-07 it misled a port of this function to the Robinhood venue into
+    shipping a two-sided entry. Read the return statement, not the prose.)
     """
     # 2026-07-25: turnover now uses sol_bidask too. Its old balanced_tight
     # entry pre-swapped HALF the deploy into base token, so a dumping fee-capture
@@ -868,7 +882,7 @@ def main():
     min_mcap = params["MIN_MCAP_USD"]
     min_holders = params["MIN_HOLDERS"]
     timeframe = params.get("TIMEFRAME", "24h")
-    max_positions = params.get("MAX_POSITIONS", 2)
+    max_positions = params.get("MAX_POSITIONS", 4)
 
     scaled_min_fee, scaled_min_vol = get_scaled_thresholds(timeframe, min_fee_tvl)
     print(f"Mode={mode} Timeframe={timeframe} | TVL>=${min_tvl:,.0f} Fee/TVL>={scaled_min_fee:.2f}% Organic>={min_organic:.0f} Mcap>=${min_mcap:,.0f} Holders>={min_holders} MaxPos={max_positions}")
@@ -1142,20 +1156,30 @@ def main():
             if mint_cd and mint_cd != "(nil)":
                 print(f"Skipping {c['name']} - mint cooldown active (reason: {mint_cd[:60]})")
                 continue
-            # Permanent rug blacklist (mint) — set by the monitor on
-            # catastrophic closes. SISMEMBER returns "1"/"0".
-            bl_mint, _, _ = run_command(f"redis-cli sismember sol:dlmm:blocklist:mint \"{c['base_mint']}\"")
-            if bl_mint and bl_mint.strip() == "1":
-                print(f"Skipping {c['name']} - mint is on the permanent rug blacklist")
+            # Rug blacklist (mint) — set by the monitor on catastrophic closes
+            # as one TTL'd key per mint (RUG_BLACKLIST_TTL_DAYS, default 7d).
+            # It was a permanent SADD until 2026-08-07; see the monitor's
+            # RUG_BLACKLIST_TTL_SEC comment for why it had to start expiring.
+            bl_mint, _, _ = run_command(f"redis-cli get \"sol:dlmm:blocklist:mint:{c['base_mint']}\"")
+            if bl_mint and bl_mint != "(nil)":
+                bl_ttl, _, _ = run_command(f"redis-cli ttl \"sol:dlmm:blocklist:mint:{c['base_mint']}\"")
+                ttl_h = int(bl_ttl) // 3600 if bl_ttl and bl_ttl.lstrip("-").isdigit() else "?"
+                print(f"Skipping {c['name']} - mint is rug-blacklisted ({ttl_h}h remaining, reason: {bl_mint[:60]})")
                 continue
         # Dev blocklist (ported from the reference bot's dev-blocklist): the
         # daemon ships the Jupiter deployer wallet as `dev`; a deployer that
-        # already rugged us never gets a second deploy. Missing dev = unknown,
-        # passes (fail-open).
+        # already rugged us does not get another deploy for the window the
+        # monitor set. Missing dev = unknown, passes (fail-open).
+        # One TTL'd key per wallet, not a SADD set — it was the latter until
+        # 2026-08-12, which meant every wallet it ever held was banned forever;
+        # see DEV_BLOCKLIST_TTL_SEC in the monitor for what that cost.
         if c.get("dev"):
-            bl_dev, _, _ = run_command(f"redis-cli sismember sol:dlmm:blocklist:dev \"{c['dev']}\"")
-            if bl_dev and bl_dev.strip() == "1":
-                print(f"Skipping {c['name']} - deployer {c['dev'][:8]}… is on the dev blocklist")
+            bl_dev, _, _ = run_command(f"redis-cli get \"sol:dlmm:blocklist:dev:{c['dev']}\"")
+            if bl_dev and bl_dev != "(nil)":
+                dev_ttl, _, _ = run_command(f"redis-cli ttl \"sol:dlmm:blocklist:dev:{c['dev']}\"")
+                dev_ttl_h = int(dev_ttl) // 3600 if dev_ttl and dev_ttl.lstrip("-").isdigit() else "?"
+                print(f"Skipping {c['name']} - deployer {c['dev'][:8]}… is dev-blocklisted "
+                      f"({dev_ttl_h}h remaining, reason: {bl_dev[:60]})")
                 continue
         # Pool-level cooldown (repeat-deploy churn guard, set post-deploy below).
         pool_cd, _, _ = run_command(f"redis-cli get \"sol:dlmm:cooldown:pool:{c['pool']}\"")
@@ -1164,8 +1188,8 @@ def main():
             continue
         # Pool memory: closes on this exact pool are journaled to
         # sol:dlmm:history:pool:<pool> by the monitor. Two or more past closes
-        # that net out negative = this pool has already cost us — hard skip.
-        # No history (fresh pool) passes untouched.
+        # netting at or below POOL_MEMORY_NET_FLOOR_PCT = this pool has really
+        # cost us — hard skip. No history (fresh pool) passes untouched.
         hist_raw, _, _ = run_command(f"redis-cli lrange \"sol:dlmm:history:pool:{c['pool']}\" 0 9")
         if hist_raw and hist_raw != "(nil)":
             past_pnls = []
@@ -1174,7 +1198,7 @@ def main():
                     past_pnls.append(float(json.loads(line).get("pnl_pct", 0)))
                 except (ValueError, json.JSONDecodeError):
                     continue
-            if len(past_pnls) >= 2 and sum(past_pnls) < 0:
+            if len(past_pnls) >= 2 and sum(past_pnls) <= POOL_MEMORY_NET_FLOOR_PCT:
                 print(f"Skipping {c['name']} - pool memory: {len(past_pnls)} past closes net {sum(past_pnls):+.1f}% PnL")
                 continue
         # Momentum screen across ALL candidates (not just deploy winner).
@@ -1624,7 +1648,8 @@ def main():
         "amount_y": amount_y,
         "mode": mode,
         # Deployer wallet (daemon-enriched, may be absent) — a rug close adds
-        # it to sol:dlmm:blocklist:dev so this deployer never deploys us again.
+        # it to sol:dlmm:blocklist:dev:<wallet> so this deployer gets no further
+        # deploy for DEV_BLOCKLIST_TTL_DAYS.
         "dev": winner.get("dev", ""),
         # Entry-time signal snapshot — the monitor copies this into the close
         # journal so dlmm_weights.py can learn which signals predict winners.

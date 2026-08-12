@@ -23,8 +23,34 @@ type ModeParams struct {
 	MinFeeTVLDay  float64 // projected daily fee/TVL % floor (volume pace x fee tier)
 	MinTxH1       int     // swaps in the last hour (wash guard with MinBuyersH1)
 	MinBuyersH1   int     // unique buyers in the last hour
-	MinFdvUSD     float64 // FDV sanity floor
-	MaxFdvUSD     float64 // FDV sanity ceiling (0 disables): fake-priced pools show absurd FDV
+
+	// Live-window flow gates, the port of Solana Pulse's (MinFeeActiveTVL,
+	// MinVolumeUSD) pair. Zero-disabled like the rest, so a mode that omits them
+	// opts out — set them explicitly.
+	//
+	// They exist because an h1 gate cannot tell a book that is trading from one
+	// that traded 50 minutes ago, and for a resting bid wall that difference is
+	// the entire outcome. Of 102 ladder closes to 2026-08-07, 91 were `ladder
+	// idle` or `ladder stale` — the wall earned EXACTLY ZERO and re-pinned on a
+	// timer. Every one of those pools cleared MinTxH1/MinFeeTVLDay at mint.
+	//
+	// Calibrated 2026-08-07 against the 20 distinct pools this venue's ladders
+	// actually minted into, re-read from GeckoTerminal. The five whose wall was
+	// ever traded into scored m15 fee/TVL 0.0010–0.0122% on 8–45 swaps; of the
+	// fifteen that stayed fee-dead, ten had literally zero m15 volume and the
+	// five exceptions failed one of the two floors (nvda/USDG: 156 swaps but
+	// 0.0006% — a deep book on the 0.05% tier pays a wall nothing). The pair
+	// separates that sample perfectly; n=20 is small, so treat it as a soak
+	// starting point, not a proven bar.
+	//
+	// MinVolumeM15USD is the dust guard MinFeeTVLM15Pct cannot be: a $737-reserve
+	// pool (this venue's collapsed launch template) reads an enormous fee/TVL on
+	// a handful of dollars of flow.
+	MinTxM15        int     // swaps in the last 15 minutes
+	MinVolumeM15USD float64 // raw 15m volume floor (USD)
+	MinFeeTVLM15Pct float64 // fee/TVL % over the 15m window (window-scoped, NOT a daily rate)
+	MinFdvUSD       float64 // FDV sanity floor
+	MaxFdvUSD       float64 // FDV sanity ceiling (0 disables): fake-priced pools show absurd FDV
 
 	// QuoteAsset pins the mode to ONE quote-side asset (lowercase address; ""
 	// accepts any whitelisted quote). Ladder modes must set it: a ladder's
@@ -40,6 +66,22 @@ type ModeParams struct {
 	// mature mode must not buy. Fresh leaves it false — a pool minutes old has
 	// no 24h history to measure, so extrapolating is the only option it has.
 	FeePaceH24 bool
+
+	// RankByFeeDensity reshapes the pick score (see score) for modes whose
+	// income is fee_tier x crossings rather than yield on inventory: fee density
+	// counts twice and pool DEPTH stops counting at all.
+	//
+	// The default score rewards a deeper book, which is right for a mode holding
+	// inventory for days — depth is the exit liquidity it will need. For a
+	// re-pinned rung it is backwards: our fee share is our liquidity over the
+	// pool's, so every extra dollar of someone else's TVL dilutes the position
+	// while contributing nothing to the crossings that pay it. The default
+	// ranking preferred a $500k book over a $58k one at the same fee pace, which
+	// is preferring the pool that pays us less.
+	//
+	// This changes the ORDER of pools that already passed every gate; it is not
+	// a gate and cannot admit anything MinReserveUSD and the flow floors reject.
+	RankByFeeDensity bool
 }
 
 // Fresh is the starter mode: young Uniswap v3 WETH pools already showing
@@ -111,10 +153,152 @@ var Mature = ModeParams{
 	MaxFdvUSD: 50_000_000,
 }
 
+// Turnover is the port of Solana's `turnover` thesis to this venue: park ONE
+// one-sided WETH rung (`weth_below`, pinned in scanner.sizeFor) adjacent to
+// spot in a pool whose book actually oscillates, and re-pin it the moment
+// price drifts off it or it stops earning, rather than closing it.
+//
+// It exists because the ladder answer to "never own the token" turned out to
+// cost the entire product. Across 104 live ladder rung closes (2026-08-04 →
+// 08-07) there were ZERO fee-positive exits: 63 closed `ladder idle` (the
+// monitor's own certification that the wall earned < 0.02% over 90m), 30
+// closed `ladder stale` at a median 23m, and the 11 that filled averaged
+// -9.48%. A resting one-sided bid only earns when the market trades THROUGH
+// it, and on this venue's books that did not happen often enough to pay for
+// the times it did.
+//
+// The diagnosis is NOT that one-sided does not work. The on-chain fee meter
+// shows the rung NEAREST spot earning (GME rung 0: 0.002039 USDG/214m) while
+// the outer rungs of the same wall read exactly zero — two thirds of a ladder's
+// capital sat where the market never came. This mode concentrates the commit in
+// the one rung that earns and keeps it there; the re-center loop in
+// uni_monitor.py is what this mode needs to work at all, and it did not exist
+// on this venue until now. It still never owns the token, so `balanced_tight`
+// (-15.04%/trade holding the memecoin) stays out by construction.
+//
+// The band STARTED as Solana turnover's verbatim (TVL 10k-150k, ~7.2%/day) on
+// the argument that it is the only calibrated churn screen either venue has.
+// That transplant failed on contact: 101 consecutive cycles on 2026-08-07
+// produced zero candidates, because Solana's numbers describe a venue whose
+// pool count is three orders of magnitude larger. Every threshold below is now
+// calibrated against a census of this venue's own live gateway feed (103
+// WETH-quoted token pools, same day). The thesis is unchanged — mature holds
+// for days and must out-earn its own inventory bleed, while this mode's holding
+// period is minutes and its income is fee_pct x crossings, not yield.
+var Turnover = ModeParams{
+	Mode: "rh-turnover",
+
+	// WETH-quoted. Sizing and the position must be the same asset for the same
+	// reason the ladders pin (see QuoteAsset) — and the equities that make up
+	// the USDG universe are the WRONG book for this thesis anyway: a deep,
+	// low-volatility stock pool crosses a tight range rarely, which is the one
+	// thing this mode is paid for.
+	QuoteAsset: WETH,
+
+	// Needs enough history to prove the book oscillates rather than that it
+	// launched. No ceiling: an oscillating pool does not expire on a clock, and
+	// the fee-pace gate expires it on evidence.
+	MinAge: 1 * time.Hour,
+	MaxAge: 0,
+
+	// The ceiling is still load-bearing — our fee share is our liquidity over
+	// the pool's — but Solana's $150k was the wrong number for THIS venue's
+	// book. Census of the live gateway feed, 2026-08-07: of 103 WETH-quoted
+	// token pools, every pool with real flow sat ABOVE the cap (CASHCAT $645k /
+	// 523 tx per h1, INDEX $382k / 220, WOOF $341k / 265, HMM $192k / 122 — the
+	// last the only pool in the whole feed clearing the m15 fee floor outright).
+	// Below the cap the survivors were the quiet half of the venue. $500k keeps
+	// the deep-book protection where it matters (CASHCAT v3 at $5.09M and v4 at
+	// $808k stay out) while admitting the churn this mode is named for.
+	MinReserveUSD: 10000,
+	MaxReserveUSD: 500000,
+
+	MinFeePct: 0.25,
+
+	// Measured over REALIZED 24h volume rather than an extrapolated hour — a
+	// mode selecting for sustained crossings must not buy a pool that had one
+	// busy hour.
+	//
+	// 3%, not the 7% this shipped with. mature.go's prefilter applies this bar
+	// BEFORE the enrichment call, so it is the first cut in the funnel, and at
+	// 7% it was cutting the mode's own thesis away: on 2026-08-07 only 2 of the
+	// 59 in-band pools cleared it, and neither survived Screen (101 consecutive
+	// cycles, zero candidates). Worse, it rejected pools that pass every live
+	// gate — PONS v3 ($61k, 265 tx per h1, 110 per m15, m15 fee/TVL 0.082) died
+	// here on a 4.4%/day average. A mode that buys churn NOW must not pre-screen
+	// on a 24h mean; the m15 gates below are what judge whether it is trading.
+	MinFeeTVLDay: 3.0,
+	FeePaceH24:   true,
+
+	// Rank the survivors on fee density, not on depth (see RankByFeeDensity).
+	// This mode holds a rung for minutes and is paid per crossing, so a deeper
+	// book is strictly worse — it dilutes our share of the same flow. Turned on
+	// together with the ranked discovery feed (ranked.go), because ordering the
+	// candidates correctly is worth nothing while the best ones never reach the
+	// batch.
+	RankByFeeDensity: true,
+
+	// The churn gates proper. These tracked rh-mature's 60/20 on the assumption
+	// that a churn mode needs MORE flow than a hold mode; the 2026-08-07 census
+	// says the venue does not have it to give. Of the two pools that reached
+	// Screen, LILUNI died at 18 tx per h1 while printing a 12.9%/day pace — a
+	// pool can pay a tight range on a dozen crossings when the fee tier is 1%.
+	// Ladder's 30/10 is the floor that survived contact with this book, and it
+	// is still a real gate: it is what drops the $195-a-day template pools.
+	MinTxH1:     30,
+	MinBuyersH1: 10,
+
+	// Live-window gates: is this pool trading RIGHT NOW, as opposed to having
+	// traded at some point in the last day.
+	//
+	// 0.073% was MinFeeTVLDay / 96 fifteen-minute windows — the daily bar
+	// restated per window, which demands a pool sustain its own 24h average in
+	// the current 15 minutes. Nothing does, in either direction: FRONG carried a
+	// 12.1%/day pace (0.126% per window on average) and read 0.019% live, 6x
+	// under itself. Measured across the 2026-08-07 census, 0.073% passed exactly
+	// one pool of the top 30 by fee pace. 0.02% is the empirical floor that
+	// separates a book with flow from a dead one on THIS venue, and it stays an
+	// order of magnitude above the ladders' 0.0010% — a wall only needs to be
+	// hit, a range has to be crossed.
+	//
+	// MinVolumeM15USD is Solana Pulse's $500 raw-window floor, and does the job
+	// MinFeeTVLM15Pct cannot: this venue's collapsed-launch template ($737
+	// reserves) prints a huge fee/TVL on a few dollars of flow. It is the gate
+	// carrying the dust rejection now that the fee floor is loosened — keep it.
+	MinTxM15:        8,
+	MinVolumeM15USD: 500,
+	MinFeeTVLM15Pct: 0.02,
+
+	MinFdvUSD: 20000,
+	MaxFdvUSD: 50_000_000,
+}
+
+// TurnoverSeenTTL is this mode's dedup window, deliberately far shorter than
+// the venue default and deliberately NOT an env var — it is a property of the
+// thesis, not an operator knob.
+//
+// A re-centering mode wants ITS OWN pool back. The venue's 6h default assumes
+// an entry is a one-shot: signal a pool, hold it, never look at it again. Under
+// turnover the opposite is true — the pool that just closed on drift is, by the
+// screen's own reckoning, still the best oscillating book available. Measured
+// 2026-08-07, minutes after the mode's first three positions closed: 8 pools
+// passed every gate and all 8 were deduped, so the mode sat idle with a funded
+// wallet and nothing to do for six hours.
+//
+// Re-entry safety does NOT come from this window; it comes from the Redis
+// cooldown a fill-class close writes and the deploy path reads. A close that
+// filled is blocked from re-entry regardless of what this says, while a close
+// that merely drifted or went idle is exactly what should come back.
+const TurnoverSeenTTL = 15 * time.Minute
+
 // Ladder is the weth_ladder mode: pools worth parking a one-sided WETH bid
 // wall under. Unlike Fresh and Mature — which buy the token and are therefore
 // betting on it — a ladder holds only WETH until the market trades down into
 // a rung, so what it needs from a pool is CHURN, not yield.
+//
+// SUPERSEDED 2026-08-07 by Turnover (above) on 104 closes with zero winners.
+// Kept screening correctly rather than deleted: it is the only comparison
+// point if the turnover loop underperforms.
 //
 // That inverts the usual threshold logic and is why this mode exists at all
 // rather than reusing Mature. Mature demands 8%/day because it holds inventory
@@ -163,6 +347,93 @@ var Ladder = ModeParams{
 	// so this mode can afford the thinner books that Mature must refuse.
 	MinTxH1:     30,
 	MinBuyersH1: 10,
+
+	// Live-window floors — see the ModeParams field comment for the 20-pool
+	// calibration. Identical across all three ladder modes on purpose: the
+	// question they ask ("is this book trading right now, and does its tier pay
+	// a wall for it?") has nothing to do with which universe the pool is in, and
+	// the observed separation held for memecoin and equity pools alike.
+	MinTxM15:        8,
+	MinVolumeM15USD: 400,
+	MinFeeTVLM15Pct: 0.0010,
+
+	MinFdvUSD: 20000,
+	MaxFdvUSD: 50_000_000,
+}
+
+// PulseLadder is the weth_ladder shape aimed one age-band earlier than Ladder:
+// WETH memecoin pools in their FIRST DAY, which no feed here could reach until
+// the carried registry in pulse.go existed.
+//
+// Same wall, same executor, same exit rulebook. What differs is only which pools
+// it looks at, and that is deliberate — rung width and count describe how far a
+// token can fall, not how old it is, so the geometry keys on the quote asset
+// (uni_ladder.js) and a pulse-discovered WETH pool gets the same 1200-tick rungs
+// rh-ladder mints. If a soak shows a first-day pool wants a different wall, the
+// knob to add is per-strategy geometry, NOT a second WETH constant.
+//
+// The two modes hand off at 24h with no overlap by construction: MaxAge here is
+// Ladder's MinAge, which is itself set by the gateway's inability to index
+// anything younger. Below that line this mode is the only one that can see the
+// pool; above it, rh-ladder's feed is strictly richer.
+//
+// FIRST-PASS thresholds. Unlike Ladder's — which were read off a profitable
+// LP's 23 real entries — nothing here is backed by an outcome yet, only by what
+// the venue's young universe looks like (measured 2026-08-06: 33 WETH launches
+// in the new_pools window, median reserve $4.8k, a handful at $21k-$27k with
+// 79-153 h1 txns). Treat every number below as a starting point for the soak.
+var PulseLadder = ModeParams{
+	Mode: "rh-pulse-ladder",
+
+	// WETH-quoted only, for the reason every ladder mode pins its quote: the
+	// rungs ARE the quote asset and the deploy sizes against that same balance.
+	QuoteAsset: WETH,
+
+	// One hour is the cheapest available "this launch survived" filter. The
+	// venue mints ~6 WETH pools a minute, nearly all of them $4.8k template dust
+	// that stops trading within the hour; waiting one out costs a mode whose
+	// thesis is a resting bid wall almost nothing, because a wall parked at
+	// minute 3 of a launch sits under a price nobody has discovered yet.
+	MinAge: 1 * time.Hour,
+	MaxAge: 24 * time.Hour, // == Ladder.MinAge: the handoff, not a thesis edge
+
+	// Ladder's floor. A wall in a $5k pool is not a smaller version of a wall in
+	// a $50k pool — our rungs would BE the book, so every fill is adverse and
+	// there is no external bid to exit into (measured 2026-08-06: young v4 pools
+	// whose active liquidity had drained refused swaps in BOTH directions with
+	// NotEnoughLiquidity). The ceiling is ours, not theirs: fee share is our
+	// share of the active tick.
+	MinReserveUSD: 10000,
+	MaxReserveUSD: 2_000_000,
+
+	// 0.25%, not Ladder's 0.3%. The venue's v4 launch template mints at the
+	// 0.25% tier — 20 of the 33 pools in the measured window — so a 0.3% floor
+	// would silently exclude most of this mode's universe on a rounding edge.
+	MinFeePct: 0.25,
+
+	// h1 EXTRAPOLATION here, unlike both established ladder modes, because a
+	// six-hour-old pool has no 24h history: GT's h24 volume for it is LIFETIME
+	// volume, so a realized pace would understate a pool that only started
+	// trading an hour ago. The bar is correspondingly higher than Ladder's
+	// realized 1.5% — an extrapolated rate reads high by construction, and 4%
+	// keeps the comparison honest rather than pretending the two measure the
+	// same thing.
+	MinFeeTVLDay: 4.0,
+	FeePaceH24:   false,
+
+	// Ladder's flow floors. A quiet hour is a non-event for a wall holding WETH,
+	// so these exist to drop dead books, not to rank live ones.
+	MinTxH1:     30,
+	MinBuyersH1: 10,
+
+	// Ladder's live-window floors. This mode needs them MORE than the others,
+	// not less: a first-day pool can die between the launch sweep that
+	// registered it and the cycle that screens it, and three of the eight WETH
+	// pools it laddered on 2026-08-06/07 had collapsed to a $321-$737 reserve
+	// with zero flow by the time they were re-read.
+	MinTxM15:        8,
+	MinVolumeM15USD: 400,
+	MinFeeTVLM15Pct: 0.0010,
 
 	MinFdvUSD: 20000,
 	MaxFdvUSD: 50_000_000,
@@ -247,6 +518,23 @@ var StockLadder = ModeParams{
 	MinTxH1:     10,
 	MinBuyersH1: 3,
 
+	// The same live-window floors as the WETH ladders, and the equity sample is
+	// what shows they are not a memecoin-only bar: of the 12 USDG pools this
+	// mode minted into, the only two whose wall was ever traded (spacex/USDG
+	// 0.05% and cashcat/USDG 1%) cleared both, while nvda/USDG 0.05% — 156
+	// swaps in 15 minutes on a $728k book — fails the fee floor at 0.0006%,
+	// correctly: 156 swaps that pay a wall nothing are not flow this mode wants.
+	//
+	// Market hours are the risk to watch in the soak. These pools legitimately
+	// go quiet overnight, and unlike the h1 floors above (deliberately loose for
+	// that reason) a 15m window will read a closed session as a dead book. That
+	// is arguably right — a wall parked into a closed session earns nothing
+	// either — but if the soak shows it starves the mode, the fix is a session
+	// filter, not a lower floor.
+	MinTxM15:        8,
+	MinVolumeM15USD: 400,
+	MinFeeTVLM15Pct: 0.0010,
+
 	// FDV gates OFF on purpose (both zero-disabled). A tokenized equity's FDV
 	// is a function of the wrapper's token supply, not of a float anyone can
 	// dump — it is neither a rug signal here nor comparable to a memecoin's, so
@@ -278,7 +566,7 @@ func Screen(p Pool, mp ModeParams, now time.Time) (*Candidate, string) {
 	// A mode pinned to one quote asset takes only that asset's pools — the
 	// ladder modes are, because their rungs and their sizing are denominated in
 	// it (see ModeParams.QuoteAsset).
-	if mp.QuoteAsset != "" && !strings.EqualFold(p.QuoteAddress, mp.QuoteAsset) {
+	if mp.QuoteAsset != "" && !quotePinMatch(p.QuoteAddress, mp.QuoteAsset) {
 		return nil, fmt.Sprintf("quote-asset %s not this mode's", p.QuoteSymbol)
 	}
 	// Both sides a quote asset (WETH/USDG, ETH/USDG …) means there is no token
@@ -352,6 +640,30 @@ func Screen(p Pool, mp ModeParams, now time.Time) (*Candidate, string) {
 		return nil, fmt.Sprintf("buyers %d < %d", p.TxH1.Buyers, mp.MinBuyersH1)
 	}
 
+	// Live-window flow, the Solana Pulse port. Everything above this line can be
+	// satisfied by a book that stopped trading 50 minutes ago; these three cannot.
+	// A ladder is why they exist — a bid wall on a stalled book earns zero and
+	// re-pins on a timer — so they are set only on the ladder modes and stay
+	// zero-disabled elsewhere.
+	txM15 := p.TxM15.Buys + p.TxM15.Sells
+	if mp.MinTxM15 > 0 && txM15 < mp.MinTxM15 {
+		return nil, fmt.Sprintf("m15 txns %d < %d", txM15, mp.MinTxM15)
+	}
+	if p.VolumeM15USD < mp.MinVolumeM15USD {
+		return nil, fmt.Sprintf("m15 volume $%.0f < $%.0f", p.VolumeM15USD, mp.MinVolumeM15USD)
+	}
+	// Window-scoped, NOT annualized: this is the fee the WHOLE pool paid its LPs
+	// in the last 15 minutes as a percent of its reserve. Comparing it to
+	// MinFeeTVLDay is a units error — the daily gate above answers "does this
+	// book earn?", this one answers "is it earning right now?".
+	feeTVLM15 := 0.0
+	if p.ReserveUSD > 0 {
+		feeTVLM15 = (p.VolumeM15USD * p.FeePct / 100) / p.ReserveUSD * 100
+	}
+	if feeTVLM15 < mp.MinFeeTVLM15Pct {
+		return nil, fmt.Sprintf("m15 fee/TVL %.4f%% < %.4f%%", feeTVLM15, mp.MinFeeTVLM15Pct)
+	}
+
 	// Honeypot heuristic, pre-GMGN: real two-sided flow must include sells.
 	// Many buys and literally zero sells over an hour is the classic
 	// cannot-sell shape; reject before spending safety-gate budget on it.
@@ -403,6 +715,9 @@ func Screen(p Pool, mp ModeParams, now time.Time) (*Candidate, string) {
 		ReserveUSD:   p.ReserveUSD,
 		FdvUSD:       p.FdvUSD,
 		McapUSD:      p.McapUSD,
+		VolumeM15USD: p.VolumeM15USD,
+		TxM15:        txM15,
+		FeeTVLM15Pct: feeTVLM15,
 		VolumeH1USD:  p.VolumeH1USD,
 		VolumeH24USD: p.VolumeH24USD,
 		FeeTVLDayPct: feeTVLDay,
@@ -411,7 +726,7 @@ func Screen(p Pool, mp ModeParams, now time.Time) (*Candidate, string) {
 		SellersH1:    p.TxH1.Sellers,
 		ChangeM5Pct:  p.ChangeM5Pct,
 		ChangeH1Pct:  p.ChangeH1Pct,
-		Score:        score(p, feeTVLDay),
+		Score:        score(p, feeTVLDay, mp),
 	}, ""
 }
 
@@ -419,13 +734,33 @@ func Screen(p Pool, mp ModeParams, now time.Time) (*Candidate, string) {
 // sub-scores (turnover, participation, fee pace, liquidity), mirroring the
 // Solana degen score's balance-enforcing shape — any zero sub-score zeroes
 // the whole score.
-func score(p Pool, feeTVLDay float64) float64 {
+// The score is what the scanner argmaxes over (pickOrder), so it decides WHICH
+// screened pool gets the wallet. mp.RankByFeeDensity swaps the liquidity term
+// for a second, heavier fee-density term — see that field for why depth is a
+// cost rather than a virtue under a churn thesis.
+func score(p Pool, feeTVLDay float64, mp ModeParams) float64 {
 	if p.ReserveUSD <= 0 {
 		return 0
 	}
 	sTurnover := clamp01((p.VolumeH1USD / p.ReserveUSD) / targetTurnoverH1)
 	sBuyers := clamp01(float64(p.TxH1.Buyers) / targetBuyersH1)
 	sFees := clamp01(feeTVLDay / targetFeeDayPct)
+	if mp.RankByFeeDensity {
+		// Fee density squared, in place of the liquidity term. Squared rather
+		// than merely un-weighted because a geometric mean of four terms flattens
+		// exactly the axis being selected on: across the seven pools that cleared
+		// this mode's band on 2026-08-08 (3.1%/day to 7.1%/day, a 2.3x spread)
+		// the fee sub-score moved 0.12 to 0.28, while a fourth root compressed
+		// that into a 1.24x score difference. Squaring restores the ordering to
+		// something close to the ratio the pools actually differ by.
+		//
+		// MinReserveUSD is what keeps this honest, and it is load-bearing here:
+		// with depth no longer scored, nothing else in this function would prefer
+		// a $20k pool to the $172-of-TVL husks the ranked feed surfaces
+		// (ranked.go), which post four-digit turnover precisely because they hold
+		// nothing.
+		return math.Pow(sTurnover*sBuyers*sFees*sFees, 0.25) * 100
+	}
 	sLiq := clamp01(math.Log10(p.ReserveUSD) / math.Log10(targetReserveUSD))
 	return math.Pow(sTurnover*sBuyers*sFees*sLiq, 0.25) * 100
 }

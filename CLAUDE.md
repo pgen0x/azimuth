@@ -117,7 +117,14 @@ one pass per enabled mode per `POLL_INTERVAL`.
     an equity ladder held 5.6h fee-dead overnight before it existed), not
     SL/TP, and a rung is
     out-of-range **by design** — the fee-dead OOR timeout must never apply to
-    it. Discovery is the **union of two feeds** (`trending.go`): `Mature`'s
+    it. A **fill is a wall event, not a rung event** (2026-08-07): the first
+    rung to convert closes every rung of that `ladderId` (`ladder wall
+    breached`), because the rest are resting bids under a market that just came
+    down through one — six of eleven observed fills were a repeat in a pool
+    that had already filled, averaging -11.8% against -6.7% for the first. A
+    fill past `UNI_LADDER_FILL_HARD_PCT` skips indicator confirmation, and a
+    fill-class close (never `idle`/`stale`, which ARE the re-pin loop) writes a
+    Redis re-entry cooldown the daemon reads at deploy time. Discovery is the **union of two feeds** (`trending.go`): `Mature`'s
     gateway feed plus the cached GeckoTerminal `trending_pools` page, which
     carries v3 pools the gateway does not index at all. The page costs no extra
     GT request while `Fresh` runs — `discover.go` already fetches it and now
@@ -138,9 +145,128 @@ one pass per enabled mode per `POLL_INTERVAL`.
     is the only honest source for a wall's real width. It spends the wallet's
     **USDG**, so sizing uses `RobinhoodSizeUSDG` (dollar units). §4c.
 
+  - `PulseLadder` (`ROBINHOOD_PULSE_LADDER`) — the same WETH wall as `Ladder`,
+    one age band earlier: memecoin pools **1h-24h old**, handing off at exactly
+    24h (`PulseLadder.MaxAge == Ladder.MinAge`, asserted by a test). It needs a
+    discovery source no other mode does, because **neither feed can answer
+    "which WETH pools are three hours old"** — measured 2026-08-06, `new_pools`
+    returned 33 WETH pools and every one was 1-5 minutes old, while the gateway
+    indexes nothing under a day. So `pulse.go` keeps a **carried registry**:
+    every launch sweep records pools by identity + creation time, and each cycle
+    the entries that have aged INTO the band are re-enriched in one
+    `/pools/multi/` call. Only identity survives the carry — every number a gate
+    reads is re-fetched, and an entry the enrich did not refresh is dropped
+    rather than screened on launch-minute data. The registry is **mirrored to
+    Redis** (`rh:young:<pool>`, one key per pool, TTL = the pool's *remaining*
+    24h window, so Redis expires an entry when `pruneWatch` would): entries are
+    only useful once they are `MinAge` old, so a process-memory-only registry
+    left the mode blind for an hour and thin for a day after every restart.
+    In-memory stays authoritative; the store only seeds it at startup. Geometry is unchanged
+    (`uni_ladder.js` keys on the quote asset, not the mode): if a soak shows a
+    first-day pool wants a different wall, add per-strategy geometry, not a
+    second WETH constant.
+
+  - `Turnover` (`ROBINHOOD_TURNOVER`) — **the venue's earning thesis as of
+    2026-08-07**, and the port of Solana `turnover`: **ONE one-sided WETH rung**
+    (`weth_below`) resting adjacent to spot in an oscillating pool, **re-pinned**
+    when price drifts off it or it stops earning, rather than closed. It
+    replaced the ladders on evidence, not taste — 104 live ladder rung closes
+    produced **zero** fee-positive exits (63 `ladder idle`, 30 `ladder stale`,
+    11 fills averaging −9.48%). The diagnosis is *not* "one-sided doesn't work":
+    the on-chain fee meter shows the rung NEAREST spot earning (GME rung 0:
+    0.002039 USDG/214m) while outer rungs read exactly 0. Two thirds of a wall's
+    capital sat where the market never came. One rung concentrates it there, and
+    the re-pin loop is what keeps it there. The mode pins its own strategy in
+    `sizeFor` instead of inheriting `ROBINHOOD_DEPLOY_STRATEGY`; that pin is also
+    what keeps `balanced_tight` — which pre-swaps half the commit into the
+    memecoin and lost −15.04%/trade holding it — out of a mode screened for
+    churn. Solana settled the same question: `select_batch_strategy()` ends in an
+    unconditional `return "sol_bidask"`, every mode single-sided.
+    Discovery is the **union of two feeds** (`ranked.go`): `Mature`'s gateway
+    feed with a turnover-band prefilter, plus GeckoTerminal's plain pool list
+    sorted by 24h volume (`/pools?sort=h24_volume_usd_desc`, 2 pages, cached and
+    rate-limited exactly like `trending.go`). The gateway ranks by TVL, which
+    sorts hardest for the deep books where a small position earns least; a churn
+    mode is paid `fee_tier x volume`, so it needs a volume ranking. Measured
+    2026-08-08: of the 19 pools this mode minted into over the preceding two
+    days, only **2** appeared anywhere in the venue's top 60 by volume — it was
+    screening a fringe of the book and calling it the book. The ranked page's
+    head is full of things that must never be minted (WETH/USDG with no token
+    side, `pons-v2-dex`, sub-$500-TVL husks posting four-digit turnover), so
+    `mapGTPools` drops the wrong DEXes and `Screen` drops the rest: this is a
+    ranking, never a gate. Polled BEFORE the ladders so a spent GeckoTerminal
+    budget starves the comparison arm first.
+
+    Ranking is also this mode's own: `RankByFeeDensity` replaces the score's
+    liquidity term with a second, squared fee-density term. Depth is a virtue
+    for a mode holding inventory for days (it is the exit liquidity it will
+    need) and a cost for a re-pinned rung (our fee share is our liquidity over
+    the pool's), so the default ranking was preferring the pool that pays us
+    less. `MinReserveUSD` is what keeps the husks out once depth stops scoring.
+
+    **Geometry is `uni_ladder.js`'s `TURNOVER_RUNG_TICKS`** (600 WETH ticks,
+    ~5.8% of covered drop — half a ladder rung, because a re-pinned rung buys
+    density where a wall buys depth), laid by the same `ladderBands()` with
+    `rungs=1` so the bid-side direction invariant has one implementation. It is
+    **out of range by design and there is no OOR fuse**: v3/v4 cannot mint
+    one-sided liquidity across spot (a straddling range computes
+    `liquidity = min(L(amount), L(0)) = 0`), unlike DLMM's `sol_bidask` which
+    includes the active bin — so a 2-minute fuse would close and re-mint forever.
+    `turnover_decide` therefore reuses the LADDER rulebook — `rung_fill_state`,
+    `ladder_idle_reason` — and only the *response* differs:
+
+    | test | ladder | turnover |
+    |---|---|---|
+    | filled | close + cooldown | close + cooldown (never re-pin under a market that just came down through the bid) |
+    | drift > stale ticks | tear down | **re-center** |
+    | earned nothing in a window | tear down | **re-center** |
+
+    Its whole viability is the **re-center loop in `uni_monitor.py`**, which
+    this venue did not have until now. Both re-center reasons share the
+    `turnover re-center` prefix, which is what the close path routes on: they
+    are deliberately NOT in `exit_confirmable` (confirmation would stall the
+    cadence, and the rung is pure quote so there is no sell to time) and NOT in
+    `cool_off` (cooling the pool would switch the mode off), and they are the
+    ONLY reasons that re-mint. Mirrors `dlmm_monitor.py`'s `is_oor_rebalance`
+    exclusions. Guarded by a per-pool 24h circuit breaker
+    (`rh:turnover:{recenters,pnl}:<pool>`) that fails **CLOSED** — unlike
+    `cool_off`, a re-center is optional work on top of an already-completed
+    close, so an unreadable window means take the normal exit. Fee compounding
+    is `collect`-to-wallet, not Solana's in-place increase: neither executor has
+    an `increaseLiquidity` path, and a loop whose holding period is minutes
+    recycles the fees into the next mint anyway.
+
+    **No fill reason is confirmable** — `exit_confirmable` now holds only the
+    two-sided momentum exits (`trailing exit` / `fast-out` / `downtrend`).
+    Fills were confirmable until 2026-08-08 on the sound argument that an
+    un-filling rung costs nothing while a round trip costs the fee tier twice;
+    218 closes refute it. A fill that closed on its own rule averaged
+    **-3.81%** (n=5); one postponed here first averaged **-9.77%** (n=9), and
+    six of those nine are in the postponement log, held by a bullish
+    supertrend/RSI read until they crossed the -8% hard floor. 422 postponements
+    in three days bought back nothing. A fill IS token inventory, which is the
+    one thing a one-sided strategy exists never to hold, so it is hard risk like
+    SL/TP and the fee-dead OOR timeout.
+
+    **Gas is metered** (`noteGas` / `gasReport` in both executors, journaled by
+    `uni_monitor.py` as `gas_eth` / `gas_txs`). It was measured nowhere before
+    2026-08-08 while the loop churned ~200 tx/day, so the venue's net was
+    always fee income minus fill losses minus a guess. Metered BEFORE the revert
+    check — a reverted tx still burns gas — and gas is always ETH even for a
+    USDG-quoted position, so it deliberately does not follow `quote_symbol`.
+    The two executors keep separate copies; what must stay identical is the
+    payload FIELD NAMES, not the code (`uni_ladder.js` is geometry and stays
+    free of receipt concerns).
+
   Modes are quote-pinned via `ModeParams.QuoteAsset` — a ladder's rungs and its
   sizing must be the same asset, so a mode may not mix WETH- and USDG-quoted
-  pools in one batch. **USDG is 6 decimals, WETH is 18**: anything touching
+  pools in one batch. The pin goes through `quotePinMatch`, not an address
+  compare: **ether has two spellings** on this venue (the v3 ERC-20 wrapper and
+  the v4 zero address, both reported as "WETH"), and a WETH pin means "LPs
+  against ether". An exact compare made the WETH ladders blind to v4 — 68 of
+  the 70 pools the pulse registry carried on 2026-08-07 were native-ETH — even
+  though `sizeFor` and the v4 executor (`ensureNativeFunds` / `rewrapExcess`)
+  were already built to fund a native-quote mint from the WETH balance. **USDG is 6 decimals, WETH is 18**: anything touching
   amounts in `uni_executor.js` must go through `parseQ`/`fmtQ`, never
   `parseEther` (the v4 executor uses `parseUnits`/`formatUnits` at `q.decimals`
   for the same reason).
@@ -150,6 +276,14 @@ one pass per enabled mode per `POLL_INTERVAL`.
   both — rung count/width/floor/ramp describe the thesis, not the protocol, and
   `uni_monitor.py`'s `ladder stale` rule reads the same widths. Change it there,
   never in one executor. §4d.
+
+  All three ladder modes also gate on the **live 15-minute window**
+  (`MinTxM15` / `MinVolumeM15USD` / `MinFeeTVLM15Pct`) — the port of Solana
+  `Pulse`'s `(MinFeeActiveTVL, MinVolumeUSD)` pair, and the fix for the mode's
+  dominant failure: 91 of 102 ladder closes earned exactly zero, and every one
+  of those pools passed the h1 and 24h gates at mint. `MinFeeTVLM15Pct` is
+  window-scoped, NOT annualized — comparing it to `MinFeeTVLDay` is a units
+  error. Costs no extra request (GT already returns `volume_usd.m15`).
 
   All four modes share `Screen` and every safety gate (GMGN OpenAPI
   `chain=robinhood` security + holder quality, Blockscout holders). The deploy

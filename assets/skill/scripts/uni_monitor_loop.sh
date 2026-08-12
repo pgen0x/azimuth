@@ -3,14 +3,27 @@
 # monitor. Runs the one-shot uni_monitor.py scan in a loop so the exit rules
 # (SL/TP/trailing/fast-out/OOR) fire reliably, mirroring dlmm_monitor_loop.sh.
 #
-# Interval is longer than the Solana loop (20s): the venue holds few positions
-# and every tick makes ~2 GeckoTerminal calls per position against the keyless
-# ~4 req/min budget the discovery daemon already shares. 60s stays clear of it.
+# Interval matches the Solana loop (20s). It did not always: the tick used to
+# cost one GeckoTerminal request per position against the ~10 req/min budget the
+# discovery daemon shares, so 60s was the only cadence that stayed clear of it —
+# which, with a ~24s scan, made the real reaction time ~84s.
+#
+# Two changes removed the coupling. /pools/multi/ made momentum ONE request per
+# tick regardless of position count, and that request is now served from a cache
+# with its own TTL (uni_monitor.py MOMENTUM_TTL, 60s) instead of the loop's
+# period. So the GT spend at 20s is what it was at 60s, while the rules that
+# actually need speed — PnL, in-range, ladder rung fills — are on-chain reads
+# whose budget is far larger. A filled rung is now seen within ~20s of the scan
+# rather than up to ~84s.
+#
+# Do not shorten this further without re-measuring the scan itself: once the
+# sleep is shorter than a scan, ticks are paced by the scan and the number here
+# stops meaning anything.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROFILE_DIR="$(dirname "$(dirname "$(dirname "$SCRIPT_DIR")")")"
 
-echo "Starting Robinhood Chain (Uniswap v3) Position Monitor Loop (60s interval)..."
+echo "Starting Robinhood Chain (Uniswap v3/v4) Position Monitor Loop (20s interval)..."
 
 cd "$SCRIPT_DIR" || exit 1
 while true; do
@@ -25,5 +38,5 @@ while true; do
     set +a
 
     python3 "$SCRIPT_DIR/uni_monitor.py"
-    sleep 60
+    sleep 20
 done

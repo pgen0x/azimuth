@@ -113,6 +113,96 @@ func (s *Seen) CooldownRemaining(ctx context.Context, symbol string) time.Durati
 	return d
 }
 
+// RobinhoodCooldown reports how long this pool (or its token) is still blocked
+// from re-entry, and why. Zero duration means clear.
+//
+// The keys are written by uni_monitor.py when a resting wall is run over —
+// rh:cooldown:pool:<pool> and rh:cooldown:token:<base>, the venue's port of the
+// Solana monitor's sol:dlmm:cooldown:* block. Only the FILL class of close
+// writes them: `ladder idle` and `ladder stale` are re-pins by design, and
+// cooling those off would switch the ladder modes off entirely.
+//
+// Both arguments are lowercased here because the two sides spell addresses
+// differently — GeckoTerminal returns mixed case, the monitor writes what the
+// executor reported — and a cooldown that missed on capitalization would read
+// as "clear" every time.
+//
+// Fails OPEN (returns 0) with no Redis backend or on any read error, matching
+// this venue's gate convention: the position cap and the screen still stand
+// between an unknown cooldown and a deploy.
+func (s *Seen) RobinhoodCooldown(ctx context.Context, pool, token string) (time.Duration, string) {
+	// Nil receiver included in the fail-open case: this is read from the deploy
+	// walk, which a caller may reach with no store wired at all (the scanner
+	// tests build a Scanner directly). A risk brake must not be the thing that
+	// panics the daemon.
+	if s == nil || s.rdb == nil {
+		return 0, ""
+	}
+	for _, k := range []struct{ kind, id string }{{"pool", pool}, {"token", token}} {
+		if k.id == "" {
+			continue
+		}
+		key := "rh:cooldown:" + k.kind + ":" + strings.ToLower(k.id)
+		d, err := s.rdb.TTL(ctx, key).Result()
+		if err != nil || d <= 0 {
+			continue
+		}
+		reason, _ := s.rdb.Get(ctx, key).Result()
+		return d, reason
+	}
+	return 0, ""
+}
+
+// RobinhoodSecurityTTL is how long one POSITIVE contract-security detection
+// silences a token. Not permanent, on the same reasoning that retired the
+// permanent Solana rug blacklist (2026-08-07): a monotonic deny-list only ever
+// grows and eventually eats the recycling universe. A week is long past the
+// life of the memecoins this venue screens.
+const RobinhoodSecurityTTL = 7 * 24 * time.Hour
+
+// rhSecKey namespaces the sticky security verdict. Lowercased for the same
+// reason as RobinhoodCooldown: GeckoTerminal and the gateway spell the same
+// address in different cases, and a verdict that missed on capitalization
+// would read as "clean".
+func rhSecKey(token string) string {
+	return "rh:sec:blacklist:" + strings.ToLower(token)
+}
+
+// SecurityBlacklisted reports the stored reason a token was hard-rejected by
+// the contract-security gate, or "" when it is clear.
+//
+// This is what makes a positive detection STICK. GMGN answers per call, and on
+// 2026-08-09 BLINK read `honeypot` on ten cycles and unknown on two — the gate
+// fails open on unknown, so those two minted into it, and one of those
+// positions can no longer be closed at all (`collect` reverts TF against a
+// token that blocks transfers). A verdict that only holds for the cycle that
+// observed it is not a gate.
+//
+// With no Redis backend there is nowhere to remember, so this returns "" and
+// the live gate stays the only layer. Where a verdict IS recorded it outranks
+// a later "unknown": affirmative evidence must not expire because the next
+// request timed out.
+func (s *Seen) SecurityBlacklisted(ctx context.Context, token string) string {
+	if s == nil || s.rdb == nil || token == "" {
+		return ""
+	}
+	reason, err := s.rdb.Get(ctx, rhSecKey(token)).Result()
+	if err != nil {
+		return ""
+	}
+	return reason
+}
+
+// BlacklistSecurity records a positive contract-security detection for a token.
+// Best-effort: a write failure only costs the stickiness, and the live gate has
+// already rejected the candidate on the call that produced reason.
+func (s *Seen) BlacklistSecurity(ctx context.Context, token, reason string) {
+	if s == nil || s.rdb == nil || token == "" || reason == "" {
+		return
+	}
+	s.rdb.Set(ctx, rhSecKey(token), reason, RobinhoodSecurityTTL)
+}
+
 // CachedCandles reads a Robinhood pool's cached GeckoTerminal candle set into
 // out (a pointer, JSON-decoded) and reports whether it was served. ok=false
 // covers no Redis backend, no cached entry and an unreadable/undecodable value
@@ -151,6 +241,70 @@ func (s *Seen) PutCandles(ctx context.Context, pool string, v any, ttl time.Dura
 		return
 	}
 	s.rdb.Set(ctx, "rh:ohlcv:"+strings.ToLower(pool), b, ttl)
+}
+
+// youngPoolPrefix namespaces the pulse ladder's carried young-pool registry.
+// One key per pool rather than one hash for the set, because the registry is
+// organized on AGE and per-key TTLs let Redis do that eviction itself: an entry
+// written with the pool's remaining watch window expires exactly when the
+// in-process prune would have dropped it.
+const youngPoolPrefix = "rh:young:"
+
+// LoadYoungPools returns every carried young-pool record still live in Redis,
+// as raw JSON for the caller to decode. Read once at startup: the registry is
+// the pulse ladder's only view of the 1h-24h band (no feed can answer "which
+// WETH pools are three hours old"), and it lived in process memory alone — so
+// a restart blinded the mode for an hour and starved it for a day while ~2400
+// carried pools rebuilt from scratch. Measured 2026-08-07.
+//
+// Best-effort: a missing backend or a failed scan returns what it has. An
+// empty result is indistinguishable from a cold cache on purpose — both mean
+// "carry nothing yet", which is where the mode already starts.
+func (s *Seen) LoadYoungPools(ctx context.Context) [][]byte {
+	if s.rdb == nil {
+		return nil
+	}
+	var (
+		out    [][]byte
+		cursor uint64
+	)
+	for {
+		keys, next, err := s.rdb.Scan(ctx, cursor, youngPoolPrefix+"*", 500).Result()
+		if err != nil {
+			return out
+		}
+		if len(keys) > 0 {
+			vals, err := s.rdb.MGet(ctx, keys...).Result()
+			if err != nil {
+				return out
+			}
+			for _, v := range vals {
+				// A key can expire between the SCAN and the MGET; that reads as nil.
+				if sv, ok := v.(string); ok && sv != "" {
+					out = append(out, []byte(sv))
+				}
+			}
+		}
+		cursor = next
+		if cursor == 0 {
+			return out
+		}
+	}
+}
+
+// SaveYoungPool persists one registry entry for ttl. Silent and best-effort for
+// the same reason PutCandles is: the in-process registry has already recorded
+// the pool, so a Redis hiccup costs a future restart's head start, never a
+// candidate this cycle.
+func (s *Seen) SaveYoungPool(ctx context.Context, addr string, v any, ttl time.Duration) {
+	if s.rdb == nil || addr == "" || ttl <= 0 {
+		return
+	}
+	b, err := json.Marshal(v)
+	if err != nil {
+		return
+	}
+	s.rdb.Set(ctx, youngPoolPrefix+strings.ToLower(addr), b, ttl)
 }
 
 // Unmark removes id from the seen set so a failed emit can retry on the next

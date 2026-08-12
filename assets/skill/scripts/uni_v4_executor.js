@@ -42,7 +42,8 @@ const { privateKeyToAccount } = require("viem/accounts");
 // why it is a module and not a copy in each executor. Relative to THIS file, so
 // it resolves inside the symlinked scripts/ dir exactly as it does in-repo.
 const {
-  LADDER_RUNGS, ladderGeom, rungWidth, ladderSizes, ladderBands, ladderSpan,
+  LADDER_RUNGS, ladderGeom, turnoverGeom, rungWidth, ladderSizes, ladderBands,
+  ladderSpan,
 } = require("./uni_ladder.js");
 
 const SCRIPT_DIR = path.dirname(path.isAbsolute(process.argv[1]) ? process.argv[1] : path.resolve(process.argv[1]));
@@ -412,6 +413,36 @@ function hasFlag(name) { return process.argv.includes(`--${name}`); }
 
 const pub = createPublicClient({ chain, transport: http(RPC_URL) });
 
+// --- gas meter -------------------------------------------------------------
+// The v3 executor's meter, verbatim in behaviour — see uni_executor.js for why
+// it exists (the venue churned ~200 transactions a day with no gas accounting
+// at all, so the loop's net could not be computed). Duplicated rather than
+// shared through uni_ladder.js because that module is GEOMETRY: it describes
+// the thesis and must stay free of client and receipt concerns. What these two
+// copies must keep identical is the payload FIELD NAMES, not the code.
+const gasMeter = { wei: 0n, txs: 0 };
+
+function noteGas(rcpt, label) {
+  if (!rcpt || rcpt.gasUsed == null) return rcpt;
+  // A missing effectiveGasPrice reads as "unpriced", never as free.
+  const price = rcpt.effectiveGasPrice == null ? null : BigInt(rcpt.effectiveGasPrice);
+  const used = BigInt(rcpt.gasUsed);
+  gasMeter.txs += 1;
+  if (price === null) {
+    console.log(`gas: ${label} used=${used} price=unavailable (uncounted)`);
+    return rcpt;
+  }
+  const cost = used * price;
+  gasMeter.wei += cost;
+  console.log(`gas: ${label} used=${used} cost=${formatEther(cost)} ETH ` +
+    `(run total ${formatEther(gasMeter.wei)} ETH over ${gasMeter.txs} tx)`);
+  return rcpt;
+}
+
+function gasReport() {
+  return { gasTxs: gasMeter.txs, gasWei: gasMeter.wei.toString(), gasEth: formatEther(gasMeter.wei) };
+}
+
 async function send(wallet, req, label) {
   if (DRY_RUN) {
     console.log(`[dry-run] would send: ${label}`);
@@ -425,7 +456,10 @@ async function send(wallet, req, label) {
     .then((g) => (g * 130n) / 100n)
     .catch(() => undefined);
   const hash = await wallet.writeContract(gas ? { ...req, gas } : req);
-  const rcpt = await pub.waitForTransactionReceipt({ hash, timeout: 120_000 });
+  const rcpt = noteGas(await pub.waitForTransactionReceipt({ hash, timeout: 120_000 }), label);
+  // Metered BEFORE the revert check: a reverted transaction still burns its
+  // gas, and a meter that only counted successes would understate exactly the
+  // failures worth knowing about.
   if (rcpt.status !== "success") throw new Error(`${label} reverted: ${hash}`);
   console.log(`${label}: ${hash}`);
   return { hash, rcpt };
@@ -845,7 +879,7 @@ async function cmdDeployLadder(wallet, account, strategy) {
       ({ bands, rungInfo, unlockData } = buildWall());
       hash = await mintOnce();
     }
-    rcpt = await pub.waitForTransactionReceipt({ hash, timeout: 120_000 });
+    rcpt = noteGas(await pub.waitForTransactionReceipt({ hash, timeout: 120_000 }), "ladder mint");
     if (rcpt.status !== "success") throw new Error(`ladder mint reverted: ${hash}`);
   } catch (e) {
     // Nothing to unwind: the ladder never swapped, so every unit is still quote
@@ -907,6 +941,11 @@ async function cmdDeployLadder(wallet, account, strategy) {
       quoteIn: formatUnits(entryQuoteRaw, q.decimals),
       wethIn: formatUnits(entryQuoteRaw, q.decimals),
       ladderId, rung: info.rung, rungs,
+      // Spot the wall was laid around — drift's only honest zero. buildWall()
+      // reprices off the CURRENT sample on every mint retry, so the tick that
+      // actually shaped these bands is the post-mint one, not the sample taken
+      // before the retry loop. See uni_monitor.py's rung_drift().
+      entryTick: stAfter.tick,
       committedQuote: formatUnits(info.size, q.decimals),
       liquidity: info.liquidity.toString(),
       used0: used0.toString(), used1: used1.toString(),
@@ -936,6 +975,7 @@ async function cmdDeployLadder(wallet, account, strategy) {
     positions: opened, tx: hash,
     quoteIn: formatUnits(totalIn, q.decimals),
     committedQuote: formatUnits(amountQuote, q.decimals),
+    ...gasReport(),
   }));
 }
 
@@ -958,18 +998,25 @@ async function cmdDeploy(wallet, account) {
   if (!q) throw new Error(`quote side ${quoteAddr} not in whitelist`);
   const quoteIs0 = qSide === 0;
 
-  const amountQuote = parseUnits(arg("amount", "0"), q.decimals);
-  if (amountQuote <= 0n) throw new Error(`--amount required (${q.symbol} units)`);
+  // token_above is funded from the TOKEN side, so --amount (quote units) does
+  // not describe it; its size is --token-amount, or the whole bag. It also must
+  // NOT call ensureNative: there is no quote leg to fund.
+  const isAsk = strategy === "token_above";
+  const amountQuote = isAsk ? 0n : parseUnits(arg("amount", "0"), q.decimals);
+  if (!isAsk && amountQuote <= 0n) throw new Error(`--amount required (${q.symbol} units)`);
 
   await ensureGas(wallet, account);
-  if (q.native) await ensureNative(wallet, account, amountQuote);
+  if (q.native && !isAsk) await ensureNative(wallet, account, amountQuote);
 
   let st = await slot0(poolId);
   const spacing = key.tickSpacing;
   const entryTick = st.tick;
   const bandTicks = Math.max(pctToTicks(rangePct), spacing);
+  // Only weth_below reads this; resolved up here because buildMint() is a
+  // closure that reprices on a failed mint and must not re-parse arguments.
+  const turnoverRungTicks = parseInt(arg("rung-ticks", "") || turnoverGeom(q).rungTicks, 10);
 
-  let amount0 = 0n, amount1 = 0n, swapped = 0n, tokenBal = 0n;
+  let amount0 = 0n, amount1 = 0n, swapped = 0n, tokenBal = 0n, askToken = 0n;
 
   if (strategy === "balanced_tight") {
     // Swap first, band around the post-swap tick — same staleness rationale
@@ -995,8 +1042,34 @@ async function cmdDeploy(wallet, account) {
     else { amount0 = tokenBal; amount1 = amountQuote - half; }
   } else if (strategy === "weth_below") {
     // One-sided quote band adjacent to the tick (name kept from the v3
-    // executor for config compatibility; here it means "quote below").
+    // executor for config compatibility; here it means "quote below"). No swap,
+    // so nothing about the entry can move the price and buildMint() below can
+    // place the band from whatever tick the mint attempt reads.
     if (quoteIs0) amount0 = amountQuote; else amount1 = amountQuote;
+    console.log(`turnover rung: ${rungWidth(spacing, turnoverRungTicks)} ticks wide `
+      + `(spacing ${spacing}, requested ${turnoverRungTicks}) on the bid side of tick ${entryTick}`);
+  } else if (strategy === "token_above") {
+    // The mirror of weth_below: a one-sided TOKEN band on the ASK side. Second
+    // leg of a round trip, not an entry — see the v3 executor's copy of this
+    // comment for why market-dumping a filled rung was the whole deficit.
+    //
+    // No swap here either, so buildMint() may reprice freely. Note the token is
+    // never native: on this venue the NATIVE side is always the quote (ether),
+    // so an ask bag is an ERC-20 and the permit2 block below covers it with no
+    // special case.
+    const tdec = Number(await pub.readContract({
+      address: tokenAddr, abi: erc20Abi, functionName: "decimals",
+    }).catch(() => 18));
+    const want = arg("token-amount", "");
+    const askAmt = want
+      ? parseUnits(String(want), tdec)
+      : (DRY_RUN ? parseUnits("1", tdec) : await balanceOf(tokenAddr, account.address));
+    if (askAmt <= 0n) throw new Error("token_above: no token balance to list");
+    if (quoteIs0) amount1 = askAmt; else amount0 = askAmt;
+    askToken = askAmt;
+    console.log(`ask rung: ${rungWidth(spacing, turnoverRungTicks)} ticks wide `
+      + `(spacing ${spacing}, requested ${turnoverRungTicks}) on the ask side of tick ${entryTick}, `
+      + `listing ${formatUnits(askAmt, tdec)} token`);
   } else {
     throw new Error(`unknown strategy ${strategy}`);
   }
@@ -1029,13 +1102,20 @@ async function cmdDeploy(wallet, account) {
     if (strategy === "balanced_tight") {
       tickLower = roundToSpacing(st.tick - bandTicks, spacing, false);
       tickUpper = roundToSpacing(st.tick + bandTicks, spacing, true);
-    } else if (quoteIs0) {
-      // currency0 inventory is consumed as the tick RISES: band above.
-      tickLower = roundToSpacing(st.tick + spacing, spacing, true);
-      tickUpper = roundToSpacing(st.tick + spacing + 2 * bandTicks, spacing, true);
     } else {
-      tickUpper = roundToSpacing(st.tick - spacing, spacing, false);
-      tickLower = roundToSpacing(st.tick - spacing - 2 * bandTicks, spacing, false);
+      // weth_below — rh-turnover's one-sided rung. A ladder of ONE, laid by the
+      // shared ladderBands() so the bid-side direction invariant and the width
+      // the monitor judges drift against have a single definition across both
+      // executors (see uni_ladder.js). Width is TURNOVER_RUNG_TICKS, not
+      // --range-pct: the band is the depth we accept being traded into before
+      // re-pinning, not a tolerance around a price.
+      // token_above is the same rung on the other side of spot, so it shares
+      // this branch and differs only in `side` — one width, one direction
+      // invariant, both executors.
+      const [band] = ladderBands(st.tick, spacing, quoteIs0, 1, turnoverRungTicks,
+        strategy === "token_above" ? "ask" : "bid");
+      tickLower = band.tickLower;
+      tickUpper = band.tickUpper;
     }
     const sqrtA = getSqrtRatioAtTick(tickLower);
     const sqrtB = getSqrtRatioAtTick(tickUpper);
@@ -1051,7 +1131,8 @@ async function cmdDeploy(wallet, account) {
   let { tickLower, tickUpper, sqrtA, sqrtB, liquidity, unlockData } = buildMint();
 
   if (DRY_RUN) {
-    console.log(`🧪 DRY RUN DEPLOY pool=${poolId} strategy=${strategy} ticks=[${tickLower},${tickUpper}] amount=${formatUnits(amountQuote, q.decimals)} ${q.symbol}`);
+    console.log(`🧪 DRY RUN DEPLOY pool=${poolId} strategy=${strategy} ticks=[${tickLower},${tickUpper}] `
+      + (askToken > 0n ? "listing token bag (ask side)" : `amount=${formatUnits(amountQuote, q.decimals)} ${q.symbol}`));
     console.log(JSON.stringify({ success: true, dryRun: true, pool: poolId, protocol: "v4", strategy, tickLower, tickUpper, quote: q.symbol }));
     return;
   }
@@ -1076,7 +1157,7 @@ async function cmdDeploy(wallet, account) {
       ({ tickLower, tickUpper, sqrtA, sqrtB, liquidity, unlockData } = buildMint());
       hash = await mintOnce();
     }
-    rcpt = await pub.waitForTransactionReceipt({ hash, timeout: 120_000 });
+    rcpt = noteGas(await pub.waitForTransactionReceipt({ hash, timeout: 120_000 }), "mint");
     if (rcpt.status !== "success") throw new Error(`mint reverted: ${hash}`);
   } catch (e) {
     // The mint never landed: no position exists, only the swap leg is at
@@ -1143,23 +1224,35 @@ async function cmdDeploy(wallet, account) {
   const stAfter = await slot0(poolId);
   const [used0, used1] = amountsForLiquidity(stAfter.sqrtPriceX96, sqrtA, sqrtB, liquidity);
   const entryQuoteRaw = valueInQuote(used0, used1, stAfter.sqrtPriceX96, quoteIs0);
-  const idle = amountQuote - entryQuoteRaw;
+  // What we set out to commit, in quote terms. An ask rung commits a TOKEN bag,
+  // not a quote amount, so its commitment is that bag marked at the mint tick —
+  // the price the bid was filled at, which is also what the -8% bag stop is
+  // measured from. Using amountQuote (0n) would report "of 0 committed" and
+  // hand the monitor a zero cost basis.
+  const committedQuote = askToken > 0n ? entryQuoteRaw : amountQuote;
+  const idle = committedQuote - entryQuoteRaw;
   journalEntry({
     tokenId, pool: poolId, protocol: "v4", key,
     quote: quoteAddr, quoteSymbol: q.symbol, quoteDecimals: q.decimals,
     tickLower, tickUpper, strategy,
     quoteIn: formatUnits(entryQuoteRaw, q.decimals),
-    committedQuote: formatUnits(amountQuote, q.decimals),
+    committedQuote: formatUnits(committedQuote, q.decimals),
     liquidity: liquidity.toString(),
+    // Spot the band was centred on. buildMint() rederives ticks from whatever
+    // sample the winning mint attempt read, so `stAfter` — not the pre-retry
+    // `entryTick` local above — is the price this position was actually pinned
+    // to. Drift measures from here; a band edge cannot, see cmdDeployLadder.
+    entryTick: stAfter.tick,
     ts: Math.floor(Date.now() / 1000),
   });
   const inRange = stAfter.tick >= tickLower && stAfter.tick < tickUpper;
-  console.log(`position value ${formatUnits(entryQuoteRaw, q.decimals)} ${q.symbol} of ${formatUnits(amountQuote, q.decimals)} committed `
+  console.log(`position value ${formatUnits(entryQuoteRaw, q.decimals)} ${q.symbol} of ${formatUnits(committedQuote, q.decimals)} committed `
     + `(${formatUnits(idle > 0n ? idle : 0n, q.decimals)} left in wallet), ${inRange ? "IN range" : "OUT OF range"} at tick ${stAfter.tick}`);
   console.log(`🚀 DEPLOYED pool=${poolId} strategy=${strategy} position=${tokenId} tx=${hash}`);
   console.log(JSON.stringify({
     success: true, pool: poolId, protocol: "v4", strategy, tokenId, tickLower, tickUpper, tx: hash,
-    quote: q.symbol, quoteIn: formatUnits(entryQuoteRaw, q.decimals), committedQuote: formatUnits(amountQuote, q.decimals), inRange,
+    quote: q.symbol, quoteIn: formatUnits(entryQuoteRaw, q.decimals), committedQuote: formatUnits(committedQuote, q.decimals), inRange,
+    ...gasReport(),
   }));
 }
 
@@ -1263,6 +1356,13 @@ async function cmdState() {
     ladderId: entry?.ladderId || null,
     rung: entry?.rung ?? null,
     rungs: entry?.rungs ?? null,
+    // The pin this position was centred on, and the pool's tick quantum — both
+    // feed the drift rule. `entryTick` is its exact zero; `tickSpacing` is the
+    // fallback for positions minted before the field existed, letting
+    // uni_monitor.py subtract the band's worst-case birth offset rather than
+    // read it as market movement.
+    entryTick: entry?.entryTick ?? null,
+    tickSpacing: Number(key.tickSpacing),
     // quoteIs0 is what ladder_decide reads to know which tick direction fills a
     // rung; wethIs0 is its pre-USDG alias.
     quoteIs0: qSide === 0,
@@ -1316,7 +1416,7 @@ async function cmdCollect(wallet, account) {
     address: POSM, abi: posmAbi, functionName: "modifyLiquidities",
     args: [unlockData, deadline], account: wallet.account, chain,
   }, `collect #${id}`);
-  console.log(JSON.stringify({ success: true, tokenId: id.toString() }));
+  console.log(JSON.stringify({ success: true, tokenId: id.toString(), ...gasReport() }));
 }
 
 async function cmdClose(wallet, account) {
@@ -1342,6 +1442,15 @@ async function cmdClose(wallet, account) {
   const q = QUOTES[quoteAddr.toLowerCase()] || { symbol: "?", decimals: 18, native: false };
 
   const tokenBalBefore = DRY_RUN ? 0n : await balanceOf(tokenAddr, account.address);
+  // Same delta measurement for the QUOTE side — see uni_executor.js's
+  // quoteBefore for why: a one-sided quote position (weth_below, ladder rungs)
+  // closes with nothing to sell, and reporting only the swap proceeds told
+  // uni_monitor.py the whole ticket was gone, which permanently tripped that
+  // pool's re-center circuit breaker. A native quote reads through the same
+  // balanceOf() helper, which routes address(0) to getBalance; the gas this
+  // close pays lands in that delta too, understating the payout by a few
+  // hundred gwei on a chain that prices gas at ~0.05 gwei.
+  const quoteBalBefore = DRY_RUN ? 0n : await balanceOf(quoteAddr, account.address);
 
   // BURN_POSITION removes all liquidity + accrued fees in one action and
   // TAKE_PAIR pays both currencies out — one tx replaces the v3 script's
@@ -1359,6 +1468,11 @@ async function cmdClose(wallet, account) {
   // Sell the freed token side back to the quote. Reports itself instead of
   // failing the close — the position is already gone (same lesson as v3:
   // a revert here must not journal success=false on a burned position).
+  // Measured after burn+take, before the sell, so this is the position's own
+  // payout (principal + fees) rather than the swap's.
+  const quoteFromPosition = DRY_RUN ? 0n
+    : (await balanceOf(quoteAddr, account.address)) - quoteBalBefore;
+
   let sold = null;
   let stranded = null;
   if (!hasFlag("no-swap-out") && !DRY_RUN) {
@@ -1384,13 +1498,25 @@ async function cmdClose(wallet, account) {
   let rewrapped = null;
   if (q.native && !DRY_RUN) rewrapped = await rewrapExcess(wallet, account);
 
+  const totalQuoteOut = formatUnits(
+    quoteFromPosition + (sold ? parseUnits(sold.quote_out, q.decimals) : 0n), q.decimals);
+
   console.log(JSON.stringify({
     success: true, closed: id.toString(), protocol: "v4",
     swapped_out: !!sold,
-    quote_out: sold ? sold.quote_out : "0", quote_symbol: q.symbol,
+    // Both halves of the unwind, matching uni_executor.js: the position's own
+    // payout plus whatever the token side fetched. Summed in base units and
+    // formatted once — adding two decimal strings would round a 6-decimal
+    // quote's cents away.
+    quote_out: totalQuoteOut, quote_symbol: q.symbol,
+    quote_from_position: formatUnits(quoteFromPosition, q.decimals),
+    quote_from_swap: sold ? sold.quote_out : "0",
     // v3-name alias for quote-agnostic consumers (uni_monitor.py close path).
-    weth_out: sold ? sold.quote_out : "0",
+    weth_out: totalQuoteOut,
     stranded, rewrapped, gas_topup: gasTopup,
+    // Realized gas for THIS close, journaled by uni_monitor.py — see the same
+    // field on the v3 close payload.
+    ...gasReport(),
   }));
 }
 

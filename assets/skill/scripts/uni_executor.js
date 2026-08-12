@@ -48,7 +48,8 @@ const { privateKeyToAccount } = require("viem/accounts");
 // for why it is a module and not a copy in each executor. Relative to THIS file,
 // so it resolves inside the symlinked scripts/ dir exactly as it does in-repo.
 const {
-  LADDER_RUNGS, ladderGeom, rungWidth, ladderSizes, ladderBands, ladderSpan,
+  LADDER_RUNGS, ladderGeom, turnoverGeom, rungWidth, ladderSizes, ladderBands,
+  ladderSpan,
 } = require("./uni_ladder.js");
 
 // Same profile resolution as dlmm_executor.js: process.argv[1], not __dirname,
@@ -342,6 +343,48 @@ function hasFlag(name) { return process.argv.includes(`--${name}`); }
 
 const pub = createPublicClient({ chain, transport: http(RPC_URL) });
 
+// --- gas meter -------------------------------------------------------------
+// Every receipt this process waits on funnels through noteGas(), which is the
+// venue's ONLY source of realized gas cost. It existed nowhere before
+// 2026-08-08: the strategy churns ~200 transactions a day (a close and a mint
+// per re-center, plus a collect per compound) and not one of them was priced,
+// so "does this loop out-earn its own gas" was an unanswerable question. A
+// back-of-envelope at the chain's observed 0.028 gwei put gas at roughly half
+// of gross fee income, which is either fine or fatal depending on a number
+// nobody had.
+//
+// Reported in the command's JSON payload (gasEth/gasWei/gasTxs) rather than
+// only logged, so uni_monitor.py can journal it per close and the ledger
+// becomes arithmetic instead of an estimate. Wei is carried as a STRING: the
+// payload crosses a JSON boundary into Python and Go, where a large integer is
+// fine but a float would silently lose the low digits.
+const gasMeter = { wei: 0n, txs: 0 };
+
+function noteGas(rcpt, label) {
+  if (!rcpt || rcpt.gasUsed == null) return rcpt;
+  // effectiveGasPrice is absent on some L2 receipt shapes; a missing price must
+  // read as "unpriced", never as free — count the tx and log the gap.
+  const price = rcpt.effectiveGasPrice == null ? null : BigInt(rcpt.effectiveGasPrice);
+  const used = BigInt(rcpt.gasUsed);
+  gasMeter.txs += 1;
+  if (price === null) {
+    console.log(`gas: ${label} used=${used} price=unavailable (uncounted)`);
+    return rcpt;
+  }
+  const cost = used * price;
+  gasMeter.wei += cost;
+  console.log(`gas: ${label} used=${used} cost=${formatEther(cost)} ETH ` +
+    `(run total ${formatEther(gasMeter.wei)} ETH over ${gasMeter.txs} tx)`);
+  return rcpt;
+}
+
+// gasReport spreads into a command's result payload. Always present, so a
+// consumer can tell "this build reports gas and spent nothing" (0 tx) from
+// "this build predates the meter" (fields absent).
+function gasReport() {
+  return { gasTxs: gasMeter.txs, gasWei: gasMeter.wei.toString(), gasEth: formatEther(gasMeter.wei) };
+}
+
 async function send(wallet, req, label) {
   if (DRY_RUN) {
     console.log(`[dry-run] would send: ${label}`);
@@ -356,7 +399,10 @@ async function send(wallet, req, label) {
     .then((g) => (g * 130n) / 100n)
     .catch(() => undefined);
   const hash = await wallet.writeContract(gas ? { ...req, gas } : req);
-  const rcpt = await pub.waitForTransactionReceipt({ hash, timeout: 120_000 });
+  const rcpt = noteGas(await pub.waitForTransactionReceipt({ hash, timeout: 120_000 }), label);
+  // Metered BEFORE the revert check on purpose: a reverted transaction still
+  // burns its gas, and a meter that only counted successes would understate
+  // exactly the failures worth knowing about.
   if (rcpt.status !== "success") throw new Error(`${label} reverted: ${hash}`);
   console.log(`${label}: ${hash}`);
   return hash;
@@ -671,7 +717,7 @@ async function cmdDeployLadder(wallet, account, strategy) {
       address: NPM, abi: npmAbi, functionName: "multicall", args: [calls],
       account: wallet.account, chain,
     });
-    rcpt = await pub.waitForTransactionReceipt({ hash, timeout: 120_000 });
+    rcpt = noteGas(await pub.waitForTransactionReceipt({ hash, timeout: 120_000 }), "ladder mint");
     if (rcpt.status !== "success") throw new Error(`ladder mint reverted: ${hash}`);
   } catch (e) {
     // Nothing to unwind: the ladder never swapped, so every unit is still quote
@@ -710,6 +756,12 @@ async function cmdDeployLadder(wallet, account, strategy) {
       quote: q.address, quoteSymbol: q.symbol, quoteDecimals: q.decimals,
       quoteIn: fmtQ(entryQuote, q), wethIn: fmtQ(entryQuote, q),
       ladderId, rung: rung < 0 ? null : rung, rungs,
+      // Spot at the moment the wall was laid — the ONLY honest zero for drift.
+      // The band edges are not: ladderBands() pins one spacing off spot and then
+      // quantizes, so rung 0's near edge is born spacing..2*spacing away from
+      // `tick`, and a drift rule that measures from the edge reads that birth
+      // offset as market movement. See uni_monitor.py's rung_drift().
+      entryTick: tick,
       committedQuote: fmtQ(rung < 0 ? 0n : sizes[rung], q),
       used0: inc.args.amount0.toString(), used1: inc.args.amount1.toString(),
       ts: Math.floor(Date.now() / 1000),
@@ -725,6 +777,7 @@ async function cmdDeployLadder(wallet, account, strategy) {
     quote: q.address, quoteSymbol: q.symbol,
     positions: opened, tx: hash, quoteIn: fmtQ(totalIn, q),
     committedQuote: fmtQ(amountQuote, q),
+    ...gasReport(),
   }));
 }
 
@@ -749,13 +802,16 @@ async function cmdDeploy(wallet, account) {
   const q = resolveQuote(st, arg("quote", ""));
   const quoteIs0 = q.isToken0;
   const token = q.token;
-  const amountQuote = parseQ(arg("amount", "0"), q);
-  if (amountQuote <= 0n) throw new Error(`--amount required (${q.symbol})`);
+  // token_above is funded from the TOKEN side, so --amount (quote units) does
+  // not describe it at all; its size is --token-amount, or the whole bag.
+  const isAsk = strategy === "token_above";
+  const amountQuote = isAsk ? 0n : parseQ(arg("amount", "0"), q);
+  if (!isAsk && amountQuote <= 0n) throw new Error(`--amount required (${q.symbol})`);
   const spacing = Number(st.tickSpacing);
   const tick = Number(st.tick);
   const bandTicks = Math.max(pctToTicks(rangePct), spacing);
 
-  let tickLower, tickUpper, amount0 = 0n, amount1 = 0n, swapped = 0n;
+  let tickLower, tickUpper, amount0 = 0n, amount1 = 0n, swapped = 0n, askToken = 0n;
   // Pool state the band is built from and the cost basis is priced at.
   // balanced_tight replaces it with a post-swap read; weth_below never swaps.
   let mintSt = st;
@@ -803,25 +859,76 @@ async function cmdDeploy(wallet, account) {
   } else if (strategy === "weth_below") {
     // One-sided quote-asset band adjacent to the current tick (bid side): no
     // swap, pure fee capture that converts to the token only if price crosses
-    // in. Direction depends on token ordering: quote-as-token0 inventory is
-    // consumed as the tick RISES, so its band sits above the current tick;
-    // quote-as-token1 the reverse. (Name kept for the config contract — it is
-    // a single-rung ladder, and the ladder strategies superseded it.)
-    if (quoteIs0) {
-      tickLower = roundToSpacing(tick + spacing, spacing, true);
-      tickUpper = roundToSpacing(tick + spacing + 2 * bandTicks, spacing, true);
-      amount0 = amountQuote;
-    } else {
-      tickUpper = roundToSpacing(tick - spacing, spacing, false);
-      tickLower = roundToSpacing(tick - spacing - 2 * bandTicks, spacing, false);
-      amount1 = amountQuote;
-    }
+    // in. This is rh-turnover's entry shape, and it is LITERALLY a ladder of
+    // one — same ladderBands() call the wall uses, with rungs=1 — so the
+    // direction invariant (quote-as-token0 fills as the tick RISES, so its band
+    // sits above spot; quote-as-token1 the reverse) has exactly one
+    // implementation on this venue rather than a second copy that can drift
+    // out of agreement with uni_monitor.py's fill rule.
+    //
+    // Width comes from TURNOVER_RUNG_TICKS, not --range-pct. The band is not a
+    // tolerance around a price we are betting on, it is the depth we are
+    // willing to be traded into before re-pinning, and the monitor judges drift
+    // against that same number. --range-pct is still accepted (and ignored)
+    // here so the deploy contract stays one shape for every strategy.
+    const rungTicks = parseInt(arg("rung-ticks", "") || turnoverGeom(q).rungTicks, 10);
+    const [band] = ladderBands(tick, spacing, quoteIs0, 1, rungTicks);
+    tickLower = band.tickLower;
+    tickUpper = band.tickUpper;
+    if (quoteIs0) amount0 = amountQuote; else amount1 = amountQuote;
+    const { dropPct } = ladderSpan([band]);
+    console.log(`turnover rung: [${tickLower},${tickUpper}] `
+      + `${rungWidth(spacing, rungTicks)} ticks wide (spacing ${spacing}, requested ${rungTicks}) `
+      + `— covers ${dropPct.toFixed(2)}% from spot tick ${tick}`);
+  } else if (strategy === "token_above") {
+    // The mirror of weth_below: a one-sided TOKEN band adjacent to spot on the
+    // ASK side. This is the SECOND LEG of a round trip, not an entry. A bid rung
+    // that filled is holding the token, and re-listing it above spot sells it
+    // back into a bounce while earning the fee tier a second time, instead of
+    // market-dumping it at whatever the dip prints — that dump was -4.9% per
+    // fill and the entire deficit of this venue's 2026-08-09 ledger, against
+    // +0.003% earned per untouched rung.
+    //
+    // Same width and the same ladderBands() as the bid, with side="ask": the
+    // round trip should be symmetric, and a separate width here would be a
+    // second number for uni_monitor.py's drift rule to disagree with.
+    //
+    // Size is the whole bag by default, not a fraction: this position exists to
+    // get rid of exactly this inventory. --token-amount overrides for tests.
+    const tdec = Number(await pub.readContract({
+      address: token, abi: erc20Abi, functionName: "decimals",
+    }).catch(() => 18));
+    const want = arg("token-amount", "");
+    const askAmt = want
+      ? parseUnits(String(want), tdec)
+      : (DRY_RUN
+        ? parseUnits("1", tdec)
+        : await pub.readContract({
+          address: token, abi: erc20Abi, functionName: "balanceOf", args: [account.address],
+        }));
+    if (askAmt <= 0n) throw new Error("token_above: no token balance to list");
+    const rungTicks = parseInt(arg("rung-ticks", "") || turnoverGeom(q).rungTicks, 10);
+    const [band] = ladderBands(tick, spacing, quoteIs0, 1, rungTicks, "ask");
+    tickLower = band.tickLower;
+    tickUpper = band.tickUpper;
+    if (quoteIs0) amount1 = askAmt; else amount0 = askAmt;
+    askToken = askAmt;
+    const { dropPct } = ladderSpan([band]);
+    console.log(`ask rung: [${tickLower},${tickUpper}] `
+      + `${rungWidth(spacing, rungTicks)} ticks wide (spacing ${spacing}, requested ${rungTicks}) `
+      + `— covers ${dropPct.toFixed(2)}% from spot tick ${tick}, `
+      + `listing ${formatUnits(askAmt, tdec)} token`);
   } else {
     throw new Error(`unknown strategy ${strategy}`);
   }
 
-  await ensureAllowance(wallet, account.address, q.address, NPM, quoteIs0 ? amount0 : amount1);
-  if (swapped > 0n) await ensureAllowance(wallet, account.address, token, NPM, quoteIs0 ? amount1 : amount0);
+  // The ask rung offers no quote at all, so its approve is the token's.
+  if (askToken > 0n) {
+    await ensureAllowance(wallet, account.address, token, NPM, askToken);
+  } else {
+    await ensureAllowance(wallet, account.address, q.address, NPM, quoteIs0 ? amount0 : amount1);
+    if (swapped > 0n) await ensureAllowance(wallet, account.address, token, NPM, quoteIs0 ? amount1 : amount0);
+  }
 
   const deadline = BigInt(Math.floor(Date.now() / 1000) + 120);
   // A two-sided strategy demands a two-sided fill: each side must take at least
@@ -840,14 +947,15 @@ async function cmdDeploy(wallet, account) {
   };
 
   if (DRY_RUN) {
-    console.log(`🧪 DRY RUN DEPLOY pool=${pool} strategy=${strategy} ticks=[${tickLower},${tickUpper}] amount=${fmtQ(amountQuote, q)} ${q.symbol}`);
+    console.log(`🧪 DRY RUN DEPLOY pool=${pool} strategy=${strategy} ticks=[${tickLower},${tickUpper}] `
+      + (askToken > 0n ? `listing token bag (ask side)` : `amount=${fmtQ(amountQuote, q)} ${q.symbol}`));
     console.log(JSON.stringify({ success: true, dryRun: true, pool, strategy, tickLower, tickUpper, quoteSymbol: q.symbol }));
     return;
   }
   let hash, rcpt;
   try {
     hash = await wallet.writeContract({ address: NPM, abi: npmAbi, functionName: "mint", args: [mintArgs], account: wallet.account, chain });
-    rcpt = await pub.waitForTransactionReceipt({ hash, timeout: 120_000 });
+    rcpt = noteGas(await pub.waitForTransactionReceipt({ hash, timeout: 120_000 }), "mint");
     if (rcpt.status !== "success") throw new Error(`mint reverted: ${hash}`);
   } catch (e) {
     // The mint never landed, so no position exists and the only capital at risk
@@ -927,24 +1035,38 @@ async function cmdDeploy(wallet, account) {
   const used0 = inc ? inc.args.amount0 : amount0;
   const used1 = inc ? inc.args.amount1 : amount1;
   const entryQuote = valueInQuote(used0, used1, mintSt.sqrtPriceX96, quoteIs0);
-  const idleQuote = amountQuote - entryQuote;
+  // What we set out to commit, in quote terms. The ask rung commits a TOKEN bag,
+  // not a quote amount, so its commitment is that bag marked at the mint tick —
+  // which is the fill price the bid converted at. Reporting `amountQuote` (0n)
+  // here would print "of 0 committed" and hand the monitor a cost basis of zero.
+  // It also fixes what the -8% bag stop is measured FROM: the price we were
+  // filled at, not the price the original bid was placed at.
+  const committedQuote = askToken > 0n ? entryQuote : amountQuote;
+  const idleQuote = committedQuote - entryQuote;
   journalEntry({
     tokenId, pool, token0: st.token0, token1: st.token1, fee: Number(st.fee),
     tickLower, tickUpper, strategy,
     quote: q.address, quoteSymbol: q.symbol, quoteDecimals: q.decimals,
     quoteIn: fmtQ(entryQuote, q), wethIn: fmtQ(entryQuote, q),
-    committedQuote: fmtQ(amountQuote, q),
+    committedQuote: fmtQ(committedQuote, q),
     used0: used0.toString(), used1: used1.toString(),
+    // Spot the band was built around — `mintSt` is the SAME sample both branches
+    // laid their ticks from (post-swap for balanced_tight, the pre-mint read for
+    // weth_below), so this is the price the position was centred on, not a
+    // second read that has already moved. Drift is measured from here; a band
+    // edge cannot serve, see the note in cmdDeployLadder's journal write.
+    entryTick: Number(mintSt.tick),
     ts: Math.floor(Date.now() / 1000),
   });
   const inRange = Number(mintSt.tick) >= tickLower && Number(mintSt.tick) < tickUpper;
-  console.log(`position value ${fmtQ(entryQuote, q)} ${q.symbol} of ${fmtQ(amountQuote, q)} committed `
+  console.log(`position value ${fmtQ(entryQuote, q)} ${q.symbol} of ${fmtQ(committedQuote, q)} committed `
     + `(${fmtQ(idleQuote, q)} left in wallet), ${inRange ? "IN range" : "OUT OF range"} at tick ${mintSt.tick}`);
   console.log(`🚀 DEPLOYED pool=${pool} strategy=${strategy} position=${tokenId} tx=${hash}`);
   console.log(JSON.stringify({
     success: true, pool, strategy, tokenId, tickLower, tickUpper, tx: hash,
     quote: q.address, quoteSymbol: q.symbol,
-    quoteIn: fmtQ(entryQuote, q), committedQuote: fmtQ(amountQuote, q), inRange,
+    quoteIn: fmtQ(entryQuote, q), committedQuote: fmtQ(committedQuote, q), inRange,
+    ...gasReport(),
   }));
 }
 
@@ -1123,6 +1245,13 @@ async function cmdState(account) {
     ladderId: entry?.ladderId || null,
     rung: entry?.rung ?? null,
     rungs: entry?.rungs ?? null,
+    // The pin this position was centred on, and the pool's tick quantum. Both
+    // exist for one rule: drift. `entryTick` gives it an exact zero; where it is
+    // missing (every position minted before 2026-08-07) `tickSpacing` lets
+    // uni_monitor.py subtract the band's WORST-CASE birth offset instead of
+    // reading it as a move the market never made.
+    entryTick: entry?.entryTick ?? null,
+    tickSpacing: Number(st.tickSpacing),
     // quoteIs0 is what ladder_decide reads to know which tick direction fills
     // a rung; wethIs0 stays as its pre-USDG alias so an older monitor build
     // against a WETH ladder keeps working.
@@ -1134,9 +1263,29 @@ async function cmdState(account) {
 async function cmdPositions(account) {
   const n = await pub.readContract({ address: NPM, abi: npmAbi, functionName: "balanceOf", args: [account.address] });
   const out = [];
+  // Husks: liquidity gone AND nothing owed on the quote side. Such an NFT is
+  // permanent — a honeypot that reverts the token leg of `collect` leaves its
+  // tokensOwed unclaimable forever, and NPM.burn refuses to retire a position
+  // with either side still owed (which is why collectPosition's partial path
+  // has to leave it standing). Nothing about it is actionable: no liquidity to
+  // close, no quote asset to recover, no way to burn it. Listing it would hand
+  // uni_monitor.py a row it re-closes every single tick, each pass "succeeding"
+  // at collecting zero and paying gas for the privilege.
+  //
+  // The test is QUOTE-side-owed, not owed-at-all: a position caught between its
+  // decrease and its collect has zero liquidity and still owes us the quote, so
+  // it stays listed and its close finishes normally.
+  const husks = [];
   for (let i = 0n; i < n; i++) {
     const id = await pub.readContract({ address: NPM, abi: npmAbi, functionName: "tokenOfOwnerByIndex", args: [account.address, i] });
     const p = await pub.readContract({ address: NPM, abi: npmAbi, functionName: "positions", args: [id] });
+    if (p[7] === 0n) {
+      const q = resolveQuote({ token0: p[2], token1: p[3] }, readEntry(id)?.quote || "");
+      if ((getAddress(p[2]) === q.address ? p[10] : p[11]) === 0n) {
+        husks.push(id.toString());
+        continue;
+      }
+    }
     out.push({
       tokenId: id.toString(), token0: p[2], token1: p[3], fee: Number(p[4]),
       tickLower: Number(p[5]), tickUpper: Number(p[6]), liquidity: p[7].toString(),
@@ -1152,19 +1301,74 @@ async function cmdPositions(account) {
     out.filter((p) => p.liquidity !== "0")
       .map((p) => `${p.token0}-${p.token1}-${p.fee}`.toLowerCase()),
   ).size;
-  console.log(JSON.stringify({ address: account.address, count: Number(n), ladders, positions: out }));
+  console.log(JSON.stringify({ address: account.address, count: Number(n), ladders, positions: out, husks }));
+}
+
+// collectPosition withdraws a position's owed balances, falling back to the
+// quote side alone when the token side cannot move.
+//
+// `collect` pays out BOTH sides in one call: UniswapV3Pool.collect runs a
+// TransferHelper.safeTransfer per non-zero amount, so a token that refuses to
+// be transferred reverts the whole call with `TF` and takes our quote asset
+// hostage with it. Live proof, 2026-08-09: #634693 (BLINK — a pool the security
+// gate convicted as a honeypot 20 minutes after the mint) had already run its
+// decreaseLiquidity, leaving 0.006857890871263797 WETH and 18.198 BLINK sitting
+// as tokensOwed, and every collect for the next 75 minutes reverted `TF`. The
+// WETH was transferable the whole time; it was blocked only by its co-passenger.
+//
+// The pool skips the transfer entirely for a zero request, so asking for the
+// quote side alone is a collect the honeypot has no say in. What that costs is
+// the burn: NPM.burn requires BOTH owed balances at zero, so a token side left
+// as tokensOwed means the husk NFT has to stay too. Cheap trade — a
+// zero-liquidity NFT costs nothing to hold, and the quote asset is the capital.
+//
+// Only the TOKEN side is ever surrendered. If the quote side is what reverts,
+// the retry throws like any other failed close: there is nothing to rescue.
+async function collectPosition(wallet, account, id, quoteIsToken0, label = `collect #${id}`) {
+  const req = { tokenId: id, recipient: account.address, amount0Max: maxUint128, amount1Max: maxUint128 };
+  const call = (args, lbl) => send(wallet, {
+    address: NPM, abi: npmAbi, functionName: "collect", args: [args],
+    account: wallet.account, chain,
+  }, lbl);
+
+  try {
+    await call(req, label);
+    return { partial: false, reason: null };
+  } catch (e) {
+    const reason = (e.shortMessage || e.message || "reverted")
+      .split("\n").map((s) => s.trim()).filter(Boolean).slice(0, 2).join(" — ").slice(0, 140);
+    await call({
+      ...req,
+      amount0Max: quoteIsToken0 ? maxUint128 : 0n,
+      amount1Max: quoteIsToken0 ? 0n : maxUint128,
+    }, `${label} (quote side only)`);
+    console.error(`warn: ${label} reverted (${reason}) — recovered the quote side; token side left as tokensOwed`);
+    return { partial: true, reason };
+  }
+}
+
+// Which side of the pair the position settles in, as the flag collectPosition
+// needs. Reads the entry journal's quote first for the same reason cmdClose
+// does: a USDG-quoted position must not be resolved into WETH.
+async function quoteSideOf(id) {
+  const [, , token0, token1] = await pub.readContract({
+    address: NPM, abi: npmAbi, functionName: "positions", args: [id],
+  });
+  const q = resolveQuote({ token0, token1 }, readEntry(id)?.quote || "");
+  return { q, quoteIsToken0: getAddress(token0) === q.address };
 }
 
 async function cmdCollect(wallet, account) {
   const id = BigInt(arg("id", "0"));
   if (id <= 0n) throw new Error("--id required");
   await ensureGas(wallet, account);
-  await send(wallet, {
-    address: NPM, abi: npmAbi, functionName: "collect",
-    args: [{ tokenId: id, recipient: account.address, amount0Max: maxUint128, amount1Max: maxUint128 }],
-    account: wallet.account, chain,
-  }, `collect #${id}`);
-  console.log(JSON.stringify({ success: true, tokenId: id.toString() }));
+  const { q, quoteIsToken0 } = await quoteSideOf(id);
+  const collected = await collectPosition(wallet, account, id, quoteIsToken0);
+  console.log(JSON.stringify({
+    success: true, tokenId: id.toString(), quote_symbol: q.symbol,
+    partial: collected.partial, collect_error: collected.reason,
+    ...gasReport(),
+  }));
 }
 
 async function cmdClose(wallet, account) {
@@ -1186,6 +1390,26 @@ async function cmdClose(wallet, account) {
   const [token0, token1, liquidity] = [getAddress(p[2]), getAddress(p[3]), p[7]];
   const deadline = BigInt(Math.floor(Date.now() / 1000) + 120);
 
+  // Which asset this position must be unwound INTO, resolved BEFORE the
+  // decrease so the quote the position itself pays back can be measured. The
+  // token-side sell below reads the same `q`.
+  const entry = readEntry(id);
+  const q = resolveQuote({ token0, token1 }, entry?.quote || "");
+
+  // Quote held before the unwind, so decrease+collect's payout can be read as a
+  // balance delta — the same measurement the token side already uses below.
+  //
+  // This exists because a ONE-SIDED quote position (weth_below, every ladder
+  // rung) closes with nothing to sell, and reporting only the swap proceeds
+  // said its entire ticket had evaporated. Live proof, 2026-08-07: turnover
+  // position #616818 paid back its full 0.017466515519518273 WETH on-chain
+  // (DecreaseLiquidity/Collect amount0, amount1 = 0) and still printed
+  // weth_out "0". uni_monitor.py books that number as realized PnL, so the
+  // re-center circuit breaker recorded -0.0175 against the pool and declined
+  // every future re-center of it — disabling the one loop this thesis runs on.
+  const quoteBefore = DRY_RUN ? 0n
+    : await pub.readContract({ address: q.address, abi: erc20Abi, functionName: "balanceOf", args: [account.address] });
+
   if (liquidity > 0n) {
     await send(wallet, {
       address: NPM, abi: npmAbi, functionName: "decreaseLiquidity",
@@ -1193,12 +1417,18 @@ async function cmdClose(wallet, account) {
       account: wallet.account, chain,
     }, `decrease #${id}`);
   }
-  await send(wallet, {
-    address: NPM, abi: npmAbi, functionName: "collect",
-    args: [{ tokenId: id, recipient: account.address, amount0Max: maxUint128, amount1Max: maxUint128 }],
-    account: wallet.account, chain,
-  }, `collect #${id}`);
-  await send(wallet, { address: NPM, abi: npmAbi, functionName: "burn", args: [id], account: wallet.account, chain }, `burn #${id}`);
+  const collected = await collectPosition(wallet, account, id, getAddress(token0) === q.address);
+  // A partial collect leaves the token side owed, and NPM.burn requires BOTH
+  // owed balances at zero — so the husk NFT stays. Burning was never the point
+  // of a close; getting the quote asset back out was.
+  if (!collected.partial) {
+    await send(wallet, { address: NPM, abi: npmAbi, functionName: "burn", args: [id], account: wallet.account, chain }, `burn #${id}`);
+  }
+
+  // Measured HERE — after collect, before the token-side sell — so this is the
+  // position's own payout (principal + fees) and not the swap's.
+  const quoteFromPosition = DRY_RUN ? 0n
+    : (await pub.readContract({ address: q.address, abi: erc20Abi, functionName: "balanceOf", args: [account.address] })) - quoteBefore;
 
   // Sell the freed token side back to the position's quote asset unless told
   // otherwise, mirroring the Solana monitor's auto-swap-to-SOL on close.
@@ -1217,8 +1447,6 @@ async function cmdClose(wallet, account) {
   // has one (a USDG ladder must not be unwound into WETH — that would leave
   // the strategy's capital in the wrong asset and the next deploy unfunded),
   // else the pool's own quote side.
-  const entry = readEntry(id);
-  const q = resolveQuote({ token0, token1 }, entry?.quote || "");
   if (!hasFlag("no-swap-out") && !DRY_RUN) {
     const token = q.token;
     const bal = await pub.readContract({ address: token, abi: erc20Abi, functionName: "balanceOf", args: [account.address] });
@@ -1239,17 +1467,40 @@ async function cmdClose(wallet, account) {
       }
     }
   }
+  // Sum in base units, format once: adding two decimal strings would round the
+  // 6-decimal quote's cents away (the parseQ/fmtQ rule this file follows).
+  const totalQuoteOut = fmtQ(quoteFromPosition + (sold ? parseQ(sold.quote_out, q) : 0n), q);
+
   console.log(JSON.stringify({
     success: true, closed: id.toString(),
     swapped_out: !!sold,
     // weth_out keeps its name for uni_monitor.py's close journal (and the v4
     // executor prints the same pair of fields); quote_symbol is what says
     // whether those digits are ether or dollars.
-    weth_out: sold ? sold.quote_out : "0",
-    quote_out: sold ? sold.quote_out : "0",
+    //
+    // Both halves of the unwind, NOT just the sell: the position's own payout
+    // plus whatever the token side fetched. The two are broken out beside it
+    // because they answer different questions — a close where the position
+    // returned everything and sold nothing is a rung that was never traded
+    // into, while a close that is all swap proceeds is a rung that filled.
+    weth_out: totalQuoteOut,
+    quote_out: totalQuoteOut,
+    quote_from_position: fmtQ(quoteFromPosition, q),
+    quote_from_swap: sold ? sold.quote_out : "0",
     quote_symbol: q.symbol,
     stranded,
+    // Set when the token side could not be transferred out of the pool and was
+    // abandoned as tokensOwed on a husk NFT. Deliberately NOT a `stranded`
+    // entry: a stranded bag is one sitting in the wallet that `sweep` can keep
+    // re-offering, and this one never reached the wallet — sweep would read a
+    // zero balance and retire it as sold. It is reported so the close is
+    // honest about what it left behind, not so anything retries it.
+    unclaimed: collected.partial ? { tokenId: id.toString(), reason: collected.reason } : null,
     gas_topup: gasTopup,
+    // Realized gas for THIS close (decrease+collect+burn, plus the exit swap
+    // when the rung filled). uni_monitor.py journals it, which is what turns
+    // "fees minus fills minus an estimate" into a closed ledger.
+    ...gasReport(),
   }));
 }
 
