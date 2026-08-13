@@ -1570,13 +1570,19 @@ def recenter_ok(pool):
                   f"24h PnL {realized:+.5f}, {tenure_why}")
 
 
-# The fill-rate veto, ported here from the daemon because the re-center loop is
-# the ONLY thing minting on this venue. scanner.sizeFor reads the same two
-# counters and applies the full tenure ramp, but it never runs while
-# ROBINHOOD_ENABLED is false: every position now comes from recenter(), which
-# re-deploys the close's own proceeds and asks the daemon nothing. So the guard
-# built for exactly this failure was inert — `rh:tenure:fills:*` sat empty while
-# a pool that converts 40% of its cycles into token kept being re-pinned.
+# The fill-rate veto, ported here because the daemon's copy cannot see the path
+# that does most of the minting. scanner.sizeFor reads the same two counters and
+# applies the full tenure ramp to the deploys IT makes — and it does run:
+# `ROBINHOOD_TURNOVER` is independent of `ROBINHOOD_ENABLED`, so rh-turnover
+# polls and reaches the deploy path even with the Fresh mode off. What bypasses
+# it is recenter(), which re-deploys the close's own proceeds and asks the daemon
+# nothing. Every re-pin was therefore unjudged, which is most positions on this
+# venue: a pool converting 40% of its cycles into token kept being re-pinned no
+# matter what its record said.
+#
+# (`rh:tenure:*` reading empty is NOT evidence of this — note_tenure works, the
+# counters were simply new. Their TTL is 7d and they had just started being
+# written. Do not diagnose the ramp from an empty keyspace.)
 #
 # Only the VETO is ported, not the size ramp. The ramp exists to send fresh
 # capital preferentially to pools that have survived cycles; a re-center has no
