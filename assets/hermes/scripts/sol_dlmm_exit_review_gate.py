@@ -33,6 +33,12 @@ SKILL_SCRIPTS = "__PROFILE__/skills/solana-dlmm/scripts"
 # the comment: when SOUL.md retunes a rule, the band has to move with it or the
 # review goes back to arriving late.
 YIELD_CHECK_AGE_MIN = 45.0    # rule: low-yield check arms at age 60m
+# ...except pulse, whose grace dropped 60m -> 30m on 2026-08-13. Left at 45 the
+# band sat BEHIND the rule it front-runs: the 20s loop closes the position at 30m
+# and the review would first look at it fifteen minutes later, i.e. never. 20m
+# keeps two 5-minute review cycles between waking and the close, which is the
+# minimum for a hold to be placed at all.
+YIELD_CHECK_AGE_MIN_PULSE = 20.0
 YIELD_BAND_FEE_TVL = 1.3      # rule: closes under 1.0% fee/TVL
 OOR_BAND_MINUTES = 2.0        # rule: 30m limit, 5m on turnover — 2m catches both
 TRAILING_ARM_PCT = 4.0        # rule: trailing arms at peak +5%
@@ -50,7 +56,9 @@ def wants_review(p):
         return "rule-firing"
     if not p.get("in_range") and p.get("oor_minutes", 0) >= OOR_BAND_MINUTES:
         return "oor"
-    if (p.get("age_minutes", 0) >= YIELD_CHECK_AGE_MIN
+    yield_age_min = (YIELD_CHECK_AGE_MIN_PULSE if p.get("mode") == "pulse"
+                     else YIELD_CHECK_AGE_MIN)
+    if (p.get("age_minutes", 0) >= yield_age_min
             and p.get("fee_per_tvl_24h", 0) < YIELD_BAND_FEE_TVL):
         return "low-yield"
     if p.get("trailing_active") or p.get("peak_pnl", 0) >= TRAILING_ARM_PCT:
