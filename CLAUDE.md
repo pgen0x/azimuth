@@ -207,8 +207,18 @@ one pass per enabled mode per `POLL_INTERVAL`.
     unconditional `return "sol_bidask"`, every mode single-sided.
     Discovery is the **union of two feeds** (`ranked.go`): `Mature`'s gateway
     feed with a turnover-band prefilter, plus GeckoTerminal's plain pool list
-    sorted by 24h volume (`/pools?sort=h24_volume_usd_desc`, 2 pages, cached and
-    rate-limited exactly like `trending.go`). The gateway ranks by TVL, which
+    sorted by 24h volume (`/pools?sort=h24_volume_usd_desc`, 4 pages on a 10m
+    refresh, cached and rate-limited exactly like `trending.go`). Two pages until
+    2026-08-13, when screening the full ranking showed the FEED DEPTH was the
+    binding constraint rather than the gates: pages 1-2 carry 21 WETH-quoted
+    candidates of which 4 clear every gate, pages 1-4 carry 39 of which 10 do.
+    Volume rank is not thesis rank — the head of this book is its DEEPEST pools,
+    which is exactly where a re-pinned rung earns least, so the mode's real
+    candidates live in the tail. Five pages was tried live and reverted: the
+    keyless tier's budget is a ~4-request burst, `refreshRanked` runs BEFORE the
+    gateway arm's enrich, and a 429 trips a GLOBAL GT pause — page 5 spent the
+    enrich's request and the cycle logged `gateway=0 ranked=36`. The 10m refresh
+    is what bounds the surviving collision to one cycle in ten. The gateway ranks by TVL, which
     sorts hardest for the deep books where a small position earns least; a churn
     mode is paid `fee_tier x volume`, so it needs a volume ranking. Measured
     2026-08-08: of the 19 pools this mode minted into over the preceding two
