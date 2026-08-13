@@ -26,6 +26,17 @@ type Config struct {
 	// Turnover dedups on a shorter window: its positions live minutes, not
 	// hours, so a still-qualifying pool must be able to re-signal once the
 	// prior cycle ends (pool/symbol cooldowns still gate fee-dead re-entries).
+	//
+	// 2h was still an order of magnitude longer than the cycle it was silencing:
+	// the mode's holds run minutes, so a pool that closed clean stayed muted for
+	// dozens of poll cycles while the screen kept re-passing it. Re-entry safety
+	// was never this window's job — CooldownRemaining is checked BEFORE
+	// MarkIfNew, so a token that closed at a loss stays blocked for its
+	// escalating 1-24h cooldown no matter how short this is, while a pool that
+	// merely rotated out of range is exactly the churning book the screen just
+	// voted for. Same argument as robinhood.TurnoverSeenTTL (15m); this one stays
+	// an env knob because Solana's cooldown is token-scoped while this window is
+	// pool-scoped, so the two can disagree about the same token.
 	TurnoverSeenTTL time.Duration
 	// Casual gets the same treatment at a gentler setting: positions live
 	// ~30m-2h and the monitor's close cooldown lapses in 1-2h, but the full
@@ -375,7 +386,7 @@ func loadConfig() Config {
 		RedisAddr:             getenv("REDIS_ADDR", ""),
 		RedisSeenKey:          getenv("REDIS_SEEN_KEY", "dlmm:signal:seen_pools"),
 		SeenTTL:               getdur("SEEN_TTL", 24*time.Hour),
-		TurnoverSeenTTL:       getdur("TURNOVER_SEEN_TTL", 2*time.Hour),
+		TurnoverSeenTTL:       getdur("TURNOVER_SEEN_TTL", 30*time.Minute),
 		CasualSeenTTL:         getdur("CASUAL_SEEN_TTL", 6*time.Hour),
 		PulseSeenTTL:          getdur("PULSE_SEEN_TTL", 2*time.Hour),
 		EnablePulse:           getbool("ENABLE_PULSE", false),
