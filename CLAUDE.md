@@ -27,9 +27,20 @@ DEFER a non-emergency close by 10-20 minutes via
 authoritative: the emergency SL floor, rug velocity, thin liquidity and a
 trailing drop >= 3% all bypass a hold in code. Every hold is journaled
 (`<profile>/memories/ai_holds.jsonl`) and counted onto the eventual close
-record as `ai_holds`, so held and unheld closes stay comparable. Restoring the
-LLM's entry role is deliberately NOT next — that path was removed for cause
-(fabricated deploy reports) and needs an on-chain existence check first.
+record as `ai_holds`, so held and unheld closes stay comparable.
+
+Its second role writes no state at all: the `sol_dlmm_daily_proposal` cron
+(21:00 WIB) reads a precomputed evidence brief
+(`assets/hermes/scripts/sol_dlmm_proposal_brief.py`) and **proposes** threshold
+changes to the operator over Telegram. It is declared with **no toolsets** —
+withholding `terminal` is what makes "propose, never apply" structural instead
+of a sentence in a prompt, and it also stops the agent re-reading the journal,
+which is what keeps it citing the brief rather than inventing figures. The
+brief does every calculation itself and marks thin samples, unmeasurable
+sections and a below-noise-floor lift as explicitly *not* evidence; proposing
+nothing is the expected output most days. Restoring the LLM's entry role is
+deliberately NOT next — that path was removed for cause (fabricated deploy
+reports) and needs an on-chain existence check first.
 
 ## Build / run
 
