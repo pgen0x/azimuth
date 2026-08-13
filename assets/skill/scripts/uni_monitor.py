@@ -119,9 +119,29 @@ ASK_STRATEGY = "token_above"
 # log showed fills crossing anyway.
 ASK_BAG_STOP_PCT = float(os.environ.get("UNI_ASK_BAG_STOP_PCT", "-8.0"))
 
-# Re-list is off by default. It is a live-funds behaviour change on a venue with
-# a losing record, so it ships dark and the operator turns it on.
-ASK_RELIST_ENABLED = os.environ.get("UNI_ASK_RELIST", "").lower() == "true"
+# Re-list is RETIRED (2026-08-13) and `UNI_ASK_RELIST` is no longer read. It ran
+# live from 2026-08-09 and the ledger closed against it: 79 `ask re-center`
+# closes averaging -2.6% and 4 `ask bag stop` at -11.1%, against 26 `ask rung
+# sold` at +5.9%. Negative as a pipeline, and the largest single loss class in
+# the venue's book.
+#
+# The mechanism, not the tuning, is what failed. Resting an ask ABOVE spot over a
+# bag we never wanted assumes the price comes back; when it does not, the rung is
+# re-pinned lower and lower and the drift chase pays -2.6% a lap.
+#
+# The counter-measurement is the one that settles it, because it is denominated
+# in quote and cannot be argued with: closes that ENDED IN QUOTE returned +7.8%
+# of the quote they spent (n=130); closes that KEPT THE BAG returned half of it
+# (n=240 — 65% of all closes). Four of the kept-bag positions read +86..96% "PnL"
+# in a position tracker while returning effectively zero quote: their whole gain
+# was the token side of a filled rung marked at a thin-pool print, against a token
+# no venue would buy. `pnl_pct` was never the arbiter; `realized_quote` in the
+# close journal is.
+#
+# So a fill is now settled where it happens, in the quote asset, at the one
+# moment the pool is provably still tradable: it just traded through our rung.
+# ASK_BAG_STOP_PCT above still applies to the ask positions this ran up before
+# the retirement — they are monitored to their exit, just never re-pinned.
 
 # --- turnover (churn) mode -------------------------------------------------
 # Port of Solana turnover's exit half (dlmm_monitor.py). The mode is paid per
@@ -362,11 +382,66 @@ def _krystal_usd(entries):
     return total
 
 
-def fetch_krystal_positions():
+# How long a Krystal outage may stay quiet. One alert, then silence for this
+# long, so a persistent break is reported without becoming its own noise.
+KRYSTAL_ALERT_EVERY = float(os.environ.get("KRYSTAL_ALERT_EVERY_SECS", "21600"))
+# Streak state lives under a reserved key in the monitor state file, alongside
+# the per-position entries. Prefixed like the ladder walls so the end-of-tick
+# prune (which drops keys for positions no longer live) leaves it alone.
+KRYSTAL_STATE_KEY = "krystal:health"
+# Failure classes that will never resolve on their own: the key is wrong, the
+# plan is exhausted, or the wallet is not permitted. Named in the alert because
+# "retrying" is the wrong mental model for them.
+_KRYSTAL_TERMINAL = ("401", "402", "403")
+
+
+def _note_krystal_failure(state, exc):
+    """Count a failed oracle fetch and alert on a streak. No-op without state."""
+    if state is None:
+        return
+    h = state.setdefault(KRYSTAL_STATE_KEY, {})
+    h["fails"] = int(h.get("fails") or 0) + 1
+    h["last_error"] = str(exc)[:200]
+    now = time.time()
+    last = h.get("alerted_at")
+    if last is not None and (now - float(last)) < KRYSTAL_ALERT_EVERY:
+        return
+    h["alerted_at"] = now
+    terminal = any(c in str(exc) for c in _KRYSTAL_TERMINAL)
+    alert(f"⚠️ Robinhood fee oracle DOWN ({h['fails']} consecutive ticks)\n"
+          f"{h['last_error']}\n"
+          + ("auth/quota class — will not self-heal, needs the operator\n"
+             if terminal else "")
+          + "idle rule is running on the value-drift fallback; on-chain feesQuote "
+            "still measures fees, so exits are degraded, not blind")
+
+
+def _note_krystal_ok(state):
+    """Clear the streak after a good fetch, and say so if one was open."""
+    if state is None:
+        return
+    h = state.get(KRYSTAL_STATE_KEY)
+    if not h or not h.get("fails"):
+        return
+    print(f"monitor: krystal recovered after {h['fails']} failed ticks")
+    state.pop(KRYSTAL_STATE_KEY, None)
+
+
+def fetch_krystal_positions(state=None):
     """{tokenId: {"fees_usd", "value_usd", "earning24h"}} for this wallet's
     open Robinhood positions. Returns {} on ANY failure — a missing oracle
     means the idle rule falls back to value drift, never that a rung is
-    closed or held on data we do not have."""
+    closed or held on data we do not have.
+
+    Pass `state` to make a PERSISTENT failure loud. The fail-open print below is
+    correct per tick and useless across days: the oracle returned HTTP 402
+    (Payment Required — the quota, not a transient) on every tick for days and
+    nothing escalated, because a line that appears 2000 times a day is
+    indistinguishable from noise. So the streak is counted in the monitor state
+    and alerted once per KRYSTAL_ALERT_EVERY, and cleared on the first success.
+    An auth/quota class (401/402/403) is called out separately because it will
+    never fix itself — it needs the operator, not patience.
+    """
     if not (KRYSTAL_API_KEY and KRYSTAL_WALLET):
         return {}
     url = f"{KRYSTAL_API_URL}?wallet={KRYSTAL_WALLET}&positionStatus=OPEN"
@@ -380,7 +455,9 @@ def fetch_krystal_positions():
             rows = json.loads(resp.read())
     except Exception as e:
         print(f"monitor: krystal fetch failed ({e}) — idle rule falls back to value drift")
+        _note_krystal_failure(state, e)
         return {}
+    _note_krystal_ok(state)
     out = {}
     for r in rows if isinstance(rows, list) else []:
         # chainId is a documented filter but takes a "<name>@<id>" form this
@@ -1353,6 +1430,69 @@ def cool_off(pool, token, reason, pnl):
     print(f"monitor: re-entry cooldown {secs // 3600}h on pool {pool}")
 
 
+# --- pool tenure ledger ----------------------------------------------------
+# What the daemon sizes a deploy against. Two counters per pool, both on a
+# rolling 7d window: every executed turnover close, and the fill subset.
+#
+# The daemon reads them in scanner.sizeFor (store.RobinhoodTenure) and grades
+# the pool: under ROBINHOOD_TENURE_PROBE_CYCLES it mints a floor-sized probe, at
+# ROBINHOOD_TENURE_FULL_CYCLES the full percentage, and above the fill-rate
+# ceiling it declines the pool outright. The evidence is in
+# robinhood.TenureParams — a pool that survives many re-centers is genuinely
+# oscillating, which is the thesis, while one that fills on its first cycles was
+# trending and we were its exit liquidity.
+#
+# Counted here rather than derived from uni_closes.jsonl because the daemon is a
+# separate process on a separate schedule: it needs the answer at deploy time,
+# not a file it would have to parse and age itself.
+TENURE_CYCLES_KEY = "rh:tenure:cycles:{}"
+TENURE_FILLS_KEY = "rh:tenure:fills:{}"
+TENURE_WINDOW_SECS = 604800  # 7d
+
+# Which close reasons ARE a turnover cycle. Deliberately the same partition the
+# 2026-08-13 bucket study used, so the thresholds the daemon compares against
+# keep meaning what they were measured to mean:
+#   - a fill is the market coming down THROUGH our bid
+#   - a re-center is the pin being in the wrong place, nothing bought
+# The ask-side closes (`ask rung sold`, `ask re-center`, `ask bag stop`) are NOT
+# cycles: they are the recovery leg working a bag some earlier fill already
+# handed over, and counting them would credit a pool with tenure it earned by
+# losing.
+TENURE_FILL_PREFIXES = ("turnover rung filled", "emergency turnover fill")
+TENURE_CLEAN_PREFIXES = ("turnover re-center",)
+
+
+def note_tenure(pool, reason):
+    """Book one executed turnover close into the pool's 7d tenure window.
+
+    Both keys carry their own rolling TTL, per the per-key discipline
+    internal/store/store.go documents for the dedup set: one shared key would
+    let a busy pool keep a quiet pool's history alive forever.
+
+    Best-effort like every other Redis write here. A lost counter costs the pool
+    tenure it will re-earn over its next cycles, and the daemon's ramp fails
+    toward the SMALLER position — so a dropped write can never talk a deploy up
+    into a bigger one.
+    """
+    if not pool:
+        return
+    is_fill = any(reason.startswith(p) for p in TENURE_FILL_PREFIXES)
+    if not is_fill and not any(reason.startswith(p) for p in TENURE_CLEAN_PREFIXES):
+        return
+    p = str(pool).lower()
+    ck = TENURE_CYCLES_KEY.format(p)
+    redis_cmd("incr", ck)
+    redis_cmd("expire", ck, TENURE_WINDOW_SECS)
+    if is_fill:
+        fk = TENURE_FILLS_KEY.format(p)
+        redis_cmd("incr", fk)
+        # The fills key gets the SAME window as cycles, not a shorter one: a
+        # fill rate is a ratio, and letting its numerator expire first would
+        # walk every repeatedly-filled pool back to a clean record while the
+        # denominator still stood.
+        redis_cmd("expire", fk, TENURE_WINDOW_SECS)
+
+
 # --- turnover re-center loop ----------------------------------------------
 # The mode's profit engine, and the one leg this venue never had. A turnover
 # position that leaves its range is closed and IMMEDIATELY re-minted around the
@@ -1423,7 +1563,67 @@ def recenter_ok(pool):
     if realized <= TURNOVER_CB_LOSS_QUOTE:
         return False, (f"circuit breaker: 24h re-center PnL {realized:+.5f} "
                        f"<= {TURNOVER_CB_LOSS_QUOTE:+.5f} floor")
-    return True, f"{n}/{TURNOVER_MAX_RECENTERS_24H} re-centers, 24h PnL {realized:+.5f}"
+    ok_tenure, tenure_why = tenure_ok(pool)
+    if not ok_tenure:
+        return False, tenure_why
+    return True, (f"{n}/{TURNOVER_MAX_RECENTERS_24H} re-centers, "
+                  f"24h PnL {realized:+.5f}, {tenure_why}")
+
+
+# The fill-rate veto, ported here from the daemon because the re-center loop is
+# the ONLY thing minting on this venue. scanner.sizeFor reads the same two
+# counters and applies the full tenure ramp, but it never runs while
+# ROBINHOOD_ENABLED is false: every position now comes from recenter(), which
+# re-deploys the close's own proceeds and asks the daemon nothing. So the guard
+# built for exactly this failure was inert — `rh:tenure:fills:*` sat empty while
+# a pool that converts 40% of its cycles into token kept being re-pinned.
+#
+# Only the VETO is ported, not the size ramp. The ramp exists to send fresh
+# capital preferentially to pools that have survived cycles; a re-center has no
+# fresh capital to allocate — its amount IS the previous rung's proceeds, already
+# at the deploy floor — so scaling it down would just park quote in the wallet
+# and change nothing about which pool we are exposed to. Sizing stays the
+# daemon's job for the day scanning is turned back on.
+TENURE_MAX_FILL_PCT = float(os.environ.get("UNI_TENURE_MAX_FILL_PCT", "0.35"))
+TENURE_MIN_SAMPLE = int(os.environ.get("UNI_TENURE_MIN_SAMPLE", "4"))
+
+
+def tenure_ok(pool):
+    """(allowed, why) for re-pinning this pool, judged on its 7d fill rate.
+
+    Fails OPEN, unlike the circuit breaker above, and the asymmetry is the point.
+    An unreadable 24h re-center window means we cannot tell whether this pool is
+    bleeding right now, so the safe answer is to stop. Missing tenure means a
+    pool has no history — which is the normal state of every pool on its first
+    cycles, and refusing those would freeze the venue rather than steer it. That
+    is the same rule scanner.sizeFor follows: unknown tenure keeps flat sizing
+    and never vetoes.
+
+    Counted by note_tenure, which runs one line before the caller consults this,
+    so the current close is already in the denominator. That biases the ratio
+    DOWN on a clean re-center (a cycle with no fill), i.e. toward allowing — the
+    conservative direction for a veto whose failure mode is freezing the loop.
+    """
+    if not pool or TENURE_MAX_FILL_PCT <= 0:
+        return True, "tenure veto off"
+    p = str(pool).lower()
+    raw_c = redis_cmd("get", TENURE_CYCLES_KEY.format(p))
+    raw_f = redis_cmd("get", TENURE_FILLS_KEY.format(p))
+    if raw_c is None:
+        return True, "tenure unreadable — flat"
+    try:
+        cycles = int(raw_c) if raw_c else 0
+        fills = int(raw_f) if raw_f else 0
+    except ValueError:
+        return True, "tenure unparseable — flat"
+    if cycles < TENURE_MIN_SAMPLE:
+        return True, f"tenure {fills}/{cycles} cycles (below sample floor)"
+    rate = fills / cycles
+    if rate >= TENURE_MAX_FILL_PCT:
+        return False, (f"tenure veto: {fills}/{cycles} cycles filled "
+                       f"({rate * 100:.0f}% >= {TENURE_MAX_FILL_PCT * 100:.0f}%) "
+                       f"— pool trends, it does not oscillate")
+    return True, f"tenure {fills}/{cycles} filled ({rate * 100:.0f}%)"
 
 
 def recenter(executor, pool, amount, quote, pair):
@@ -1451,59 +1651,22 @@ def recenter(executor, pool, amount, quote, pair):
     return True
 
 
-def is_fill_close(reason):
-    """True for the reasons that mean the bid converted to token.
+def close_is_marked(out):
+    """True when the close left value the wallet cannot spend.
 
-    Both tiers, because both leave the same thing in the wallet: a bag. The
-    emergency tier only skips indicator confirmation, it does not change what
-    the position turned into.
+    The honest-ledger companion to `swapped_out`, and the reason it exists as its
+    own predicate: `swapped_out` is False for a one-sided bid that never filled,
+    and that close is fully REALIZED — its whole position was quote from mint to
+    burn. Reading `swapped_out=False` as "unrealized" would therefore mislabel
+    the mode's normal, healthy exit.
+
+    What actually makes a close a mark is value that did not reach the wallet in
+    a spendable form: `stranded` (the token side exists but no venue would buy
+    it) or `unclaimed` (it never left the pool at all). Both are write-downs
+    pending, so `pnl_pct` on those rows is an opinion about a price, not money.
     """
-    r = reason or ""
-    return r.startswith("turnover rung filled") or r.startswith("emergency turnover fill")
-
-
-def wants_relist(reason, s):
-    """True when this close should keep the token and re-list it as an ask.
-
-    Two cases, both of which end holding token:
-      - a turnover BID that filled (the round trip's halfway point), and
-      - an ASK that is being re-centered (still unsold, just mispriced).
-
-    Explicitly NOT `ask bag stop` — that reason exists to get rid of the bag, so
-    re-listing on it would defeat the only hard risk rule the ask half has. And
-    not `ask rung sold`: that one already ended in quote.
-    """
-    if not ASK_RELIST_ENABLED:
-        return False
-    if is_turnover(s) and is_fill_close(reason):
-        return True
-    return is_ask(s) and (reason or "").startswith("ask re-center")
-
-
-def relist_ask(executor, pool, quote, pair):
-    """Mint a resting ask over the token bag the close just left in the wallet.
-
-    Takes no amount: `token_above` lists the whole balance by construction,
-    because the position exists to unload exactly that inventory. That also
-    sidesteps the decimals trap — the bag is token units, and every amount the
-    monitor otherwise handles is quote units.
-
-    A failure here is not fatal and must not be retried into: the close already
-    succeeded, so the bag is simply sitting in the wallet where the executor's
-    own `sweep` path can still sell it. Reported loudly because a silent failure
-    would look exactly like a successful re-list until the next tick.
-    """
-    args = ["deploy", "--pool", pool, "--strategy", ASK_STRATEGY]
-    if quote:
-        args += ["--quote", quote]
-    out, err = run_executor(executor, args)
-    if err or not out or not out.get("success"):
-        print(f"monitor: RE-LIST FAILED {pair}: {err or (out or {}).get('error') or 'no payload'} "
-              f"— bag left in wallet for sweep")
-        return False
-    print(f"monitor: RE-LISTED {pair} -> ask #{out.get('tokenId')} "
-          f"ticks [{out.get('tickLower')},{out.get('tickUpper')}]")
-    return True
+    o = out or {}
+    return bool(o.get("stranded") or o.get("unclaimed"))
 
 
 def compound_fees(executor, tid, s, proto):
@@ -1780,7 +1943,12 @@ def main():
     now = time.time()
     # One request for the whole wallet, before the per-position loop — the
     # point of the oracle is that it does not scale with position count.
-    krystal = fetch_krystal_positions()
+    #
+    # This pass is the ONE that owns the health streak, hence the only call site
+    # given `state`: it is also the only pass that ends in save_state, and a
+    # counter incremented by a pass that never saves would re-alert from the same
+    # stale timestamp every time it ran.
+    krystal = fetch_krystal_positions(state)
     # Every position we were handed is live, whether or not its state read lands
     # below — a read failure means we could not SEE the position, not that it
     # closed, and pruning on that would reset its peak (see the prune at the
@@ -1909,14 +2077,13 @@ def main():
             print(f"monitor: [dry-run] would close {proto} #{tid}: {reason}")
             continue
 
-        # Keeping the token is what makes the re-list possible at all: the
-        # executor's close sells the freed token side by default, and that sale
-        # IS the -4.9% we are trying to stop paying.
-        relist = wants_relist(reason, s)
-        close_args = ["close", "--id", str(tid)]
-        if relist:
-            close_args.append("--no-swap-out")
-        out, cerr = run_executor(executor, close_args, close_auth=True)
+        # Every close ends in the quote asset. `--no-swap-out` was the re-list's
+        # only mechanism and is deliberately never passed now — see the re-list
+        # retirement note next to ASK_BAG_STOP_PCT for what bought this line. The
+        # executor's default close sells the freed token side, and paying that
+        # sale's spread on a pool that has just traded through our rung is the
+        # cheapest exit the venue offers.
+        out, cerr = run_executor(executor, ["close", "--id", str(tid)], close_auth=True)
         closed = out and out.get("success")
         # A close can succeed while its token->WETH sell fails (rugged pool,
         # sell tax): the liquidity is out and the NFT burned, but the token side
@@ -1932,6 +2099,27 @@ def main():
             "peak_pct": round(peak, 4), "age_min": round(age_min, 1) if age_min else None,
             "reason": reason, "success": bool(closed), "dry_run": False,
             "swapped_out": bool((out or {}).get("swapped_out")),
+            # The arbiter. `pnl_pct` is the executor's percentage against the
+            # position's marked value, which is the right number only when the
+            # close ended in quote — a bag priced at a thin-pool print carried
+            # four closes to +86..96% while returning effectively zero quote.
+            # This pair is quote units in, quote units out, so no price opinion
+            # can enter it:
+            #   realized_quote = weth_out - entryWeth   (negative = capital lost)
+            # and `pnl_basis` says out loud whether the row is money or a mark.
+            # Any report that sums profit MUST sum realized_quote on
+            # pnl_basis == "realized" rows; pnl_pct is for ranking, never for
+            # totals. null means UNMEASURABLE (the executor gave no amount, or
+            # the position record predates entryWeth) and has to be excluded and
+            # COUNTED — coercing it to 0.0 would quietly read a missing
+            # measurement as a break-even trade, which is the same class of lie
+            # this field exists to end.
+            "realized_quote": (
+                None if (_f(s.get("entryWeth")) is None
+                         or _f((out or {}).get("weth_out")) is None)
+                else round(_f((out or {}).get("weth_out")) - _f(s.get("entryWeth")), 18)
+            ),
+            "pnl_basis": "mark" if close_is_marked(out) else "realized",
             # weth_out is the v4 executor's alias for quote_out, so this stays
             # populated on both protocols; quote_symbol says what unit it is.
             "weth_out": (out or {}).get("weth_out"),
@@ -1963,6 +2151,13 @@ def main():
             # leaves the wall standing, and blocking re-entry to a pool we are
             # still in would be the wrong brake on the wrong thing.
             cool_off(pool, s.get("token"), reason, pnl)
+            # Same gate as cool_off, and for the same reason: a failed close
+            # left the rung standing, so nothing about this pool's history has
+            # actually happened yet. Recorded for BOTH classes though, not just
+            # fills — tenure is a denominator as much as a numerator, and a
+            # ledger that only ever counted the bad cycles would grade every
+            # pool as a 100% filler.
+            note_tenure(pool, reason)
             # Turnover's re-center: the close was half of one operation, so
             # finish it before reporting. ONLY the two re-center reasons
             # (drift and fee-death) re-mint — a fill or the backstop SL is the
@@ -1971,14 +2166,8 @@ def main():
             # into a bag-holding loop. (Mirrors dlmm_monitor.py's
             # is_oor_rebalance, which excludes exactly the same classes; the
             # `cool_off` above has already blocked re-entry on those.)
-            # The ask leg. Runs before the re-center branch and returns through
-            # the same `recentered` flag purely for the report verb; the two are
-            # mutually exclusive by construction (wants_relist never matches a
-            # `turnover re-center` reason).
             recentered = False
-            if relist:
-                recentered = relist_ask(executor, pool, s.get("quote"), pair)
-            elif reason.startswith("turnover re-center"):
+            if reason.startswith("turnover re-center"):
                 realized = None
                 ent, got = s.get("entryWeth"), (out or {}).get("weth_out")
                 try:
@@ -2000,8 +2189,7 @@ def main():
                     recentered = recenter(executor, pool, _f(got), s.get("quote"), pair)
                 else:
                     print(f"monitor: re-center declined for {pair}: {why}")
-            verb = ("📤 re-listed as ask" if (relist and recentered)
-                    else "♻️ re-centered" if recentered else "🔴 closed")
+            verb = "♻️ re-centered" if recentered else "🔴 closed"
             msg = f"{verb} Robinhood LP {pair} (#{tid})\n{reason}\npnl {pnl_str} peak {peak:.1f}%"
             if stranded:
                 msg += (f"\n⚠️ {stranded.get('symbol', '?')} NOT sold — {stranded.get('reason', '?')}"
@@ -2018,6 +2206,20 @@ def main():
             # accumulates toward the cap.
             fails = ps.get("close_fails", 0) + 1
             ps["close_fails"] = fails
+            # Persist the counter NOW, not at the end of the tick.
+            #
+            # save_state() runs once, on the last line of the run, and every tick
+            # is a fresh process (uni_monitor_loop.sh re-execs after a 20s sleep).
+            # So a tick that dies inside or after a slow failing close — an RPC
+            # that hangs past the loop's patience, an unhandled error further
+            # down the pass — never reached the save, and the next process loaded
+            # a state with no `close_fails` at all. The cap could therefore never
+            # be reached: position #634693 was re-attempted 93 times in 85
+            # minutes on 2026-08-09 against MAX_CLOSE_FAILURES=5, each attempt
+            # journaled with success=false. Writing here makes the counter
+            # durable no matter what happens to the rest of the tick, which is
+            # the whole point of a give-up rule.
+            save_state(state)
             print(f"monitor: CLOSE FAILED {proto} #{tid} ({fails}/{MAX_CLOSE_FAILURES}): {cerr}")
             if fails >= MAX_CLOSE_FAILURES:
                 # Alert exactly once — the skip at the top of the loop means
@@ -2047,6 +2249,11 @@ def main():
     # its position key goes, so the wall key goes with it on the same tick.
     keep |= {ladder_wall_key(lid) for lid in
              ((state.get(k) or {}).get("ladder_id") for k in keep) if lid}
+    # The oracle-health streak is wallet-scoped, not position-scoped, so it is
+    # never in `live` and the prune above would drop it every tick — which would
+    # reset the counter to zero forever and make the escalation unreachable, the
+    # same shape of bug as the unsaved close_fails.
+    keep.add(KRYSTAL_STATE_KEY)
     for key in list(state.keys()):
         if key not in keep:
             state.pop(key, None)
