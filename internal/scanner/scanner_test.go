@@ -139,7 +139,7 @@ func TestTurnoverPinsOneSidedStrategy(t *testing.T) {
 
 	c := wethCandidate("0xpool1aaaaaaaaaa", "AAA")
 	c.Mode = robinhood.Turnover.Mode
-	if got := s.sizeFor(c, bal).strategy; got != "weth_below" {
+	if got := s.sizeFor(context.Background(), c, bal).strategy; got != "weth_below" {
 		t.Errorf("rh-turnover strategy = %q, want weth_below (one rung, holds no token)", got)
 	}
 
@@ -147,7 +147,7 @@ func TestTurnoverPinsOneSidedStrategy(t *testing.T) {
 	// turnover's alone, not a global override.
 	other := wethCandidate("0xpool2bbbbbbbbbb", "BBB")
 	other.Mode = robinhood.Ladder.Mode
-	if got := s.sizeFor(other, bal).strategy; got != "weth_ladder" {
+	if got := s.sizeFor(context.Background(), other, bal).strategy; got != "weth_ladder" {
 		t.Errorf("rh-ladder strategy = %q, want the configured weth_ladder", got)
 	}
 }

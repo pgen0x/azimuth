@@ -278,3 +278,116 @@ func TestInventoryErrorsOnUnparseableOutput(t *testing.T) {
 		t.Fatal("unparseable positions output must error, not return an empty inventory")
 	}
 }
+
+// tenureDefaults mirrors config.go's ROBINHOOD_TENURE_* defaults, which are the
+// measured bucket edges rather than round numbers — see TenureParams.
+func tenureDefaults() TenureParams {
+	return TenureParams{ProbeCycles: 8, FullCycles: 20, MaxFillPct: 0.35, MinSample: 4}
+}
+
+func TestTenureSizeRamp(t *testing.T) {
+	p, tp := defaults(), tenureDefaults()
+	// 0.1 WETH wallet: (0.1 - 0.002) * 0.45 = 0.0441, under the 0.05 ceil.
+	const full = 0.0441
+
+	tests := []struct {
+		name   string
+		cycles int
+		want   float64
+	}{
+		// A pool nobody has traded is KNOWN and unproven, not unknown — this is
+		// the case the whole change exists for. 18 such pools took 54% of the
+		// venue's spend at full size and lost 5-22% of it.
+		{"never traded probes at the floor", 0, p.Floor},
+		{"still under the probe bar", 7, p.Floor},
+		{"the breakeven bucket gets half", 8, full / 2},
+		{"top of the breakeven bucket", 19, full / 2},
+		{"the profitable bucket gets full size", 20, full},
+		{"well past the bar stays full size", 57, full},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, note := TenureSize(full, p, Tenure{Cycles: tt.cycles, Known: true}, tp)
+			if math.Abs(got-tt.want) > 1e-9 {
+				t.Errorf("TenureSize(%d cycles) = %v, want %v", tt.cycles, got, tt.want)
+			}
+			if note == "" {
+				t.Error("a graded pool must carry a note — the DEPLOY PICK line reports it")
+			}
+		})
+	}
+}
+
+// No Redis means no history to grade pools on, and silently minting every
+// position at the floor would be a different strategy chosen by accident — not
+// a safe default. Flat sizing is what this venue did before the ramp existed.
+func TestTenureSizeUnknownBackendKeepsFlatSizing(t *testing.T) {
+	p, tp := defaults(), tenureDefaults()
+	got, note := TenureSize(0.0441, p, Tenure{}, tp)
+	if got != 0.0441 {
+		t.Errorf("unknown tenure resized to %v, want the amount untouched", got)
+	}
+	if note != "" {
+		t.Errorf("unknown tenure noted %q, want no note", note)
+	}
+}
+
+// The ramp only ever spends LESS. A thin wallet whose percentage already lands
+// under the floor must not be talked UP into a bigger position by the very rule
+// that exists to spend less on unproven pools — that would overspend exactly
+// where the balance is smallest.
+func TestTenureSizeNeverExceedsWalletAmount(t *testing.T) {
+	p, tp := defaults(), tenureDefaults()
+	// 0.0068 WETH wallet: (0.0068 - 0.002) * 0.45 = 0.00216, floored to 0.003 by
+	// ComputeDeployAmount. The probe branch would "raise" it to the same 0.003.
+	amount := ComputeDeployAmount(0.0068, p)
+	for _, cycles := range []int{0, 4, 8, 19, 20, 100} {
+		got, _ := TenureSize(amount, p, Tenure{Cycles: cycles, Known: true}, tp)
+		if got > amount {
+			t.Fatalf("tenure %d cycles sized %v above the wallet's %v", cycles, got, amount)
+		}
+	}
+}
+
+func TestTenureReject(t *testing.T) {
+	tp := tenureDefaults()
+	tests := []struct {
+		name       string
+		tenure     Tenure
+		wantReject bool
+	}{
+		// Unknown tenure never rejects. The ramp already sizes an ungraded pool
+		// down to a probe, and blocking on missing data is how the monotonic
+		// gates starved Solana on 2026-08-07.
+		{"no backend", Tenure{Cycles: 10, Fills: 10}, false},
+		// One fill out of one cycle is not a fill rate. Rejecting on it would
+		// re-create the one-and-done selection the ramp exists to stop.
+		{"under the sample floor", Tenure{Cycles: 3, Fills: 3, Known: true}, false},
+		{"at the sample floor and over the ceiling", Tenure{Cycles: 4, Fills: 2, Known: true}, true},
+		// 13% is the profitable bucket's measured rate — the ceiling must not
+		// touch it.
+		{"the profitable bucket survives", Tenure{Cycles: 23, Fills: 3, Known: true}, false},
+		// 39-43% is what the two losing buckets ran at.
+		{"a losing-bucket rate is convicted", Tenure{Cycles: 7, Fills: 3, Known: true}, true},
+		{"a clean pool passes", Tenure{Cycles: 8, Fills: 0, Known: true}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			why := TenureReject(tt.tenure, tp)
+			if got := why != ""; got != tt.wantReject {
+				t.Errorf("TenureReject(%+v) rejected=%v (%q), want %v", tt.tenure, got, why, tt.wantReject)
+			}
+		})
+	}
+}
+
+// A dropped fills INCR must not invent a fill rate above 100%. store clamps on
+// read; this pins the arithmetic the clamp protects.
+func TestTenureFillPct(t *testing.T) {
+	if got := (Tenure{}).FillPct(); got != 0 {
+		t.Errorf("FillPct with no cycles = %v, want 0", got)
+	}
+	if got := (Tenure{Cycles: 4, Fills: 1}).FillPct(); math.Abs(got-0.25) > 1e-9 {
+		t.Errorf("FillPct = %v, want 0.25", got)
+	}
+}

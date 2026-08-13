@@ -19,6 +19,29 @@ API, screens pools through quality gates, dedups, and hands each poll cycle's
 This daemon owns **entry signals only** — exits are the `dlmm_monitor.py`
 cron's job.
 
+**Where the LLM sits.** Nowhere in entry: the pick is deterministic
+(`dlmm_pipeline.py` via `DEPLOY_CMD`). In exit it has exactly one power, and
+only ever a subtractive one — the `sol_dlmm_ai_exit_review` cron (5m) may
+DEFER a non-emergency close by 10-20 minutes via
+`dlmm_monitor.py --override-hold`, and may do nothing else. The rules stay
+authoritative: the emergency SL floor, rug velocity, thin liquidity and a
+trailing drop >= 3% all bypass a hold in code. Every hold is journaled
+(`<profile>/memories/ai_holds.jsonl`) and counted onto the eventual close
+record as `ai_holds`, so held and unheld closes stay comparable.
+
+Its second role writes no state at all: the `sol_dlmm_daily_proposal` cron
+(21:00 WIB) reads a precomputed evidence brief
+(`assets/hermes/scripts/sol_dlmm_proposal_brief.py`) and **proposes** threshold
+changes to the operator over Telegram. It is declared with **no toolsets** —
+withholding `terminal` is what makes "propose, never apply" structural instead
+of a sentence in a prompt, and it also stops the agent re-reading the journal,
+which is what keeps it citing the brief rather than inventing figures. The
+brief does every calculation itself and marks thin samples, unmeasurable
+sections and a below-noise-floor lift as explicitly *not* evidence; proposing
+nothing is the expected output most days. Restoring the LLM's entry role is
+deliberately NOT next — that path was removed for cause (fabricated deploy
+reports) and needs an on-chain existence check first.
+
 ## Build / run
 
 ```bash
@@ -45,7 +68,7 @@ found"). `loginctl enable-linger $USER` is what keeps them alive across logout.
 | `azimuth` | the `azimuth` daemon in this repo (entry signals) | `install.sh` ← `assets/systemd/azimuth.service` |
 | `azimuth-sol-monitor` | 20s Solana exit loop (`dlmm_monitor_loop.sh`) — the real safety net | `install.sh` ← `assets/systemd/azimuth-sol-monitor.service` |
 | `azimuth-rh-monitor` | Robinhood Chain exit loop (`uni_monitor_loop.sh`); installed disabled | `install.sh` ← `assets/systemd/azimuth-rh-monitor.service` |
-| `hermes-gateway-<profile>` | Hermes gateway that receives the webhook | Hermes, not this repo |
+| `hermes-gateway-<profile>` | Hermes gateway that receives the webhook, and ticks the profile's cron jobs | Hermes, not this repo |
 
 Units named after other agents (e.g. a separate LLM LP agent) may also be
 running on the same box; they are **not** this repo's and `install.sh` must
@@ -248,6 +271,29 @@ one pass per enabled mode per `POLL_INTERVAL`.
     one thing a one-sided strategy exists never to hold, so it is hard risk like
     SL/TP and the fee-dead OOR timeout.
 
+    **Sizing is per-POOL, not just per-wallet** (`ROBINHOOD_TENURE_*`,
+    `robinhood.TenureParams`). `ComputeDeployAmount` says what the wallet can
+    afford; the tenure ramp says which pools have earned it. Bucketing the
+    venue's own 24 WETH pools by cycles survived, full-cycle (bid spend against
+    every WETH the pool paid back, so the ask recovery counts) — `>=20 cycles:
+    13.0% fill, +6.50%` / `8-19: 22.9%, -0.35%` / `3-7: 39.4%, -5.04%` / `1-2:
+    42.9%, -21.90%`. Monotonic, and it is one fact stated twice: a pool that
+    survives many re-centers is genuinely oscillating (the thesis), one that
+    fills on cycle 1-2 was trending and we were its exit liquidity. **The
+    selection was never wrong** — all 24 passed the same screen — the
+    allocation was: the 18 pools under 8 cycles took 54% of the spend at full
+    size. So under `PROBE_CYCLES` a pool mints a floor-sized probe, between the
+    bars half, at `FULL_CYCLES` the full percentage; and `MAX_FILL_PCT` vetoes a
+    pool outright, which is the long horizon the 4h `cool_off` cooldown cannot
+    see (a 40%-filler keeps clearing it and coming back). Counters are written
+    by `uni_monitor.py`'s `note_tenure` (`rh:tenure:{cycles,fills}:<pool>`,
+    rolling 7d) and read in `scanner.sizeFor`. Ask-side closes are NOT cycles —
+    they work a bag an earlier fill handed over, and counting them would credit
+    a pool with tenure it earned by losing. Unknown tenure (no Redis) keeps FLAT
+    sizing and never vetoes: probing everything at the floor forever is a
+    different strategy, not a safe default, and blocking on missing data is what
+    starved Solana on 2026-08-07.
+
     **Gas is metered** (`noteGas` / `gasReport` in both executors, journaled by
     `uni_monitor.py` as `gas_eth` / `gas_txs`). It was measured nowhere before
     2026-08-08 while the loop churned ~200 tx/day, so the venue's net was
@@ -329,6 +375,23 @@ one pass per enabled mode per `POLL_INTERVAL`.
   Keep time injection at the edges.
 - **Webhook payload is a contract** documented in `docs/SIGNAL_SCHEMA.md`.
   Update that doc when changing the emitted shape.
+- **`pnl_pct` is not money.** In `uni_closes.jsonl` it is a percentage against the
+  position's *marked* value, so a close that ended holding an unsellable token can
+  read +90% while returning almost no quote, leaving behind a token side no venue
+  will buy. Four closes did exactly that. The arbiter is the pair added
+  2026-08-13: `realized_quote` (quote out minus quote in, so no price opinion can
+  enter it) and `pnl_basis` (`"mark"` when the close left `stranded`/`unclaimed`
+  value behind). Sum `realized_quote` over `pnl_basis == "realized"` rows; treat
+  `null` as unmeasurable and count it, never as 0.0. Use `pnl_pct` for ranking
+  only. The same trap sits in third-party position trackers, whose net worth
+  counts zero-market dust rows — including impostor tokens that spell their symbol
+  like a real quote asset — at a stale print.
+- **A one-sided rung settles in quote.** `--no-swap-out` exists in both executors
+  but the monitor never passes it: the re-list that kept filled bags was retired
+  2026-08-13 (see the note by `ASK_BAG_STOP_PCT`). Closes that ended in quote
+  returned +7.8% of the quote they spent; closes that kept the bag returned half
+  of it. A fill is settled at the one moment the pool is provably tradable — it
+  has just traded through our rung.
 
 ## Security
 

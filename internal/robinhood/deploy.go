@@ -253,6 +253,126 @@ func ComputeDeployAmount(quoteBalance float64, p SizeParams) float64 {
 	return amount
 }
 
+// Tenure is one pool's recent close history, as the monitor recorded it:
+// `Cycles` is every completed turnover close of that pool (re-centers AND
+// fills), `Fills` the subset where a resting bid was run over. `Known` is false
+// when there is no tenure backend at all (no Redis) — distinct from a pool that
+// simply has no history yet, which is Known with Cycles == 0.
+type Tenure struct {
+	Cycles int
+	Fills  int
+	Known  bool
+}
+
+// FillPct is the share of this pool's cycles that ended in a fill, or 0 when
+// nothing has closed yet.
+func (t Tenure) FillPct() float64 {
+	if t.Cycles <= 0 {
+		return 0
+	}
+	return float64(t.Fills) / float64(t.Cycles)
+}
+
+// TenureParams configures the pool-tenure size ramp and its fill-rate cut.
+//
+// The numbers come from the venue's own book, 2026-08-08..13, 24 WETH pools
+// bucketed by how many turnover cycles each survived (full-cycle accounting:
+// bid-rung spend against every WETH the pool paid back, so the ask-side
+// recovery is credited):
+//
+//	>= 20 cycles   2 pools   13.0% fill   +6.50%
+//	 8-19 cycles   4 pools   22.9% fill   -0.35%
+//	  3-7 cycles  14 pools   39.4% fill   -5.04%
+//	  1-2 cycles   4 pools   42.9% fill  -21.90%
+//
+// Monotonic in both directions, and it is the same fact twice: a pool that
+// survives many re-centers is genuinely oscillating, which is the whole thesis,
+// while a pool that fills on its first or second cycle was in a downtrend and
+// we were its exit liquidity. The two long-tenured pools carried +0.0239 WETH;
+// every other pool together lost -0.028.
+//
+// The cost of that was allocation, not selection: the 18 pools in the two
+// losing buckets absorbed 54% of the spend at full size, because a pool nobody
+// had ever traded and a pool with 23 clean cycles were sized identically. So
+// the ramp is the fix — an unproven pool gets a floor-sized probe, and only a
+// pool that has PAID for its tenure gets the full percentage.
+type TenureParams struct {
+	// ProbeCycles is the tenure below which a pool is sized at Floor only.
+	ProbeCycles int
+	// FullCycles is the tenure at or above which a pool gets the full
+	// ComputeDeployAmount percentage. Between the two it gets half.
+	FullCycles int
+	// MaxFillPct rejects a pool whose fill rate is at or above it (0 disables).
+	MaxFillPct float64
+	// MinSample is how many cycles must be on record before MaxFillPct may
+	// reject anything — one fill out of one cycle is not a fill rate.
+	MinSample int
+}
+
+// TenureSize applies the ramp to a full-size amount, returning the sized amount
+// and a short operator-facing label for the log line.
+//
+// Returns the amount unchanged when there is no tenure backend: with no Redis
+// there is no history to grade pools on, and silently minting every position at
+// the floor is not a safe default — it is a different strategy, chosen by
+// accident. A pool that is merely NEW is graded (Known, Cycles 0) and probes.
+//
+// The floor is used as the probe size rather than some fraction of it because
+// ComputeDeployAmount's floor already means "smallest position worth its gas
+// and round-trip swap cost" — probing below that spends more on gas than the
+// position can teach us.
+func TenureSize(amount float64, p SizeParams, t Tenure, tp TenureParams) (float64, string) {
+	if !t.Known || amount <= 0 {
+		return amount, ""
+	}
+	switch {
+	case tp.FullCycles > 0 && t.Cycles >= tp.FullCycles:
+		return amount, fmt.Sprintf("tenure %d cycles — full size", t.Cycles)
+	case tp.ProbeCycles > 0 && t.Cycles < tp.ProbeCycles:
+		// Never ABOVE the computed amount: a thin wallet whose percentage is
+		// already under the floor must not be talked UP into a bigger position by
+		// the very rule that exists to spend less on unproven pools.
+		if p.Floor > 0 && p.Floor < amount {
+			return p.Floor, fmt.Sprintf("tenure %d/%d cycles — floor probe", t.Cycles, tp.ProbeCycles)
+		}
+		return amount, fmt.Sprintf("tenure %d/%d cycles — probe (already at floor)", t.Cycles, tp.ProbeCycles)
+	default:
+		half := amount / 2
+		if p.Floor > 0 && half < p.Floor {
+			half = p.Floor
+		}
+		if half > amount {
+			half = amount
+		}
+		return half, fmt.Sprintf("tenure %d cycles — half size", t.Cycles)
+	}
+}
+
+// TenureReject reports why this pool's fill rate disqualifies it, or "" to
+// allow it.
+//
+// Separate from TenureSize because it is a different KIND of answer — the ramp
+// is an allocation, this is a veto — and because it must stay checked beside
+// the re-entry cooldown in the pick walk, before the entry-timing gate spends a
+// GeckoTerminal request on a pool we have already convicted.
+//
+// The cooldown it sits next to is a 4h brake on the pool that JUST filled; this
+// is the longer horizon that brake cannot see. A pool filling 40%+ of its
+// cycles is not unlucky, it is trending, and it will keep clearing its cooldown
+// and coming back. Unknown tenure never rejects — the ramp already sizes an
+// ungraded pool down to a probe, and blocking on missing data is how the
+// monotonic gates starved Solana on 2026-08-07.
+func TenureReject(t Tenure, tp TenureParams) string {
+	if !t.Known || tp.MaxFillPct <= 0 || t.Cycles < tp.MinSample {
+		return ""
+	}
+	if pct := t.FillPct(); pct >= tp.MaxFillPct {
+		return fmt.Sprintf("fill rate %.0f%% over %d cycles >= %.0f%% ceiling",
+			pct*100, t.Cycles, tp.MaxFillPct*100)
+	}
+	return ""
+}
+
 // lastLine returns the final non-empty stdout line — the executor's JSON
 // payload, after any transaction-log noise.
 func lastLine(out string) string {

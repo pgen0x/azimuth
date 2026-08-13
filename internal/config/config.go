@@ -200,6 +200,16 @@ type Config struct {
 	// different numbers, and sharing one config would silently misprice
 	// whichever asset the operator wasn't thinking about.
 	RobinhoodSizeUSDG robinhood.SizeParams
+	// RobinhoodTenure grades a pool by how many turnover cycles it has survived
+	// and how many of those ended in a fill, then sizes the deploy accordingly:
+	// an unproven pool gets a floor-sized probe, a pool that has earned its
+	// tenure gets the full percentage, and a pool that fills too often is
+	// declined outright. See robinhood.TenureParams for the book it came from.
+	//
+	// Inert with no REDIS_ADDR — the counters live there and are written by
+	// uni_monitor.py, so a wallet with no Redis keeps flat sizing rather than
+	// probing every pool forever.
+	RobinhoodTenure robinhood.TenureParams
 	// RobinhoodMinGasEth is the native-ETH floor required to deploy. Unlike
 	// Solana — where SOL is gas AND quote, so one reserve covers both — this
 	// venue pays gas in ETH but LPs in WETH, so a wallet flush with WETH can
@@ -418,6 +428,21 @@ func loadConfig() Config {
 			Pct:     getfloat("ROBINHOOD_DEPLOY_PCT_USDG", 0.45),
 			Floor:   getfloat("ROBINHOOD_DEPLOY_FLOOR_USDG", 8),
 			Ceil:    getfloat("ROBINHOOD_DEPLOY_CEIL_USDG", 150),
+		},
+		RobinhoodTenure: robinhood.TenureParams{
+			// The bucket edges are the measured ones, not round numbers: 8 cycles
+			// is where the book stops losing (-0.35%) and 20 is where it starts
+			// paying (+6.50%). Everything under 8 lost 5-22%.
+			ProbeCycles: getint("ROBINHOOD_TENURE_PROBE_CYCLES", 8),
+			FullCycles:  getint("ROBINHOOD_TENURE_FULL_CYCLES", 20),
+			// 0.35 sits between the profitable bucket's 13% and the two losing
+			// buckets' 39-43%, so it convicts a pool for the pattern that lost
+			// money without touching the pools that made it.
+			MaxFillPct: getfloat("ROBINHOOD_TENURE_MAX_FILL_PCT", 0.35),
+			// Four cycles before the veto may fire. Below that the "rate" is one
+			// or two events, and rejecting on it would re-create the one-and-done
+			// selection this whole change exists to stop making.
+			MinSample: getint("ROBINHOOD_TENURE_MIN_SAMPLE", 4),
 		},
 		RobinhoodMinGasEth: getfloat("ROBINHOOD_MIN_GAS_ETH", 0.0002),
 		// weth_ladder, not balanced_tight. balanced_tight swaps half the commit

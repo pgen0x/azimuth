@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"encoding/json"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -151,6 +152,64 @@ func (s *Seen) RobinhoodCooldown(ctx context.Context, pool, token string) (time.
 		return d, reason
 	}
 	return 0, ""
+}
+
+// Tenure counter keys, written by uni_monitor.py's note_tenure(). Two counters
+// rather than one JSON blob so each INCR is atomic against the monitor's own
+// concurrent closes — the 20s loop can close two positions in the same pool in
+// one pass, and a read-modify-write would drop one.
+const (
+	tenureCyclesKey = "rh:tenure:cycles:"
+	tenureFillsKey  = "rh:tenure:fills:"
+)
+
+// RobinhoodTenure reads one pool's close history — total turnover cycles, and
+// the fill subset — from the counters uni_monitor.py increments on every close.
+//
+// The bool is KNOWN, not "found": a pool with no history reads (0, 0, true),
+// which is what the size ramp needs to tell "we have never traded here" from
+// "no tenure backend is wired". Only the absence of Redis, or a failed read,
+// reports false, and that returns the deploy to plain ComputeDeployAmount
+// sizing rather than probing everything at the floor — a floor-only wallet is
+// a different strategy, not a safe default.
+//
+// Lowercased for the same reason RobinhoodCooldown is: GeckoTerminal, the
+// gateway and the monitor spell the same address in three different cases, and
+// tenure that missed on capitalization would read as "brand new pool" every
+// cycle — grading a pool with 20 clean re-centers as an unproven probe forever.
+//
+// Fills are clamped to cycles. They are two counters and the second INCR can
+// fail on its own, so an unclamped read could invent a fill rate above 100%
+// out of a dropped write — and the fill-rate veto would act on it.
+func (s *Seen) RobinhoodTenure(ctx context.Context, pool string) (cycles, fills int, known bool) {
+	// Nil receiver tolerated for the same reason as RobinhoodCooldown: this is
+	// read from the deploy walk, which the scanner tests reach with no store.
+	if s == nil || s.rdb == nil || pool == "" {
+		return 0, 0, false
+	}
+	p := strings.ToLower(pool)
+	vals, err := s.rdb.MGet(ctx, tenureCyclesKey+p, tenureFillsKey+p).Result()
+	if err != nil || len(vals) != 2 {
+		return 0, 0, false
+	}
+	// A missing key arrives as nil and counts as zero — the new-pool case, and
+	// it is Known.
+	atoi := func(v any) int {
+		sv, ok := v.(string)
+		if !ok {
+			return 0
+		}
+		n, err := strconv.Atoi(strings.TrimSpace(sv))
+		if err != nil || n < 0 {
+			return 0
+		}
+		return n
+	}
+	cycles, fills = atoi(vals[0]), atoi(vals[1])
+	if fills > cycles {
+		fills = cycles
+	}
+	return cycles, fills, true
 }
 
 // RobinhoodSecurityTTL is how long one POSITIVE contract-security detection

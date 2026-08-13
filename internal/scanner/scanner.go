@@ -324,13 +324,19 @@ type deploySize struct {
 	strategy string
 	sizeCfg  robinhood.SizeParams
 	sizeBal  float64
+	// tenure is the pool's graded close history and tenureNote the ramp's
+	// operator-facing label ("" when there is no tenure backend). Carried on the
+	// sizing answer because the fill-rate veto in the pick walk needs the same
+	// read the ramp already paid for.
+	tenure     robinhood.Tenure
+	tenureNote string
 }
 
 // sizeFor sizes one candidate from the LIVE wallet, not a fixed constant — same
 // rationale as the Solana pipeline's compute_deploy_amount. The caller has
 // already failed closed on an unreadable balance: guessing a size is how you
 // overspend or mint dust.
-func (s *Scanner) sizeFor(c *robinhood.Candidate, bal robinhood.Balances) deploySize {
+func (s *Scanner) sizeFor(ctx context.Context, c *robinhood.Candidate, bal robinhood.Balances) deploySize {
 	// Gas is native ETH here, not the assets we LP with — a WETH/USDG-rich
 	// wallet can still be too broke to pay for the mint.
 	if bal.ETH < s.cfg.RobinhoodMinGasEth {
@@ -380,6 +386,20 @@ func (s *Scanner) sizeFor(c *robinhood.Candidate, bal robinhood.Balances) deploy
 		sz.strategy = "weth_below"
 	}
 	sz.amount = robinhood.ComputeDeployAmount(sz.sizeBal, sz.sizeCfg)
+	// Pool tenure ramp. The wallet says how much we CAN spend; this says how much
+	// this particular pool has earned the right to. Applied after the balance
+	// sizing and before the floor check, so a probe that lands under the floor is
+	// reported as unfundable by the same line as any other sub-floor position.
+	//
+	// Measured 2026-08-13 over the venue's own 24 WETH pools: the 18 that had
+	// survived fewer than 8 cycles absorbed 54% of the spend and lost 5-22% of
+	// it, while the 2 that had survived 20+ returned +6.5%. Nothing about the
+	// SELECTION was wrong there — those pools passed the same screen — the
+	// allocation was, because an untested pool and a pool with 23 clean
+	// re-centers were sized identically.
+	cyc, fills, known := s.seen.RobinhoodTenure(ctx, c.Pool)
+	sz.tenure = robinhood.Tenure{Cycles: cyc, Fills: fills, Known: known}
+	sz.amount, sz.tenureNote = robinhood.TenureSize(sz.amount, sz.sizeCfg, sz.tenure, s.cfg.RobinhoodTenure)
 	if sz.amount <= 0 {
 		sz.skip = fmt.Sprintf("%.5f %s balance cannot fund a %.5f floor position (reserve %.5f)",
 			sz.sizeBal, sz.unit, sz.sizeCfg.Floor, sz.sizeCfg.Reserve)
@@ -488,7 +508,7 @@ func (s *Scanner) robinhoodDeploy(ctx context.Context, mode string, batch []*rob
 	sizes := make(map[string]deploySize, len(order))
 	fundable := 0
 	for _, c := range order {
-		sz := s.sizeFor(c, bals[protoKey(c)])
+		sz := s.sizeFor(ctx, c, bals[protoKey(c)])
 		sizes[c.Pool] = sz
 		if sz.skip == "" {
 			fundable++
@@ -532,6 +552,17 @@ func (s *Scanner) robinhoodDeploy(ctx context.Context, mode string, batch []*rob
 				mode, c.BaseSymbol, c.Pool[:10], cd.Round(time.Minute), why)
 			continue
 		}
+		// Fill-rate veto — the long horizon the 4h cooldown above cannot see. That
+		// one brakes the pool that JUST filled; this one convicts the pool that
+		// keeps doing it, and would otherwise clear its cooldown and come back
+		// every four hours. Checked here, before the entry-timing gate, for the
+		// same reason the cooldown is: the read is local and that gate costs a
+		// GeckoTerminal request.
+		if why := robinhood.TenureReject(sizes[c.Pool].tenure, s.cfg.RobinhoodTenure); why != "" {
+			log.Printf("scanner[%s]: %s (%s) skipped: %s",
+				mode, c.BaseSymbol, c.Pool[:10], why)
+			continue
+		}
 		if sz := sizes[c.Pool]; sz.skip != "" {
 			// Only reachable when one batch mixes protocols whose executors report
 			// different assets (the v4 build reports USDG; an older v3 build may
@@ -572,9 +603,18 @@ func (s *Scanner) robinhoodDeploy(ctx context.Context, mode string, batch []*rob
 	}
 
 	sz := sizes[best.Pool]
-	log.Printf("scanner[%s]: DEPLOY PICK %s (%s, %s) score=%.0f amount=%.5f %s (%.0f%% of %.5f bal, reserve %.5f) strategy=%s",
+	// The tenure clause is appended rather than folded into the percentage
+	// clause: the percentage is what the WALLET allowed, the tenure note is what
+	// the POOL earned, and a size that reads as 45%-of-balance when the ramp
+	// actually cut it to a floor probe is the kind of log line that costs an
+	// afternoon to reconcile against the journal.
+	tenure := ""
+	if sz.tenureNote != "" {
+		tenure = fmt.Sprintf(" [%s, %d/%d fills]", sz.tenureNote, sz.tenure.Fills, sz.tenure.Cycles)
+	}
+	log.Printf("scanner[%s]: DEPLOY PICK %s (%s, %s) score=%.0f amount=%.5f %s (%.0f%% of %.5f bal, reserve %.5f) strategy=%s%s",
 		mode, best.BaseSymbol, best.Pool[:10], best.Protocol, best.Score, sz.amount, sz.unit,
-		sz.sizeCfg.Pct*100, sz.sizeBal, sz.sizeCfg.Reserve, sz.strategy)
+		sz.sizeCfg.Pct*100, sz.sizeBal, sz.sizeCfg.Reserve, sz.strategy, tenure)
 
 	out, err := runner.Deploy(ctx, best.Pool, sz.amount, s.cfg.RobinhoodRangePct, s.cfg.RobinhoodSlippagePct, sz.strategy, sz.quote)
 	if err != nil {

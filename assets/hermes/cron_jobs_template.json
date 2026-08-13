@@ -1,51 +1,5 @@
 [
   {
-    "id": "sol_strategy_self_improvement",
-    "name": "DLMM Strategy Self-Improvement Review",
-    "prompt": "You are the Solana DLMM Strategy Self-Improvement agent 📊. This agent trades Meteora DLMM LP ONLY — two modes: **casual** (30m timeframe, 2-6h holds) and **multiday** (24h timeframe, 24h+ holds), each with isolated position slots (max 2 each).\n\n**STEP 1: Run the performance data gatherer**\n```bash\npython3 __PROFILE__/skills/solana-web3/scripts/self_improvement.py\n```\nOutput sections:\n- §1: Binance Web3 wallet DeFi stats (volume, gas, buy/sell count, realized PnL across ALL on-chain activity)\n- §1b: Past 7 days realized PnL from Redis\n- §1c: Daily start balance\n- §1d: Past 7 days realized DLMM PnL from Meteora calendar API (ground truth)\n- §2: Active non-DLMM positions (legacy, likely empty)\n- §2b: Active DLMM positions — includes `mode` column (casual/multiday)\n- §3: Trade entry/exit records from Hindsight + Redis\n- §4: Current Section 9 rules from SOUL.md\n\n**STEP 2: Analyze performance**\n\n*Overall wallet health (§1):*\n- Gas costs vs realized PnL — is friction eating returns?\n- Trade count reasonable or overtrading?\n\n*DLMM performance by mode (§1d + §2b + §3 hindsight):*\n- **Casual** (30m): volume spikes being caught? OOR exits too fast? Fee/TVL 0.1% threshold right?\n- **Multiday** (24h): fee/TVL yield by TVL band? Trailing TP too wide/tight? OOR time limit cutting winners?\n- Check `mode` field in §2b and hindsight records to split casual vs multiday outcomes.\n\n**STEP 3: Decide on rule optimization (Section 9 ONLY)**\nOptimize casual and multiday params independently. Do not change unless clearly backed by data. If no changes needed, skip to Step 6.\n\nSection 9 structure to preserve exactly:\n- `### Casual Mode Parameters` — Casual Min TVL, Casual Min Fee/TVL, Casual Min Mcap, Casual Min Holders, Casual Max Positions\n- `### Multiday Mode Parameters` — Multiday Min TVL, Multiday Min Fee/TVL, Multiday Min Mcap, Multiday Min Holders, Multiday Max Positions\n- `### Shared Ingestion Gates` — Minimum Base Organic Score, Slippage\n- `### Active Strategy Configuration` — Strategy, Indicators Enabled, Indicators Preset\n- `### Exit Parameters` — Hard Stop-Loss, Trailing TP Trigger/Drop, Max Bins Pumped Above, Max OOR Minutes, Min Age for Yield Check, Min 24h Fee/TVL for Yield Check, Min Exit Liquidity\n- `### Close GUARD` — **NEVER modify this block**\n\n**STEP 4: Update SOUL.md (Section 9)**\nIf optimizing, format the COMPLETE updated Section 9 preserving ALL blocks above. Update via:\n```bash\npython3 __PROFILE__/skills/solana-web3/scripts/update_soul_section.py 9 \"<NEW_SECTION_9_CONTENT>\"\n```\nConfirm output shows \"SUCCESS\". ⚠️ Never flatten Casual/Multiday blocks back into a single param set.\n\n**STEP 5: Retain the review**\nIf the `hindsight_retain` tool is available this session, use it. If it is NOT available, do not skip — append the same content as one JSON line instead:\n```bash\npython3 -c \"import json,time,sys; open('__PROFILE__/memories/dlmm_strategy_reviews.jsonl','a').write(json.dumps({'ts': int(time.time()), 'context': 'strategy-review', 'content': sys.argv[1]})+'\\n')\" \"DLMM STRATEGY REVIEW: ...\"\n```\nOriginal tool call for when it exists:\n```\nhindsight_retain(\n  content=\"DLMM STRATEGY REVIEW: Analyzed past DLMM trades by mode. PnL: $[USD]. Casual: [wins]W/[losses]L. Multiday: [wins]W/[losses]L. Gas cost: $[USD]. Section 9 changes: [details or 'none'].\",\n  context=\"strategy-review\",\n  tags=[\"sol-dlmm\",\"self-improvement\",\"strategy-review\"]\n)\n```\n\n**STEP 6: Report to Telegram**\nPost summary to (REPLACE_ME_channel_id):\n```\n🧠 DLMM Self-Improvement Report\n\nPeriod: Last 7 Days\nOverall Wallet PnL: $[USD] (after gas: [X]%)\nRealized DLMM PnL: $[USD] ([wins]W / [losses]L)\n\nBy Mode:\n- Casual (30m): [wins]W / [losses]L | avg hold [X]h\n- Multiday (24h): [wins]W / [losses]L | avg hold [X]h\n\nOptimizations Applied:\n- Casual params: [change or 'None']\n- Multiday params: [change or 'None']\n- Exit params: [change or 'None']\n\nLessons Learned:\n- [Bullet points]\n```",
-    "skills": [
-      "solana-web3"
-    ],
-    "deliver": "REPLACE_ME_telegram_or_platform:REPLACE_ME_channel_id",
-    "enabled_toolsets": [
-      "terminal",
-      "hindsight"
-    ],
-    "schedule": {
-      "kind": "cron",
-      "expr": "0 21 * * *",
-      "display": "every day at 21:00 (server time)"
-    },
-    "schedule_display": "every day at 21:00 (server time)",
-    "enabled": true,
-    "paused_at": null,
-    "paused_reason": null,
-    "skill": "solana-web3",
-    "model": "markt"
-  },
-  {
-    "id": "sol_dlmm_position_monitor",
-    "name": "Solana DLMM Position Monitor",
-    "prompt": "You are a Solana Trading Specialist. Run Solana DLMM Position Monitor.\n\n⚠️ OUTPUT RULE: Your ENTIRE response must be ONLY the final card. No preamble, no analysis text, no \"Evaluating...\", no \"Analysis:\", no code fences, no extra formatting beyond what the script outputs. The very first character of your response must be \"D\" (from \"DLMM Position Status\"). Any text before the card will break delivery.\n\n**STEP 1: Get position report**:\n```bash\npython3 __PROFILE__/skills/solana-dlmm/scripts/dlmm_monitor.py --report-only\n```\nParse the `MONITOR_REPORT:` JSON line at the end. If `positions` array is empty → output `[SILENT]` and stop.\n\n**STEP 2: For each position get live price momentum**:\n```bash\ncurl -s \"https://api.dexscreener.com/latest/dex/tokens/<BASE_MINT>\"\n```\nExtract priceChange.m5, priceChange.h1.\n\n**STEP 3: Silently decide CLOSE / HOLD / CLAIM for each position** (do not write anything):\n\n**GUARD — evaluate FIRST, overrides every CLOSE rule below:** NEVER CLOSE when ALL of these hold: in_range == true AND fee_per_tvl_24h >= 10 AND the report's `triggered_rules` array is empty AND 1h price change > -5%. A 1h dump <= -5% VOIDS this guard — fees cannot outrun a sustained downtrend. A young, in-range position earning high fees is healthy — HOLD it no matter what your other math suggests. Closing a fresh, in-range, high-fee winner is the single worst error this job can make. Also: do NOT --override-close any position whose `triggered_rules` is empty unless 5m price is dumping <= -3% OR 1h price is dumping <= -5% OR break_even_days >= 5.\n\nA. break_even_days: READ this number directly from the report JSON field `break_even_days` (the script computes it deterministically — do NOT divide pnl by fee yourself, you get it wrong). break_even_days >= 5 = CLOSE candidate; < 5 = HOLD. If break_even_days is 0 (position not underwater, or earning fees fast) this rule NEVER fires.\nB. pnl_pct < -20% → CLOSE (hard floor)\nC. OOR + price dumping -3%+ or oor_minutes > 60 → CLOSE; recovering +2%+ → HOLD. OOR positions accrue ZERO fees — fee_per_tvl_24h is pool-level and NEVER a HOLD justification while OOR; judge OOR only on price momentum toward range and oor_minutes vs the limit\nD. unclaimed_fees_sol > 0.02 AND pnl_pct > -5% AND in_range → CLAIM\nE. trailing_active AND drop from peak >= threshold → CLAIM then CLOSE\nF. age_minutes > 90 AND fee_per_tvl_24h < 3% → CLOSE\nG. age_minutes > 30 AND fee_per_tvl_24h > 10% → HOLD\n\nH. triggered_rules contains \"Thin pool liquidity\" -> CLOSE: pool liquidity is draining below the exit floor. Exit while the pool is still liquid enough to exit cleanly. This OVERRIDES the high-fee GUARD above — a position you cannot exit is worse than forgone fees.\n\nI. pnl_pct <= -5% AND 1h price <= -5% → CLOSE: sustained downtrend with the position already underwater — exit now, before the hard SL floor does it 10+ points deeper (drooling/spurdo pattern: -7% HOLD became -18%+ booked loss within minutes).\n\n**STEP 4: Execute decisions**:\n\nCLOSE:\n```bash\npython3 __PROFILE__/skills/solana-dlmm/scripts/dlmm_monitor.py --override-close <POSITION_ADDR> --reason \"<REASON>\"\n```\nHOLD (suppress 20m):\n```bash\npython3 __PROFILE__/skills/solana-dlmm/scripts/dlmm_monitor.py --override-hold <POSITION_ADDR> --hold-minutes 20 --reason \"<REASON>\"\n```\nCLAIM:\n```bash\nnode __PROFILE__/skills/solana-dlmm/scripts/dlmm_executor.js claim <POSITION_ADDR>\n```\n\n**STEP 4b: Retain each CLOSE in hindsight** (silent tool call — produces NO visible output):\nFor every position you CLOSED in STEP 4, call:\n```\nhindsight_retain(\n  content=\"DLMM CLOSE: mode=<MODE> pool=<PAIR> mint=<BASE_MINT> pnl=<PNL_PCT>% fee/tvl=<FEE_PER_TVL>% age=<AGE_MIN>m oor=<OOR_MIN>m reason=<REASON>\",\n  context=\"dlmm-close\",\n  tags=[\"sol-dlmm\",\"close\",\"position-outcome\",\"mode-<MODE>\"]\n)\n```\n`<MODE>` = `casual` or `multiday` — read from `mode` field in `MONITOR_REPORT` JSON for this position (fallback: `multiday` if absent). Tag `mode-casual` or `mode-multiday` is MANDATORY — self-improvement filters by this tag to analyze modes separately.\nThis is a tool invocation ONLY — do NOT print it anywhere. Your visible response still starts with \"DLMM Position Status — \".\n\n**STEP 5: Output ONLY this — copy the card from STEP 1 output verbatim, then add two lines per position**:\n\nTake the exact text block that starts with \"DLMM Position Status — \" from the script output.\nFor each position block, after the \"| Size | ... |\" row insert (if price data available):\n| Price 5m/1h | X.XX% / Y.YY% |\nThen replace the \"→ ...\" summary line with:\n→ HOLD/CLOSE/CLAIM: [one sentence — include the one number that drove the decision]\nIf CLOSE or CLAIM was executed, add after the summary:\n| TX | https://solscan.io/tx/<hash> |\n\nRemember: start your response directly with \"DLMM Position Status — \". Nothing before it.",
-    "skills": [
-      "solana-dlmm"
-    ],
-    "deliver": "REPLACE_ME_telegram_or_platform:REPLACE_ME_channel_id",
-    "enabled_toolsets": [
-      "terminal",
-      "web",
-      "hindsight"
-    ],
-    "schedule": {
-      "kind": "interval",
-      "minutes": 30,
-      "display": "every 30m"
-    },
-    "enabled": true,
-    "model": "dev",
-    "script": "sol_dlmm_monitor_wakegate.sh"
-  },
-  {
     "id": "sol_dlmm_journal_reconcile",
     "name": "DLMM Journal Reconciliation (weekly)",
     "prompt": "You are a Solana Trading Specialist. Run the weekly DLMM journal reconciliation.\n\n**STEP 1: Run the reconciler**:\n```bash\npython3 __PROFILE__/skills/solana-dlmm/scripts/dlmm_reconcile.py --days 7\n```\n\n**STEP 2: Output a short card** (start your response directly with \"DLMM Journal Reconciliation — \"):\nDLMM Journal Reconciliation — <date + time>\n| Metric | Value |\n|--------|-------|\n| Net PnL (7d, API) | <SOL> |\n| Fees earned | <SOL> |\n| Price/IL component | <SOL> |\n| Journal coverage | <matched>/<API pools closed in window> |\n| Unjournaled closes | <count> |\n| PnL divergences | <count> |\nThen list the 5 worst unjournaled closes (symbol, SOL, %) if any, and one sentence: is the journal drifting or healthy? If every close is journaled and no divergences, end with: Journal healthy ✅.\n\n**RULES:**\n- The journal file is APPEND-ONLY: the LAST line is the newest entry. Never judge staleness by the first line.\n- If the script errors or prints nothing, report the failure verbatim and stop. Do NOT reconstruct the card from Redis counters, the journal file, or memory — a wrong card is worse than no card.\n- The card's PnL numbers come ONLY from the script's '=== Meteora API ground truth ===' and '=== Redis book vs calendar truth ===' sections. If BOOK DRIFT is flagged, include the drift line in the card.",
@@ -62,7 +16,10 @@
       "display": "every Monday at 09:00 (server time)"
     },
     "enabled": true,
-    "model": "dev"
+    "model": "improve",
+    "state": "scheduled",
+    "paused_at": null,
+    "paused_reason": null
   },
   {
     "id": "rh_dlmm_position_monitor",
@@ -81,6 +38,47 @@
       "display": "every 30m"
     },
     "enabled": true,
-    "model": "dev"
+    "model": "com",
+    "state": "scheduled",
+    "paused_at": null,
+    "paused_reason": null
+  },
+  {
+    "id": "sol_dlmm_ai_exit_review",
+    "name": "Solana DLMM AI Exit Review",
+    "deliver": "REPLACE_ME_telegram_or_platform:REPLACE_ME_channel_id",
+    "enabled_toolsets": [
+      "terminal",
+      "web"
+    ],
+    "schedule": {
+      "kind": "interval",
+      "minutes": 5,
+      "display": "every 5m"
+    },
+    "enabled": true,
+    "model": "com",
+    "script": "sol_dlmm_exit_review_gate.py",
+    "prompt": "You are the exit reviewer for the Solana DLMM bot. The rules engine\n(`dlmm_monitor.py`, running every 20 seconds) owns every close. You do not.\n\nYour ONE power: defer a close that is about to happen, by up to 20 minutes,\nwhen live price momentum says the rule is about to sell a bounce. Deferring is\nthe only action you may take. You may never close, claim, swap, deploy, or\nchange any threshold.\n\nThe Script Output above is the current position report. Read the\n`MONITOR_REPORT:` JSON line; the `exit-review gate:` line names which positions\nare in a reviewable band and why.\n\n**STEP 1 - momentum.** For each position the gate named, run:\n```bash\ncurl -s \"https://api.dexscreener.com/latest/dex/tokens/<BASE_MINT>\"\n```\nRead `priceChange.m5` and `priceChange.h1` from the SOL pair.\n\n**STEP 2 - decide, per position. The default is DO NOTHING.**\n\nPlace a HOLD only when ALL of these are true:\n- `m5 >= +1.0` - price is rising right now, not merely \"not falling\". A flat or\n  negative m5 is never a bounce.\n- `h1 >= -8.0` - the hour is not a sustained bleed.\n- `pnl_pct > -5.0` - the position is not already deep underwater.\n- The position is IN RANGE, or out of range with `m5 >= +2.0` (price is coming\n  back toward the range; an OOR position earns exactly zero while you wait).\n\nAdditional bar for `low-yield` band positions: hold ONLY if\n`fee_per_tvl_24h >= 0.5` AND m5 >= +2.0. A pool that has stopped paying is the\nsingle most common way this bot loses money slowly: a large share of closes earn\nexactly zero. When in doubt on this band, let the rule close it.\n\nNever hold when the report shows `hard_rule: true`, and never hold a position\nwhose gate band you cannot explain from the numbers.\n\nIf no position clears the bar, do nothing and output `[SILENT]`. Doing nothing\nis the correct outcome most of the time, and costs the bot nothing.\n\n**STEP 3 - execute holds only.**\n```bash\npython3 __PROFILE__/skills/solana-dlmm/scripts/dlmm_monitor.py --override-hold <POSITION_ADDR> --hold-minutes 15 --reason \"<m5/h1 numbers + what you expect>\"\n```\n`--hold-minutes` may be 10, 15, or 20. Nothing longer: the review runs again in\n5 minutes and can renew, whereas a long hold you cannot retract sits over a\nfalling position. The `--reason` must contain the actual m5 and h1 numbers you\nread - it is journaled to `memories/ai_holds.jsonl` and audited later against\nhow the position actually closed.\n\nThese bypass your hold no matter what, by design: the emergency stop-loss\nfloor, a rug-velocity dump, thin pool liquidity, and a trailing drop of 3% or\nmore from peak. Do not attempt to work around them.\n\n**STEP 4 - output.** If you placed no holds, your entire response is exactly:\n`[SILENT]`\n\nIf you placed holds, output only one line per hold, nothing else:\n`HOLD <PAIR> <N>m - m5 <X>% h1 <Y>% pnl <Z>% - <one clause on what you expect>`\n"
+  },
+  {
+    "id": "sol_dlmm_daily_proposal",
+    "name": "Solana DLMM Daily Threshold Proposal",
+    "prompt": "You are the strategy proposal reviewer for the Solana DLMM bot.\n\nThe Script Output above is a precomputed evidence brief. It is the ONLY\nevidence you have and the ONLY evidence you may cite. You have no terminal in\nthis job: you cannot read a file, run a script, or change a parameter. That is\ndeliberate. This job proposes to the operator, and the operator applies. A\nreport that reads as though a change were already made is a failure of the\njob, not a stylistic problem.\n\nNever state a number that does not appear in the brief. If a number you want\nis not in the brief, say that it is not in the brief.\n\n**STEP 1 - read the evidence.** The brief has six sections: outcomes by mode,\nwhich exit rule costs what, signal weights, AI exit-review holds, the daemon\nscreen funnel, and the current SOUL.md section 9 parameters verbatim.\n\n**STEP 2 - decide what, if anything, to propose. At most 3 proposals.**\n\nA proposal is admissible only if ALL of these hold:\n- it names ONE parameter that appears verbatim in the section 9 block;\n- its evidence is a brief row WITHOUT the thin marker, or a funnel counter;\n- it gives the current value and the proposed value;\n- it names what gets worse if the proposal is wrong.\n\nThese are NOT evidence, and a proposal resting on them is noise:\n- any row marked with the thin warning;\n- any section the brief itself calls not measurable;\n- signal weights when the brief says every lift is below the noise floor -\n  that finding says the screen's inputs carry no predictive information, NOT\n  that some particular gate should move;\n- anything you remember from a previous run. Each run sees a fresh window.\n\n**Proposing nothing is a valid and frequent outcome.** These parameters have\nbeen tuned repeatedly; the base rate of a genuinely warranted change on any\ngiven day is low. An empty proposal list with a clear reason is worth more\nthan three speculative ones and costs the operator nothing to read.\n\nRank by expected SOL, not by how interesting the change is. The exit-rule\ntable is usually the highest-value section: a rule with a large negative net\nis either firing too late or firing on the wrong positions.\n\n**STEP 3 - output. Under 3500 characters, plain markdown, no code fences.**\n\nDLMM Proposal - [date from the brief header]\n\nWindow: [N] closes / 7d\nHealth: [one sentence - net SOL and the single number that best describes it]\n\nProposals: [N, or \"none\"]\n\nFor each proposal:\n\n**[N]. [Parameter name exactly as section 9 spells it]**\nNow: [current] -> Propose: [new]\nBecause: [one or two sentences citing the brief row and its n]\nRisk: [what gets worse if this is wrong]\n\nThen:\n\nNot proposed: [one line each for anything you considered and rejected on thin\nevidence - this tells the operator you looked]\n\nIf you propose nothing, say so in one line with the reason and stop. Do not\npad the report to look productive.\n",
+    "script": "sol_dlmm_proposal_brief.py",
+    "deliver": "REPLACE_ME_telegram_or_platform:REPLACE_ME_channel_id",
+    "enabled_toolsets": [],
+    "model": "improve",
+    "schedule": {
+      "kind": "cron",
+      "expr": "0 21 * * *",
+      "display": "every day at 21:00 WIB"
+    },
+    "enabled": true,
+    "state": "scheduled",
+    "last_status": null,
+    "last_error": null,
+    "last_delivery_error": null,
+    "fire_claim": null
   }
 ]
