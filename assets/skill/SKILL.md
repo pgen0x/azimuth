@@ -97,7 +97,13 @@ gate (bin-array rent, entry timing) rejects the top pick. Used by the daemon's
 **Exit chokepoint:** `dlmm_monitor.py` is the ONLY authorized closer — it sets `DLMM_CLOSE_AUTH` after the GUARD/rules pass. A raw `node dlmm_executor.js close <addr>` is REFUSED (exit 3) unless `--force`/`DRY_RUN`. The gateway agent and the spot fast-monitor must never close DLMM positions directly.
 
 ### 3. `dlmm_weights.py` — Darwinian Signal Weights
-**Purpose**: Learns which entry signals predict winners. Correlates the entry-signal snapshots in `dlmm_closes.jsonl` (last 60d, needs >= 10 closes with both wins and losses) with realized PnL; boosts top-quartile signals ×1.05, decays bottom ×0.95, clamped [0.3, 2.5]. Persists to `<profile>/memories/signal_weights.json` and mirrors to Redis `sol:dlmm:signal_weights`, which the deploy agent reads when ranking candidates.
+**Purpose**: Learns which entry signals predict winners. Correlates the entry-signal snapshots in `dlmm_closes.jsonl` (last 60d, needs >= 10 closes with both wins and losses) with realized PnL, producing a signed **lift** per signal; each weight then steps 35% of the way toward `1.0 + 3 × lift`, clamped [0.3, 2.5]. Persists weights **and lifts** to `<profile>/memories/signal_weights.json`, mirrored to Redis `sol:dlmm:signal_weights`, which the deploy pick reads when ranking candidates.
+
+Two properties are deliberate, both applied 2026-08-13 after an audit found 10 of 14 weights sitting exactly on a clamp after 108 recalcs:
+*   **Mean-reverting, not ratcheting.** A weight is a function of the CURRENT lift, so evidence that fades pulls it back toward neutral. The old ×1.05/×0.95 quartile ratchet compounded over stable quartile membership and could only ever end on the rails, after which no new evidence could move it.
+*   **The learned set equals the applied set.** `SIGNAL_NAMES` here must stay identical to `WEIGHTED_SIGNALS_HIGHER_IS_BETTER` in `dlmm_pipeline.py`. Six non-directional signals (`volatility`, `mcap`, `tvl`, `fee_pct`, `swap_count`, `bot_holders_pct`) were learned but never applied, and because their lift went through `abs()` it was never negative — so they monopolised the boost quartile and pushed the signals that *do* score toward the floor. They are retired and pruned from stored state. Adding a signal here means teaching the pipeline to apply it, not just appending a name.
+
+A weight near 1.0 is ambiguous on its own — "no evidence" and "evidence of no effect" both land there — which is why the `lifts` map is published alongside it and `--show` prints both columns.
 **Commands**:
 *   `python3 ~/.hermes/profiles/<profile>/skills/solana-dlmm/scripts/dlmm_weights.py --show` — print current weights
 *   `python3 .../dlmm_weights.py --force` — recalc now (normally self-guarded to once per 6h, auto-run by the monitor)
