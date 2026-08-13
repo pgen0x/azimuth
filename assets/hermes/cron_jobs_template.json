@@ -82,5 +82,23 @@
     },
     "enabled": true,
     "model": "dev"
+  },
+  {
+    "id": "sol_dlmm_ai_exit_review",
+    "name": "Solana DLMM AI Exit Review",
+    "deliver": "REPLACE_ME_telegram_or_platform:REPLACE_ME_channel_id",
+    "enabled_toolsets": [
+      "terminal",
+      "web"
+    ],
+    "schedule": {
+      "kind": "interval",
+      "minutes": 5,
+      "display": "every 5m"
+    },
+    "enabled": true,
+    "model": "com",
+    "script": "sol_dlmm_exit_review_gate.py",
+    "prompt": "You are the exit reviewer for the Solana DLMM bot. The rules engine\n(`dlmm_monitor.py`, running every 20 seconds) owns every close. You do not.\n\nYour ONE power: defer a close that is about to happen, by up to 20 minutes,\nwhen live price momentum says the rule is about to sell a bounce. Deferring is\nthe only action you may take. You may never close, claim, swap, deploy, or\nchange any threshold.\n\nThe Script Output above is the current position report. Read the\n`MONITOR_REPORT:` JSON line; the `exit-review gate:` line names which positions\nare in a reviewable band and why.\n\n**STEP 1 - momentum.** For each position the gate named, run:\n```bash\ncurl -s \"https://api.dexscreener.com/latest/dex/tokens/<BASE_MINT>\"\n```\nRead `priceChange.m5` and `priceChange.h1` from the SOL pair.\n\n**STEP 2 - decide, per position. The default is DO NOTHING.**\n\nPlace a HOLD only when ALL of these are true:\n- `m5 >= +1.0` - price is rising right now, not merely \"not falling\". A flat or\n  negative m5 is never a bounce.\n- `h1 >= -8.0` - the hour is not a sustained bleed.\n- `pnl_pct > -5.0` - the position is not already deep underwater.\n- The position is IN RANGE, or out of range with `m5 >= +2.0` (price is coming\n  back toward the range; an OOR position earns exactly zero while you wait).\n\nAdditional bar for `low-yield` band positions: hold ONLY if\n`fee_per_tvl_24h >= 0.5` AND m5 >= +2.0. A pool that has stopped paying is the\nsingle most common way this bot loses money slowly: a large share of closes earn\nexactly zero. When in doubt on this band, let the rule close it.\n\nNever hold when the report shows `hard_rule: true`, and never hold a position\nwhose gate band you cannot explain from the numbers.\n\nIf no position clears the bar, do nothing and output `[SILENT]`. Doing nothing\nis the correct outcome most of the time, and costs the bot nothing.\n\n**STEP 3 - execute holds only.**\n```bash\npython3 __PROFILE__/skills/solana-dlmm/scripts/dlmm_monitor.py --override-hold <POSITION_ADDR> --hold-minutes 15 --reason \"<m5/h1 numbers + what you expect>\"\n```\n`--hold-minutes` may be 10, 15, or 20. Nothing longer: the review runs again in\n5 minutes and can renew, whereas a long hold you cannot retract sits over a\nfalling position. The `--reason` must contain the actual m5 and h1 numbers you\nread - it is journaled to `memories/ai_holds.jsonl` and audited later against\nhow the position actually closed.\n\nThese bypass your hold no matter what, by design: the emergency stop-loss\nfloor, a rug-velocity dump, thin pool liquidity, and a trailing drop of 3% or\nmore from peak. Do not attempt to work around them.\n\n**STEP 4 - output.** If you placed no holds, your entire response is exactly:\n`[SILENT]`\n\nIf you placed holds, output only one line per hold, nothing else:\n`HOLD <PAIR> <N>m - m5 <X>% h1 <Y>% pnl <Z>% - <one clause on what you expect>`\n"
   }
 ]

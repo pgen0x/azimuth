@@ -328,6 +328,43 @@ def trailing_floor_pct(peak_pnl, trailing_drop_pct):
         return max(2.0, peak_pnl - 2.5)
     return peak_pnl - trailing_drop_pct
 
+def _read_hold_count(pos_addr):
+    """How many AI holds were placed on this position (see log_hold)."""
+    out, _, _ = run_command(f"redis-cli get \"sol:dlmm:position:{pos_addr}:ai_hold_count\"")
+    try:
+        return int(out) if out and out != "(nil)" else 0
+    except (ValueError, TypeError):
+        return 0
+
+def log_hold(pos_addr, hold_minutes, reason):
+    """Journal one AI hold to memories/ai_holds.jsonl and bump the per-position
+    hold counter that log_close() later stamps onto the close record.
+
+    Without this pair of writes the exit-review stage is unmeasurable: a hold
+    leaves no trace once its Redis key expires, so there is no way to ask
+    afterwards whether held positions closed better than unheld ones. The
+    counter carries a 7-day TTL — long enough to outlive any position, short
+    enough that a stale address cannot accumulate forever."""
+    meta = get_position_metadata(pos_addr) or {}
+    run_command(f"redis-cli incr \"sol:dlmm:position:{pos_addr}:ai_hold_count\"")
+    run_command(f"redis-cli expire \"sol:dlmm:position:{pos_addr}:ai_hold_count\" 604800")
+    entry = {
+        "ts": int(time.time()),
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "position": pos_addr,
+        "pair": meta.get("pair"),
+        "mode": meta.get("mode"),
+        "hold_minutes": hold_minutes,
+        "reason": reason,
+    }
+    try:
+        path = os.path.join(PROFILE_DIR, "memories", "ai_holds.jsonl")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry) + "\n")
+    except Exception as e:
+        print(f"⚠️ Failed to write hold journal: {e}")
+
 def log_close(pool, pair, meta, pos_addr, pnl_pct, realized_sol, fee_per_tvl_24h,
               age_min, reason, txs, dry_run):
     """Append a uniform close record to memories/dlmm_closes.jsonl. Every monitor
@@ -349,6 +386,10 @@ def log_close(pool, pair, meta, pos_addr, pnl_pct, realized_sol, fee_per_tvl_24h
         "reason": reason,
         "txs": txs,
         "dry_run": bool(dry_run),
+        # How many times the AI exit review deferred this close (0 = pure rules).
+        # This is the whole measurement for the exit-review stage — held vs
+        # unheld closes are only comparable if the close record says which it was.
+        "ai_holds": _read_hold_count(pos_addr),
         # Entry-time signal snapshot (written by dlmm_pipeline.py at deploy) —
         # dlmm_weights.py correlates these with pnl_pct to learn signal weights.
         "signal": meta.get("signal"),
@@ -846,6 +887,7 @@ def main():
     if cli.override_hold:
         hold_until = int(time.time()) + (cli.hold_minutes * 60)
         run_command(f"redis-cli set \"sol:dlmm:position:{cli.override_hold}:ai_hold_until\" {hold_until} EX {cli.hold_minutes * 60}")
+        log_hold(cli.override_hold, cli.hold_minutes, cli.reason)
         print(f"✋ AI HOLD set for {cli.override_hold} — auto-close suppressed for {cli.hold_minutes}m. Reason: {cli.reason}")
         sys.exit(0)
 

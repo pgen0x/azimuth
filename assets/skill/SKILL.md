@@ -92,6 +92,8 @@ gate (bin-array rent, entry timing) rejects the top pick. Used by the daemon's
 
 **AI HOLD blocks `--override-close`:** If `ai_hold_active: true` in the report, do NOT call `--override-close` — the code will exit(2) and refuse. Only exceptions: (1) pass `--force` for genuine manual override, or (2) `pnl_pct <= -25%` (hard SL emergency, hold auto-bypassed by code). If conditions worsened to emergency, use `--force` and explain in `--reason`.
 
+**Who sets an AI hold:** the `sol_dlmm_ai_exit_review` cron (every 5m). It is the LLM's ONLY authority over exits — it may defer a non-emergency close by 10-20 minutes and may do nothing else; it cannot close, claim, or deploy. Its pre-run script (`<profile>/scripts/sol_dlmm_exit_review_gate.py`, installed from `assets/hermes/scripts/`) emits `{"wakeAgent": false}` unless a position sits in a band *approaching* a suppressible rule, so most 5m ticks cost no model call. Those bands must stay ahead of the rules: the 20s loop closes on the same tick a rule fires, so a review that waited for `triggered_rules` would always arrive after the close. Every hold is journaled to `<profile>/memories/ai_holds.jsonl` and increments `sol:dlmm:position:<addr>:ai_hold_count` (7d TTL), which `log_close` stamps onto the close record as `ai_holds` — without that field, held and unheld closes are indistinguishable afterwards and the whole arrangement is unmeasurable.
+
 **Exit chokepoint:** `dlmm_monitor.py` is the ONLY authorized closer — it sets `DLMM_CLOSE_AUTH` after the GUARD/rules pass. A raw `node dlmm_executor.js close <addr>` is REFUSED (exit 3) unless `--force`/`DRY_RUN`. The gateway agent and the spot fast-monitor must never close DLMM positions directly.
 
 ### 3. `dlmm_weights.py` — Darwinian Signal Weights

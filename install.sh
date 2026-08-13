@@ -59,6 +59,17 @@ else:
 open(dst_path, "w").write(content)
 PY
 
+echo "→ Installing cron pre-run scripts"
+# Copied with the __PROFILE__ token rewritten, not symlinked: Hermes validates a
+# cron job's script path against HERMES_HOME/scripts/ and rejects anything that
+# resolves outside it, so these cannot live in the repo the way skills/scripts do.
+mkdir -p "$PROFILE/scripts"
+for f in "$REPO/assets/hermes/scripts/"*; do
+  sed "s#__PROFILE__#$PROFILE#g" "$f" > "$PROFILE/scripts/$(basename "$f")"
+  chmod +x "$PROFILE/scripts/$(basename "$f")"
+  echo "   $(basename "$f")"
+done
+
 echo "→ Merging DLMM cron jobs (skips any job id or name that already exists)"
 JOBS_DST="$PROFILE/cron/jobs.json"
 mkdir -p "$(dirname "$JOBS_DST")"

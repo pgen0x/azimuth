@@ -19,6 +19,18 @@ API, screens pools through quality gates, dedups, and hands each poll cycle's
 This daemon owns **entry signals only** — exits are the `dlmm_monitor.py`
 cron's job.
 
+**Where the LLM sits.** Nowhere in entry: the pick is deterministic
+(`dlmm_pipeline.py` via `DEPLOY_CMD`). In exit it has exactly one power, and
+only ever a subtractive one — the `sol_dlmm_ai_exit_review` cron (5m) may
+DEFER a non-emergency close by 10-20 minutes via
+`dlmm_monitor.py --override-hold`, and may do nothing else. The rules stay
+authoritative: the emergency SL floor, rug velocity, thin liquidity and a
+trailing drop >= 3% all bypass a hold in code. Every hold is journaled
+(`<profile>/memories/ai_holds.jsonl`) and counted onto the eventual close
+record as `ai_holds`, so held and unheld closes stay comparable. Restoring the
+LLM's entry role is deliberately NOT next — that path was removed for cause
+(fabricated deploy reports) and needs an on-chain existence check first.
+
 ## Build / run
 
 ```bash
@@ -45,7 +57,7 @@ found"). `loginctl enable-linger $USER` is what keeps them alive across logout.
 | `azimuth` | the `azimuth` daemon in this repo (entry signals) | `install.sh` ← `assets/systemd/azimuth.service` |
 | `azimuth-sol-monitor` | 20s Solana exit loop (`dlmm_monitor_loop.sh`) — the real safety net | `install.sh` ← `assets/systemd/azimuth-sol-monitor.service` |
 | `azimuth-rh-monitor` | Robinhood Chain exit loop (`uni_monitor_loop.sh`); installed disabled | `install.sh` ← `assets/systemd/azimuth-rh-monitor.service` |
-| `hermes-gateway-<profile>` | Hermes gateway that receives the webhook | Hermes, not this repo |
+| `hermes-gateway-<profile>` | Hermes gateway that receives the webhook, and ticks the profile's cron jobs | Hermes, not this repo |
 
 Units named after other agents (e.g. a separate LLM LP agent) may also be
 running on the same box; they are **not** this repo's and `install.sh` must
