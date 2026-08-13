@@ -1216,10 +1216,22 @@ def main():
             continue
         # Multi-timeframe trend gate: reject sustained downtrends even when h1 looks positive
         # (dead-cat bounce). This is the gate that would have rejected the Joby -30% h24 entry.
-        if h6 is not None and h6 < MAX_ENTRY_H6_DROP:
+        #
+        # Turnover opts out of BOTH long horizons (mirrors
+        # ModeParams.SkipLongHorizonMomentum in internal/meteora/screen.go — the
+        # daemon's gate is the stricter of the two and rejects first, so opting
+        # out there alone would change nothing). Its positions live 4-10 minutes,
+        # which no 6h or 24h trend can reach; the m5/h1 legs above are the ones
+        # that catch a token dying inside the hold, and they still apply. Live
+        # 2026-08-13: 63 consecutive empty turnover batches, emptied by exactly
+        # these two legs (BOIÚNA 6h -24.6%, MARIO64 24h -72.9%, CHAM 6h -79.7%),
+        # while a reference bot without them churned BOIÚNA three times in 26
+        # minutes for three positive closes.
+        skip_long_momentum = mode == "turnover"
+        if h6 is not None and h6 < MAX_ENTRY_H6_DROP and not skip_long_momentum:
             print(f"Skipping {c['name']} - 6h trend {h6:.1f}% < {MAX_ENTRY_H6_DROP}% (downtrend gate)")
             continue
-        if h24 is not None and h24 < MAX_ENTRY_H24_DROP:
+        if h24 is not None and h24 < MAX_ENTRY_H24_DROP and not skip_long_momentum:
             print(f"Skipping {c['name']} - 24h trend {h24:.1f}% < {MAX_ENTRY_H24_DROP}% (downtrend gate)")
             continue
         # Momentum term: reward up-trend, penalize weak. Clamped so it tunes ranking,

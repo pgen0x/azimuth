@@ -56,6 +56,27 @@ type ModeParams struct {
 	// for the one screen that wants out and why.
 	SkipMomentumGate bool
 
+	// SkipLongHorizonMomentum keeps the two short legs of the momentum gate
+	// (5m dump, 1h dump) and drops the two long ones (6h, 24h downtrend). It is
+	// the middle setting between keeping the whole gate and SkipMomentumGate,
+	// and it exists because a gate's horizon has to match the HOLDING PERIOD.
+	// A 24h trend cannot hurt a position that lives four minutes; a 5m dump can.
+	// Measured 2026-08-13 14:57-15:59: turnover ran 63 consecutive cycles with an
+	// empty batch off a 5-pool universe, and the long legs are what emptied it —
+	// BOIÚNA on 6h -24.6%, MARIO64 on 24h -72.9%, CHAM on 6h -79.7%. In the same
+	// window a reference bot with no long-horizon gate opened BOIÚNA three times
+	// (14:55, 15:10, 15:21), held 5-6 minutes each, and closed all three
+	// positive. Its seven closes over 13:35-15:21 returned +$0.171 against this
+	// daemon's single close of +$0.078 — better per trade here, 2.2x less in
+	// total, which is a volume problem and not a selection problem.
+	// The APR trap the long legs were built for (a collapsing price paying huge
+	// fees on the way down) is still caught, by m5 and h1: a token actually
+	// dying prints on the short horizons too, and those are the only horizons a
+	// minutes-long rung is exposed to. What the long legs uniquely reject is a
+	// token that fell hours ago and is now oscillating — the exact pool a
+	// fee-capture rung wants.
+	SkipLongHorizonMomentum bool
+
 	// Discovery query knobs. Empty = the historical defaults ("trending", API
 	// default sort) so Casual/Multiday queries are byte-identical to before.
 	Category string
@@ -129,8 +150,9 @@ var (
 		MaxTVL: 150000, MinFeePct: 1.0, MinVolTVLRatio: 3.0,
 		MinSwapCount: 20, MinUniqueTraders: 15,
 		MaxVolatility: 15, MaxYieldDecline: -40,
-		AllowUnverified: true,
-		Category:        "all", SortBy: "fee:desc",
+		AllowUnverified:         true,
+		SkipLongHorizonMomentum: true,
+		Category:                "all", SortBy: "fee:desc",
 	}
 
 	// Pulse exists because turnover's window was never the whole opportunity.
@@ -174,9 +196,12 @@ var (
 	// -7% to -23%, 5m -3% to -8.8%); the reference bot, which has no momentum
 	// gate at all ("efficiency only, no momentum/change_pct, per design"),
 	// entered at 20:25 inside that window and closed +1.39% on the fee take.
-	// Turnover KEEPS the gate: its 30m fee-sorted screen is exactly where the
-	// APR trap lives (a collapsing price paying huge fees on the way down), and
-	// the gate has been catching those. Pulse's 5m trending window selects for
+	// Turnover keeps the gate's SHORT legs only (SkipLongHorizonMomentum, added
+	// 2026-08-13): its 30m fee-sorted screen is exactly where the APR trap lives
+	// (a collapsing price paying huge fees on the way down), and m5/h1 are the
+	// legs that catch a token dying inside a minutes-long hold — the 6h/24h legs
+	// were rejecting pools that fell hours ago and now oscillate, which is the
+	// population the mode is for. Pulse's 5m trending window selects for
 	// pools that are moving, so applying a downtrend gate on top of it rejects
 	// most of the population the mode exists to sample.
 	Pulse = ModeParams{
