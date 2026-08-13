@@ -799,6 +799,7 @@ def main():
     parser.add_argument("--override-close", type=str, default=None, metavar="POSITION_ADDR", help="AI-decided force-close for a specific position")
     parser.add_argument("--override-hold", type=str, default=None, metavar="POSITION_ADDR", help="AI-decided hold — skip auto-close rules for this position")
     parser.add_argument("--hold-minutes", type=int, default=30, help="Minutes to hold (used with --override-hold)")
+    parser.add_argument("--dry-run", action="store_true", help="With --override-hold: print the hold that would be placed, write nothing")
     parser.add_argument("--reset-trailing", type=str, default=None, metavar="POSITION_ADDR", help="Reset peak_pnl and trailing_active after a standalone fee claim")
     parser.add_argument("--reason", type=str, default="AI decision", help="Reason string for close/hold (logged)")
     parser.add_argument("--force", action="store_true", help="Bypass the health GUARD on --override-close (close a healthy in-range high-fee position anyway)")
@@ -883,9 +884,30 @@ def main():
         print(f"\n🧹 Cleanup done: {swapped} swapped, {skipped} skipped (dust).")
         sys.exit(0)
 
+    # --dry-run only means anything on the hold path. Every other path here
+    # closes, claims or swaps for real, and a flag that looks protective while
+    # protecting nothing is worse than no flag — so refuse the combination
+    # rather than accept it and ignore it.
+    if cli.dry_run and not cli.override_hold:
+        print("--dry-run is only supported with --override-hold; it does not make any other path safe.")
+        sys.exit(2)
+
     # --override-hold: set AI hold flag in Redis, skip auto-close for N minutes
     if cli.override_hold:
         hold_until = int(time.time()) + (cli.hold_minutes * 60)
+        if cli.dry_run:
+            # Prints the two writes it is skipping by name: the exit review is
+            # an LLM path, so being able to rehearse a hold — from the same
+            # command line the job uses, against a live position — is what
+            # separates testing the reviewer from testing on the wallet.
+            meta = get_position_metadata(cli.override_hold) or {}
+            pair = meta.get("pair") or "unknown pair"
+            print(f"🧪 DRY RUN — would hold {cli.override_hold} ({pair}) for {cli.hold_minutes}m. Reason: {cli.reason}")
+            print(f"   skipped: SET sol:dlmm:position:{cli.override_hold}:ai_hold_until {hold_until} EX {cli.hold_minutes * 60}")
+            print(f"   skipped: INCR sol:dlmm:position:{cli.override_hold}:ai_hold_count, append to memories/ai_holds.jsonl")
+            if not meta:
+                print("   ⚠️ position not found in Redis — a real hold would still write the key, but nothing reads it")
+            sys.exit(0)
         run_command(f"redis-cli set \"sol:dlmm:position:{cli.override_hold}:ai_hold_until\" {hold_until} EX {cli.hold_minutes * 60}")
         log_hold(cli.override_hold, cli.hold_minutes, cli.reason)
         print(f"✋ AI HOLD set for {cli.override_hold} — auto-close suppressed for {cli.hold_minutes}m. Reason: {cli.reason}")
