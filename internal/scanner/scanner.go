@@ -906,7 +906,7 @@ func (s *Scanner) pollMode(ctx context.Context, mp meteora.ModeParams) {
 		// screen; see the Pulse comment in meteora/screen.go.
 		if s.cfg.EnableMomentumGate && !mp.SkipMomentumGate {
 			if m, ok := meteora.GetMomentum(cand.BaseMint); ok {
-				if r := meteora.MomentumReject(m); r != "" {
+				if r := meteora.MomentumReject(m, mp); r != "" {
 					momRejected++
 					momRejectedKeys = append(momRejectedKeys, poolKey)
 					log.Printf("scanner[%s]: %s (%s) rejected on momentum: %s", mp.Mode, cand.BaseSymbol, cand.Pool[:8], r)

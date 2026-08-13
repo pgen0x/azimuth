@@ -53,9 +53,14 @@ func GetMomentum(baseMint string) (Momentum, bool) {
 	return Momentum{M5: pc.M5, H1: pc.H1, H6: pc.H6, H24: pc.H24}, true
 }
 
-// MomentumReject applies the pipeline's momentum + downtrend gates.
-// Returns a non-empty reason when the pool should be rejected.
-func MomentumReject(m Momentum) string {
+// MomentumReject applies the pipeline's momentum + downtrend gates for one
+// mode. Returns a non-empty reason when the pool should be rejected.
+//
+// The mode decides the HORIZON, not the thresholds: a mode whose positions live
+// minutes is not exposed to a six-hour trend, so it takes the short legs only
+// (mp.SkipLongHorizonMomentum). Whether the gate runs at all is the caller's
+// call — see ModeParams.SkipMomentumGate and ENABLE_MOMENTUM_GATE.
+func MomentumReject(m Momentum, mp ModeParams) string {
 	// Strategy overhaul 2026-07-20: entry failures were mostly downtrend catches.
 	// Tighten short-horizon gates so we stop entering tokens already bleeding.
 	if m.M5 <= -3 {
@@ -63,6 +68,9 @@ func MomentumReject(m Momentum) string {
 	}
 	if m.H1 <= -7 {
 		return fmt.Sprintf("1h %.1f%% <= -7%% (dumping)", m.H1)
+	}
+	if mp.SkipLongHorizonMomentum {
+		return ""
 	}
 	// Sustained downtrend gate.
 	if m.H6 <= -10 {
