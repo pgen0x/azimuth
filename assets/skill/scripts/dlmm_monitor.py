@@ -129,6 +129,18 @@ TURNOVER_TRAILING_TRIGGER_PCT = 1.2
 TURNOVER_TRAILING_DROP_PCT = 0.6
 MIN_FEE_TVL_24H_LIMIT = 1.0
 MIN_AGE_BEFORE_YIELD_CHECK = 60.0
+# ...but 60m was calibrated on modes that enter a pool with hours of history.
+# Pulse enters off a 5-MINUTE trending window, so its grace is more than an
+# order of magnitude longer than the signal it acted on: a pulse pool not paying
+# by 30m was never screened as a slow starter, it was screened as busy and
+# stopped. Measured on the pulse-only book of 2026-08-12/13 — Solana turnover
+# went off at 08-12 09:42 and the median hold ran 4.7m -> 60.9m -> 136.8m — the
+# long holds sat under the 1.0% fee/TVL bar with nothing else able to fire (in
+# range, PnL inside the trailing trigger, so no OOR fuse and no ratchet).
+# ASTEROID-SOL read 0.63% at 54m with no exit rule available until minute 60.
+# No hard max-hold accompanies this: both closes past 300m in the journal are
+# winners (+1.13% mean), so length is not the defect — earning nothing is.
+PULSE_MIN_AGE_BEFORE_YIELD_CHECK = 30.0
 # Exit-side liquidity floor. Below the $10k entry TVL gate on purpose — only fires
 # when a pool's liquidity DRAINS after entry (the "can't exit cleanly" scenario).
 MIN_EXIT_LIQUIDITY_USD = 7000.0
@@ -444,6 +456,7 @@ def load_soul_dlmm_params():
         "TURNOVER_SOL_SIDE_OOR_MINUTES": int(TURNOVER_SOL_SIDE_OOR_MINUTES),
         "TURNOVER_CB_LOSS_SOL": float(TURNOVER_CB_LOSS_SOL),
         "MIN_AGE_BEFORE_YIELD_CHECK": float(MIN_AGE_BEFORE_YIELD_CHECK),
+        "PULSE_MIN_AGE_BEFORE_YIELD_CHECK": float(PULSE_MIN_AGE_BEFORE_YIELD_CHECK),
         "MIN_FEE_TVL_24H_LIMIT": float(MIN_FEE_TVL_24H_LIMIT),
         "TIMEFRAME": "24h",
         "STRATEGY": "spot",
@@ -532,6 +545,11 @@ def load_soul_dlmm_params():
                 params["OOR_DOWNSIDE_MAX_MINUTES"] = int(val)
             elif "Max Out of Range Minutes" in name:
                 params["MAX_OOR_MINUTES"] = int(val)
+            # Checked before the generic line below: "Pulse Min Age for Yield
+            # Check" contains that name as a substring, same trap as the
+            # turnover SOL-side fuse above.
+            elif "Pulse Min Age for Yield Check" in name:
+                params["PULSE_MIN_AGE_BEFORE_YIELD_CHECK"] = val
             elif "Min Age for Yield Check" in name:
                 params["MIN_AGE_BEFORE_YIELD_CHECK"] = val
             elif "Min 24h Fee/TVL for Yield Check" in name:
@@ -821,10 +839,11 @@ def main():
     turnover_max_oor_minutes = params["TURNOVER_MAX_OOR_MINUTES"]
     turnover_sol_side_oor_minutes = params["TURNOVER_SOL_SIDE_OOR_MINUTES"]
     min_age_before_yield_check = params["MIN_AGE_BEFORE_YIELD_CHECK"]
+    pulse_min_age_before_yield_check = params["PULSE_MIN_AGE_BEFORE_YIELD_CHECK"]
     min_fee_tvl_24h_limit = params["MIN_FEE_TVL_24H_LIMIT"]
     min_exit_liquidity_usd = params["MIN_EXIT_LIQUIDITY_USD"]
     
-    print(f"Loaded SOUL.md parameters -> SL: {stop_loss_pct:.1f}%, Trailing TP Trigger: {trailing_trigger_pct:.1f}%, Trailing TP Drop: {trailing_drop_pct:.1f}%, Trailing TP (turnover): {turnover_trailing_trigger_pct:.1f}%/{turnover_trailing_drop_pct:.1f}%, Max Bins Pumped Above: {max_bins_pumped_above}, Max OOR: {max_oor_minutes}m (turnover {turnover_max_oor_minutes}m token-side / {turnover_sol_side_oor_minutes}m SOL-side), Min Age for Yield Check: {min_age_before_yield_check:.1f}m, Min Fee/TVL: {min_fee_tvl_24h_limit:.2f}%")
+    print(f"Loaded SOUL.md parameters -> SL: {stop_loss_pct:.1f}%, Trailing TP Trigger: {trailing_trigger_pct:.1f}%, Trailing TP Drop: {trailing_drop_pct:.1f}%, Trailing TP (turnover): {turnover_trailing_trigger_pct:.1f}%/{turnover_trailing_drop_pct:.1f}%, Max Bins Pumped Above: {max_bins_pumped_above}, Max OOR: {max_oor_minutes}m (turnover {turnover_max_oor_minutes}m token-side / {turnover_sol_side_oor_minutes}m SOL-side), Min Age for Yield Check: {min_age_before_yield_check:.1f}m (pulse {pulse_min_age_before_yield_check:.1f}m), Min Fee/TVL: {min_fee_tvl_24h_limit:.2f}%")
     
     # --reset-trailing: reset peak_pnl + trailing_active after a standalone fee claim
     if cli.reset_trailing:
@@ -1496,7 +1515,12 @@ def main():
         # 5. Low Yield Exit Check
         deployed_at = meta.get("deployed_at", now)
         age_minutes = (now - deployed_at) / 60.0
-        if age_minutes >= min_age_before_yield_check:
+        # Grace is mode-scoped: a pulse entry acted on a 5m window, so it does not
+        # get an hour to prove it (see PULSE_MIN_AGE_BEFORE_YIELD_CHECK).
+        yield_grace_minutes = (pulse_min_age_before_yield_check
+                               if meta.get("mode") == "pulse"
+                               else min_age_before_yield_check)
+        if age_minutes >= yield_grace_minutes:
             if fee_per_tvl_24h < min_fee_tvl_24h_limit:
                 close_reason = f"Low yield (Fee/TVL 24h: {fee_per_tvl_24h:.2f}% < {min_fee_tvl_24h_limit}% after {age_minutes:.1f}m)"
 
@@ -1695,8 +1719,23 @@ def main():
 
         # 7. Pre-exit Indicators Timing Check (for non-emergency exits)
         if close_reason and params.get("INDICATORS_ENABLED"):
-            is_emergency = emergency_close or "stop-loss" in close_reason.lower() or "out of range" in close_reason.lower() or "pumped" in close_reason.lower()
-            if not is_emergency:
+            reason_l = close_reason.lower()
+            is_emergency = (emergency_close or "stop-loss" in reason_l
+                            or "out of range" in reason_l or "pumped" in reason_l)
+            # An income-death close is not a price call, so a price indicator has
+            # nothing to say about it. "Low yield" and "fee pace death" both mean
+            # the fee stream — the entire product — has stopped; postponing turns
+            # a position that earns nothing into a position that earns nothing AND
+            # carries token risk for up to another hour. Same verdict Robinhood
+            # reached on fills (2026-08-08): a bullish supertrend read is not a
+            # reason to keep capital where no fee is being paid. Measured
+            # 2026-08-12/13 on the pulse-only book: 282 then 164 postponement
+            # ticks, with 67-SOL blocked ~52m, ASTEROID-SOL ~20m and STONKS-SOL
+            # ~19m — episodes stack, because the block key clears on every
+            # confirm and a fresh block restarts the 60m timeout from zero.
+            is_income_death = ("low yield" in reason_l
+                               or "fee pace death" in reason_l)
+            if not is_emergency and not is_income_death:
                 MAX_INDICATOR_BLOCK_MINUTES = 60.0
                 ind_block_key = f"sol:dlmm:position:{pos_addr}:indicator_blocked_since"
                 ind_block_val, _, _ = run_command(f"redis-cli get \"{ind_block_key}\"")
