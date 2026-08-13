@@ -5,6 +5,24 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.5.0](https://github.com/pgen0x/azimuth/compare/v2.4.0...v2.5.0) (2026-08-13)
+
+
+### Features
+
+* **exit:** give the LLM one power over exits — deferring a close ([708452a](https://github.com/pgen0x/azimuth/commit/708452aa6499c3f5bc146badd0ea08353b0e3304))
+* give the LLM a subtractive role in exits, and stop paying for holds nothing earns ([bbd6704](https://github.com/pgen0x/azimuth/commit/bbd6704ad61e823114ac219c2d70f208288025d8))
+* **monitor:** let an AI hold be rehearsed before it is placed ([43ff905](https://github.com/pgen0x/azimuth/commit/43ff905060f308b4aa332f8294e5b3805be89dc6))
+* **proposal:** a daily job that proposes thresholds and cannot apply them ([edfed72](https://github.com/pgen0x/azimuth/commit/edfed7210e007ff73252ea69d50a1c5a20a68fdc))
+* **robinhood:** settle a filled rung in quote, and stop trusting a mark ([a9751a7](https://github.com/pgen0x/azimuth/commit/a9751a78cf54dd30583a3c585fcaf1b0be371e6d))
+
+
+### Bug Fixes
+
+* **exit-review:** move the low-yield band back in front of the rule it guards ([6edd77b](https://github.com/pgen0x/azimuth/commit/6edd77b7030595af2e1b54128e8099e79b515ca1))
+* **pulse:** stop giving a five-minute signal an hour to prove itself ([9d7d80d](https://github.com/pgen0x/azimuth/commit/9d7d80de3da965e931a78c49bd3e63a505d395b7))
+* **weights:** stop the learner ratcheting into its own clamps ([3a447d2](https://github.com/pgen0x/azimuth/commit/3a447d28ef7f8e2df3122657ec2856e3d34dfd75))
+
 ## [2.4.0](https://github.com/pgen0x/azimuth/compare/v2.3.0...v2.4.0) (2026-08-12)
 
 
