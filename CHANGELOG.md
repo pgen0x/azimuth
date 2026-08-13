@@ -5,6 +5,14 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.5.1](https://github.com/pgen0x/azimuth/compare/v2.5.0...v2.5.1) (2026-08-13)
+
+
+### Bug Fixes
+
+* **turnover:** judge a four-minute position on a four-minute horizon ([1bb6b0f](https://github.com/pgen0x/azimuth/commit/1bb6b0fa71ee856b8c842c8e69edbbe39dc77a63))
+* **turnover:** judge a four-minute position on a four-minute horizon ([3561534](https://github.com/pgen0x/azimuth/commit/3561534614e37db72f28cf2c45a7779a30f5b291))
+
 ## [2.5.0](https://github.com/pgen0x/azimuth/compare/v2.4.0...v2.5.0) (2026-08-13)
 
 
