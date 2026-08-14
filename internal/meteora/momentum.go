@@ -10,24 +10,45 @@ import (
 
 var momentumClient = &http.Client{Timeout: 10 * time.Second}
 
+// dexPair is one venue the token trades on. The token endpoint returns every
+// one of them, which is why picking the right entry matters — see momentumFrom.
+type dexPair struct {
+	Liquidity struct {
+		USD float64 `json:"usd"`
+	} `json:"liquidity"`
+	PriceChange struct {
+		M5  float64 `json:"m5"`
+		H1  float64 `json:"h1"`
+		H6  float64 `json:"h6"`
+		H24 float64 `json:"h24"`
+	} `json:"priceChange"`
+}
+
 // dexResponse partially models the DexScreener token endpoint.
 type dexResponse struct {
-	Pairs []struct {
-		PriceChange struct {
-			M5  float64 `json:"m5"`
-			H1  float64 `json:"h1"`
-			H6  float64 `json:"h6"`
-			H24 float64 `json:"h24"`
-		} `json:"priceChange"`
-	} `json:"pairs"`
+	Pairs []dexPair `json:"pairs"`
 }
+
+// implausibleChangePct is the floor below which a short-window price change is
+// a bad read rather than a move — the Go twin of IMPLAUSIBLE_CHANGE_PCT in
+// dlmm_monitor.py and dlmm_pipeline.py; keep the three in sync.
+//
+// No pool sheds 95% inside a 5-minute candle and still quotes: the liquidity
+// is gone well before the last percent, which is why every real rug this bot
+// has closed printed -20% to -35%. A -99.9% therefore means we read the wrong
+// pair, and the token endpoint makes that easy — it lists every venue the mint
+// trades on, husks included. Measured on Plumber 2026-08-15: 17 pairs, the
+// live $46k pool quoting m5 -1.17% next to a $177 corpse quoting h1 -99.96%.
+const implausibleChangePct = -95.0
 
 // Momentum holds recent price-change percentages for a base mint.
 type Momentum struct {
 	M5, H1, H6, H24 float64
 }
 
-// GetMomentum fetches DexScreener price momentum for a base mint.
+// GetMomentum fetches DexScreener price momentum for a base mint, reading the
+// DEEPEST pair rather than pairs[0] — the endpoint's order is not a contract,
+// and the deepest pool is where the token's price is actually discovered.
 // Best-effort: on any error it returns ok=false and the caller fails open.
 func GetMomentum(baseMint string) (Momentum, bool) {
 	url := fmt.Sprintf("https://api.dexscreener.com/latest/dex/tokens/%s", baseMint)
@@ -49,8 +70,33 @@ func GetMomentum(baseMint string) (Momentum, bool) {
 	if err := json.NewDecoder(resp.Body).Decode(&dr); err != nil || len(dr.Pairs) == 0 {
 		return Momentum{}, false
 	}
-	pc := dr.Pairs[0].PriceChange
-	return Momentum{M5: pc.M5, H1: pc.H1, H6: pc.H6, H24: pc.H24}, true
+	return momentumFrom(dr), true
+}
+
+// momentumFrom picks the pair to believe out of a token's venues and sanitizes
+// it. Split out of GetMomentum so the choice is testable without the network —
+// it is the half that had the bug.
+func momentumFrom(dr dexResponse) Momentum {
+	deepest := 0
+	for i := range dr.Pairs {
+		if dr.Pairs[i].Liquidity.USD > dr.Pairs[deepest].Liquidity.USD {
+			deepest = i
+		}
+	}
+	pc := dr.Pairs[deepest].PriceChange
+	m := Momentum{M5: pc.M5, H1: pc.H1, H6: pc.H6, H24: pc.H24}
+	// Neutralize an impossible short-window reading instead of rejecting on it.
+	// 0 is this struct's "no move" — the gates are all `<= -N`, so a zeroed leg
+	// passes, which is the same fail-open the caller applies when the whole
+	// fetch fails. H6/H24 are left alone: a token really can be down 99% over a
+	// day, and zeroing that would walk a corpse past the downtrend gate.
+	if m.M5 <= implausibleChangePct {
+		m.M5 = 0
+	}
+	if m.H1 <= implausibleChangePct {
+		m.H1 = 0
+	}
+	return m
 }
 
 // MomentumReject applies the pipeline's momentum + downtrend gates for one

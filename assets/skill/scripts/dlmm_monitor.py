@@ -637,11 +637,52 @@ def load_soul_dlmm_params():
     return params
 
 
+# A price change at or below this is not a market move, it is a bad read —
+# see implausible_change(). Mirrored as IMPLAUSIBLE_CHANGE_PCT in
+# dlmm_pipeline.py and implausibleChangePct in internal/meteora/momentum.go;
+# keep the three in sync.
+IMPLAUSIBLE_CHANGE_PCT = -95.0
+
+
+def implausible_change(pct):
+    """True when a DexScreener price-change reading is arithmetically possible
+    but physically isn't, and must be treated as unknown rather than as a move.
+
+    A pool cannot shed >=95% inside a 5-minute candle and still quote: the
+    liquidity is gone long before the last percent, which is why every REAL rug
+    this bot has closed printed -20% to -35%, not -99.9%. Measured 2026-08-15
+    over 53 `RUG velocity` closes: the -20%-band closes realized -2.9%/-3.2%/
+    -6.2% PnL (real damage), while every -99.9%/-100.0% close realized
+    -0.07%/-0.00%/+0.04%/+0.11%/+0.84% — the price provably had not moved at
+    all. Those five false reads each wrote a 7d mint ban and a 30d deployer ban
+    (maybe_blacklist_rug takes the rug_event path, which ignores PnL by
+    design), and that blacklist is what starved Solana entries for 12h on
+    2026-08-14 while a comparison bot entered the same pools green.
+
+    The source is pair confusion, not corruption: DexScreener aggregates every
+    pool of a token, and a dead husk beside a live pool quotes a real -99.96%
+    of its own (Plumber, 2026-08-15: our pool -1.17% m5, a $177 husk of the
+    same mint -99.96% h1). get_pool_liquidity_usd below now refuses to read a
+    pair that isn't ours; this floor is the second line, for when the pool's
+    OWN feed glitches.
+
+    Deliberately NOT applied to h6/h24 — a token really can be down 99% over a
+    day, and nulling that would let a corpse through the entry downtrend gate."""
+    return pct is not None and pct <= IMPLAUSIBLE_CHANGE_PCT
+
+
 def get_pool_liquidity_usd(pool, base_mint):
     """Live pool liquidity (USD), 1h and 5m price change (%) from DexScreener,
     looked up by pool address (falls back to the base mint's pairs). Returns
     (None, None, None) on any failure — callers MUST treat None as 'unknown, do
-    not act' (fail-open) so a transient API blip never force-closes."""
+    not act' (fail-open) so a transient API blip never force-closes.
+
+    Only ever returns figures for OUR pool. The token endpoint is a fallback
+    for reaching the same pair by another route, never a licence to read a
+    different pool: it lists every venue the token trades on, including husks
+    whose price has already gone to zero, and reading one of those as if it
+    were ours is what produced the false -99.9% rug closes (see
+    implausible_change). No exact pairAddress match = unknown."""
     import urllib.request
     urls = [f"https://api.dexscreener.com/latest/dex/pairs/solana/{pool}"]
     if base_mint:
@@ -654,17 +695,28 @@ def get_pool_liquidity_usd(pool, base_mint):
             pairs = data.get("pairs") or ([data["pair"]] if data.get("pair") else [])
             if not pairs:
                 continue
-            match = pairs[0]
+            match = None
             for p in pairs:
                 if (p.get("pairAddress") or "").lower() == pool.lower():
                     match = p
                     break
+            if match is None:
+                continue
             liq = float((match.get("liquidity") or {}).get("usd") or 0.0)
             changes = match.get("priceChange") or {}
             h1_raw = changes.get("h1")
             h1 = float(h1_raw) if h1_raw is not None else None
             m5_raw = changes.get("m5")
             m5 = float(m5_raw) if m5_raw is not None else None
+            # Drop an impossible reading rather than the whole response: the
+            # liquidity figure beside it is still usable, and every caller
+            # already treats None as "unknown, do not act".
+            if implausible_change(m5):
+                print(f"⚠️  Ignoring implausible 5m read ({m5:+.1f}%) for pool {pool[:8]}… — treating as unknown")
+                m5 = None
+            if implausible_change(h1):
+                print(f"⚠️  Ignoring implausible 1h read ({h1:+.1f}%) for pool {pool[:8]}… — treating as unknown")
+                h1 = None
             return liq, h1, m5
         except Exception:
             continue
