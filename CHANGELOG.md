@@ -5,6 +5,22 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.6.0](https://github.com/pgen0x/azimuth/compare/v2.5.1...v2.6.0) (2026-08-14)
+
+
+### Features
+
+* **robinhood:** screen the tail of the volume ranking, and stop muting a clean close ([671f317](https://github.com/pgen0x/azimuth/commit/671f3177931e2beb41519931ae1abe867c3b5b8d))
+* **robinhood:** screen the tail of the volume ranking, not its head ([d309ac7](https://github.com/pgen0x/azimuth/commit/d309ac7c2d7138240532dc0c7f6298118e1d3d35))
+
+
+### Bug Fixes
+
+* **solana:** stop paying for depth the market never reaches ([49e2af3](https://github.com/pgen0x/azimuth/commit/49e2af33db0b4d19d1e0471851cab0de8a6c1967))
+* **solana:** stop paying for depth the market never reaches ([5d17178](https://github.com/pgen0x/azimuth/commit/5d17178c3c8d16c2b506749871db877b6c065eef))
+* **turnover:** stop muting a clean close for two hours ([5f805f4](https://github.com/pgen0x/azimuth/commit/5f805f4fcde77d82f190f5f347eca67c38cec861))
+* **turnover:** widen the ranked feed, and stop muting a clean close ([9c0f34a](https://github.com/pgen0x/azimuth/commit/9c0f34a4c5907542dcb3d2ae77176d7ffe7c802c))
+
 ## [2.5.1](https://github.com/pgen0x/azimuth/compare/v2.5.0...v2.5.1) (2026-08-13)
 
 
