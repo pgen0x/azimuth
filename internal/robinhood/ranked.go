@@ -46,18 +46,49 @@ import (
 const rankedURL = "https://api.geckoterminal.com/api/v2/networks/robinhood/pools"
 
 const (
-	// rankedPages is how many 20-pool pages to pull per refresh. Two covers the
-	// top 40 by volume, which on the 2026-08-08 census reached down to ~$800k of
-	// 24h volume — well past the point where a pool still clears the churn
-	// gates. A third page would spend a request out of a ~4/min budget (see
-	// discover.go) to rank pools Screen rejects on flow anyway.
-	rankedPages = 2
+	// rankedPages is how many 20-pool pages to pull per refresh.
+	//
+	// Two, on the 2026-08-08 census, on the argument that the top 40 by volume
+	// reached past the point where a pool still clears the churn gates.
+	// Re-measured 2026-08-13 against the full turnover screen, that argument was
+	// wrong — the tail is where this mode's candidates actually live:
+	//
+	//   pages 1-2   21 WETH-quoted candidates    4 clear every gate
+	//   pages 1-3   33                           6
+	//   pages 1-4   39                          10
+	//   pages 1-5   53                          15
+	//
+	// Volume rank is not thesis rank. The head of this venue's book is its
+	// DEEPEST pools — VIRTUAL/WETH at $237k of reserves tops the ranking — and
+	// depth is what dilutes a re-pinned rung's share of the same flow. The pools
+	// that survive the screen (MUMU, PONS, wire, THROBBIN) sit on pages 3-5
+	// precisely because they are smaller. Ranking by volume puts churn in front
+	// of the gates, but only over the part of the book that gets ranked at all.
+	//
+	// Four, not the five the table above would argue for, and the fifth page was
+	// tried live first: it 429s, and a 429 here is not local damage. The keyless
+	// tier's real budget is a ~4-request burst (discover.go), refreshRanked runs
+	// BEFORE the gateway arm's enrich in FetchTurnoverPools, and a 429 trips a
+	// GLOBAL GT pause — so page 5 spent the enrich's request and the cycle logged
+	// `gateway=0 ranked=36`. Four pages still carries 10 of the 15
+	// screen-passing pools, against 4 at two pages.
+	//
+	// Four does NOT make the collision impossible — 4 pages plus the enrich is
+	// still 5 requests in the refresh cycle. What bounds the damage is the
+	// 10-minute rankedRefresh below: the collision costs the gateway arm ONE
+	// cycle in ten, and that cycle still screens 39 ranked pools against the 25
+	// a two-page feed merged in total. Paying for a wider feed with an
+	// occasional gateway-blind cycle is the trade; paying for it with a
+	// permanently throttled one is not.
+	rankedPages = 4
 
 	// rankedRefresh is the MINIMUM spacing between refreshes across all
 	// consumers — a rate limit, not just a freshness bound, matching
 	// trendingRefresh. A ranking over a 24h volume window does not reorder in
-	// five minutes.
-	rankedRefresh = 5 * time.Minute
+	// five minutes, and it does not reorder in ten either: widened with
+	// rankedPages so the deeper burst is spent half as often, which is what
+	// keeps the gateway arm's enrich out of the 429 (see rankedPages).
+	rankedRefresh = 10 * time.Minute
 
 	// rankedUsable is how stale a cached ranking may be and still be unioned in.
 	// Deliberately several refresh windows wide, for trendingUsable's reason: a
