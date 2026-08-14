@@ -110,8 +110,30 @@ TURNOVER_MAX_OOR_MINUTES = 5
 TURNOVER_SOL_SIDE_OOR_MINUTES = 5
 # Turnover rebalance circuit breaker: re-centers stop once the pool's cumulative
 # realized PnL across rebalance closes (24h window) drops below this many SOL.
-# Replaces a count cap as the primary guard — the count backstop stays at 20/24h.
-TURNOVER_CB_LOSS_SOL = -0.05
+# Was -0.05 while the count backstop sat at 20/24h; neither ever fired. Measured
+# over the 24h to 2026-08-14: the worst single pool lost -0.0288 SOL across its
+# whole re-center run, so a -0.05 floor cannot be reached before the run ends on
+# its own. Set below the observed per-pool damage so it stops a losing pool
+# DURING the run rather than after it.
+TURNOVER_CB_LOSS_SOL = -0.015
+# ...and the count is now a real guard, not a backstop. A turnover pool's
+# re-center run reads as a ladder of crumbs ending in one full-size loss: over
+# the 24h to 2026-08-14, five of the six pools entered more than once had their
+# LARGEST loss as the LAST entry (OnlyMarms -0.43 +3.23 -0.07 +0.10 -2.80;
+# Niles -0.77 +2.90 -4.48; cc +0.14 -4.57; MARIO64 -0.03 -5.21). The re-pin is
+# a bid resting under a market: while the pool oscillates it earns ~0.1%, and
+# when the pool finally trends it hands back 4-5% at once. Bounding the run
+# bounds how many times we offer that trade. 3/24h matches the reference bot's
+# oorCooldownTriggerCount, which works the same book and never took a downtrend
+# close in the same window.
+TURNOVER_RECENTER_STRIKES = 3
+# Exhausting the strikes cools the POOL, not just the symbol — the symbol
+# cooldown is as short as 15m after a profitable exit, and the daemon would
+# re-signal the same pool straight back into a fresh run. Matches the reference
+# bot's oorCooldownHours and the pipeline's own repeat-deploy churn guard
+# (dlmm_pipeline.py: 3 deploys/24h -> 12h pool cooldown), which never saw these
+# runs because a monitor re-center never passes through the deploy path.
+TURNOVER_STRIKE_COOLDOWN_HOURS = 12
 SOL_MINT = "So11111111111111111111111111111111111111112"
 DEFAULT_DEPLOY_SOL = 0.5
 TRAILING_TRIGGER_PCT = 5.0
@@ -128,6 +150,19 @@ TRAILING_DROP_PCT = 1.5
 TURNOVER_TRAILING_TRIGGER_PCT = 1.2
 TURNOVER_TRAILING_DROP_PCT = 0.6
 MIN_FEE_TVL_24H_LIMIT = 1.0
+# ...and 1.0% is a solvency bar, not an earning bar: at that pace a position pays
+# back 1% of TVL a day, of which our share is our liquidity over the pool's. The
+# reference bot holds the same book to 7% and turns its capital over twice as
+# fast for it (median hold 20.6m against this daemon's 33m, 47 closes/24h against
+# 27, on FEWER slots — 3 against turnover 2 + pulse 4). Slots were never the
+# constraint here: the 24h to 2026-08-14 logged ZERO "Max positions reached"
+# aborts and 196 cycles of "already exposed to all winners", so throughput is
+# bounded by how long each ticket sits, and 11 of 27 closes sat past 54m. This
+# bar is what ends that sit. Tight-scoped, not global: a multiday ticket is
+# supposed to hold through a slow window, a fee-capture one is not. Set below
+# the reference's 7% because our exit also has the fee-pace-death rail underneath
+# it, which reads realized SOL rather than the pool's advertised ratio.
+MIN_FEE_TVL_24H_TIGHT_LIMIT = 5.0
 MIN_AGE_BEFORE_YIELD_CHECK = 60.0
 # ...but 60m was calibrated on modes that enter a pool with hours of history.
 # Pulse enters off a 5-MINUTE trending window, so its grace is more than an
@@ -170,6 +205,20 @@ FAST_EXIT_M5_PCT = -3.0
 # slippage). Both thresholds must trip; missing DexScreener data never fires it.
 DOWNTREND_1H_PCT = -5.0
 DOWNTREND_PNL_PCT = -5.0
+# ...but -5% is the wrong tolerance for the tight-trailing modes. turnover and
+# pulse bank inside a 1.2-2.5% band (TURNOVER_TRAILING_TRIGGER_PCT), so one
+# -5.5% downtrend close costs 3-5 wins to repay — and it is the same
+# is_tight_tp_pos set that already gets its own trailing pair for that reason.
+# Measured 2026-08-08..08-13 on the live book: of 18 closes held past 120m, 15
+# left via fee-pace-death / low-yield / OOR and landed ~0.00 SOL (one +3.41% at
+# 231m), so length is not the defect. The 3 that left through THIS rule booked
+# -0.0296 / -0.0274 / -0.0288 SOL — together more than every gain in the 30-120m
+# buckets, against +0.0037 SOL for the average turnover churn. MARIO64-SOL
+# (2026-08-13, 170m, -5.21%) is the shape: fee/TVL 15.1% so low yield could not
+# fire, in range so no OOR fuse, peak under the 1.2% trigger so the ratchet never
+# armed — no rule could speak until -5%. The 1h leg stays at -5%: that threshold
+# states the token is bleeding, and only our tolerance for it is mode-scoped.
+DOWNTREND_PNL_TIGHT_PCT = -2.5
 # ...and a PnL-only leg that needs no trend confirmation. Requiring BOTH legs
 # made this rail structurally slower than what it guards against: an hour of
 # price history cannot confirm a dump that is minutes old, so the rule written
@@ -181,6 +230,19 @@ DOWNTREND_PNL_PCT = -5.0
 # and keeps the "dump" routing (2h cooldown, no re-center) — the SL below is
 # still the backstop that no hold can defer.
 DOWNTREND_PNL_ONLY_PCT = -6.0
+# ...and the tight modes need their own value here too, for the same reason they
+# needed one above — but this is the leg that actually bites. Measured on the 24h
+# to 2026-08-14: all four downtrend closes left through the CONFIRMED leg, and
+# every one fired with h1 already at -12.8 / -18.1 / -22.2 / -23.9%. The -2.5%
+# tight tolerance never got to speak: a one-sided SOL position moves ~1/5 of the
+# token, so PnL crosses -2.5% long before DexScreener's h1 window has aggregated
+# the decline that authorises the close. Booked PnL was -2.80 / -4.48 / -4.57 /
+# -5.21% against a win band of 1.2-2.5% — -0.0821 SOL from those 4 closes against
+# +0.0374 SOL from the other 23, i.e. the whole day's loss. Only the PnL leg is
+# knowable in real time, so for the tight modes it is the primary rail, not the
+# fallback: unconfirmed at -3% fires first, the confirmed leg at -2.5% only when
+# h1 happens to arrive early enough to matter, the -8% floor unchanged.
+DOWNTREND_PNL_ONLY_TIGHT_PCT = -3.0
 # OOR-upside profit lock: above range the position is fully converted to SOL
 # (PnL frozen, fees stopped); at or above this banked gain, close immediately
 # instead of riding the OOR fuse and risking a retrace back into range.
@@ -455,8 +517,11 @@ def load_soul_dlmm_params():
         "TURNOVER_MAX_OOR_MINUTES": int(TURNOVER_MAX_OOR_MINUTES),
         "TURNOVER_SOL_SIDE_OOR_MINUTES": int(TURNOVER_SOL_SIDE_OOR_MINUTES),
         "TURNOVER_CB_LOSS_SOL": float(TURNOVER_CB_LOSS_SOL),
+        "TURNOVER_RECENTER_STRIKES": int(TURNOVER_RECENTER_STRIKES),
+        "TURNOVER_STRIKE_COOLDOWN_HOURS": float(TURNOVER_STRIKE_COOLDOWN_HOURS),
         "MIN_AGE_BEFORE_YIELD_CHECK": float(MIN_AGE_BEFORE_YIELD_CHECK),
         "PULSE_MIN_AGE_BEFORE_YIELD_CHECK": float(PULSE_MIN_AGE_BEFORE_YIELD_CHECK),
+        "MIN_FEE_TVL_24H_TIGHT_LIMIT": float(MIN_FEE_TVL_24H_TIGHT_LIMIT),
         "MIN_FEE_TVL_24H_LIMIT": float(MIN_FEE_TVL_24H_LIMIT),
         "TIMEFRAME": "24h",
         "STRATEGY": "spot",
@@ -541,6 +606,10 @@ def load_soul_dlmm_params():
                 params["TURNOVER_MAX_OOR_MINUTES"] = int(val)
             elif "Turnover CB Loss SOL" in name:
                 params["TURNOVER_CB_LOSS_SOL"] = val
+            elif "Turnover Re-center Strikes" in name:
+                params["TURNOVER_RECENTER_STRIKES"] = int(val)
+            elif "Turnover Strike Cooldown Hours" in name:
+                params["TURNOVER_STRIKE_COOLDOWN_HOURS"] = val
             elif "OOR Downside Max Minutes" in name:
                 params["OOR_DOWNSIDE_MAX_MINUTES"] = int(val)
             elif "Max Out of Range Minutes" in name:
@@ -552,6 +621,10 @@ def load_soul_dlmm_params():
                 params["PULSE_MIN_AGE_BEFORE_YIELD_CHECK"] = val
             elif "Min Age for Yield Check" in name:
                 params["MIN_AGE_BEFORE_YIELD_CHECK"] = val
+            # Tight key before the generic one — same substring trap as the
+            # turnover/pulse keys above.
+            elif "Tight Min 24h Fee/TVL for Yield Check" in name:
+                params["MIN_FEE_TVL_24H_TIGHT_LIMIT"] = val
             elif "Min 24h Fee/TVL for Yield Check" in name:
                 params["MIN_FEE_TVL_24H_LIMIT"] = val
             elif "Slippage" in name:
@@ -841,9 +914,10 @@ def main():
     min_age_before_yield_check = params["MIN_AGE_BEFORE_YIELD_CHECK"]
     pulse_min_age_before_yield_check = params["PULSE_MIN_AGE_BEFORE_YIELD_CHECK"]
     min_fee_tvl_24h_limit = params["MIN_FEE_TVL_24H_LIMIT"]
+    min_fee_tvl_24h_tight_limit = params["MIN_FEE_TVL_24H_TIGHT_LIMIT"]
     min_exit_liquidity_usd = params["MIN_EXIT_LIQUIDITY_USD"]
     
-    print(f"Loaded SOUL.md parameters -> SL: {stop_loss_pct:.1f}%, Trailing TP Trigger: {trailing_trigger_pct:.1f}%, Trailing TP Drop: {trailing_drop_pct:.1f}%, Trailing TP (turnover): {turnover_trailing_trigger_pct:.1f}%/{turnover_trailing_drop_pct:.1f}%, Max Bins Pumped Above: {max_bins_pumped_above}, Max OOR: {max_oor_minutes}m (turnover {turnover_max_oor_minutes}m token-side / {turnover_sol_side_oor_minutes}m SOL-side), Min Age for Yield Check: {min_age_before_yield_check:.1f}m (pulse {pulse_min_age_before_yield_check:.1f}m), Min Fee/TVL: {min_fee_tvl_24h_limit:.2f}%")
+    print(f"Loaded SOUL.md parameters -> SL: {stop_loss_pct:.1f}%, Trailing TP Trigger: {trailing_trigger_pct:.1f}%, Trailing TP Drop: {trailing_drop_pct:.1f}%, Trailing TP (turnover): {turnover_trailing_trigger_pct:.1f}%/{turnover_trailing_drop_pct:.1f}%, Max Bins Pumped Above: {max_bins_pumped_above}, Max OOR: {max_oor_minutes}m (turnover {turnover_max_oor_minutes}m token-side / {turnover_sol_side_oor_minutes}m SOL-side), Min Age for Yield Check: {min_age_before_yield_check:.1f}m (pulse {pulse_min_age_before_yield_check:.1f}m), Min Fee/TVL: {min_fee_tvl_24h_limit:.2f}% (tight {min_fee_tvl_24h_tight_limit:.2f}%), Downtrend PnL: {DOWNTREND_PNL_PCT:.1f}%/{DOWNTREND_PNL_ONLY_PCT:.1f}% (tight {DOWNTREND_PNL_TIGHT_PCT:.1f}%/{DOWNTREND_PNL_ONLY_TIGHT_PCT:.1f}%), Turnover re-center: {params['TURNOVER_RECENTER_STRIKES']}/24h then {params['TURNOVER_STRIKE_COOLDOWN_HOURS']:.0f}h pool cooldown, CB {params['TURNOVER_CB_LOSS_SOL']:+.3f} SOL")
     
     # --reset-trailing: reset peak_pnl + trailing_active after a standalone fee claim
     if cli.reset_trailing:
@@ -1520,9 +1594,15 @@ def main():
         yield_grace_minutes = (pulse_min_age_before_yield_check
                                if meta.get("mode") == "pulse"
                                else min_age_before_yield_check)
+        # The bar itself is mode-scoped for the same reason the grace is: a
+        # fee-capture ticket earns by turning over, so a pool that has fallen to
+        # a solvency pace is not a slow window to sit through — it is a slot
+        # another candidate should have. See MIN_FEE_TVL_24H_TIGHT_LIMIT.
+        yield_limit = (min_fee_tvl_24h_tight_limit if is_tight_tp_pos
+                       else min_fee_tvl_24h_limit)
         if age_minutes >= yield_grace_minutes:
-            if fee_per_tvl_24h < min_fee_tvl_24h_limit:
-                close_reason = f"Low yield (Fee/TVL 24h: {fee_per_tvl_24h:.2f}% < {min_fee_tvl_24h_limit}% after {age_minutes:.1f}m)"
+            if fee_per_tvl_24h < yield_limit:
+                close_reason = f"Low yield (Fee/TVL 24h: {fee_per_tvl_24h:.2f}% < {yield_limit}% after {age_minutes:.1f}m)"
 
         # 5b. Exit-side liquidity floor: entry depth gate is not enough — pool liquidity
         # can drain AFTER entry, stranding the position. Re-checked live every cycle
@@ -1541,17 +1621,31 @@ def main():
         # the reason routes the close through the dump path (2h cooldown, wide swap
         # impact, no rebalance re-center). Non-emergency: an AI hold can still defer
         # it, and the emergency SL floor below remains the hard backstop.
+        # Tolerance is mode-scoped on the same is_tight_tp_pos set as the trailing
+        # pair — see DOWNTREND_PNL_TIGHT_PCT. Ordering still holds for both:
+        # confirmed downtrend (-2.5% tight / -5% thesis) fires before the
+        # unconfirmed leg at -6% and the unconditional floor at -8%.
+        downtrend_pnl_limit = (DOWNTREND_PNL_TIGHT_PCT if is_tight_tp_pos
+                               else DOWNTREND_PNL_PCT)
         if (not close_reason and price_change_h1 is not None
-                and price_change_h1 <= DOWNTREND_1H_PCT and pnl_pct <= DOWNTREND_PNL_PCT):
+                and price_change_h1 <= DOWNTREND_1H_PCT and pnl_pct <= downtrend_pnl_limit):
             close_reason = (f"Sustained downtrend dump (1h {price_change_h1:+.1f}% <= {DOWNTREND_1H_PCT}% "
-                            f"& PnL {pnl_pct:.2f}% <= {DOWNTREND_PNL_PCT}%) — exit before the SL floor")
+                            f"& PnL {pnl_pct:.2f}% <= {downtrend_pnl_limit}%) — exit before the SL floor")
         # 5c-ii. The same exit on PnL alone, no trend confirmation required. The
         # rule above cannot fire faster than DexScreener can confirm an hour of
         # decline, and fails open when h1 is missing; this leg reads only the
         # position's own PnL, so nothing can disarm it but the number recovering.
-        elif not close_reason and pnl_pct <= DOWNTREND_PNL_ONLY_PCT:
+        # Mode-scoped on the same set, and for the tight modes this is the rail
+        # that does the work — h1 cannot confirm in time at their size of move.
+        # See DOWNTREND_PNL_ONLY_TIGHT_PCT. The confirmed leg above stays FIRST
+        # and stays tighter (-2.5% vs -3%), so when h1 does arrive early it still
+        # wins; this leg is what fires when h1 is stale, missing, or has not yet
+        # aggregated the decline.
+        downtrend_pnl_only_limit = (DOWNTREND_PNL_ONLY_TIGHT_PCT if is_tight_tp_pos
+                                    else DOWNTREND_PNL_ONLY_PCT)
+        if not close_reason and pnl_pct <= downtrend_pnl_only_limit:
             close_reason = (f"Downtrend dump, unconfirmed (PnL {pnl_pct:.2f}% <= "
-                            f"{DOWNTREND_PNL_ONLY_PCT}%, no 1h confirmation) — exit before the SL floor")
+                            f"{downtrend_pnl_only_limit}%, no 1h confirmation) — exit before the SL floor")
 
         # 5d. Fast-out velocity exit: the trailing ratchet floor is checked once
         # per tick, so a fast dump gaps THROUGH the floor and a "take-profit"
@@ -1735,7 +1829,18 @@ def main():
             # confirm and a fresh block restarts the 60m timeout from zero.
             is_income_death = ("low yield" in reason_l
                                or "fee pace death" in reason_l)
-            if not is_emergency and not is_income_death:
+            # A tight-mode downtrend close is hard risk, not a price opinion worth
+            # second-guessing. DOWNTREND_PNL_TIGHT_PCT already sits at -2.5% against
+            # a win band of 1.2-2.5%, so a 60m postponement can carry the position
+            # past the -6% unconfirmed leg to the -8% floor and hand back three wins
+            # to buy one bounce. Same verdict Robinhood reached on fills
+            # (2026-08-08): a fill that closed on its own rule averaged -3.81%, one
+            # postponed by this gate first averaged -9.77%, and 422 postponements in
+            # three days bought back nothing. Matches both legs ("Sustained
+            # downtrend dump" and "Downtrend dump, unconfirmed"). Thesis modes KEEP
+            # the confirmation — their -5% floor leaves room for a bounce to matter.
+            is_tight_downtrend = is_tight_tp_pos and "downtrend dump" in reason_l
+            if not is_emergency and not is_income_death and not is_tight_downtrend:
                 MAX_INDICATOR_BLOCK_MINUTES = 60.0
                 ind_block_key = f"sol:dlmm:position:{pos_addr}:indicator_blocked_since"
                 ind_block_val, _, _ = run_command(f"redis-cli get \"{ind_block_key}\"")
@@ -1855,11 +1960,14 @@ def main():
                     or (mode_cd == "multiday" and pnl_pct > 0)
                     or (mode_cd == "casual" and oor_above)
                 )
-                # Rebalance budget. Thesis modes keep the hard 3/24h count cap.
-                # Turnover churns by design (fast OOR fuse feeds re-centers), so
-                # its primary guard is a net-PnL circuit breaker: cumulative
-                # realized PnL across this pool's rebalance closes (24h window)
-                # must stay above the floor. The 20/24h count is only a backstop.
+                # Rebalance budget: 3 re-centers per pool per 24h for EVERY mode.
+                # Turnover used to get 20 on the argument that it churns by design
+                # and the net-PnL circuit breaker was its real guard; the 24h to
+                # 2026-08-14 showed neither binding — see TURNOVER_RECENTER_STRIKES
+                # for the run shape that motivates the cap, and TURNOVER_CB_LOSS_SOL
+                # for why the breaker could not reach its floor first. Both guards
+                # stay: the count bounds a pool that keeps oscillating, the breaker
+                # cuts one that is already bleeding before the count runs out.
                 rebalance_pnl_key = f"sol:dlmm:rebalance_pnl:{pool}"
                 _rp_str, _, _ = run_command(f"redis-cli get \"{rebalance_pnl_key}\"")
                 try:
@@ -1868,7 +1976,7 @@ def main():
                     rebalance_pnl_24h = 0.0
                 cb_floor_sol = params.get("TURNOVER_CB_LOSS_SOL", TURNOVER_CB_LOSS_SOL)
                 if mode_cd == "turnover":
-                    rebalance_cap = 20
+                    rebalance_cap = params.get("TURNOVER_RECENTER_STRIKES", TURNOVER_RECENTER_STRIKES)
                     rebalance_budget_ok = rebalances_24h < rebalance_cap and rebalance_pnl_24h > cb_floor_sol
                 else:
                     rebalance_cap = 3
@@ -1887,7 +1995,21 @@ def main():
                     and strategy != "single_sided_reseed"
                     and not emergency_close
                     and realized_sol > 0
-                    and not any(kw in reason_lower for kw in ("stop-loss", "stop_loss", "downtrend", "rug"))
+                    # Income-death reasons are excluded for the opposite reason to
+                    # the loss reasons: not that the pool hurt us, but that it
+                    # stopped paying. The churn path exists because a profitable
+                    # close proves the pool is HOT — "Low yield" and "Fee pace
+                    # death" are the two closes that prove the opposite, and a
+                    # profitable one is exactly the shape that used to slip
+                    # through (realized_sol > 0, no loss keyword). The same close
+                    # writes a 4h pool cooldown a few lines below, so re-centering
+                    # here contradicted it: the daemon was locked out of the pool
+                    # while the monitor re-pinned into it. Raising the yield bar
+                    # (MIN_FEE_TVL_24H_TIGHT_LIMIT) only frees the slot if the
+                    # slot is actually released.
+                    and not any(kw in reason_lower for kw in (
+                        "stop-loss", "stop_loss", "downtrend", "rug",
+                        "low yield", "fee pace death"))
                     and rebalance_budget_ok
                 )
                 is_oor_rebalance = is_turnover_churn or (
@@ -1902,10 +2024,27 @@ def main():
 
                 if is_oor_rebalance:
                     print(f"♻️ {mode_cd} rebalance eligible ({rebalances_24h}/{rebalance_cap} in 24h, pool rebalance PnL {rebalance_pnl_24h:+.4f} SOL) — skipping re-entry cooldown for {base_symbol_cd}")
-                elif (mode_cd == "turnover" and close_reason.startswith("Out of Range")
-                        and rebalance_pnl_24h <= cb_floor_sol):
-                    print(f"⛔ Turnover rebalance circuit breaker tripped: pool 24h rebalance PnL {rebalance_pnl_24h:+.4f} SOL <= {cb_floor_sol} SOL floor — normal exit + cooldown")
                 else:
+                    # A turnover OOR close that did NOT earn a re-center has spent
+                    # the pool's churn budget — one guard or the other said stop.
+                    # Cool the POOL for the full window, because the symbol cooldown
+                    # written below can be as short as 15m on a profitable exit and
+                    # the daemon would re-signal this same pool straight into a fresh
+                    # run. This branch used to be an `elif` that only printed: it
+                    # claimed "normal exit + cooldown" while skipping the cooldown
+                    # block entirely, so a tripped breaker left the pool completely
+                    # unguarded. See TURNOVER_STRIKE_COOLDOWN_HOURS.
+                    if mode_cd == "turnover" and close_reason.startswith("Out of Range"):
+                        if rebalance_pnl_24h <= cb_floor_sol:
+                            strike_why = (f"circuit breaker: pool 24h rebalance PnL "
+                                          f"{rebalance_pnl_24h:+.4f} SOL <= {cb_floor_sol} SOL floor")
+                        else:
+                            strike_why = f"re-center strikes exhausted ({rebalances_24h}/{rebalance_cap} in 24h)"
+                        strike_cd_secs = int(params.get("TURNOVER_STRIKE_COOLDOWN_HOURS",
+                                                        TURNOVER_STRIKE_COOLDOWN_HOURS) * 3600)
+                        run_command(f"redis-cli set \"sol:dlmm:cooldown:pool:{pool}\" "
+                                    f"\"{strike_why[:120]}\" ex {strike_cd_secs}")
+                        print(f"⛔ Turnover pool cooled {strike_cd_secs // 3600}h — {strike_why}")
                     cooldown_secs = 7200 if is_dump_close else 3600  # 2h dump, 1h other
                     # Profitable exit: 15m across all modes (2026-07-15, was 30m
                     # casual-only). A pool that just paid is proven; a long block only
