@@ -377,6 +377,22 @@ one pass per enabled mode per `POLL_INTERVAL`.
 - **Fail-open gates.** `verified` / Jupiter shield / momentum treat missing data
   as passing (`boolOr(..., true)`). Preserve this — the API omits these fields
   for some tokens and failing closed would over-reject.
+- **A price feed names a POOL, not a token.** DexScreener's token endpoint
+  returns every venue a mint trades on, dead ones included, and the order is
+  not a contract. Never read `pairs[0]`: match our exact `pairAddress` when we
+  hold the position (`dlmm_monitor.get_pool_liquidity_usd` — no match means
+  *unknown*, never a substitute pool), and take the DEEPEST pair when all we
+  have is a mint (`dlmm_pipeline.get_momentum`, `meteora.momentumFrom`). Paired
+  with that, a short-window change at or below `IMPLAUSIBLE_CHANGE_PCT` (-95%,
+  mirrored in all three) is a bad read rather than a move and is nulled to
+  unknown; h6/h24 are exempt, because a token really can be down 99% in a day
+  and nulling that would walk a corpse past the downtrend gate. Not a nicety —
+  a husk pool's honest -99.96% read as ours fired the rug-velocity rule on
+  healthy positions, and since that rule blacklists via `rug_event`
+  (PnL-independent, by design) each false read cost a 7d mint ban plus a 30d
+  deployer ban. Eleven such bans starved Solana of every entry for 12h on
+  2026-08-14 while the comparison bot entered the same pools green. Pinned by
+  `internal/meteora/momentum_test.go`.
 - **Redis TTL is per-key on purpose.** `SetNX` per pool gives each an independent
   rolling `SEEN_TTL`. The old `SAdd`+`Expire` refreshed the whole set's TTL every
   write so pools were deduped forever — see the comment in `store.go`; don't

@@ -593,9 +593,21 @@ MAX_ENTRY_H24_DROP = -25.0   # reject if 24h price change below this
 # bleeding pool even though each one is forgettable.
 POOL_MEMORY_NET_FLOOR_PCT = float(os.environ.get("POOL_MEMORY_NET_FLOOR_PCT", "-10.0"))
 
+# Twin of dlmm_monitor.IMPLAUSIBLE_CHANGE_PCT / momentum.go implausibleChangePct.
+IMPLAUSIBLE_CHANGE_PCT = -95.0
+
+
 def get_momentum(mint):
     """Returns (m5_pct, h1_pct, h6_pct, h24_pct) price change from DexScreener, or
-    (None, None, None, None) on failure. Screens ALL candidates, not just the winner."""
+    (None, None, None, None) on failure. Screens ALL candidates, not just the winner.
+
+    Reads the DEEPEST pair, not pairs[0]. The token endpoint lists every venue
+    the mint trades on and the order is not a contract, so pairs[0] can be a
+    husk — Plumber on 2026-08-15 carried 17 pairs, its live $46k pool quoting
+    m5 -1.17% next to a $177 corpse quoting h1 -99.96%. Deepest = where price
+    is actually discovered, and it is the pool a batch is most likely screening.
+    The same defect on the exit side is what wrote the false rug blacklists;
+    see dlmm_monitor.implausible_change for the evidence."""
     if not mint or os.environ.get("DRY_RUN") == "true":
         return None, None, None, None
     try:
@@ -606,11 +618,22 @@ def get_momentum(mint):
         pairs = data.get("pairs") or []
         if not pairs:
             return None, None, None, None
-        pc = pairs[0].get("priceChange") or {}
+        deepest = max(pairs, key=lambda p: float((p.get("liquidity") or {}).get("usd") or 0.0))
+        pc = deepest.get("priceChange") or {}
         m5 = float(pc.get("m5", 0) or 0)
         h1 = float(pc.get("h1", 0) or 0)
         h6 = float(pc.get("h6", 0) or 0)
         h24 = float(pc.get("h24", 0) or 0)
+        # A short-window reading this deep is a bad pair, not a dump: no pool
+        # sheds 95% inside 5 minutes and still quotes. Unknown, so the gate
+        # fails open exactly as it does for a missing field. h6/h24 are left
+        # alone — a token really can be down 99% over a day, and nulling that
+        # would walk a corpse straight past the downtrend gate below.
+        if m5 <= IMPLAUSIBLE_CHANGE_PCT or h1 <= IMPLAUSIBLE_CHANGE_PCT:
+            print(f"Warning: implausible momentum for {mint[:8]} "
+                  f"(m5 {m5:+.1f}%, h1 {h1:+.1f}%) — treating short windows as unknown")
+            m5 = None if m5 <= IMPLAUSIBLE_CHANGE_PCT else m5
+            h1 = None if h1 <= IMPLAUSIBLE_CHANGE_PCT else h1
         return m5, h1, h6, h24
     except Exception as e:
         print(f"Warning: momentum fetch failed for {mint[:8]}: {e}")
