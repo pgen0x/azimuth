@@ -5,6 +5,14 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.6.1](https://github.com/pgen0x/azimuth/compare/v2.6.0...v2.6.1) (2026-08-14)
+
+
+### Bug Fixes
+
+* **momentum:** read our own pool's price, not a dead pool's ([ad4ad2b](https://github.com/pgen0x/azimuth/commit/ad4ad2b695a59fd339f0cd5f549c1ddc77f2ec77))
+* **momentum:** read our own pool's price, not a dead pool's ([a424001](https://github.com/pgen0x/azimuth/commit/a4240017fb1e192c05cf27d4fdc6277c6eb9aba9))
+
 ## [2.6.0](https://github.com/pgen0x/azimuth/compare/v2.5.1...v2.6.0) (2026-08-14)
 
 
