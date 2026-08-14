@@ -72,8 +72,35 @@ MODE_DEFAULTS = {
     },
 }
 
-MIN_BINS_BELOW = 40
-MAX_BINS_BELOW = 100
+# Deployable bid-side depth, in bins below the active bin. Narrowed 40-100 ->
+# 35-53 on 2026-08-14 to match the reference bot's band (its live deploys read
+# bins_below 53-69, minBinsBelow 35). The old ceiling was not a ceiling: all 23
+# deploys in the preceding 48h printed "Bins Below | 100", i.e. every single one
+# clamped. At bin step 100 that is 63% of downside covered, and bid-ask weights
+# liquidity toward the FAR end of the ladder — so the majority of each ticket sat
+# 30-60% below spot, in bins the market never reached.
+#
+# Three measured consequences, all of which the narrower band attacks:
+#   1. Fee share is our liquidity in the ACTIVE bin over the pool's. Spread over
+#      100 bins only a handful ever earn: $6.25 fees in 24h against the
+#      reference bot's $19.32 on comparable deployed capital — this book was
+#      never short of funds, only of concentration.
+#   2. The 5m OOR fuse is the churn engine, and a 63% range disarms it — the
+#      18-24%/h dumps observed on 2026-08-13/14 never left the range, so no rule
+#      could speak until the downtrend floor. Same tokens, same days: the
+#      reference bot closed MARIO64 at 13m/10m/60m for +0.05/+0.19/-0.24% while
+#      this book held it 170m to -5.21%; cc at 13m/16m for +0.02/+0.24% against
+#      56.7m and -4.57%; OnlyMarms at 6m for -0.11% against 93.3m and -2.80%.
+#      Its 72 closes over those 48h contain exactly 3 worse than -1%.
+#   3. Fewer bins span fewer 70-bin bin arrays, so fewer candidates are refused
+#      on bin-array rent (~0.071 SOL/array, non-refundable) — 12 such rejections
+#      in the 24h to 2026-08-14.
+#
+# This is the Robinhood ladder verdict applied to Solana: 104 rung closes, zero
+# fee-positive, on-chain fee meter showing the rung nearest spot earning while
+# outer rungs read exactly 0. Concentration is the fix on both venues.
+MIN_BINS_BELOW = 35
+MAX_BINS_BELOW = 53
 
 # Pre-deploy depth gate: refuse entry if SOL->base impact at our size exceeds this,
 # since a thin pool means the eventual exit swap would strand the token. Matches executor default.
@@ -816,18 +843,46 @@ def apply_batch_conviction(candidates, mode="multiday"):
     return kept
 
 
-# sol_bidask price coverage below the active bin. Community-converged range is
-# -65..-75% (linclonlogging's "bread'n'butter"/sawtooth: 69-bin ladders to -74%);
-# 0.70 lands inside it at bin steps 80-125 before the MAX_BINS_BELOW clamp.
-SOL_BIDASK_COVERAGE = 0.70
+# sol_bidask price coverage below the active bin. Was 0.70, chosen from the
+# community-converged -65..-75% band (linclonlogging's "bread'n'butter"/sawtooth:
+# 69-bin ladders to -74%). That band describes a ladder held for DAYS, which is a
+# different trade: depth is the inventory such a position expects to accumulate
+# and later sell into a recovery. This book turns over in minutes, so the same
+# depth is capital parked where the market never comes — see MIN_BINS_BELOW for
+# the measurement. 0.35 puts the far edge at roughly the drop a memecoin actually
+# prints in an hour, which is where a re-entered position wants its bid.
+#
+# Cheap to reverse and worth watching: if closes start arriving as downside OOR
+# with a full token bag instead of the intended fast re-centers, the range is too
+# tight and this is the number to raise first.
+SOL_BIDASK_COVERAGE = 0.35
+
+# Hard floor on downside coverage, and the technical ceiling on bin count that
+# floor is allowed to reach. The MIN/MAX band above is expressed in BINS, but the
+# thesis is expressed in PRICE: at a small bin step the same bin count buys a far
+# smaller range, so the band clamps in the dangerous direction — 53 bins is 34.4%
+# of downside at step 80 but only 10.0% at step 20, which a memecoin clears in
+# minutes and which would leave the position holding a full token bag instead of
+# re-centering. The reference bot avoids this by refusing the pools outright
+# (minBinStep 80); this book has no bin-step gate and should not grow one just to
+# make a geometry constant safe, so the guard lives here instead. 100 is the old
+# MAX_BINS_BELOW, kept as the rent/technical bound the floor may not exceed.
+SOL_BIDASK_MIN_COVERAGE = 0.20
+BINS_BELOW_HARD_MAX = 100
 
 def sol_bidask_bins(bin_step):
     """Bins below the active bin so the ladder covers SOL_BIDASK_COVERAGE of
     downside. Bins compound: price after n down-bins = (1+step)^-n, so
-    n = ln(1-coverage) / -ln(1+step). Clamped to the deployable band."""
+    n = ln(1-coverage) / -ln(1+step). Clamped to the deployable band, then
+    re-widened if that clamp left the range under SOL_BIDASK_MIN_COVERAGE."""
     step = max(bin_step, 1) / 10000.0
-    need = int(math.ceil(math.log(1.0 - SOL_BIDASK_COVERAGE) / -math.log1p(step)))
-    return max(MIN_BINS_BELOW, min(MAX_BINS_BELOW, need))
+    def bins_for(coverage):
+        return int(math.ceil(math.log(1.0 - coverage) / -math.log1p(step)))
+    bins = max(MIN_BINS_BELOW, min(MAX_BINS_BELOW, bins_for(SOL_BIDASK_COVERAGE)))
+    floor_bins = bins_for(SOL_BIDASK_MIN_COVERAGE)
+    if bins < floor_bins:
+        bins = min(BINS_BELOW_HARD_MAX, floor_bins)
+    return bins
 
 def select_batch_strategy(c, mode):
     """Deterministic port of the deploy agent's strategy table (STEP 3).
