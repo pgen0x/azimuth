@@ -65,6 +65,12 @@ echo "→ Installing cron pre-run scripts"
 # resolves outside it, so these cannot live in the repo the way skills/scripts do.
 mkdir -p "$PROFILE/scripts"
 for f in "$REPO/assets/hermes/scripts/"*; do
+  # Skip anything that is not a regular file. This glob is deliberately
+  # unfiltered (these are .py and .sh alike), so it also picks up whatever else
+  # the directory is carrying — a __pycache__ left behind by any python run in
+  # the tree is the common one, and it aborted the install right here, because
+  # the destination path already existed as a directory.
+  [ -f "$f" ] || continue
   sed "s#__PROFILE__#$PROFILE#g" "$f" > "$PROFILE/scripts/$(basename "$f")"
   chmod +x "$PROFILE/scripts/$(basename "$f")"
   echo "   $(basename "$f")"
