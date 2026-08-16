@@ -5,6 +5,14 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.6.2](https://github.com/pgen0x/azimuth/compare/v2.6.1...v2.6.2) (2026-08-16)
+
+
+### Bug Fixes
+
+* **solana:** stop a 5m price candle from writing a 30-day ban ([88d5408](https://github.com/pgen0x/azimuth/commit/88d540899f00227c2cebe3b9bcb468306a06f23a))
+* **solana:** stop a 5m price candle from writing a 30-day ban ([752b37a](https://github.com/pgen0x/azimuth/commit/752b37ac06071b5a1b1ff6fb465998da8d8bb961))
+
 ## [2.6.1](https://github.com/pgen0x/azimuth/compare/v2.6.0...v2.6.1) (2026-08-14)
 
 
