@@ -302,6 +302,20 @@ RUG_BLACKLIST_TTL_SEC = int(float(os.environ.get("RUG_BLACKLIST_TTL_DAYS", "7"))
 # silent exactly like the mint case. Longer than the mint window because the
 # deployer claim IS the stronger one; finite because stronger is not permanent.
 DEV_BLOCKLIST_TTL_SEC = int(float(os.environ.get("DEV_BLOCKLIST_TTL_DAYS", "30")) * 86400)
+# Liquidity collapse required to turn a rug_event into a BAN — never into an
+# exit, which stays instant and unconditional. The velocity gate reads a 5m
+# PRICE candle, and -20% in 5m on a memecoin is a Tuesday: of the 19
+# rug-velocity bans live on 2026-08-16, the comparison agent had entered
+# several of the same pools green. A rug is liquidity LEAVING, so that is what
+# a ban has to see. Measured against the entry TVL the pipeline snapshots into
+# meta["signal"]["tvl"].
+RUG_LIQ_DROP_PCT = float(os.environ.get("RUG_LIQ_DROP_PCT", "-50.0"))
+# Distinct rugged mints from one deployer before the DEPLOYER is banned. At 1,
+# a single bad read costs a launchpad-scale wallet's entire output for 30 days.
+# The asymmetry is the argument: a missed ban risks one ticket, a wrong ban
+# forfeits every pool that wallet will ever sign inside the window. The mint
+# ban still lands on the first offense — only the deployer waits for a pattern.
+RUG_DEV_MIN_OFFENSES = int(os.environ.get("RUG_DEV_MIN_OFFENSES", "2"))
 
 
 def rug_blacklist_mint_key(mint):
@@ -325,21 +339,71 @@ def mint_cooldown_key(meta):
     mint = (meta or {}).get("base_mint", "")
     return f"sol:dlmm:cooldown:mint:{mint}" if mint and mint != SOL_MINT else None
 
-def maybe_blacklist_rug(meta, pnl_pct, rug_event=None):
-    """Add the mint (TTL'd) and deployer (permanent), if known, to the rug
-    blacklists when a close realizes <= RUG_BLACKLIST_PNL_PCT, OR when the caller passes
-    rug_event (a short reason string) for a close that is rug evidence on its
-    own regardless of realized PnL — e.g. the RUG_M5_PCT velocity gate firing.
-    A fast reaction can book a tiny/near-zero PnL on a token that just
-    cratered -20%+ in 5 minutes; without this, a well-executed emergency exit
-    would let the bot re-enter the same rug once its cooldown expires (as
-    happened with SOLdiers-SOL: two RUG velocity closes on 2026-07-19 booked
-    ~0% PnL, no blacklist, re-entered 2026-07-21 and hit the hard SL).
-    Callers must skip dry-run closes — permanent state must never come from
-    proxy PnL."""
+def rug_dev_offenses_key(dev):
+    """Distinct mints this deployer has rugged inside the ban window. A SET, not
+    a counter: the same mint rugging twice is one offense, and what earns a
+    deployer ban is a PATTERN across tokens. Expires on the same clock as the
+    ban it feeds, so a wallet that goes quiet for a window starts clean."""
+    return f"sol:dlmm:rugmints:dev:{dev}"
+
+def rug_ban_confirmed(meta, live_liquidity_usd):
+    """Second opinion on a rug_event BEFORE it becomes a ban. Returns True
+    (liquidity really collapsed), False (it did not — price move only), or None
+    (unmeasurable).
+
+    The velocity gate that raises rug_event reads a 5m price candle, which is
+    the right trigger for an EXIT and the wrong evidence for a BAN: a -22% 5m
+    print is ordinary memecoin volatility, while a rug is the liquidity
+    leaving. Compared against the entry TVL the pipeline snapshots into
+    meta["signal"]["tvl"].
+
+    None must be treated as "do not ban" by the caller — the inverse of the
+    fail-open rule the trade gates use, and deliberately so. Fail-open is right
+    when the cost of acting on missing data is a skipped ticket; here the cost
+    is a 7-30 day ban written from data we never had."""
+    entry_tvl = float(((meta or {}).get("signal") or {}).get("tvl") or 0.0)
+    if live_liquidity_usd is None or entry_tvl <= 0:
+        return None
+    drop_pct = (float(live_liquidity_usd) - entry_tvl) / entry_tvl * 100.0
+    return drop_pct <= RUG_LIQ_DROP_PCT
+
+def maybe_blacklist_rug(meta, pnl_pct, rug_event=None, live_liquidity_usd=None,
+                        operator_confirmed=False):
+    """Add the mint (TTL'd) and, on a repeat offense, the deployer to the rug
+    blacklists when a close realizes <= RUG_BLACKLIST_PNL_PCT, OR when the
+    caller passes rug_event (a short reason string) for a close that is rug
+    evidence on its own regardless of realized PnL — e.g. the RUG_M5_PCT
+    velocity gate firing. A fast reaction can book a tiny/near-zero PnL on a
+    token that just cratered -20%+ in 5 minutes; without this, a well-executed
+    emergency exit would let the bot re-enter the same rug once its cooldown
+    expires (as happened with SOLdiers-SOL: two RUG velocity closes on
+    2026-07-19 booked ~0% PnL, no blacklist, re-entered 2026-07-21 and hit the
+    hard SL). Callers must skip dry-run closes — permanent state must never
+    come from proxy PnL.
+
+    Two guards stand between an exit and a ban, both added 2026-08-17 after a
+    purge of 44 stale keys (25 an unvetted legacy import, 19 rug-velocity):
+
+    1. A rug_event is CONFIRMED against liquidity (rug_ban_confirmed) unless
+       operator_confirmed — a human typing "rug" into --close is the
+       confirmation. Unmeasurable = no ban.
+    2. The deployer ban waits for RUG_DEV_MIN_OFFENSES distinct mints.
+
+    The EXIT is never gated by either: it has already happened by the time this
+    runs. These decide only what outlives it."""
     is_rug = bool(rug_event) or (pnl_pct is not None and pnl_pct <= RUG_BLACKLIST_PNL_PCT)
     if not is_rug:
         return
+    # A realized loss at or past RUG_BLACKLIST_PNL_PCT is its own evidence — we
+    # paid for it. Only the velocity-gate path, which bans off an unrealized 5m
+    # candle, needs the liquidity second opinion.
+    if rug_event and not operator_confirmed:
+        confirmed = rug_ban_confirmed(meta, live_liquidity_usd)
+        if confirmed is not True:
+            why = ("liquidity unmeasurable" if confirmed is None
+                   else f"liquidity held (drop > {RUG_LIQ_DROP_PCT:.0f}%)")
+            print(f"↩️  No rug ban ({why}) — exit stands, blocklist untouched: {rug_event[:80]}")
+            return
     reason = rug_event or f"{pnl_pct:+.1f}% close"
     mint = (meta or {}).get("base_mint", "")
     if mint and mint != SOL_MINT:
@@ -352,14 +416,32 @@ def maybe_blacklist_rug(meta, pnl_pct, rug_event=None):
         print(f"⛔ RUG BLACKLIST: mint {mint[:8]}… blocked for {days:.0f}d ({reason})")
     dev = (meta or {}).get("dev", "")
     if dev:
-        # SETEX per wallet, not SADD into a shared set: same reasoning as the
-        # mint above, and re-blacklisting a repeat offender refreshes its window
-        # rather than being a no-op — a deployer that keeps rugging keeps its ban.
-        run_command(
-            f"redis-cli setex \"{rug_blacklist_dev_key(dev)}\" {DEV_BLOCKLIST_TTL_SEC} \"{reason[:120]}\""
-        )
-        dev_days = DEV_BLOCKLIST_TTL_SEC / 86400
-        print(f"⛔ RUG BLACKLIST: deployer {dev[:8]}… blocked for {dev_days:.0f}d ({reason})")
+        # Record the offense first, ban only once the pattern is there. Without
+        # a mint there is nothing to count distinctly, so an unknown-mint rug
+        # advances nothing — it must not be able to ban a wallet by itself.
+        offenses = 0
+        if mint and mint != SOL_MINT:
+            run_command(f"redis-cli sadd \"{rug_dev_offenses_key(dev)}\" \"{mint}\"")
+            run_command(f"redis-cli expire \"{rug_dev_offenses_key(dev)}\" {DEV_BLOCKLIST_TTL_SEC}")
+            card, _, _ = run_command(f"redis-cli scard \"{rug_dev_offenses_key(dev)}\"")
+            try:
+                offenses = int((card or "0").strip())
+            except ValueError:
+                offenses = 0
+        if offenses < RUG_DEV_MIN_OFFENSES:
+            what = "mint banned" if offenses else "no mint on the close to count"
+            print(f"📝 Deployer {dev[:8]}… rug offense {offenses}/{RUG_DEV_MIN_OFFENSES} "
+                  f"— {what}, deployer NOT banned yet ({reason[:60]})")
+        else:
+            # SETEX per wallet, not SADD into a shared set: same reasoning as the
+            # mint above, and re-blacklisting a repeat offender refreshes its window
+            # rather than being a no-op — a deployer that keeps rugging keeps its ban.
+            run_command(
+                f"redis-cli setex \"{rug_blacklist_dev_key(dev)}\" {DEV_BLOCKLIST_TTL_SEC} \"{reason[:120]}\""
+            )
+            dev_days = DEV_BLOCKLIST_TTL_SEC / 86400
+            print(f"⛔ RUG BLACKLIST: deployer {dev[:8]}… blocked for {dev_days:.0f}d "
+                  f"({offenses} distinct mints; {reason})")
 
 def send_event_alert(text):
     """Push an event alert straight to the operator via `hermes send` — script-side
@@ -1175,7 +1257,13 @@ def main():
                         if mint_cd_key:
                             run_command(f"redis-cli expire \"{mint_cd_key}\" 900")
                         print(f"🚫 Cooldown shortened to 15m for {base_symbol_cd} (profitable force-close)")
-                maybe_blacklist_rug(meta, guard_pnl_pct, rug_event=(cli.reason if "rug" in reason_lower else None))
+                # operator_confirmed: this is the --close path, so "rug" in the
+                # reason was typed by a human looking at the pool. That IS the
+                # second opinion the automatic path has to fetch, and there is
+                # no live liquidity read on this branch to fetch it with.
+                maybe_blacklist_rug(meta, guard_pnl_pct,
+                                    rug_event=(cli.reason if "rug" in reason_lower else None),
+                                    operator_confirmed=True)
                 print(f"📊 Daily PnL booked: {realized_sol:+.4f} SOL ({guard_pnl_pct:+.2f}%)")
             # Auto-swap base token back to SOL
             base_mint = meta.get("base_mint")
@@ -2136,13 +2224,17 @@ def main():
                     run_command(f"redis-cli set \"sol:dlmm:cooldown:pool:{pool}\" \"{close_reason[:120]}\" ex 14400")
                     print(f"🚫 Pool cooldown set 4h (low yield): {pool}")
 
-                # Permanent rug blacklist — live closes only, never proxy PnL.
+                # Rug blacklist — live closes only, never proxy PnL.
                 # rug_event fires independent of realized PnL: a fast RUG_M5_PCT
                 # velocity exit can book a near-zero loss on a token that just
-                # cratered -20%+ in 5m — that crater is the rug evidence, not
-                # how well we reacted to it.
+                # cratered -20%+ in 5m. That crater is what triggers the EXIT;
+                # whether it also earns a BAN is decided by the liquidity read
+                # fetched at step 3b of this same iteration, because a 5m price
+                # candle alone cannot tell a rug from a volatile hour.
                 if not (close_res.get("dryRun") or close_res.get("dry_run") == True):
-                    maybe_blacklist_rug(meta, pnl_pct, rug_event=(close_reason if "rug" in reason_lower else None))
+                    maybe_blacklist_rug(meta, pnl_pct,
+                                        rug_event=(close_reason if "rug" in reason_lower else None),
+                                        live_liquidity_usd=pool_liquidity_usd)
 
                 # Auto-swap base token back to SOL (unless skip_swap is active)
                 base_mint = meta.get("base_mint")

@@ -397,6 +397,24 @@ one pass per enabled mode per `POLL_INTERVAL`.
   rolling `SEEN_TTL`. The old `SAdd`+`Expire` refreshed the whole set's TTL every
   write so pools were deduped forever — see the comment in `store.go`; don't
   reintroduce a single-key set.
+- **An exit is not a ban, and a TTL is not a bound.** The two are separate
+  decisions in `maybe_blacklist_rug` and must stay that way. The RUG_M5_PCT
+  velocity gate reads a 5m PRICE candle: right trigger for an emergency close,
+  wrong evidence for a 7-30 day blocklist entry, because -20% in 5m on a
+  memecoin is ordinary. A `rug_event` therefore only becomes a ban once
+  `rug_ban_confirmed` sees LIQUIDITY collapse against the entry TVL — and
+  unmeasurable means **no ban**, the deliberate inverse of the fail-open rule
+  the trade gates use (fail-open is right when acting on missing data costs a
+  skipped ticket; here it costs a month of a deployer's output). A realized
+  loss past `RUG_BLACKLIST_PNL_PCT` needs no confirmation — we paid for that
+  evidence. The deployer ban additionally waits for `RUG_DEV_MIN_OFFENSES`
+  distinct mints (`sol:dlmm:rugmints:dev:<wallet>`), because one bad read must
+  not forfeit every pool a launchpad wallet will sign.
+  Separately, per-key TTLs bound each entry's AGE but not the SET SIZE, and
+  size is what decides throughput: at the observed write rate the dev set
+  converges on ~30 wallets (31 were found on 2026-08-16, of which 25 were an
+  unvetted legacy import). `prune_blocklists()` caps both sets and evicts
+  lowest-remaining-TTL — the stalest evidence — first.
 - **No hidden clock reads.** `webhook.Send` takes `nowUnix` from the caller.
   Keep time injection at the edges.
 - **Webhook payload is a contract** documented in `docs/SIGNAL_SCHEMA.md`.

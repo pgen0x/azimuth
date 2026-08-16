@@ -228,6 +228,92 @@ def section_funnel():
         print(f"- **{mode}** ({cycles[mode]} cycles): {parts}")
 
 
+_GATE_CLASSES = (
+    ("dev-blocklisted", "dev blocklist"),
+    ("rug-blacklisted", "rug mint blacklist"),
+    ("pool memory", "pool memory"),
+    ("mint cooldown", "mint cooldown"),
+    ("pool cooldown", "pool cooldown"),
+    ("already exposed to token", "already exposed (token)"),
+    ("already have an active position", "already exposed (pool)"),
+    ("entry timing check", "entry timing"),
+    ("dumping", "momentum"),
+    ("trend", "momentum"),
+)
+
+
+def gate_class(tail):
+    """Bucket a pipeline `Skipping X-SOL - <tail>` reason into a stable class."""
+    low = tail.lower()
+    for needle, label in _GATE_CLASSES:
+        if needle in low:
+            return label
+    return "other"
+
+
+def section_gates():
+    print("\n## Pipeline gates — what was refused after the screen (last 24h)\n")
+    try:
+        proc = subprocess.run(
+            ["journalctl", "--user", "-u", "azimuth", "--since", "24 hours ago", "--no-pager"],
+            capture_output=True, text=True, timeout=60,
+        )
+        lines = proc.stdout.splitlines()
+    except Exception as exc:
+        print(f"journalctl unavailable ({exc}) — no gate data; propose nothing about blocklists.")
+        return
+
+    # DISTINCT tokens per class, not line counts: the pipeline re-prints the same
+    # skip every cycle, so a raw count measures how long a pool stayed in the
+    # feed, not how much the gate actually refused.
+    per_class = collections.defaultdict(set)
+    for line in lines:
+        m = re.search(r"Skipping ([\w.\-]+)-SOL - (.+)$", line)
+        if m:
+            per_class[gate_class(m.group(2))].add(m.group(1))
+    dead = collections.Counter(
+        m.group(1).strip().rstrip(".")
+        for m in (re.search(r"❌ (No candidates.+)$", ln) for ln in lines) if m
+    )
+
+    if not per_class and not dead:
+        print("No pipeline skips logged in the last 24h — either nothing reached the")
+        print("deploy path at all (check the screen funnel above) or every batch deployed.")
+    else:
+        print("`section_funnel` above stops at `sent`. This is what happened AFTER that:")
+        print("the gates inside `dlmm_pipeline.py`, which is where a batch that reached")
+        print("the deploy path can still end in nothing. Counted as distinct tokens.\n")
+        if per_class:
+            print("| gate | distinct tokens refused |")
+            print("|---|---|")
+            for label, toks in sorted(per_class.items(), key=lambda kv: -len(kv[1])):
+                print(f"| {label} | {len(toks)} |")
+        if dead:
+            print("\nBatches that reached the deploy path and deployed nothing:\n")
+            for reason, n in dead.most_common():
+                print(f"- {n}x — {reason}")
+
+    # Live blocklist stock against its cap. This is the number that starves the
+    # venue on a delay: a TTL bounds each entry's age, the cap bounds the set.
+    print("")
+    for pattern, cap_env, cap_default, label in (
+        ("sol:dlmm:blocklist:dev:*", "DEV_BLOCKLIST_MAX", 12, "dev blocklist"),
+        ("sol:dlmm:blocklist:mint:*", "MINT_BLACKLIST_MAX", 20, "rug mint blacklist"),
+    ):
+        try:
+            out = subprocess.run(["redis-cli", "--scan", "--pattern", pattern],
+                                 capture_output=True, text=True, timeout=20).stdout
+            n = len([k for k in out.splitlines() if k.strip()])
+            cap = int(os.environ.get(cap_env, cap_default))
+            flag = " — **at cap**" if n >= cap else ""
+            print(f"- {label} stock: **{n}** / cap {cap}{flag}")
+        except Exception as exc:
+            print(f"- {label} stock: unreadable ({exc}) — not evidence either way")
+    print("\nA blocklist sitting at its cap is not proof of over-blocking, but it does")
+    print("mean eviction — not expiry — is deciding what we may trade. Read it next to")
+    print("the refusal table above before proposing any TTL or cap change.")
+
+
 def section_soul():
     print("\n## Current parameters — SOUL.md section 9 (verbatim)\n")
     try:
@@ -254,6 +340,7 @@ def main():
     section_weights()
     section_holds(closes)
     section_funnel()
+    section_gates()
     section_soul()
     return 0
 
