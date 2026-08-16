@@ -454,6 +454,56 @@ def compute_deploy_amount(wallet_sol):
         return max(0.1, round(dynamic, 2)) if wallet_sol - reserve >= 0.1 else 0.0
     result = min(ceil, dynamic)
     return round(result, 2)
+
+
+def _prune_one_blocklist(pattern, cap, label):
+    """Evict the oldest entries of one blocklist until at most `cap` remain.
+
+    Age is read off the remaining TTL — lowest remaining = written longest ago —
+    because Redis stores no write time and adding one would not survive the
+    keys already in flight. Best-effort throughout: an unreadable TTL sorts as
+    "youngest" so a transient redis-cli failure can never evict a fresh ban,
+    and any exception leaves the blocklist exactly as it was. Over-blocking
+    costs throughput; under-blocking costs one ticket. Neither is worth
+    breaking a deploy cycle over."""
+    try:
+        out, _, code = run_command(f"redis-cli --scan --pattern \"{pattern}\"")
+        if code != 0:
+            return
+        keys = [k.strip() for k in out.splitlines() if k.strip()]
+        if len(keys) <= cap:
+            return
+        aged = []
+        for k in keys:
+            ttl_raw, _, _ = run_command(f"redis-cli ttl \"{k}\"")
+            try:
+                ttl = int((ttl_raw or "").strip())
+            except ValueError:
+                ttl = 1 << 30  # unreadable = treat as freshest, never evict
+            # A persistent key (ttl -1) predates the TTL migration entirely and
+            # is the stalest thing in the set — evict it first, not last.
+            aged.append((ttl if ttl >= 0 else -1, k))
+        aged.sort()
+        for _, k in aged[:len(aged) - cap]:
+            run_command(f"redis-cli del \"{k}\"")
+        print(f"🧹 {label} blocklist over cap ({len(keys)} > {cap}) — evicted "
+              f"{len(keys) - cap} oldest entries")
+    except Exception as exc:
+        print(f"[prune] Warning: {label} blocklist not pruned ({exc})")
+
+
+def prune_blocklists():
+    """Keep the rug blocklists inside their cardinality caps.
+
+    The TTLs added 2026-08-07/08-12 bound each entry's AGE. They do not bound
+    the SET SIZE, and size is what decides how much of the venue we can still
+    trade: at the observed write rate the dev set converges on ~30 wallets, and
+    a launchpad-scale deployer signs a large slice of the book. Run once per
+    deploy cycle, before any candidate is screened against these keys."""
+    _prune_one_blocklist("sol:dlmm:blocklist:dev:*", DEV_BLOCKLIST_MAX, "dev")
+    _prune_one_blocklist("sol:dlmm:blocklist:mint:*", MINT_BLACKLIST_MAX, "mint")
+
+
 def check_bin_coverage(pool, bins_below, bins_above):
     """Read-only: would deploying [active-bins_below, active+bins_above] need NEW
     Meteora bin-array init (~0.071 SOL each, non-refundable)? Returns the executor
@@ -595,6 +645,21 @@ POOL_MEMORY_NET_FLOOR_PCT = float(os.environ.get("POOL_MEMORY_NET_FLOOR_PCT", "-
 
 # Twin of dlmm_monitor.IMPLAUSIBLE_CHANGE_PCT / momentum.go implausibleChangePct.
 IMPLAUSIBLE_CHANGE_PCT = -95.0
+
+# Blocklist cardinality caps. TTLs bound how OLD an entry gets; nothing bounded
+# how MANY there are, and that second number is what decides throughput. The
+# arithmetic, measured 2026-08-16: rug bans were written at ~1 dev/day against a
+# 30d TTL and ~2 mints/day against a 7d TTL, so the set converges on ~30 wallets
+# and ~14 mints — and we found exactly 31 dev keys. The 2026-08-07 fix turned
+# "grows forever" into "converges large", which starves the same way on a
+# delay, because discovery recycles a small ticker set every cycle.
+#
+# A cap makes that equilibrium a decision instead of a side effect. Eviction
+# takes the LOWEST remaining TTL first: that is the oldest entry, i.e. the
+# stalest evidence, and under a 30d window it may still have weeks left to run,
+# so this is not a no-op that only drops what was about to expire anyway.
+DEV_BLOCKLIST_MAX = int(os.environ.get("DEV_BLOCKLIST_MAX", "12"))
+MINT_BLACKLIST_MAX = int(os.environ.get("MINT_BLACKLIST_MAX", "20"))
 
 
 def get_momentum(mint):
@@ -1198,6 +1263,9 @@ def main():
     if not candidates:
         print("No pools survived safety filters.")
         sys.exit(0)
+
+    # 3z. Bound the blocklists before reading them. See DEV_BLOCKLIST_MAX.
+    prune_blocklists()
 
     # 4. Check already open positions — filter valid candidates
     open_pos = get_open_positions()
