@@ -5,6 +5,13 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.6.3](https://github.com/pgen0x/azimuth/compare/v2.6.2...v2.6.3) (2026-08-16)
+
+
+### Bug Fixes
+
+* **install:** skip non-files when copying the cron pre-run scripts ([1b3bcc9](https://github.com/pgen0x/azimuth/commit/1b3bcc9a139b6b78dec7271ece8f5ecdbc6b024d))
+
 ## [2.6.2](https://github.com/pgen0x/azimuth/compare/v2.6.1...v2.6.2) (2026-08-16)
 
 
