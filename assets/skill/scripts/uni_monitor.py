@@ -1374,7 +1374,22 @@ def journal_close(rec):
 # down must never block a close.
 COOLDOWN_POOL_SECS = int(os.environ.get("UNI_COOLDOWN_POOL_SECS", "14400"))    # 4h
 COOLDOWN_TOKEN_SECS = int(os.environ.get("UNI_COOLDOWN_TOKEN_SECS", "14400"))  # 4h
-COOLDOWN_STREAK_SECS = (86400, 259200)  # 2 losses in 7d -> 24h, 3+ -> 72h
+# The escalation ladder, lowered 2026-08-17 from (24h, 72h). The repeat-fill
+# evidence it was built on still holds; what was wrong is the ceiling, which was
+# sized for a venue with pools to spare. This one does not have them: on
+# 2026-08-17 the WETH book offered exactly TWO pools clearing the screen at all
+# (LEMON.FUN, PACK), both drew the 72h tier, and the mode sat idle 41 hours with
+# a funded wallet — 2457 cycles, 229 with a passer, 11 candidates reaching the
+# deploy walk, 10 of them dying here. A brake that stops the vehicle is not a
+# brake. 12h/24h keeps the ladder's SHAPE (a repeat offender still costs more
+# than the 4h base, a third fill still more than a second) while bounding the
+# worst case at one day, the horizon the screen's own m15 gates re-judge a pool
+# on anyway.
+#
+# The long-horizon brake is TenureReject's MAX_FILL_PCT, not this: a pool that
+# keeps filling is meant to be vetoed on its 7d fill RATE, which no cooldown
+# length can express. Tighten that before lengthening this again.
+COOLDOWN_STREAK_SECS = (43200, 86400)  # 2 losses in 7d -> 12h, 3+ -> 24h
 
 
 def redis_cmd(*args):
