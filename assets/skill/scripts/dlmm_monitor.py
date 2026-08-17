@@ -134,6 +134,30 @@ TURNOVER_RECENTER_STRIKES = 3
 # (dlmm_pipeline.py: 3 deploys/24h -> 12h pool cooldown), which never saw these
 # runs because a monitor re-center never passes through the deploy path.
 TURNOVER_STRIKE_COOLDOWN_HOURS = 12
+# Stale-ticket re-pin (2026-08-17). The tight modes have a hole no rule can
+# speak into: in range, pool still advertising yield, and a peak that never
+# reached the ratchet trigger. Every other rail needs a condition that state
+# does not meet — the OOR fuse needs OOR, the low-yield bar is
+# MIN_FEE_TVL_24H_TIGHT_LIMIT (5%) against pools reading 20-35%, fee-pace-death
+# cannot fire before 75m (FEE_STALL_MIN_AGE_MINUTES 45 + a 30m window), and the
+# ratchet needs TURNOVER_TRAILING_TRIGGER_PCT. So the ticket sits until the
+# -2.5% downtrend rail, which is a LOSS rule doing a STALENESS rule's job:
+# WOFL-SOL sat 94.0m and MEOW-SOL 73.8m in exactly that state, both left at
+# -2.65% / -2.82%, both still reading fee/TVL above 19% at close.
+# 60m is where the mode's own outcomes stop improving — median PnL by hold
+# bucket over 457 turnover closes (the phantom -100% API reads excluded) runs
+# +0.13% (<30m) / +0.24% (<60m) / +0.10% (<120m) / -0.19% (>=120m), win rate
+# 68.4 / 69.7 / 51.3 / 42.9. A 60m bar cannot touch the two best buckets — they
+# closed on their own before it — so its whole blast radius is the 67 closes
+# (14.5%) that ran past 60m, whose combined realized PnL is -0.0064 SOL.
+# NOT an exit: the reason string carries no loss or income-death keyword, so a
+# PROFITABLE close routes straight back through is_turnover_churn and re-pins at
+# the current bin, while a losing one takes the normal exit + cooldown. That
+# asymmetry is the existing churn leg, not new plumbing. What it does spend is
+# the shared re-center budget (TURNOVER_RECENTER_STRIKES), which is deliberate:
+# a pool being re-pinned on age is making the same offer as one re-pinned on
+# drift, and 3/24h should ceiling both together.
+TURNOVER_MAX_HOLD_MINUTES = 60
 SOL_MINT = "So11111111111111111111111111111111111111112"
 DEFAULT_DEPLOY_SOL = 0.5
 TRAILING_TRIGGER_PCT = 5.0
@@ -522,10 +546,24 @@ def log_hold(pos_addr, hold_minutes, reason):
         print(f"⚠️ Failed to write hold journal: {e}")
 
 def log_close(pool, pair, meta, pos_addr, pnl_pct, realized_sol, fee_per_tvl_24h,
-              age_min, reason, txs, dry_run):
+              age_min, reason, txs, dry_run, event="exit", unclaimed_fees_sol=None):
     """Append a uniform close record to memories/dlmm_closes.jsonl. Every monitor
     close is journaled here; reconcile against the Meteora portfolio API (ground
-    truth) with dlmm_reconcile.py."""
+    truth) with dlmm_reconcile.py.
+
+    `event` distinguishes the two paths that end a position on-chain. Until
+    2026-08-17 only "exit" reached this file at all: the fee-compounding path
+    closed and redeployed inside its own branch and `continue`d past the journal
+    entirely, so every compounded ticket had its age and peak reset with no
+    record that it had ever existed. Re-centers were journaled, but as ordinary
+    exits — which is why MEOW-SOL's six rows read as six independent tickets
+    when two of them were one run. Nothing downstream can measure a hold-time or
+    trailing-trigger threshold honestly while those two facts are missing, so
+    the fields below are the prerequisite for tuning either one.
+
+    Additive only: dlmm_weights.py / dlmm_reconcile.py / dlmm_stats.py all read
+    named keys through .get(), and dlmm_backfill_close.py writes rows without
+    them (a backfilled close cannot recover a peak after the fact)."""
     entry = {
         "ts": int(time.time()),
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -549,6 +587,28 @@ def log_close(pool, pair, meta, pos_addr, pnl_pct, realized_sol, fee_per_tvl_24h
         # Entry-time signal snapshot (written by dlmm_pipeline.py at deploy) —
         # dlmm_weights.py correlates these with pnl_pct to learn signal weights.
         "signal": meta.get("signal"),
+        # "exit" | "compound" — which path ended the position. Only "exit" rows
+        # existed before 2026-08-17, so absence means "exit" for older rows.
+        # A re-center is NOT a third value: the close that feeds one is a real
+        # exit and cannot know it will be re-pinned (is_oor_rebalance is decided
+        # after this call), so the link is recorded on the CHILD as recenter_of.
+        "event": event,
+        # The trailing ratchet's own state at close. A close with a peak BELOW
+        # the mode's trigger is one the ratchet never got to judge, which is the
+        # only sample that can say whether the trigger sits too high.
+        "peak_pnl": round(float(meta.get("peak_pnl", 0.0) or 0.0), 4),
+        "trailing_armed": bool(meta.get("trailing_active", False)),
+        # Our own fee income, not the pool's advertised ratio. fee_per_tvl_24h is
+        # the POOL's — WOFL-SOL read 35.49% while bleeding to -2.65%, so it can
+        # not answer "can fees repay this drawdown". These two can. Written by
+        # the fee-stall window in step 5e; null when that window has not closed.
+        "unclaimed_fees_sol": round(float(unclaimed_fees_sol), 6) if unclaimed_fees_sol is not None else None,
+        "fee_pace_pct_30m": meta.get("fee_pace_pct_30m"),
+        "size_sol": meta.get("size_sol"),
+        "strategy": meta.get("strategy"),
+        # Position this one was re-pinned from, so a re-center run can be chained
+        # back to its first leg instead of reading as unrelated tickets.
+        "recenter_of": meta.get("recenter_of"),
     }
     try:
         path = os.path.join(PROFILE_DIR, "memories", "dlmm_closes.jsonl")
@@ -601,6 +661,7 @@ def load_soul_dlmm_params():
         "TURNOVER_CB_LOSS_SOL": float(TURNOVER_CB_LOSS_SOL),
         "TURNOVER_RECENTER_STRIKES": int(TURNOVER_RECENTER_STRIKES),
         "TURNOVER_STRIKE_COOLDOWN_HOURS": float(TURNOVER_STRIKE_COOLDOWN_HOURS),
+        "TURNOVER_MAX_HOLD_MINUTES": float(TURNOVER_MAX_HOLD_MINUTES),
         "MIN_AGE_BEFORE_YIELD_CHECK": float(MIN_AGE_BEFORE_YIELD_CHECK),
         "PULSE_MIN_AGE_BEFORE_YIELD_CHECK": float(PULSE_MIN_AGE_BEFORE_YIELD_CHECK),
         "MIN_FEE_TVL_24H_TIGHT_LIMIT": float(MIN_FEE_TVL_24H_TIGHT_LIMIT),
@@ -692,6 +753,8 @@ def load_soul_dlmm_params():
                 params["TURNOVER_RECENTER_STRIKES"] = int(val)
             elif "Turnover Strike Cooldown Hours" in name:
                 params["TURNOVER_STRIKE_COOLDOWN_HOURS"] = val
+            elif "Turnover Max Hold Minutes" in name:
+                params["TURNOVER_MAX_HOLD_MINUTES"] = val
             elif "OOR Downside Max Minutes" in name:
                 params["OOR_DOWNSIDE_MAX_MINUTES"] = int(val)
             elif "Max Out of Range Minutes" in name:
@@ -1050,8 +1113,9 @@ def main():
     min_fee_tvl_24h_limit = params["MIN_FEE_TVL_24H_LIMIT"]
     min_fee_tvl_24h_tight_limit = params["MIN_FEE_TVL_24H_TIGHT_LIMIT"]
     min_exit_liquidity_usd = params["MIN_EXIT_LIQUIDITY_USD"]
-    
-    print(f"Loaded SOUL.md parameters -> SL: {stop_loss_pct:.1f}%, Trailing TP Trigger: {trailing_trigger_pct:.1f}%, Trailing TP Drop: {trailing_drop_pct:.1f}%, Trailing TP (turnover): {turnover_trailing_trigger_pct:.1f}%/{turnover_trailing_drop_pct:.1f}%, Max Bins Pumped Above: {max_bins_pumped_above}, Max OOR: {max_oor_minutes}m (turnover {turnover_max_oor_minutes}m token-side / {turnover_sol_side_oor_minutes}m SOL-side), Min Age for Yield Check: {min_age_before_yield_check:.1f}m (pulse {pulse_min_age_before_yield_check:.1f}m), Min Fee/TVL: {min_fee_tvl_24h_limit:.2f}% (tight {min_fee_tvl_24h_tight_limit:.2f}%), Downtrend PnL: {DOWNTREND_PNL_PCT:.1f}%/{DOWNTREND_PNL_ONLY_PCT:.1f}% (tight {DOWNTREND_PNL_TIGHT_PCT:.1f}%/{DOWNTREND_PNL_ONLY_TIGHT_PCT:.1f}%), Turnover re-center: {params['TURNOVER_RECENTER_STRIKES']}/24h then {params['TURNOVER_STRIKE_COOLDOWN_HOURS']:.0f}h pool cooldown, CB {params['TURNOVER_CB_LOSS_SOL']:+.3f} SOL")
+    turnover_max_hold_minutes = params["TURNOVER_MAX_HOLD_MINUTES"]
+
+    print(f"Loaded SOUL.md parameters -> SL: {stop_loss_pct:.1f}%, Trailing TP Trigger: {trailing_trigger_pct:.1f}%, Trailing TP Drop: {trailing_drop_pct:.1f}%, Trailing TP (turnover): {turnover_trailing_trigger_pct:.1f}%/{turnover_trailing_drop_pct:.1f}%, Max Bins Pumped Above: {max_bins_pumped_above}, Max OOR: {max_oor_minutes}m (turnover {turnover_max_oor_minutes}m token-side / {turnover_sol_side_oor_minutes}m SOL-side), Min Age for Yield Check: {min_age_before_yield_check:.1f}m (pulse {pulse_min_age_before_yield_check:.1f}m), Min Fee/TVL: {min_fee_tvl_24h_limit:.2f}% (tight {min_fee_tvl_24h_tight_limit:.2f}%), Downtrend PnL: {DOWNTREND_PNL_PCT:.1f}%/{DOWNTREND_PNL_ONLY_PCT:.1f}% (tight {DOWNTREND_PNL_TIGHT_PCT:.1f}%/{DOWNTREND_PNL_ONLY_TIGHT_PCT:.1f}%), Turnover re-center: {params['TURNOVER_RECENTER_STRIKES']}/24h then {params['TURNOVER_STRIKE_COOLDOWN_HOURS']:.0f}h pool cooldown, CB {params['TURNOVER_CB_LOSS_SOL']:+.3f} SOL, Turnover max hold: {turnover_max_hold_minutes:.0f}m (stale re-pin)")
     
     # --reset-trailing: reset peak_pnl + trailing_active after a standalone fee claim
     if cli.reset_trailing:
@@ -1824,15 +1888,44 @@ def main():
                 window_min = (now - float(snap_at)) / 60.0
                 growth_sol = unclaimed_fees_sol - float(snap_sol)
                 growth_pct = (growth_sol / position_value_sol * 100.0) if position_value_sol > 0 else None
+                # Normalize to the window length before storing: the tick that
+                # closes the window can overshoot FEE_STALL_WINDOW_MINUTES, so a
+                # raw growth_pct is not comparable between positions. The
+                # threshold test below stays on the raw figure — it asks "did
+                # this window pay", not "at what rate" — but the journalled
+                # number has to be a rate or it cannot be compared at all.
+                if growth_pct is not None and window_min > 0:
+                    meta["fee_pace_pct_30m"] = round(growth_pct / window_min * FEE_STALL_WINDOW_MINUTES, 5)
                 if growth_pct is not None and growth_pct < FEE_STALL_MIN_PCT:
                     close_reason = (f"Fee pace death (+{growth_sol:.5f} SOL fees in {window_min:.0f}m = "
                                     f"{growth_pct:.3f}% of position < {FEE_STALL_MIN_PCT}%) — rotating dead capital")
+                    if not is_dry_run_stored:
+                        run_command(f"redis-cli set \"sol:dlmm:position:{pos_addr}\" '{json.dumps(meta)}'")
                 else:
                     # Pace healthy — roll the window forward.
                     meta["fee_snap_sol"] = unclaimed_fees_sol
                     meta["fee_snap_at"] = now
                     if not is_dry_run_stored:
                         run_command(f"redis-cli set \"sol:dlmm:position:{pos_addr}\" '{json.dumps(meta)}'")
+
+        # 5f. Stale-ticket re-pin: turnover's missing rail. See
+        # TURNOVER_MAX_HOLD_MINUTES for the hole this fills and the buckets that
+        # set 60m. Conditions are the hole itself, stated positively: still in
+        # range (so no fuse can speak), never armed (so no ratchet can), and past
+        # the age bar. `not trailing_active` is the same carve-out fee-pace-death
+        # takes — the ratchet owns armed winners and must not be pre-empted by a
+        # clock. Deliberately LAST of the close rules so every rule that can name
+        # a cause gets to name it first; this one only fires when none could.
+        # Turnover-only, NOT the is_tight_tp_pos set that shares the trailing
+        # pair: pulse has the same hole in theory but not in its journal — 18 of
+        # its 28 closes past 60m left through "Low yield", because its grace is
+        # 30m rather than 60m, so the rail that is missing here is present there.
+        # Its whole sample is 49 closes and the >=120m bucket's median is
+        # POSITIVE (+0.16%); one loser drives the negative sum. Not evidence.
+        if (not close_reason and meta.get("mode") == "turnover" and in_range
+                and not trailing_active and age_minutes >= turnover_max_hold_minutes):
+            close_reason = (f"Stale ticket re-pin ({age_minutes:.0f}m in range, peak {peak_pnl:+.2f}% "
+                            f"never armed the {effective_trigger:.1f}% ratchet, fee/TVL {fee_per_tvl_24h:.1f}%)")
 
         # An emergency reason must not be diluted by a softer rule that fired after it
         # (pumped-above / OOR / low-yield all overwrite close_reason unconditionally).
@@ -1865,6 +1958,24 @@ def main():
                     close_res, close_err = close_position(pos_addr, env_prefix,
                                                          wallet_address, is_dry_run_stored)
                     if close_res and close_res.get("success"):
+                        # Journal the leg before it disappears. This close is as
+                        # real on-chain as any other, but until 2026-08-17 the
+                        # branch redeployed and `continue`d straight past
+                        # log_close — so a compounded position's age and peak
+                        # reset with no record that the first leg existed, and
+                        # every hold-time figure computed from this journal was
+                        # short by however many compounds preceded the last leg.
+                        # Journal only: the daily PnL counters below are left
+                        # alone deliberately, because they never counted these
+                        # either and silently restating them would move totals
+                        # that past analysis was written against.
+                        log_close(pool, pair, meta, pos_addr, pnl_pct,
+                                  pnl_sol_actual if pnl_sol_actual is not None
+                                  else meta.get("size_sol", DEFAULT_DEPLOY_SOL) * (pnl_pct / 100.0),
+                                  fee_per_tvl_24h, age_minutes,
+                                  f"Fee compounding ({unclaimed_fees_sol:.4f} SOL claimed back into range)",
+                                  close_res.get("txHashes") or [], is_dry_run_stored,
+                                  event="compound", unclaimed_fees_sol=unclaimed_fees_sol)
                         new_deploy_sol = meta.get("size_sol", DEFAULT_DEPLOY_SOL) + unclaimed_fees_sol
                         compound_shape = "bid_ask" if is_turnover_compound else "spot"
                         deploy_cmd = f"node {EXECUTOR_PATH} deploy {pool} 0 {new_deploy_sol} {bins_below} {meta.get('bins_above', 0)} {compound_shape} {params.get('SLIPPAGE_BPS', 1000)}"
@@ -1896,7 +2007,10 @@ def main():
                                 "strategy": strategy if is_turnover_compound else "fee_compounding",
                                 "mode": meta.get("mode") or "multiday",
                                 "amount_x": 0,
-                                "amount_y": new_deploy_sol
+                                "amount_y": new_deploy_sol,
+                                # Chain back to the leg this compounded out of,
+                                # keeping the run's first position as the root.
+                                "recenter_of": meta.get("recenter_of") or pos_addr,
                              }
                             if not is_dry_run_stored:
                                 run_command(f"redis-cli set \"sol:dlmm:position:{new_pos}\" '{json.dumps(tracking_data)}'")
@@ -2068,7 +2182,12 @@ def main():
                 # this file against the Meteora portfolio API).
                 log_close(pool, pair, meta, pos_addr, pnl_pct, realized_sol,
                           fee_per_tvl_24h, age_minutes, close_reason, txs,
-                          close_res.get("dryRun") or close_res.get("dry_run") == True)
+                          close_res.get("dryRun") or close_res.get("dry_run") == True,
+                          # Read at close time rather than reusing the loop
+                          # variable: step 5e only assigns it on the branch where
+                          # the fee-stall window is live, so it is not guaranteed
+                          # to be bound here.
+                          unclaimed_fees_sol=(float(bp.get("unclaimed_fees_sol") or 0.0) if bp else None))
 
                 # Re-entry cooldown blacklist — prevent re-opening same token too soon
                 base_symbol_cd = meta.get("base_symbol", pair.split("-")[0]).upper()
@@ -2174,7 +2293,13 @@ def main():
                     # claimed "normal exit + cooldown" while skipping the cooldown
                     # block entirely, so a tripped breaker left the pool completely
                     # unguarded. See TURNOVER_STRIKE_COOLDOWN_HOURS.
-                    if mode_cd == "turnover" and close_reason.startswith("Out of Range"):
+                    # "Stale ticket re-pin" joins "Out of Range" here for the
+                    # same reason: both are closes that ASKED for a re-center and
+                    # were refused by a guard. A refused ask must cool the pool,
+                    # or the 15m profitable-exit symbol cooldown lets the daemon
+                    # re-signal it straight into a fresh run and the guard that
+                    # just said stop is answered by a new ticket.
+                    if mode_cd == "turnover" and close_reason.startswith(("Out of Range", "Stale ticket re-pin")):
                         if rebalance_pnl_24h <= cb_floor_sol:
                             strike_why = (f"circuit breaker: pool 24h rebalance PnL "
                                           f"{rebalance_pnl_24h:+.4f} SOL <= {cb_floor_sol} SOL floor")
@@ -2349,7 +2474,13 @@ def main():
                             "strategy": f"{mode_cd}_rebalance",
                             "mode": mode_cd,
                             "amount_x": 0,
-                            "amount_y": size_sol
+                            "amount_y": size_sol,
+                            # Chain the run: leg 1 keeps its own address as the
+                            # root, every later leg carries it forward. Without
+                            # this a re-center run reads as unrelated tickets —
+                            # MEOW-SOL's +1.33% close and the -2.82% leg it
+                            # reseeded into looked like two independent trades.
+                            "recenter_of": meta.get("recenter_of") or pos_addr,
                         }
                         if not is_dry_run_stored:
                             run_command(f"redis-cli set \"sol:dlmm:position:{new_pos}\" '{json.dumps(tracking_data)}'")
