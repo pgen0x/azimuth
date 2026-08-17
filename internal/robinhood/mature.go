@@ -40,6 +40,30 @@ const feeTierDenom = 10000.0
 
 var gatewayClient = &http.Client{Timeout: 15 * time.Second}
 
+const (
+	// gatewayAttempts is how many times one leaderboard query is issued before
+	// the arm is declared down for the cycle.
+	//
+	// The gateway answers this venue in ~0.33s and returns 94 pools when it
+	// answers at all, yet 25 of 181 cycles on 2026-08-17 lost the v3 arm
+	// entirely — 89 `returned no v3 pools` plus 17 client timeouts over six
+	// hours, against ZERO non-200 statuses and ZERO GraphQL field errors. So the
+	// failure is an empty 200 or a stalled connection at the edge, not a
+	// rejected query: the shape a retry fixes. A losing cycle costs that
+	// protocol's whole universe, because fetchTopPools has no partial result to
+	// fall back on the way fetchRankedPages does.
+	//
+	// Two, not more: the retry is cheap only while it stays rare (~14% of
+	// cycles), and a gateway that fails twice a second apart is down rather than
+	// flaky — the ranked feed already carries that cycle.
+	gatewayAttempts = 2
+
+	// gatewayRetryDelay spaces the retry far enough to outlast one bad edge
+	// response without stretching the cycle: the poll interval is 60s and the
+	// two protocols retry independently, so the worst case adds under 2s.
+	gatewayRetryDelay = 900 * time.Millisecond
+)
+
 // topPoolsQuery asks for everything the gateway can give us about a pool.
 // Notably absent, and the reason enrichFromGT exists: h1 volume, the
 // buys/sells/buyers/sellers breakdown, price-change windows, and FDV.
@@ -168,6 +192,16 @@ func FetchMaturePools(mp ModeParams, now time.Time) ([]Pool, error) {
 	}
 	add(rawV3, "v3")
 	add(rawV4, "v4")
+
+	// The funnel, not just the outcome. `feed union gateway=0` is ambiguous by
+	// itself — a failed fetch and a prefilter that kept nothing log the same
+	// zero — and that ambiguity cost a misdiagnosis on 2026-08-17, where the arm
+	// was read as broken while both leaderboards were answering in 0.33s with 94
+	// pools each and the prefilter was simply cutting all 188. One line
+	// distinguishes them for good.
+	log.Printf("robinhood[%s]: gateway funnel v3=%d v4=%d shortlist=%d",
+		mp.Mode, len(rawV3), len(rawV4), len(shortlist))
+
 	if len(shortlist) == 0 {
 		return nil, nil
 	}
@@ -183,8 +217,30 @@ func FetchMaturePools(mp ModeParams, now time.Time) ([]Pool, error) {
 }
 
 // fetchTopPools runs one protocol's gateway leaderboard query ("v3" or "v4")
-// and returns the raw pool list.
+// and returns the raw pool list, retrying a failed attempt (see
+// gatewayAttempts). An empty leaderboard is treated as a failure and retried
+// for the same reason a transport error is: this venue has ~94 indexed pools
+// per protocol, so zero is the edge misbehaving, not the chain being empty.
 func fetchTopPools(protocol string) ([]uniPool, error) {
+	var err error
+	for attempt := 1; attempt <= gatewayAttempts; attempt++ {
+		var pools []uniPool
+		pools, err = fetchTopPoolsOnce(protocol)
+		if err == nil {
+			if attempt > 1 {
+				log.Printf("robinhood: gateway %s leaderboard recovered on attempt %d", protocol, attempt)
+			}
+			return pools, nil
+		}
+		if attempt < gatewayAttempts {
+			time.Sleep(gatewayRetryDelay)
+		}
+	}
+	return nil, err
+}
+
+// fetchTopPoolsOnce is one attempt at a leaderboard query.
+func fetchTopPoolsOnce(protocol string) ([]uniPool, error) {
 	op, query := "TopV3Pools", topPoolsQuery
 	if protocol == "v4" {
 		op, query = "TopV4Pools", topV4PoolsQuery

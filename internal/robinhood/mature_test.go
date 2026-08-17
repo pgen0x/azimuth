@@ -1,6 +1,8 @@
 package robinhood
 
 import (
+	"io"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -311,5 +313,82 @@ func TestPrefilterRejects(t *testing.T) {
 		if prefilter(p, Mature, now) {
 			t.Errorf("%s: expected prefilter to reject", c.name)
 		}
+	}
+}
+
+// stubRoundTrip serves canned gateway responses, one per call.
+type stubRoundTrip struct {
+	bodies []string
+	calls  int
+}
+
+func (s *stubRoundTrip) RoundTrip(*http.Request) (*http.Response, error) {
+	body := s.bodies[len(s.bodies)-1]
+	if s.calls < len(s.bodies) {
+		body = s.bodies[s.calls]
+	}
+	s.calls++
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(strings.NewReader(body)),
+		Header:     http.Header{},
+	}, nil
+}
+
+func withGatewayStub(t *testing.T, bodies ...string) *stubRoundTrip {
+	t.Helper()
+	stub := &stubRoundTrip{bodies: bodies}
+	prev := gatewayClient
+	gatewayClient = &http.Client{Transport: stub}
+	t.Cleanup(func() { gatewayClient = prev })
+	return stub
+}
+
+const oneV3Pool = `{"data":{"topV3Pools":[{"address":"0xaaaa","createdAtTimestamp":1785270712,` +
+	`"feeTier":10000,"totalLiquidity":{"value":100000},"cumulativeVolume":{"value":50000},` +
+	`"token0":{"address":"0x1111","symbol":"TKN","decimals":18},` +
+	`"token1":{"address":"0x2222","symbol":"WETH","decimals":18}}]}}`
+
+// An empty leaderboard is this venue's dominant gateway failure — 89 of them in
+// six hours on 2026-08-17, every one HTTP 200 with no GraphQL errors, on a chain
+// that has ~94 indexed v3 pools. It must be retried, not accepted as "the chain
+// is empty".
+func TestFetchTopPoolsRetriesEmptyLeaderboard(t *testing.T) {
+	stub := withGatewayStub(t, `{"data":{"topV3Pools":[]}}`, oneV3Pool)
+
+	pools, err := fetchTopPools("v3")
+	if err != nil {
+		t.Fatalf("expected the retry to recover, got %v", err)
+	}
+	if len(pools) != 1 {
+		t.Fatalf("pools = %d, want 1", len(pools))
+	}
+	if stub.calls != 2 {
+		t.Errorf("calls = %d, want 2 (one failure + one retry)", stub.calls)
+	}
+}
+
+// Failing every attempt a second apart means down, not flaky: the caller
+// degrades to the other feed rather than spending more of the cycle here.
+func TestFetchTopPoolsGivesUpAfterAttempts(t *testing.T) {
+	stub := withGatewayStub(t, `{"data":{"topV3Pools":[]}}`)
+
+	if _, err := fetchTopPools("v3"); err == nil {
+		t.Fatal("expected an error once every attempt failed")
+	}
+	if stub.calls != gatewayAttempts {
+		t.Errorf("calls = %d, want %d", stub.calls, gatewayAttempts)
+	}
+}
+
+// A first-attempt success must not pay for the retry.
+func TestFetchTopPoolsNoRetryOnSuccess(t *testing.T) {
+	stub := withGatewayStub(t, oneV3Pool)
+
+	if _, err := fetchTopPools("v3"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if stub.calls != 1 {
+		t.Errorf("calls = %d, want 1", stub.calls)
 	}
 }
