@@ -5,6 +5,22 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.7.0](https://github.com/pgen0x/azimuth/compare/v2.6.3...v2.7.0) (2026-08-17)
+
+
+### Features
+
+* **solana:** close the turnover stale-ticket hole, and journal what it needs ([26bde90](https://github.com/pgen0x/azimuth/commit/26bde90becadd136a5ddf8bea490aade3b062b1b))
+* **solana:** close the turnover stale-ticket hole, and journal what it needs ([7151c73](https://github.com/pgen0x/azimuth/commit/7151c7378976f9e7ebf72334d22619856a487801))
+
+
+### Bug Fixes
+
+* **robinhood:** bound the repeat-fill cooldown at 24h, not 72h ([3429ea5](https://github.com/pgen0x/azimuth/commit/3429ea51932eeefe6f46bb5c9a5474b10573fd31))
+* **robinhood:** bound the repeat-fill cooldown at 24h, not 72h ([a60ecc7](https://github.com/pgen0x/azimuth/commit/a60ecc79f8213bcacb987b023cb80bd38b2fa872))
+* **robinhood:** retry an empty gateway leaderboard, and log the funnel ([eac6244](https://github.com/pgen0x/azimuth/commit/eac62449327a0f18e03aab8da36cb299ce0ec8a0))
+* **robinhood:** retry an empty gateway leaderboard, and log the funnel ([145aa92](https://github.com/pgen0x/azimuth/commit/145aa92e04708a97007db7b20d2ae6b3bebc43e9))
+
 ## [2.6.3](https://github.com/pgen0x/azimuth/compare/v2.6.2...v2.6.3) (2026-08-16)
 
 
