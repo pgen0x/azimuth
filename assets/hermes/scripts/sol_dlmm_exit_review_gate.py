@@ -17,10 +17,12 @@ still merely APPROACHING a rule — these bands are deliberately wider than the
 rules in `dlmm_monitor.py`, and each names the rule it front-runs.
 
 Only rules an AI hold can actually suppress are worth waking for. The
-emergency floor, the rug-velocity dump, the thin-liquidity exit and a trailing
-drop >= 3% all bypass holds outright (see the AI HOLD CHECK in
-dlmm_monitor.py), so a position in one of those states is not the review's
-business — the rules have already decided.
+emergency floor, the rug-velocity dump, the thin-liquidity exit, a trailing
+drop >= 3%, the peak-giveback stop and the underwater fast-out all bypass
+holds outright (see the AI HOLD CHECK in dlmm_monitor.py), so a position in one
+of those states is not the review's business — the rules have already decided.
+The last two are also why no band front-runs a ~-1% position: deferring a speed
+rule turns it back into the -3% close it was written to pre-empt.
 """
 import json
 import os

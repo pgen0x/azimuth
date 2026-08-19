@@ -215,6 +215,16 @@ EMERGENCY_SL_BUFFER_PCT = 3.0
 # only a second consecutive suspect tick is allowed through.
 SUSPECT_PNL_PCT = -90.0
 SUSPECT_PNL_RETRY_TTL_SECS = 300
+# ...and the executor's own confirmation is worth nothing while the position is this
+# young: `pnl` reads the same not-yet-indexed state the Portfolio API does, so both
+# sides agreed on -100.00% three times in 48h (2026-08-17..18) and the EMERGENCY SL
+# closed three healthy positions at age 0.0-0.1m. Every one returned its full deposit
+# on-chain (deposit == withdrawal, 0.0000 SOL realized) while the journal booked
+# -1.41 SOL of loss that never happened — money the stats, the weight learner and the
+# daily book all then treated as real. Under this age a catastrophic read is a skipped
+# tick, never a close. A genuine collapse is still covered: the rug-velocity rule
+# reads 5m PRICE candles, not a position mark, so the indexing gap cannot mask it.
+SUSPECT_PNL_MIN_AGE_MINUTES = 3.0
 # Trailing TP must lock at least this much (≈ round-trip swap cost) to count as a
 # take-profit. Below it, a floor breach gets one-tick gap-through grace first.
 TRAILING_MIN_LOCK_PCT = 0.3
@@ -223,6 +233,29 @@ TRAILING_MIN_LOCK_PCT = 0.3
 # instead of waiting for the ratchet-floor breach — dumps gap through the floor
 # between 20s ticks and turn peaked winners into booked losses.
 FAST_EXIT_M5_PCT = -3.0
+# ...and the same velocity read is the right trigger when the position is already
+# UNDERWATER, which is where it used to be forbidden (the rule above requires an
+# armed trailing TP and a position still in profit). Measured over 7d of live
+# closes: the `downtrend` bucket is the single biggest real loss maker — 9 closes,
+# 0% win rate, -0.257 SOL — and it books an average -4.82% against triggers of
+# -2.5%/-3.0%, because a one-sided SOL position that is underwater IS a token bag
+# and the close swaps it out at the bottom of the move. This leg does not wait for
+# the level; it fires while the pool is still moving. Tight modes only: their whole
+# band is 1.2%, so a -3% 5m candle against a -1.5% position is not noise there,
+# whereas a thesis-mode position is sized to sit through exactly that.
+FAST_EXIT_UNDERWATER_PNL_PCT = -1.5
+# Peak-giveback stop — the gap under the trailing TP. A tight-mode position only
+# arms the ratchet at TURNOVER_TRAILING_TRIGGER_PCT (1.2%), so everything that
+# peaks between here and there has NO downside rail at all until the downtrend
+# leg at -2.5%/-3%. That gap is where the losers live: of the four worst closes in
+# the 24h to 2026-08-19, three peaked at +0.51%/+0.75%/+0.76% and were booked at
+# -4.12%/-3.32%/-3.27%. Over 7d the rule below would have fired on 8 of the 12
+# closes worse than -1% (which booked -0.133 SOL between them) against 2 eventual
+# winners worth +0.011 SOL that dipped that far and recovered — a 12:1 trade.
+# Deliberately NOT a take-profit: the giveback lands near flat, well under
+# TRAILING_MIN_LOCK_PCT, so it must never route through the TP/cooldown path.
+GIVEBACK_ARM_PCT = 0.5
+GIVEBACK_DROP_PCT = 1.5
 # Sustained-downtrend exit: an underwater position whose token is in a steady 1h
 # decline closes early instead of riding to the SL floor (spurdo: -7.45% at the
 # last cron HOLD, hard SL -17.22% ten minutes later, -21.13% booked after swap
@@ -1547,10 +1580,21 @@ def main():
         # SUSPECT-READ GUARD — a catastrophic Portfolio-API PnL must be confirmed
         # on-chain before any close rule may act on it (see SUSPECT_PNL_PCT).
         suspect_key = f"sol:dlmm:position:{pos_addr}:suspect_pnl_since"
+        # A position with no recorded deploy time gets no age protection — unknown age
+        # must not become an unclosable position.
+        suspect_deployed_at = meta.get("deployed_at")
+        suspect_age_min = ((now - suspect_deployed_at) / 60.0
+                           if suspect_deployed_at else float("inf"))
         if api_available and bp and pnl_pct <= SUSPECT_PNL_PCT:
             verify_data, verify_err = run_command_json(f"node {EXECUTOR_PATH} pnl {pool} {pos_addr}")
             if verify_data and verify_data.get("success") != False:
                 v_pct = float(verify_data.get("pnl_pct", pnl_pct))
+                if v_pct <= SUSPECT_PNL_PCT and suspect_age_min < SUSPECT_PNL_MIN_AGE_MINUTES:
+                    print(f"🛡️ SUSPECT PnL: both sources read {v_pct:.2f}% but {pair} is only "
+                          f"{suspect_age_min:.1f}m old (< {SUSPECT_PNL_MIN_AGE_MINUTES:.0f}m) — "
+                          f"indexing gap, not a loss; skipping this tick")
+                    run_command(f"redis-cli set \"{suspect_key}\" {int(now)} ex {SUSPECT_PNL_RETRY_TTL_SECS}")
+                    continue
                 if v_pct > SUSPECT_PNL_PCT:
                     print(f"🛡️ SUSPECT PnL: Portfolio API says {pnl_pct:.2f}% but on-chain executor says {v_pct:+.2f}% — using on-chain read")
                     pnl_pct = v_pct
@@ -1564,6 +1608,11 @@ def main():
                     run_command(f"redis-cli del \"{suspect_key}\"")
             else:
                 prev_suspect, _, _ = run_command(f"redis-cli get \"{suspect_key}\"")
+                if suspect_age_min < SUSPECT_PNL_MIN_AGE_MINUTES:
+                    print(f"🛡️ SUSPECT PnL {pnl_pct:.2f}% unverifiable (executor error: {verify_err}) "
+                          f"and {pair} is only {suspect_age_min:.1f}m old — skipping this tick")
+                    run_command(f"redis-cli set \"{suspect_key}\" {int(now)} ex {SUSPECT_PNL_RETRY_TTL_SECS}")
+                    continue
                 if prev_suspect and prev_suspect != "(nil)":
                     print(f"⚠️ SUSPECT PnL {pnl_pct:.2f}% unverifiable (executor error: {verify_err}) for a 2nd consecutive tick — letting rules act on it")
                     run_command(f"redis-cli del \"{suspect_key}\"")
@@ -1646,6 +1695,18 @@ def main():
                 meta["trailing_grace_used"] = False
                 if not is_dry_run_stored:
                     run_command(f"redis-cli set \"sol:dlmm:position:{pos_addr}\" '{json.dumps(meta)}'")
+
+        # 1b. Peak-giveback stop — the rail under the arming threshold. Only for
+        # positions the trailing TP never armed (an armed one is owned by the
+        # ratchet and by the fast-out), and only for the tight modes, whose band
+        # is small enough that a 1.5-point giveback is a reversal rather than
+        # noise. See GIVEBACK_ARM_PCT for the closes that motivated it.
+        if (not close_reason and is_tight_tp_pos and not trailing_active
+                and peak_pnl >= GIVEBACK_ARM_PCT
+                and (peak_pnl - pnl_pct) >= GIVEBACK_DROP_PCT):
+            close_reason = (f"Peak-giveback stop (peak {peak_pnl:+.2f}%, now {pnl_pct:+.2f}% — "
+                            f"gave back {peak_pnl - pnl_pct:.2f}% >= {GIVEBACK_DROP_PCT}% "
+                            f"without ever arming the trailing TP)")
 
         # 2. Hard Stop-Loss Check. Grace is conditional: only a young position that is
         # still in range AND earning hard (fee/TVL >= 10%) may ride a breach of the SL,
@@ -1863,6 +1924,18 @@ def main():
                 and price_change_m5 <= FAST_EXIT_M5_PCT and pnl_pct >= TRAILING_MIN_LOCK_PCT):
             close_reason = (f"Fast-out dump exit (5m {price_change_m5:+.1f}% <= {FAST_EXIT_M5_PCT}% "
                             f"with PnL {pnl_pct:+.2f}%, peak {peak_pnl:+.2f}%) — realizing before floor gap-through")
+        # 5d-ii. The same velocity read, underwater. The downtrend legs above wait
+        # for a LEVEL (-2.5%/-3%) and then book -4.8% on average because the bag is
+        # sold into the move that caused the level; this fires while the move is
+        # still happening. Tight modes only, and it stays strictly above the rug
+        # velocity rail (RUG_M5_PCT, -20%), which remains the emergency class.
+        # Fail-open: missing m5 never fires. "dump" routes the cooldown path.
+        if (not close_reason and is_tight_tp_pos and price_change_m5 is not None
+                and price_change_m5 <= FAST_EXIT_M5_PCT
+                and pnl_pct <= FAST_EXIT_UNDERWATER_PNL_PCT):
+            close_reason = (f"Fast-out dump exit, underwater (5m {price_change_m5:+.1f}% <= "
+                            f"{FAST_EXIT_M5_PCT}% with PnL {pnl_pct:+.2f}% <= "
+                            f"{FAST_EXIT_UNDERWATER_PNL_PCT}%) — cutting before the downtrend level")
 
         # 5e. Fee-pace-death exit: fees are the product — when the stream stops,
         # the position is pure token risk earning nothing (26 of the 30d
@@ -2136,9 +2209,21 @@ def main():
         if close_reason and not emergency_close:
             hold_val, _, _ = run_command(f"redis-cli get \"sol:dlmm:position:{pos_addr}:ai_hold_until\"")
             if hold_val and hold_val != "(nil)" and int(hold_val) > now:
-                is_large_trailing_drop = "trailing take-profit" in close_reason.lower() and drop_from_peak >= AI_HOLD_BYPASS_DROP_PCT
-                if is_large_trailing_drop:
-                    print(f"⚡ AI HOLD bypassed for {pair}: trailing TP drop {drop_from_peak:.2f}% >= {AI_HOLD_BYPASS_DROP_PCT}% (real dump, not bounce)")
+                reason_lc = close_reason.lower()
+                is_large_trailing_drop = "trailing take-profit" in reason_lc and drop_from_peak >= AI_HOLD_BYPASS_DROP_PCT
+                # The two speed rules bypass too. A hold defers 10-20 minutes,
+                # which is precisely the window both exist to beat: the giveback
+                # stop fires before the position reaches the downtrend level, and
+                # the underwater fast-out fires while the 5m candle is still
+                # dumping. Deferred, each one simply becomes the -3% close it was
+                # built to pre-empt, so a hold would not soften it — it would
+                # delete the rule and keep its name.
+                is_speed_rule = ("peak-giveback stop" in reason_lc
+                                 or "fast-out dump exit, underwater" in reason_lc)
+                if is_large_trailing_drop or is_speed_rule:
+                    why = (f"trailing TP drop {drop_from_peak:.2f}% >= {AI_HOLD_BYPASS_DROP_PCT}% (real dump, not bounce)"
+                           if is_large_trailing_drop else "speed rule — a hold would defer it past its own purpose")
+                    print(f"⚡ AI HOLD bypassed for {pair}: {why}")
                 else:
                     mins_left = (int(hold_val) - now) / 60.0
                     print(f"✋ AI HOLD active for {pair} ({mins_left:.0f}m left) — suppressing: {close_reason}")

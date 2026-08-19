@@ -419,6 +419,18 @@ one pass per enabled mode per `POLL_INTERVAL`.
   Keep time injection at the edges.
 - **Webhook payload is a contract** documented in `docs/SIGNAL_SCHEMA.md`.
   Update that doc when changing the emitted shape.
+- **Neither is `pnl_sol`, on Solana.** In `dlmm_closes.jsonl` both figures are the
+  MARK the monitor read one tick before it closed, and the Portfolio API returns
+  `-100%` for a position it has not indexed yet — so three closes on 2026-08-17..18
+  booked -1.41 SOL that the chain never took (deposit == withdrawal on all three).
+  `dlmm_realized.py` writes the arbiter to `memories/dlmm_realized.jsonl` (deposit /
+  withdrawal / fee flows per closed position, joined on `position`), and the
+  scoreboard, the weight learner and the proposal brief all read `realized_sol`
+  through `apply_realized()`, stamping `pnl_basis`. **Pass the caller's own path to
+  it**: the profile's `skills/solana-dlmm/scripts` is a symlink into this repo and
+  Python resolves sys.path[0], so an imported module computes the REPO as its
+  profile and every close silently comes back "mark". A position the reconciler has
+  not fetched is unmeasured, never 0.0.
 - **`pnl_pct` is not money.** In `uni_closes.jsonl` it is a percentage against the
   position's *marked* value, so a close that ended holding an unsellable token can
   read +90% while returning almost no quote, leaving behind a token side no venue
