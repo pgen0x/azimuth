@@ -5,6 +5,16 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.7.1](https://github.com/pgen0x/azimuth/compare/v2.7.0...v2.7.1) (2026-08-22)
+
+
+### Bug Fixes
+
+* **scanner:** stop reject-tally reasonKey from erasing the gate name ([6b5efef](https://github.com/pgen0x/azimuth/commit/6b5efef32d173e5157676377b6e976271cc20077))
+* **solana:** close turnover stale-ticket hole, kill phantom losses, fix reject tally ([ee40cfd](https://github.com/pgen0x/azimuth/commit/ee40cfd398c4a6de35254df3194f5372074622ed))
+* **solana:** stop booking losses that never happened, and cut the drawdown tail earlier ([2566622](https://github.com/pgen0x/azimuth/commit/256662249368d7d7d183de425efc78c0a6750818))
+* **solana:** widen suspect-read guard to catch shallower indexing-lag misreads ([06bc9d1](https://github.com/pgen0x/azimuth/commit/06bc9d1b18547130028ca426ca39de5d5d0d1e9b))
+
 ## [2.7.0](https://github.com/pgen0x/azimuth/compare/v2.6.3...v2.7.0) (2026-08-17)
 
 
