@@ -26,18 +26,63 @@ func batchSummary(batch []*meteora.Candidate) string {
 	return strings.Join(parts, ", ")
 }
 
-// reasonKey collapses a Screen reject reason to its stable prefix (the text
-// before the first number or colon) so per-pool reasons group into a tally.
+// reasonKey collapses a Screen reject reason to its stable prefix (the words
+// before the first measured value) so per-pool reasons group into a tally.
 // "fee/TVL 0.02% < 0.10%" -> "fee/TVL", "non-SOL pool" -> "non-SOL_pool".
+//
+// Cutting at the first DIGIT was wrong twice over, and both ways cost a
+// diagnosis. Several gates lead with a window label — "m15 txns 4 < 8",
+// "m15 volume $12 < $500", "m15 fee/TVL 0.001% < 0.02%" all collapsed to a
+// bare "m", so a cycle reporting "m=3" named no gate at all. And every
+// floor/cap pair shares its prefix ("reserve $8k < $10k" vs
+// "reserve $2.1M > $500k cap"), so "reserve=18" could mean the mode is
+// starved of depth or drowning in it — opposite fixes. The first field is
+// therefore always kept, later fields are cut once one reads as a value, and
+// an over-the-ceiling reject is tagged "_over" so it tallies apart from its
+// floor.
 func reasonKey(reason string) string {
-	if i := strings.IndexAny(reason, "0123456789:"); i >= 0 {
+	if i := strings.Index(reason, ":"); i >= 0 {
 		reason = reason[:i]
 	}
-	reason = strings.TrimRight(reason, " $<>=(%-")
-	if reason == "" {
+	over := strings.Contains(reason, " > ")
+	fields := strings.Fields(reason)
+	kept := make([]string, 0, len(fields))
+	for i, f := range fields {
+		if i > 0 && isValueField(f) {
+			break
+		}
+		kept = append(kept, f)
+	}
+	key := strings.Join(kept, "_")
+	key = strings.TrimRight(key, "_$<>=(%-")
+	if key == "" {
 		return "other"
 	}
-	return strings.ReplaceAll(reason, " ", "_")
+	if over {
+		key += "_over"
+	}
+	return key
+}
+
+// isValueField reports whether a field is a measured quantity rather than part
+// of the gate's name — a number, a "$1234"/"-6.1%" amount, a comparison
+// operator, or the start of a parenthesised aside.
+func isValueField(f string) bool {
+	if f == "" {
+		return false
+	}
+	switch f[0] {
+	case '$', '(', '<', '>', '=':
+		return true
+	}
+	if f[0] >= '0' && f[0] <= '9' {
+		return true
+	}
+	// "-6.1%" is a value; "-" alone or a hyphenated word ("non-SOL") is not.
+	if f[0] == '-' && len(f) > 1 && f[1] >= '0' && f[1] <= '9' {
+		return true
+	}
+	return false
 }
 
 // rejectSummary renders a reject tally as "k=v k=v", highest count first.

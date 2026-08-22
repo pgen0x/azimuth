@@ -41,6 +41,8 @@ import os
 import subprocess
 import time
 
+from dlmm_realized import apply_realized
+
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROFILE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(SCRIPT_DIR)))
 CLOSES_PATH = os.path.join(PROFILE_DIR, "memories", "dlmm_closes.jsonl")
@@ -130,7 +132,10 @@ def load_recent_closes():
             if (rec.get("ts") or 0) < cutoff:
                 continue
             records.append(rec)
-    return records
+    # Learn against money, not against the monitor's last mark — a phantom
+    # -100% close would otherwise teach the weights that whatever signals that
+    # position carried predict a total loss (dlmm_realized.py).
+    return apply_realized(records, os.path.join(PROFILE_DIR, "memories", "dlmm_realized.jsonl"))
 
 
 def outcome_sol(rec):

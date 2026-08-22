@@ -35,6 +35,12 @@ import time
 PROFILE = "__PROFILE__"
 MEMORIES = os.path.join(PROFILE, "memories")
 CLOSES_PATH = os.path.join(MEMORIES, "dlmm_closes.jsonl")
+# On-chain flows per closed position, written by the skill's dlmm_realized.py.
+# The journal's own pnl_sol is the monitor's mark one tick before the close and
+# can be pure fiction (three -100% rows in 2026-08-17..18 booked -1.41 SOL the
+# chain never took). Read as an override, never as a requirement: a position the
+# reconciler has not fetched keeps its mark and is counted as such.
+REALIZED_PATH = os.path.join(MEMORIES, "dlmm_realized.jsonl")
 HOLDS_PATH = os.path.join(MEMORIES, "ai_holds.jsonl")
 WEIGHTS_PATH = os.path.join(MEMORIES, "signal_weights.json")
 SOUL_PATH = os.path.join(PROFILE, "SOUL.md")
@@ -49,8 +55,26 @@ LIFT_NOISE_FLOOR = 0.08
 SOLANA_MODES = ("casual", "multiday", "turnover", "pulse")
 
 
+def load_realized():
+    """{position: realized record} — empty dict when the reconciler has not run."""
+    out = {}
+    if not os.path.exists(REALIZED_PATH):
+        return out
+    with open(REALIZED_PATH, encoding="utf-8") as f:
+        for line in f:
+            if not line.strip():
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if rec.get("position"):
+                out[rec["position"]] = rec
+    return out
+
+
 def load_closes():
-    """Real, attributable closes inside the window."""
+    """Real, attributable closes inside the window, marked-to-chain where possible."""
     if not os.path.exists(CLOSES_PATH):
         return []
     cutoff = time.time() - WINDOW_DAYS * 86400
@@ -68,6 +92,15 @@ def load_closes():
             if (rec.get("ts") or 0) < cutoff:
                 continue
             out.append(rec)
+    realized = load_realized()
+    for rec in out:
+        got = realized.get(rec.get("position"))
+        if got:
+            rec["pnl_sol"] = got.get("realized_sol")
+            rec["pnl_pct"] = got.get("realized_pct")
+            rec["pnl_basis"] = "realized"
+        else:
+            rec["pnl_basis"] = "mark"
     return out
 
 
@@ -100,6 +133,10 @@ def fmt_sol(v):
 
 def section_modes(closes):
     print(f"\n## Outcomes by mode ({WINDOW_DAYS}d window, {len(closes)} closes)\n")
+    on_chain = sum(1 for r in closes if r.get("pnl_basis") == "realized")
+    if closes:
+        print(f"PnL basis: {on_chain}/{len(closes)} closes reconciled to on-chain flows, "
+              f"{len(closes) - on_chain} still on the monitor's close-time mark.\n")
     if not closes:
         print("No closes in the window. Propose nothing on outcome grounds.")
         return
@@ -332,8 +369,28 @@ def section_soul():
     print("```")
 
 
+def refresh_realized():
+    """Reconcile the window to on-chain flows before reading it.
+
+    Best-effort by design: the brief must still render on a datapi outage, and
+    an unreconciled close is counted as a mark rather than dropped. Without this
+    the brief reads whatever the last daily run left behind, and yesterday's
+    closes — the ones a proposal is most likely to be about — are exactly the
+    ones missing from it.
+    """
+    script = os.path.join(PROFILE, "skills", "solana-dlmm", "scripts", "dlmm_realized.py")
+    if not os.path.exists(script):
+        return
+    try:
+        subprocess.run([sys.executable, script, "--days", str(WINDOW_DAYS), "--quiet"],
+                       capture_output=True, text=True, timeout=180)
+    except Exception:
+        pass
+
+
 def main():
     print(f"# DLMM proposal brief — {time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime())}")
+    refresh_realized()
     closes = load_closes()
     section_modes(closes)
     section_reasons(closes)

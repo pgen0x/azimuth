@@ -212,3 +212,43 @@ func TestUnreadableBalanceFailsClosedWithoutWalking(t *testing.T) {
 		t.Fatal("deployed on a balance we could not read")
 	}
 }
+
+// TestReasonKeyNamesTheGate pins the two collisions that made a cycle tally
+// unreadable: the m15 window gates all collapsing to "m", and a floor sharing
+// its key with the ceiling above it.
+func TestReasonKeyNamesTheGate(t *testing.T) {
+	cases := map[string]string{
+		"m15 txns 4 < 8":                             "m15_txns",
+		"m15 volume $12 < $500":                      "m15_volume",
+		"m15 fee/TVL 0.0010% < 0.0200%":              "m15_fee/TVL",
+		"reserve $8000 < $10000":                     "reserve",
+		"reserve $2100000 > $500000 cap":             "reserve_over",
+		"fdv $1000 < $5000":                          "fdv",
+		"fdv $9000000 > $5000000 cap":                "fdv_over",
+		"TVL $100 < $2500":                           "TVL",
+		"TVL $900000 > $500000 cap":                  "TVL_over",
+		"mcap $1000 < $5000":                         "mcap",
+		"mcap $9000000 > $5000000 cap":               "mcap_over",
+		"bin_step 2 < 10":                            "bin_step",
+		"bin_step 400 > 200":                         "bin_step_over",
+		"fee/TVL pace 1.2%/d < 3.0%/d":               "fee/TVL_pace",
+		"fee tier 0.05% < 0.25%":                     "fee_tier",
+		"txns 12 < 30":                               "txns",
+		"buyers 3 < 10":                              "buyers",
+		"too-young 30m < 60m":                        "too-young",
+		"too-old 5.0h > 2.0h":                        "too-old_over",
+		"5m -6.1% <= -5% (dumping)":                  "5m",
+		"1h -20.0% <= -15% (dumping)":                "1h",
+		"6h -13.0% <= -12% (downtrend)":              "6h",
+		"24h -30.0% <= -25% (downtrend)":             "24h",
+		"no sells (12 buys, 0 sells h1)":             "no_sells",
+		"v4 hooked pool (0xabc)":                     "v4_hooked_pool",
+		"non-SOL pool":                               "non-SOL_pool",
+		"quote-asset base WETH/USDG (no token side)": "quote-asset_base_WETH/USDG",
+	}
+	for reason, want := range cases {
+		if got := reasonKey(reason); got != want {
+			t.Errorf("reasonKey(%q) = %q, want %q", reason, got, want)
+		}
+	}
+}

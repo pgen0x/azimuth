@@ -22,6 +22,7 @@ import subprocess
 import time
 import urllib.request
 
+from dlmm_realized import apply_realized
 from tz_util import local_time_str
 
 PORTFOLIO_API = "https://dlmm.datapi.meteora.ag/portfolio"
@@ -105,7 +106,11 @@ def load_closes(cutoff_ts):
             if rec.get("pnl_sol") is None and rec.get("pnl_pct") is None:
                 continue
             closes.append(rec)
-    return closes
+    # The journal's pnl_sol is a mark, and a mark can be pure fiction: three
+    # closes in the 2026-08-17..18 window booked -1.41 SOL that the chain shows
+    # was never lost. Prefer the reconciled on-chain flows wherever they exist
+    # (dlmm_realized.py); rows it hasn't fetched keep the mark.
+    return apply_realized(closes, os.path.join(PROFILE_DIR, "memories", "dlmm_realized.jsonl"))
 
 
 def fmt_hold(minutes):
@@ -131,6 +136,12 @@ def build_card(hours):
     api_pnl = sum(f(p.get("pnlSol")) for p in pools)
     api_fee = sum(f(p.get("totalFeeSol")) for p in pools)
     api_dep = sum(f(p.get("totalDepositSol")) for p in pools)
+
+    # Say which basis the number is on: "chain" once every close in the window
+    # has been reconciled to on-chain flows, otherwise how many are still marks.
+    on_chain = sum(1 for c in closes if c.get("pnl_basis") == "realized")
+    basis_label = ("chain" if closes and on_chain == len(closes)
+                   else f"{on_chain}/{len(closes)} chain" if closes else "journal")
 
     wins = [c for c in closes if f(c.get("pnl_sol")) > 0]
     losses = [c for c in closes if f(c.get("pnl_sol")) <= 0]
@@ -169,7 +180,7 @@ def build_card(hours):
         "|--------|-------|",
         f"| Closes | {len(closes)} ({len(wins)}W/{len(losses)}L · {win_rate:.0f}% win) |",
         f"| Avg hold | {fmt_hold(avg_hold)} |",
-        f"| Realized PnL (journal) | {realized:+.4f} SOL |",
+        f"| Realized PnL ({basis_label}) | {realized:+.4f} SOL |",
     ]
     if pools:
         lines += [

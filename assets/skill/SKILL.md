@@ -108,6 +108,16 @@ A weight near 1.0 is ambiguous on its own — "no evidence" and "evidence of no 
 *   `python3 ~/.hermes/profiles/<profile>/skills/solana-dlmm/scripts/dlmm_weights.py --show` — print current weights
 *   `python3 .../dlmm_weights.py --force` — recalc now (normally self-guarded to once per 6h, auto-run by the monitor)
 
+### 3b. `dlmm_realized.py` — Realized-PnL Reconciliation
+**Purpose**: Turns the close journal into money. `dlmm_closes.jsonl`'s `pnl_sol` is the monitor's MARK one tick before the close, and a mark can be fiction: three closes on 2026-08-17..18 were booked at -100.00% / -1.41 SOL while the on-chain flows show every deposit returned in full. This pass writes `<profile>/memories/dlmm_realized.jsonl` — one line per closed position, carrying Meteora's aggregated deposit / withdrawal / fee flows in SOL, so `realized_sol` holds no price opinion of ours. Append-only and idempotent (a position is fetched once).
+
+`apply_realized()` is the join every consumer uses: `dlmm_stats.py`, `dlmm_weights.py` and the Hermes proposal brief all prefer `realized_sol` over the journal figure and stamp `pnl_basis` (`realized` | `mark`). A position the reconciler has not fetched keeps its mark and is counted as unmeasured — never as 0.0.
+
+Measured over the 7d to 2026-08-19: journal -1.6120 SOL, chain -0.0213 SOL. Nearly all of that gap is the three phantom rows; the rest is the mark systematically overstating BOTH wins and losses.
+**Commands**:
+*   `python3 .../dlmm_realized.py --days 30` — backfill the window, then print the divergence report
+*   `python3 .../dlmm_realized.py --check` — report only, no API calls
+
 ### 4. `dlmm_executor.js` — SDK Transaction Executor
 **Purpose**: Interacts directly with Meteora DLMM program on-chain. Invoked by Python runners. Supports RPC failover rotation.
 **Commands**:

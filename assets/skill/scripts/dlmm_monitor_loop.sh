@@ -49,6 +49,11 @@ while true; do
         hour_local=$(date +%H); today_local=$(date +%F)
     fi
     if [ "$hour_local" = "${DLMM_STATS_HOUR:-09}" ] && [ "$(cat "$STATS_STAMP" 2>/dev/null)" != "$today_local" ]; then
+        # Reconcile the journal to on-chain flows FIRST — the card, the weight
+        # learner and the proposal brief all read the reconciled figure, and an
+        # un-reconciled mark can be off by a whole position (dlmm_realized.py).
+        # Best-effort: a datapi outage must never block the card.
+        "$PYTHON" "$SCRIPT_DIR/dlmm_realized.py" --days 7 --quiet >/dev/null 2>&1 || true
         "$PYTHON" "$SCRIPT_DIR/dlmm_stats.py" --send && echo "$today_local" > "$STATS_STAMP"
     fi
     sleep 20
