@@ -57,6 +57,11 @@ Go tests exist for `internal/deploy` and `internal/robinhood`
 defaults in `.env.example`); nothing is hardcoded except the screening
 thresholds.
 
+Run `git config core.hooksPath .githooks` once per clone — wires up the
+`commit-msg` hook that enforces Conventional Commits subjects and a bulleted,
+<=100-char-per-line body. `core.hooksPath` is a local git config setting, not
+tracked by git, so every clone/worktree needs it set once.
+
 ## Runtime services + logs
 
 In production nothing runs in a terminal — everything is a **user** systemd unit
