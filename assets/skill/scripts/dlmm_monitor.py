@@ -1585,17 +1585,28 @@ def main():
         suspect_deployed_at = meta.get("deployed_at")
         suspect_age_min = ((now - suspect_deployed_at) / 60.0
                            if suspect_deployed_at else float("inf"))
-        if api_available and bp and pnl_pct <= SUSPECT_PNL_PCT:
+        # -90% only ever caught the -100% shape of the indexing-lag bug. EYE-SOL and
+        # CONK-SOL (2026-08-21/22) show it also lands shallower: two DIFFERENT
+        # positions in the same pool, opened seconds apart, both read the identical
+        # -49.9974%/-58.328% at age <1m — the same stale figure echoed to two reads,
+        # not two independent price observations (a real crash would not agree to 4
+        # decimals). A young position must justify an EMERGENCY close against its own
+        # floor, not a blanket -90%, so under SUSPECT_PNL_MIN_AGE_MINUTES the trigger
+        # widens to whichever bar is looser.
+        suspect_trigger_pct = SUSPECT_PNL_PCT
+        if suspect_age_min < SUSPECT_PNL_MIN_AGE_MINUTES:
+            suspect_trigger_pct = max(SUSPECT_PNL_PCT, stop_loss_pct - EMERGENCY_SL_BUFFER_PCT)
+        if api_available and bp and pnl_pct <= suspect_trigger_pct:
             verify_data, verify_err = run_command_json(f"node {EXECUTOR_PATH} pnl {pool} {pos_addr}")
             if verify_data and verify_data.get("success") != False:
                 v_pct = float(verify_data.get("pnl_pct", pnl_pct))
-                if v_pct <= SUSPECT_PNL_PCT and suspect_age_min < SUSPECT_PNL_MIN_AGE_MINUTES:
+                if v_pct <= suspect_trigger_pct and suspect_age_min < SUSPECT_PNL_MIN_AGE_MINUTES:
                     print(f"🛡️ SUSPECT PnL: both sources read {v_pct:.2f}% but {pair} is only "
                           f"{suspect_age_min:.1f}m old (< {SUSPECT_PNL_MIN_AGE_MINUTES:.0f}m) — "
                           f"indexing gap, not a loss; skipping this tick")
                     run_command(f"redis-cli set \"{suspect_key}\" {int(now)} ex {SUSPECT_PNL_RETRY_TTL_SECS}")
                     continue
-                if v_pct > SUSPECT_PNL_PCT:
+                if v_pct > suspect_trigger_pct:
                     print(f"🛡️ SUSPECT PnL: Portfolio API says {pnl_pct:.2f}% but on-chain executor says {v_pct:+.2f}% — using on-chain read")
                     pnl_pct = v_pct
                     pnl_sol_actual = None  # API SOL figure is equally suspect
