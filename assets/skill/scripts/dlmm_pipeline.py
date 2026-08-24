@@ -1527,6 +1527,27 @@ def main():
         others = ", ".join(c["base_symbol"] for c in valid_candidates if c is not winner) or "none"
         print(f"BATCH_PICK: {winner['base_symbol']} (score {winner['score']:.1f}) over [{others}]")
 
+    # Risk-scaled ticket size (2026-08-21). compute_deploy_amount() above is
+    # wallet-size-only — every winner in a mode got the same ticket regardless
+    # of how close its conviction score sat to BATCH_CONVICTION_FLOOR. Two 24h
+    # tail losses (CYBERCAT-SOL -0.0652 SOL, URANUS-SOL -0.0398 SOL) were both
+    # near-floor picks that cleared the gate but not by much — exactly the
+    # population this discounts. 0.5x at the floor, scaling linearly to 1.0x
+    # (no change from today) at floor+40 or better. batch_mode-only and
+    # fail-open to 1.0x (today's behavior) when score/floor data isn't
+    # available, e.g. --pool/--from-signal manual overrides — this can only
+    # ever shrink a ticket relative to the status quo, never grow one.
+    if batch_mode and winner.get("score") is not None:
+        _floor = BATCH_CONVICTION_FLOOR.get(mode, 12.0)
+        _margin = max(0.0, min(1.0, (float(winner["score"]) - _floor) / 40.0))
+        _risk_mult = 0.5 + 0.5 * _margin
+        if _risk_mult < 1.0:
+            _orig_deploy_sol = deploy_sol
+            deploy_sol = round(max(0.10, deploy_sol * _risk_mult), 2)
+            print(f"Risk-scaled ticket: {winner['base_symbol']} score {winner['score']:.1f} "
+                  f"(floor {_floor:.0f}, margin {_margin*100:.0f}%) -> {_risk_mult:.2f}x "
+                  f"({_orig_deploy_sol:.2f} -> {deploy_sol:.2f} SOL)")
+
     # 5. Indicators Check (batch mode already ran this inside the pick loop)
     if params.get("INDICATORS_ENABLED") and not batch_mode:
         preset = params.get("INDICATORS_PRESET", "supertrend_or_rsi")
