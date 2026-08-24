@@ -292,6 +292,113 @@ def fetch_onchain_candles(pool_address, token_address=None,
             prev_close = c[3]
     return out
 
+# resolution values GMGN's kline endpoint and Birdeye's v3 OHLCV endpoint each
+# accept, keyed by the same clean_tf strings fetch_ohlcv_candles already
+# normalizes to. Only the legs this file actually requests need an entry.
+_GMGN_RESOLUTION = {"1m": "1m", "5m": "5m", "30m": "15m"}
+_BIRDEYE_TYPE = {"1m": "1m", "5m": "5m", "30m": "15m"}
+
+def fetch_gmgn_candles(token_address, timeframe, chain="sol"):
+    """
+    NOT WIRED IN — kept for whoever finishes this, not called by
+    fetch_ohlcv_candles. Probed live 2026-08-24: /v1/market/token_kline
+    rejects X-APIKEY (the header the /v1/token/info security gate in
+    internal/meteora/gmgn.go uses) with 401 "missing api key or client_id".
+    Adding client_id=<value> as a query param gets PAST that check (reached
+    429 rate-limit instead of 401), so the real scheme is client_id-based, and
+    GMGN's own docs mention an AK/SK HMAC signature on top of it that was not
+    verified here. Do not flip this into the fallback chain until the actual
+    signing scheme is confirmed against GMGN's dashboard/support — a silently
+    wrong signature would just 401 forever, same as never calling it, but
+    looks like working code.
+    """
+    api_key = os.environ.get("GMGN_API_KEY", "").strip()
+    if not api_key or not token_address:
+        return []
+    resolution = _GMGN_RESOLUTION.get(str(timeframe).lower().strip())
+    if not resolution:
+        return []
+    q = f"chain={chain}&address={token_address}&resolution={resolution}"
+    url = f"https://openapi.gmgn.ai/v1/market/token_kline?{q}"
+    try:
+        req = urllib.request.Request(url, headers={
+            "X-APIKEY": api_key,
+            "Accept": "application/json",
+        })
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode())
+        rows = data.get("list") or data.get("data", {}).get("list") or []
+        out = []
+        for r in rows:
+            out.append([int(r["time"]) // 1000, float(r["open"]), float(r["high"]),
+                        float(r["low"]), float(r["close"]), float(r.get("volume", 0) or 0)])
+        out.sort(key=lambda c: c[0])
+        return out
+    except Exception as e:
+        print(f"Warning: GMGN kline fallback failed: {e}")
+        return []
+
+def _birdeye_rate_limit_ok(max_per_min=None):
+    """
+    Redis-backed per-minute counter, checked BEFORE every Birdeye call.
+    Birdeye's 60rpm cap is account-wide across every key on the account, not
+    per-key — and this file runs as a fresh subprocess per poll cycle
+    (dlmm_pipeline.py per batch, dlmm_monitor.py/uni_monitor.py every ~20s per
+    open position), so an in-process counter would not see other cycles.
+    Redis is the only thing all of them share. Default budget is set below
+    60 on purpose, to leave headroom for any other consumer of the same
+    account (BIRDEYE_MAX_RPM overrides). Fails OPEN on a Redis hiccup — same
+    fail-open contract as the rest of this file; a broken limiter must not
+    block the trade path, only the request budget it is trying to protect.
+    """
+    cap = max_per_min if max_per_min is not None else int(os.environ.get("BIRDEYE_MAX_RPM", "45"))
+    key = f"birdeye:rpm:{int(time.time()) // 60}"
+    try:
+        res = subprocess.run(f"redis-cli incr \"{key}\"", shell=True, capture_output=True, text=True, timeout=5)
+        count = int((res.stdout or "0").strip() or "0")
+        if count == 1:
+            subprocess.run(f"redis-cli expire \"{key}\" 65", shell=True, capture_output=True, text=True, timeout=5)
+        return count <= cap
+    except Exception:
+        return True
+
+def fetch_birdeye_candles(token_address, timeframe, chain="solana"):
+    """
+    GT fallback: Birdeye's v3 OHLCV endpoint. Needs its own key
+    (BIRDEYE_API_KEY) — a genuinely new vendor. Returns [] on any
+    failure/missing key/exhausted rate budget, same contract as GT itself —
+    the caller can't tell this apart from "GeckoTerminal had nothing either".
+    """
+    api_key = os.environ.get("BIRDEYE_API_KEY", "").strip()
+    if not api_key or not token_address:
+        return []
+    candle_type = _BIRDEYE_TYPE.get(str(timeframe).lower().strip())
+    if not candle_type:
+        return []
+    if not _birdeye_rate_limit_ok():
+        print("Birdeye per-minute budget exhausted — skipping (fail-open).")
+        return []
+    now = int(time.time())
+    time_from = now - 60 * 60 * 6  # 6h lookback comfortably covers 30 candles at every supported leg
+    q = f"address={token_address}&type={candle_type}&time_from={time_from}&time_to={now}"
+    url = f"https://public-api.birdeye.so/defi/v3/ohlcv?{q}"
+    try:
+        req = urllib.request.Request(url, headers={
+            "X-API-KEY": api_key,
+            "x-chain": chain,
+            "Accept": "application/json",
+        })
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode())
+        items = data.get("data", {}).get("items") or []
+        out = [[int(it["unix_time"]), float(it["o"]), float(it["h"]),
+                float(it["l"]), float(it["c"]), float(it.get("v", 0) or 0)] for it in items]
+        out.sort(key=lambda c: c[0])
+        return out
+    except Exception as e:
+        print(f"Warning: Birdeye OHLCV fallback failed: {e}")
+        return []
+
 
 def fetch_ohlcv_candles(pool_address, timeframe, token_address=None, network="solana",
                         quote_address=None, quote_symbol=None):
@@ -310,7 +417,9 @@ def fetch_ohlcv_candles(pool_address, timeframe, token_address=None, network="so
     aggregate = 15
     
     clean_tf = str(timeframe).lower().strip()
-    if clean_tf in ["5m", "30m"]:
+    if clean_tf == "1m":
+        aggregate = 1
+    elif clean_tf in ["5m", "30m"]:
         if clean_tf == "5m":
             aggregate = 5
         else:
@@ -326,7 +435,10 @@ def fetch_ohlcv_candles(pool_address, timeframe, token_address=None, network="so
     if token_address and token_address != "So11111111111111111111111111111111111111112":
         urls.append((f"https://api.geckoterminal.com/api/v2/networks/{network}/tokens/{token_address}/ohlcv/{tf_path}?aggregate={aggregate}", "token"))
         
+    rate_limited = False
     for url, path_type in urls:
+        if rate_limited:
+            break  # a 429 means back off, not hammer the token-address URL too
         retries = 3
         for attempt in range(retries):
             try:
@@ -347,15 +459,32 @@ def fetch_ohlcv_candles(pool_address, timeframe, token_address=None, network="so
                 status_code = getattr(e, "code", None)
                 print(f"Warning: GeckoTerminal {path_type} OHLCV fetch failed (attempt {attempt+1}/{retries}): {e}")
                 if status_code == 429:
-                    print("Rate limit hit (429). Waiting 2 seconds before retry...")
-                    time.sleep(2)
+                    # Retrying into a live 429 just burns the same exhausted
+                    # quota — go straight to the fallback sources below instead
+                    # of sleep-and-retry-3x-per-url (was up to ~12s of retries
+                    # that could never succeed once the server said slow down).
+                    print("Rate limit hit (429) — skipping remaining GT retries, trying fallback sources.")
+                    rate_limited = True
+                    break
                 elif status_code == 404 and path_type == "pool":
                     print("Pool address not indexed (404). Falling back to token address endpoint.")
                     break
                 else:
                     time.sleep(1)
 
-    # Every GeckoTerminal path is exhausted. On Robinhood the chain itself still
+    # GeckoTerminal is exhausted or rate-limited. Try Birdeye (needs its own
+    # BIRDEYE_API_KEY) before giving up — a no-op returning [] when the key is
+    # unset, so this is inert until an operator opts in. token_address is
+    # required; a pool-only entry (Robinhood on-chain fallback below) can't
+    # use it. fetch_gmgn_candles is NOT called here — see its docstring, its
+    # auth scheme is confirmed broken as implemented (X-APIKEY is ignored).
+    if token_address:
+        candles = fetch_birdeye_candles(token_address, timeframe)
+        if candles:
+            print(f"📈 GeckoTerminal exhausted — got {len(candles)} candles from Birdeye for {token_address[:10]}")
+            return candles
+
+    # Every source above is exhausted. On Robinhood the chain itself still
     # has the trades — one eth_getLogs against a keyless RPC that nothing else on
     # this box is competing for. Wrapped whole: a fallback that could raise would
     # turn a skipped indicator check into a crashed monitor tick, and this file
@@ -607,7 +736,17 @@ def check_local_indicators(pool_address, base_mint, side, preset, timeframe, net
     print(f"📊 Running local indicators check for pool {pool_address[:8]} ({preset})")
 
     # 2. Fetch Candles
-    candles = fetch_ohlcv_candles(pool_address, timeframe, token_address=base_mint,
+    # Entry always fetches 1m candles regardless of the mode's trading
+    # timeframe: pulse/turnover target pools that just started trending, and
+    # 30 candles at the mode's own timeframe (5m -> 2.5h, 30m -> 7.5h of pool
+    # age) is unmet by design for that population — measured 2026-08-24, every
+    # "Entry timing" log for a week was fail-open on missing data. CYBERCAT was
+    # 56min old at entry: 0 usable 5m candles but 56 usable 1m ones. Cache key
+    # below still uses the mode's own `timeframe` — this only changes what
+    # granularity is fetched, not the cache/rate-limit scope. Exit checks are
+    # unchanged (uncached, own staleness tradeoffs — out of scope here).
+    candle_tf = "1m" if side == "entry" else timeframe
+    candles = fetch_ohlcv_candles(pool_address, candle_tf, token_address=base_mint,
                                   network=network, quote_address=quote_address,
                                   quote_symbol=quote_symbol)
     if not candles:
