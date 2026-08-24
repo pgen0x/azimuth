@@ -9,6 +9,24 @@
             "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/guard-secrets.sh"
           }
         ]
+      },
+      {
+        "matcher": "Bash|Grep",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/home/ubuntu/.local/bin/graphify hook-guard search"
+          }
+        ]
+      },
+      {
+        "matcher": "Read|Glob",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/home/ubuntu/.local/bin/graphify hook-guard read"
+          }
+        ]
       }
     ],
     "PostToolUse": [
