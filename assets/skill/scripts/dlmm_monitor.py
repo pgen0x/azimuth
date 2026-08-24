@@ -89,15 +89,16 @@ OOR_DOWNSIDE_MAX_MINUTES = 5
 # Turnover fast-cycle: an OOR turnover position is idle
 # fee-capture capital, so it re-centers after minutes — not the multi-hour
 # patience of the thesis modes. The 20s monitor loop makes this cadence real.
-# 2 -> 5 on 2026-08-12, finishing the fix the SOL side already got below. The
-# measurement that set TURNOVER_SOL_SIDE_OOR_MINUTES was never direction-
-# specific: waiting to 5m beat cutting at 2m on the same event. The token side
-# kept 2m on the argument that here the bag really is decaying — but the
-# outcome does not support it. All 21 OOR closes in the 24h to 2026-08-12 fired
-# at 2.1-2.2m and averaged +0.0006 SOL: the fuse is not cutting losses, it is
-# round-tripping capital for zero before a fee can accrue, and each trip pays
-# gas and swap slippage that the close journal's pnl_sol never records.
-TURNOVER_MAX_OOR_MINUTES = 5
+# 2 -> 5 on 2026-08-12: the 21-close sample that justified it (all fired at
+# 2.1-2.2m, averaged +0.0006 SOL) was an aggregate mean that hid tail
+# variance. 2026-08-21: URANUS-SOL rode the full unconditional 5.2m and
+# realized -8.5% of ticket (-0.0398 SOL) — this IS the token-side "falling
+# bag" direction (turnover_max_oor_minutes governs oor_token_side, see the
+# oor_limit_minutes selection below), so letting it ride 5m rather than
+# cutting near 2m converts idle-capital churn into a directional loss
+# whenever the drift is real instead of noise. 5 -> 3: keeps most of the
+# round-trip-avoidance upside without riding a real dump for 5 minutes.
+TURNOVER_MAX_OOR_MINUTES = 3
 # ...but that fuse was applied to BOTH directions, which is the mistake the
 # thesis modes already fixed with OOR_DOWNSIDE_MAX_MINUTES. SOL-side OOR is
 # frozen SOL — nothing decays — so the fuse only trades an immediate re-pin
@@ -579,7 +580,8 @@ def log_hold(pos_addr, hold_minutes, reason):
         print(f"⚠️ Failed to write hold journal: {e}")
 
 def log_close(pool, pair, meta, pos_addr, pnl_pct, realized_sol, fee_per_tvl_24h,
-              age_min, reason, txs, dry_run, event="exit", unclaimed_fees_sol=None):
+              age_min, reason, txs, dry_run, event="exit", unclaimed_fees_sol=None,
+              pnl_basis=None):
     """Append a uniform close record to memories/dlmm_closes.jsonl. Every monitor
     close is journaled here; reconcile against the Meteora portfolio API (ground
     truth) with dlmm_reconcile.py.
@@ -642,6 +644,15 @@ def log_close(pool, pair, meta, pos_addr, pnl_pct, realized_sol, fee_per_tvl_24h
         # Position this one was re-pinned from, so a re-center run can be chained
         # back to its first leg instead of reading as unrelated tickets.
         "recenter_of": meta.get("recenter_of"),
+        # "pre_swap_mark" on a dump-class close (2026-08-21+): pnl_sol/pnl_pct
+        # above were read BEFORE the auto-swap-back-to-SOL block runs, from a
+        # portfolio-API mark. CYBERCAT-SOL's RUG_M5_PCT exit journaled -1.44%
+        # here while the swap actually realized -43.5% of ticket — this flag
+        # is what a reader (dlmm_realized.py, dlmm_weights.py, a human tuning
+        # a threshold) needs to know NOT to trust this row's pnl_sol at face
+        # value without reconciling against on-chain flows first. None means
+        # unflagged / not applicable (normal exit, no swap, or pre-2026-08-21).
+        "pnl_basis": pnl_basis,
     }
     try:
         path = os.path.join(PROFILE_DIR, "memories", "dlmm_closes.jsonl")
@@ -1389,8 +1400,14 @@ def main():
                     est_sol = token_balance * current_price
                     print(f"Base token balance: {token_balance} (~{est_sol:.4f} SOL)")
                     if est_sol > 0.01 or is_dry:
-                        # Dump exits force-liquidate (high impact OK); normal exits use tight 5% guard.
-                        swap_max_impact = 50 if is_dump_close else 15
+                        # Dump exits force-liquidate; normal exits use tight 5% guard. Was
+                        # 50% until 2026-08-21 — CYBERCAT-SOL's RUG_M5_PCT exit journaled a
+                        # -1.44% mark but the liquidation swap, unbounded up to 50% impact
+                        # into a still-crashing token, actually realized -43.5% of ticket
+                        # (-0.0652 SOL, see dlmm_monitor.py:~2480 for the automatic-path
+                        # twin of this constant). 18 still lets a genuine rug clear ahead
+                        # of a normal 15% guard, without accepting a near-total-loss fill.
+                        swap_max_impact = 18 if is_dump_close else 15
                         swap_slip_bps = 300 if is_dump_close else 300
                         print(f"Executing auto-swap back to SOL for {token_balance} tokens (max_impact {swap_max_impact}%)...")
                         swap_res, swap_err = run_command_json(f"{env_prefix}node {EXECUTOR_PATH} swap {base_mint} SOL {token_balance} {swap_max_impact} {swap_slip_bps}", timeout=90)
@@ -2274,6 +2291,14 @@ def main():
                 if realized_sol < 0:
                     run_command(f"redis-cli hincrby {pnl_key} count_losses 1")
 
+                # Computed here (moved up from just below the journal write on
+                # 2026-08-21) so log_close can tag dump-class rows below —
+                # order-of-computation only, the re-entry cooldown logic that
+                # reads these two names is unchanged.
+                base_symbol_cd = meta.get("base_symbol", pair.split("-")[0]).upper()
+                reason_lower = close_reason.lower()
+                is_dump_close = any(kw in reason_lower for kw in ("trailing", "dump", "stop-loss", "stop_loss", "sell pressure", "momentum"))
+
                 # Journal every close with API-verified PnL (dlmm_reconcile.py audits
                 # this file against the Meteora portfolio API).
                 log_close(pool, pair, meta, pos_addr, pnl_pct, realized_sol,
@@ -2283,12 +2308,14 @@ def main():
                           # variable: step 5e only assigns it on the branch where
                           # the fee-stall window is live, so it is not guaranteed
                           # to be bound here.
-                          unclaimed_fees_sol=(float(bp.get("unclaimed_fees_sol") or 0.0) if bp else None))
+                          unclaimed_fees_sol=(float(bp.get("unclaimed_fees_sol") or 0.0) if bp else None),
+                          # A dump-class row's pnl_sol/pnl_pct above were read
+                          # from the portfolio-API mark BEFORE the auto-swap
+                          # block (below) runs the actual liquidation — see the
+                          # field's docstring in log_close for why that matters.
+                          pnl_basis=("pre_swap_mark" if is_dump_close else None))
 
                 # Re-entry cooldown blacklist — prevent re-opening same token too soon
-                base_symbol_cd = meta.get("base_symbol", pair.split("-")[0]).upper()
-                reason_lower = close_reason.lower()
-                is_dump_close = any(kw in reason_lower for kw in ("trailing", "dump", "stop-loss", "stop_loss", "sell pressure", "momentum"))
                 cooldown_key = f"sol:dlmm:cooldown:{base_symbol_cd}"
                 loss_streak_key = f"sol:dlmm:loss_streak:{base_symbol_cd}"
 
@@ -2373,7 +2400,15 @@ def main():
                     and close_reason.startswith("Out of Range")
                     and not emergency_close
                     and not is_dump_close
-                    and pnl_pct > -8.0
+                    # -8.0 until 2026-08-21: URANUS-SOL's OOR close realized -8.47%
+                    # (deposit vs on-chain settlement) but the MARK read here — the
+                    # same portfolio-API snapshot documented elsewhere in this file
+                    # to lag chain truth on fast moves — likely printed something
+                    # closer to -7.x%, clearing this gate and triggering a same-pool
+                    # re-mint 5.7m later that added another loss on top. -6.0 gives
+                    # margin against that measurement lag so a close already past
+                    # the real -8% floor doesn't get re-centered on a stale read.
+                    and pnl_pct > -6.0
                     and rebalance_budget_ok
                 )
 
@@ -2471,9 +2506,14 @@ def main():
                         est_sol = balance * active_price
                         print(f"Base token balance: {balance} (~{est_sol:.4f} SOL)")
                         if est_sol > 0.01 or (close_res.get("dryRun") or close_res.get("dry_run") == True):
-                            # Dump exits MUST liquidate even at high impact — holding a crashing token is worse than slippage.
+                            # Dump exits MUST liquidate — holding a crashing token is worse than slippage.
                             # Normal/profit exits use a tight 5% guard to avoid bad fills on thin pools (token re-swept by --cleanup-tokens).
-                            swap_max_impact = 50 if is_dump_close else 15
+                            # Was 50% until 2026-08-21: CYBERCAT-SOL's RUG_M5_PCT exit journaled a
+                            # -1.44% mark (read before this swap ran) but the swap itself, unbounded
+                            # up to 50% impact into a still-crashing token, realized -43.5% of ticket
+                            # (-0.0652 SOL). 18 still forces a genuine rug through ahead of the normal
+                            # 15% guard, without accepting a near-total-loss fill on the way out.
+                            swap_max_impact = 18 if is_dump_close else 15
                             swap_slip_bps = 300 if is_dump_close else 300
                             print(f"Executing auto-swap back to SOL for {balance} tokens (max_impact {swap_max_impact}%, {'dump' if is_dump_close else 'normal'} exit)...")
                             swap_res, swap_err = run_command_json(f"{env_prefix}node {EXECUTOR_PATH} swap {base_mint} SOL {balance} {swap_max_impact} {swap_slip_bps}")
