@@ -5,6 +5,13 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.7.2](https://github.com/pgen0x/azimuth/compare/v2.7.1...v2.7.2) (2026-08-24)
+
+
+### Bug Fixes
+
+* **indicators:** fetch 1m candles at entry, add Birdeye fallback for GT 429 ([#80](https://github.com/pgen0x/azimuth/issues/80)) ([4521b92](https://github.com/pgen0x/azimuth/commit/4521b9237fcfab4960018a0e108d2b2a1727bc55))
+
 ## [2.7.1](https://github.com/pgen0x/azimuth/compare/v2.7.0...v2.7.1) (2026-08-22)
 
 
