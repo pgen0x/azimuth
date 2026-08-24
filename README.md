@@ -103,15 +103,11 @@ GMGN key and fail open without one.
 
 ## Architecture
 
-```
-┌─────────────────────────┐   HMAC-signed   ┌─────────────────────┐
-│ azimuth (this Go daemon)   │ POST /webhooks/ │ Hermes agent        │
-│                         ├────────────────▶│ ranks the batch,    │
-│                         │   dlmm-signal   │ picks 1 + strategy  │
-│ poll -> screen -> dedup │  (batch array)  │ -> dlmm_pipeline.py │
-└─────────────────────────┘                 └─────────────────────┘
-             │                                        │
-   Meteora discovery API              Meteora on-chain (deploy/monitor)
+```mermaid
+flowchart LR
+    A["azimuth (this Go daemon)<br/>poll → screen → dedup"] -->|"HMAC-signed POST /webhooks/dlmm-signal<br/>(batch array)"| B["Hermes agent<br/>ranks the batch,<br/>picks 1 + strategy<br/>→ dlmm_pipeline.py"]
+    C[(Meteora discovery API)] --> A
+    B --> D[(Meteora on-chain<br/>deploy/monitor)]
 ```
 
 The daemon (`internal/scanner`) does one thing on a loop: poll the discovery
