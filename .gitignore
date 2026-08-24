@@ -27,3 +27,6 @@ assets/skill/node_modules/
 
 # Playwright-MCP scratch output
 .playwright-mcp
+
+# graphify knowledge-graph output — regenerable from source (/graphify .)
+graphify-out/
