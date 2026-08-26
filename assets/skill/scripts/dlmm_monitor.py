@@ -75,7 +75,13 @@ def get_meteora_portfolio_positions(wallet_address):
 # review over every open position on a 5m cadence, which this bot has no
 # equivalent of, so an unknown share of its edge is judgment rather than
 # threshold. Treat -8.0 as calibrated, not proven.
-STOP_LOSS_PCT = -8.0
+# -12.0 since 2026-08-26: that reference's own config defaults to -50% behind
+# a 10m LLM-judgment cadence, not a threshold this bot can copy verbatim at
+# turnover's 0.2-0.5 SOL ticket size. -12 is a bounded step in that direction,
+# paired with the widened GIVEBACK_ARM_PCT/GIVEBACK_DROP_PCT below — not a
+# full adoption of -50. Fallback only; SOUL.md section 9 "Hard Stop-Loss" is
+# what actually governs at runtime.
+STOP_LOSS_PCT = -12.0
 TAKE_PROFIT_PCT = 50.0
 MAX_OOR_MINUTES = 30
 # Asymmetric OOR (2026-07-19): the two OOR directions mean OPPOSITE things for
@@ -255,8 +261,15 @@ FAST_EXIT_UNDERWATER_PNL_PCT = -1.5
 # winners worth +0.011 SOL that dipped that far and recovered — a 12:1 trade.
 # Deliberately NOT a take-profit: the giveback lands near flat, well under
 # TRAILING_MIN_LOCK_PCT, so it must never route through the TP/cooldown path.
-GIVEBACK_ARM_PCT = 0.5
-GIVEBACK_DROP_PCT = 1.5
+# Widened 0.5/1.5 -> 2.5/2.5 on 2026-08-26: the 08-19 sample that motivated the
+# tight version was a 12:1 edge, but the 24h/7d comparison against a reference
+# bot running the same screen showed the opposite on Sue-SOL/Token-SOL/PANTS-SOL
+# — the same pool re-pinned, stopped on a dip that then reversed into a large
+# win the reference caught. That reference arms its own trailing rail at +3%
+# peak, not +0.5%; 2.5/2.5 moves partway there without fully matching it.
+# Re-tune again once enough post-change closes accumulate to judge the swap.
+GIVEBACK_ARM_PCT = 2.5
+GIVEBACK_DROP_PCT = 2.5
 # Sustained-downtrend exit: an underwater position whose token is in a steady 1h
 # decline closes early instead of riding to the SL floor (spurdo: -7.45% at the
 # last cron HOLD, hard SL -17.22% ten minutes later, -21.13% booked after swap
@@ -1323,7 +1336,7 @@ def main():
             # Set re-entry cooldown (same as auto-close path)
             base_symbol_cd = meta.get("base_symbol", meta.get("pair", "").split("-")[0]).upper()
             reason_lower = cli.reason.lower()
-            is_dump_close = any(kw in reason_lower for kw in ("trailing", "dump", "stop-loss", "stop_loss", "sell pressure", "momentum"))
+            is_dump_close = any(kw in reason_lower for kw in ("trailing", "dump", "stop-loss", "stop_loss", "sell pressure", "momentum", "giveback"))
             cooldown_secs = 7200 if is_dump_close else 3600
             cooldown_key = f"sol:dlmm:cooldown:{base_symbol_cd}"
             run_command(f"redis-cli set \"{cooldown_key}\" \"{cli.reason[:120]}\" ex {cooldown_secs}")
@@ -2297,7 +2310,7 @@ def main():
                 # reads these two names is unchanged.
                 base_symbol_cd = meta.get("base_symbol", pair.split("-")[0]).upper()
                 reason_lower = close_reason.lower()
-                is_dump_close = any(kw in reason_lower for kw in ("trailing", "dump", "stop-loss", "stop_loss", "sell pressure", "momentum"))
+                is_dump_close = any(kw in reason_lower for kw in ("trailing", "dump", "stop-loss", "stop_loss", "sell pressure", "momentum", "giveback"))
 
                 # Journal every close with API-verified PnL (dlmm_reconcile.py audits
                 # this file against the Meteora portfolio API).
