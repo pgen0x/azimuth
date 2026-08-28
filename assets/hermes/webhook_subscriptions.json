@@ -1,7 +1,7 @@
 {
   "dlmm-signal": {
     "secret": "dlmm-signal-secret-change-me",
-    "model": "claude-sonnet-4-6",
+    "model": "markt",
     "enabled": true,
     "deliver": "telegram",
     "deliver_extra": {
