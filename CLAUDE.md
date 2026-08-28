@@ -19,17 +19,42 @@ API, screens pools through quality gates, dedups, and hands each poll cycle's
 This daemon owns **entry signals only** — exits are the `dlmm_monitor.py`
 cron's job.
 
-**Where the LLM sits.** Nowhere in entry: the pick is deterministic
-(`dlmm_pipeline.py` via `DEPLOY_CMD`). In exit it has exactly one power, and
-only ever a subtractive one — the `sol_dlmm_ai_exit_review` cron (5m) may
-DEFER a non-emergency close by 10-20 minutes via
-`dlmm_monitor.py --override-hold`, and may do nothing else. The rules stay
-authoritative: the emergency SL floor, rug velocity, thin liquidity and a
-trailing drop >= 3% all bypass a hold in code. Every hold is journaled
-(`<profile>/memories/ai_holds.jsonl`) and counted onto the eventual close
-record as `ai_holds`, so held and unheld closes stay comparable.
+**Where the LLM sits.** Restored to entry 2026-08-28, gated by a health probe:
+the Go daemon (`internal/scanner`) checks `store.LLMHealthy` — a periodic
+ping of the local LLM router recorded to `sol:dlmm:llm_healthy` by
+`dlmm_monitor.py`'s `check_llm_health()`, piggybacked on the existing 20s
+loop rather than a new process — and, only when **both** a webhook and
+`DEPLOY_CMD` are configured, routes each batch to whichever is currently
+trustworthy: Hermes' `dlmm-signal` webhook subscription (LLM picks the
+candidate, `dlmm_pipeline.py --from-signal` deploys it) when the probe says
+healthy, `dlmm_pipeline.py --from-batch` (fully deterministic) the moment it
+doesn't — the concrete fallback for "LLM down or quota exhausted." A config
+that sets only one of the two keeps its old unconditional behavior unchanged.
+Neither path trusts a deploy claim blind anymore: `dlmm_pipeline.py` now
+confirms the position exists on-chain (`dlmm_executor.js pnl`, 3 retries)
+before printing `🚀 DEPLOYED`, flagging `⚠️ UNVERIFIED` rather than blocking
+on a transient indexer-lag false negative — the anti-fabrication guard the
+2026-07-06 incident (fabricated deploy reports) made a precondition for
+touching entry again.
 
-Its second role writes no state at all: the `sol_dlmm_daily_proposal` cron
+In exit the LLM has two powers, both flag-only — it never executes a trade
+itself, only ever writes a decision the deterministic 20s loop then acts on.
+The `sol_dlmm_ai_exit_review` cron (5m) may DEFER a non-emergency close by
+10-20 minutes via `dlmm_monitor.py --override-hold`. A second, narrower cron,
+`sol_dlmm_ai_close_review` (5m, ships `enabled: false`), may propose an EARLY
+close — before the low-yield/OOR-timeout rule would fire on its own — via
+`dlmm_monitor.py --override-close`, on the `oor`/`low-yield` bands only; the
+existing HEALTH GUARD still refuses a genuinely healthy position regardless
+of what the LLM asks, and the cron's prompt is never allowed to pass
+`--force`. The rules stay authoritative in every case: the emergency SL
+floor, rug velocity, thin liquidity and a trailing drop >= 3% all bypass a
+hold in code. Every hold is journaled (`<profile>/memories/ai_holds.jsonl`)
+and counted onto the eventual close record as `ai_holds`; an early close is
+journaled like any other close, distinguished by its `reason` prefix
+(`AI early-close:`) rather than a new field, so held/unheld and
+AI-closed/rule-closed closes stay comparable.
+
+Its third role writes no state at all: the `sol_dlmm_daily_proposal` cron
 (21:00 WIB) reads a precomputed evidence brief
 (`assets/hermes/scripts/sol_dlmm_proposal_brief.py`) and **proposes** threshold
 changes to the operator over Telegram. It is declared with **no toolsets** —
@@ -38,9 +63,7 @@ of a sentence in a prompt, and it also stops the agent re-reading the journal,
 which is what keeps it citing the brief rather than inventing figures. The
 brief does every calculation itself and marks thin samples, unmeasurable
 sections and a below-noise-floor lift as explicitly *not* evidence; proposing
-nothing is the expected output most days. Restoring the LLM's entry role is
-deliberately NOT next — that path was removed for cause (fabricated deploy
-reports) and needs an on-chain existence check first.
+nothing is the expected output most days.
 
 ## Build / run
 

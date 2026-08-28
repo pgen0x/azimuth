@@ -230,6 +230,23 @@ def section_holds(closes):
     print(f"\nHolds are {verdict} the rules by {fmt_sol(hp - up)} SOL/close.")
 
 
+def section_early_closes(closes):
+    print("\n## AI early-close proposals\n")
+    early = [r for r in closes if str(r.get("reason") or "").startswith("AI early-close:")]
+    rest = [r for r in closes if r not in early]
+    print(f"early closes in window: {len(early)} | other closes: {len(rest)}")
+    if len(early) < MIN_MODE_SAMPLES:
+        print(f"\nOnly {len(early)} early close(s) in the window. The stage-1 close-review cron is NOT")
+        print("yet measurable — say so plainly and propose no change to its bands or its prompt.")
+        return
+    ep = statistics.mean(float(r["pnl_sol"]) for r in early)
+    rp = statistics.mean(float(r["pnl_sol"]) for r in rest) if rest else 0.0
+    print(f"\nearly   n={len(early):<4} mean {fmt_sol(ep)} SOL")
+    print(f"rule    n={len(rest):<4} mean {fmt_sol(rp)} SOL")
+    verdict = "BEATING" if ep > rp else "LOSING TO"
+    print(f"\nEarly closes are {verdict} the rule-fired closes by {fmt_sol(ep - rp)} SOL/close.")
+
+
 def section_funnel():
     print("\n## Daemon screen funnel (last 24h)\n")
     try:
@@ -396,6 +413,7 @@ def main():
     section_reasons(closes)
     section_weights()
     section_holds(closes)
+    section_early_closes(closes)
     section_funnel()
     section_gates()
     section_soul()

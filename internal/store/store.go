@@ -366,6 +366,25 @@ func (s *Seen) SaveYoungPool(ctx context.Context, addr string, v any, ttl time.D
 	s.rdb.Set(ctx, youngPoolPrefix+strings.ToLower(addr), b, ttl)
 }
 
+// LLMHealthy reports whether the local LLM router looked reachable on the
+// most recent probe (sol:dlmm:llm_healthy, written by dlmm_monitor.py's
+// check_llm_health() roughly every 150s, piggybacked on the 20s monitor
+// loop). Fails CLOSED — no Redis, a read error, a missing/expired key (the
+// probe process isn't running), or any value other than exactly "1" all read
+// as unhealthy. This gates which path handles real entries (webhook/LLM vs.
+// deterministic DEPLOY_CMD), so an unmeasured signal must default to the
+// proven-safe deterministic path, not to trusting an LLM nothing confirmed
+// was reachable — inverted from the dedup/cooldown reads above, which fail
+// OPEN because there the risk of a false negative is a skipped ticket, not a
+// fabricated deploy report.
+func (s *Seen) LLMHealthy(ctx context.Context) bool {
+	if s == nil || s.rdb == nil {
+		return false
+	}
+	v, err := s.rdb.Get(ctx, "sol:dlmm:llm_healthy").Result()
+	return err == nil && v == "1"
+}
+
 // Unmark removes id from the seen set so a failed emit can retry on the next
 // poll. Called when webhook delivery fails after MarkIfNew already recorded it.
 func (s *Seen) Unmark(ctx context.Context, id string) {

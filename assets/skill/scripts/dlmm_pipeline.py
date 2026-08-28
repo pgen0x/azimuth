@@ -1798,7 +1798,24 @@ def main():
 
     position_address = res.get("position", "DRY_RUN_POSITION")
     tx_hash = res.get("txHash", "DRY_RUN_TX_HASH")
-    
+
+    # On-chain existence check before any DEPLOYED claim is trusted (2026-08-28,
+    # the precondition project-restore-ai-role-2026-08-12 named before entry-side
+    # LLM involvement: the executor's own "success" JSON was previously trusted
+    # unconditionally, which is exactly the gap the 2026-07-06 fabricated-deploy
+    # incident exploited). Bounded retry, not a hard gate — a real deploy can lag
+    # the datapi index by a few seconds, and aborting here risks a duplicate
+    # deploy against a position that may already be funded.
+    is_dry_run = res.get("dryRun") or (res.get("dry_run") == True)
+    verified = is_dry_run
+    if not is_dry_run:
+        for _ in range(3):
+            v_data, _ = run_command_json(f"node {EXECUTOR_PATH} pnl {winner['pool']} {position_address}")
+            if v_data and v_data.get("success"):
+                verified = True
+                break
+            time.sleep(4)
+
     active_bin = bins_below
     active_price = 0.0
     ab_data, ab_err = run_command_json(f"node {EXECUTOR_PATH} active-bin {winner['pool']}")
@@ -1840,7 +1857,6 @@ def main():
         ) if winner.get(k) is not None},
     }
 
-    is_dry_run = res.get("dryRun") or (res.get("dry_run") == True)
     if not is_dry_run:
         run_command(f"redis-cli set \"sol:dlmm:position:{position_address}\" '{json.dumps(tracking_data)}'")
         run_command(f"redis-cli sadd \"sol:dlmm:active_positions\" \"{position_address}\"")
@@ -1860,8 +1876,9 @@ def main():
 
     ts_str = local_time_str()
     status_label = "🧪 DRY RUN DEPLOY" if is_dry_run else "🚀 DEPLOYED"
+    verify_line = "" if verified else "⚠️ UNVERIFIED — not found via on-chain query after 3 retries\n"
     report = f"""{status_label} — {ts_str}
-{winner['name']} {position_address}
+{verify_line}{winner['name']} {position_address}
 Pool | {winner['pool']}
 Metric | Value
 Strategy | {strategy}
