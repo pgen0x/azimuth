@@ -75,13 +75,18 @@ def get_meteora_portfolio_positions(wallet_address):
 # review over every open position on a 5m cadence, which this bot has no
 # equivalent of, so an unknown share of its edge is judgment rather than
 # threshold. Treat -8.0 as calibrated, not proven.
-# -12.0 since 2026-08-26: that reference's own config defaults to -50% behind
-# a 10m LLM-judgment cadence, not a threshold this bot can copy verbatim at
-# turnover's 0.2-0.5 SOL ticket size. -12 is a bounded step in that direction,
-# paired with the widened GIVEBACK_ARM_PCT/GIVEBACK_DROP_PCT below — not a
-# full adoption of -50. Fallback only; SOUL.md section 9 "Hard Stop-Loss" is
-# what actually governs at runtime.
-STOP_LOSS_PCT = -12.0
+# Was -12.0 from 2026-08-26 to 2026-08-31, on the argument that "that
+# reference's own config defaults to -50%". That premise read the reference's
+# CODE DEFAULT (config.js: `u.stopLossPct ?? -50`), not the config it actually
+# runs: its user-config.json sets `stopLossPct: -8`, so the live reference has
+# been at -8 the whole time and the -50 was never a threshold anyone traded.
+# Restored to -8.0 to match. This constant is a FALLBACK only — SOUL.md
+# section 9 "Hard Stop-Loss" governs at runtime and already reads -8.0, which
+# is why live closes journal "Hard Stop-Loss hit (-10.07% <= -8.0%)" while this
+# line said -12. Aligning the two so a profile without a SOUL.md does not
+# silently trade a floor 4 points wider than every calibration note here
+# assumes.
+STOP_LOSS_PCT = -8.0
 TAKE_PROFIT_PCT = 50.0
 MAX_OOR_MINUTES = 30
 # Asymmetric OOR (2026-07-19): the two OOR directions mean OPPOSITE things for
@@ -311,9 +316,12 @@ DOWNTREND_PNL_ONLY_PCT = -6.0
 # -5.21% against a win band of 1.2-2.5% — -0.0821 SOL from those 4 closes against
 # +0.0374 SOL from the other 23, i.e. the whole day's loss. Only the PnL leg is
 # knowable in real time, so for the tight modes it is the primary rail, not the
-# fallback: unconfirmed at -3% fires first, the confirmed leg at -2.5% only when
-# h1 happens to arrive early enough to matter, the -8% floor unchanged.
-DOWNTREND_PNL_ONLY_TIGHT_PCT = -3.0
+# fallback: unconfirmed at -2.5% fires first, the confirmed leg at -2.5% only when
+# h1 happens to arrive early enough to matter, the -8% floor unchanged. Tightened
+# from -3.0 on 2026-08-30 per the daily proposal cron: "downtrend dump,
+# unconfirmed" was the worst non-thin exit rule over the preceding 7d (16 closes,
+# 0% win rate, -0.0724 SOL net) and none of those 16 recovered before -3%.
+DOWNTREND_PNL_ONLY_TIGHT_PCT = -2.5
 # OOR-upside profit lock: above range the position is fully converted to SOL
 # (PnL frozen, fees stopped); at or above this banked gain, close immediately
 # instead of riding the OOR fuse and risking a retrace back into range.
@@ -1861,6 +1869,38 @@ def main():
                      and active_bin <= upper_bin)
         oor_sol_side = (oor_below if sol_is_x_pos else oor_above)
         oor_token_side = (oor_above if sol_is_x_pos else oor_below)
+
+        # 3d. Gap-through close — the mirror of rule 3 on the LOSING side.
+        # Rule 3 tests only the UPPER edge, so the only thing watching a gap
+        # past the LOWER edge was the countdown below: a 5m fast fuse
+        # (OOR_DOWNSIDE_MAX_MINUTES) that the green-candle recovery grace can
+        # stretch to 10m while a bid_ask position holds a full, decaying token
+        # bag. That made the exit FAST on the harmless side (above range = 100%
+        # SOL, PnL frozen, nothing decays) and SLOW on the side that actually
+        # loses money — the same asymmetry the reference bot found and fixed in
+        # its own rule 3 ("dumped far below range ... A gap this far past the
+        # lower edge is not drift — close it without waiting the clock").
+        # At this distance price has crossed the WHOLE range plus
+        # MAX_BINS_PUMPED_ABOVE bins, so there is no re-entry to wait for and
+        # the token side decays every tick it is held. Same bin threshold as
+        # rule 3, so one number describes "gapped through" in both directions.
+        # The token side carries the "dump" keyword deliberately: is_dump_close
+        # keys on it, which routes the high-impact liquidation and the 2h
+        # cooldown, matching the OOR token-side exit. Neither string starts with
+        # "Out of Range", so is_oor_rebalance cannot re-center a gap-through;
+        # only is_turnover_churn can, and that already requires realized_sol > 0.
+        # Guarded by `not close_reason` so it never clobbers an emergency reason
+        # (rug velocity / emergency SL) already set above.
+        if (not close_reason and active_bin is not None and lower_bin is not None
+                and active_bin < lower_bin - max_bins_pumped_above):
+            gap_bins = lower_bin - active_bin
+            if oor_token_side:
+                close_reason = (f"Gap-through dump exit (active bin {active_bin} is {gap_bins} bins below "
+                                f"lower bin {lower_bin}, limit {max_bins_pumped_above}) — fully converted "
+                                f"to token, no clock to wait")
+            else:
+                close_reason = (f"Gapped far below range (active bin {active_bin} is {gap_bins} bins below "
+                                f"lower bin {lower_bin}, limit {max_bins_pumped_above})")
         if meta.get("mode") == "turnover":
             # Asymmetric here too: token-side is a decaying bag (fast fuse),
             # SOL-side is frozen SOL that may yet walk back into range or pump
