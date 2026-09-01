@@ -987,18 +987,97 @@ def position_gone_onchain(wallet_address, pos_addr, attempts=2, gap_s=6):
         return None
     return all(verdicts)
 
+# A position still holding this much quote after a close that reported success
+# did not actually close. Well under any real ticket (the smallest observed is
+# ~0.16 SOL) and under the auto-swap's own 0.01 SOL "too small to bother" floor,
+# so ordinary leftovers never trip it.
+CLOSE_RESIDUAL_DUST_SOL = 0.005
+
+
+def position_residual_sol(wallet_address, pos_addr, attempts=2, gap_s=6):
+    """Smallest balance the portfolio API reports for `pos_addr` across `attempts`
+    polls; 0.0 when it is not listed at all, None when no poll could be read.
+
+    The MINIMUM is deliberate. The indexer lags a close by seconds and keeps
+    serving the pre-close balance, so a single reading of "settled" outweighs a
+    stale "still funded" — the same polarity `position_gone_onchain` uses in
+    reverse, for the same reason.
+    """
+    if not wallet_address:
+        return None
+    readings = []
+    for i in range(attempts):
+        if i:
+            time.sleep(gap_s)
+        positions, _err = get_meteora_portfolio_positions(wallet_address)
+        if positions is None:
+            continue
+        bp = positions.get(pos_addr)
+        try:
+            readings.append(float(bp.get("balances_sol", 0.0)) if bp else 0.0)
+        except (TypeError, ValueError):
+            continue
+    if not readings:
+        return None
+    return min(readings)
+
+
+def position_live_onchain(pos_addr):
+    """True/False from the executor's own SDK read, None when it cannot answer.
+
+    The portfolio API is an indexer; this is the chain. Used only to break the
+    tie when the API still shows a funded position after a close reported
+    success, so indexer lag can never be mistaken for a partial close.
+    """
+    data, _err = run_command_json(f"node {EXECUTOR_PATH} positions")
+    if not isinstance(data, list):
+        return None
+    return any(isinstance(p, dict) and p.get("position") == pos_addr for p in data)
+
+
 def close_position(pos_addr, env_prefix="", wallet_address=None, is_dry_run=False):
-    """Execute a close, reconciling a reported failure against the chain.
+    """Execute a close, reconciling BOTH verdicts against the chain.
 
     Same (result, error) shape as run_command_json. A close the subprocess gave
     up on but the chain confirms comes back as a success with no tx hashes —
     losing the hash is survivable, losing the close is not: an unrecorded close
     leaves a phantom open position in Redis and a hole in the PnL journal.
+
+    The inverse — a reported SUCCESS the chain does not confirm — was trusted
+    blind until 2026-09-01, and that is how STACY-SOL booked -20.51%: the 17:55
+    fast-out exit on 2026-08-31 printed "✅ Successfully closed", wrote its
+    journal row and dropped the Redis key while 0.2511 SOL of liquidity was
+    still in the position. Nothing managed it for 68 minutes; the orphan reclaim
+    found it again at -23.73%. The entry path has verified against the chain
+    since the 2026-07-06 fabricated-deploy incident (dlmm_pipeline.py confirms
+    the position exists before printing 🚀 DEPLOYED) — this is that guard's
+    missing other half.
+
+    An unsettled close returns success=False, so the caller keeps Redis state
+    and the journal untouched and the 20s loop simply tries again next tick with
+    every rule still armed. Unmeasurable (API down) keeps trusting the reported
+    success: blocking on missing data is its own failure mode, and this branch
+    only has to catch a close that lies, not one we cannot check.
     """
     cmd = f"{env_prefix}DLMM_CLOSE_AUTH=1 node {EXECUTOR_PATH} close {pos_addr}"
     res, err = run_command_json(cmd, timeout=CLOSE_CMD_TIMEOUT)
-    if (res and res.get("success")) or is_dry_run:
+    if is_dry_run:
         return res, err
+    if res and res.get("success"):
+        residual = position_residual_sol(wallet_address, pos_addr)
+        if residual is None or residual < CLOSE_RESIDUAL_DUST_SOL:
+            return res, err
+        # The indexer still shows value. Ask the chain before calling it a lie.
+        if position_live_onchain(pos_addr) is False:
+            print(f"✅ Close of {pos_addr} confirmed on-chain; portfolio API still "
+                  f"lists {residual:.4f} SOL (indexer lag) — treating as closed.")
+            return res, err
+        print(f"⚠️ Close of {pos_addr} reported SUCCESS but the position still holds "
+              f"{residual:.4f} SOL on-chain — partial close. Keeping it tracked and "
+              f"retrying next tick; NOT journaling a close that did not happen.")
+        return ({"success": False, "unsettled": True, "residualSol": residual,
+                 "txHashes": res.get("txHashes") or [],
+                 "error": f"partial close — {residual:.4f} SOL still in position"}, None)
     if position_gone_onchain(wallet_address, pos_addr) is True:
         detail = err or (res or {}).get("error") or "unknown error"
         print(f"⚠️ Close of {pos_addr} reported failure ({detail}) but the position "
@@ -1029,6 +1108,84 @@ def get_position_metadata(position_address):
         return json.loads(out)
     except:
         return None
+
+# How far back an adoption reads the close journal. The file grows ~1 MB a
+# month and adoption is rare, but this runs inside the 20s loop — a bounded tail
+# keeps a pathological file from stalling a tick.
+ADOPT_JOURNAL_TAIL_BYTES = 512 * 1024
+
+
+def recover_position_metadata(pos_addr, pool):
+    """Best-effort provenance for a position the reclaim path is adopting.
+
+    An adopted position used to enter Redis as a blank: no pair, no base_mint,
+    no mode, strategy "spot". That blank is not neutral — it silently opts the
+    position out of every mode-specific rail (STACY-SOL's turnover 5m OOR fuse
+    became the 30m default on 2026-08-31), out of the auto-swap that settles a
+    filled bag (no base_mint means nothing to sell), and out of the rug and
+    momentum checks that key on the mint.
+
+    Our own close journal is the authority here rather than the chain: mode and
+    strategy are labels we assigned and the chain never knew them. Returns {}
+    when nothing is recoverable — a blank adoption is still better than none.
+
+    POSITION-level facts (its real age) come only from an exact position match;
+    a pool match yields POOL-level facts only, because an earlier ticket in the
+    same pool is a different ticket.
+    """
+    path = os.path.join(PROFILE_DIR, "memories", "dlmm_closes.jsonl")
+    try:
+        size = os.path.getsize(path)
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            if size > ADOPT_JOURNAL_TAIL_BYTES:
+                f.seek(size - ADOPT_JOURNAL_TAIL_BYTES)
+                f.readline()  # discard the partial line the seek landed inside
+            rows = f.readlines()
+    except Exception as e:
+        print(f"⚠️ Adoption metadata lookup failed: {e}")
+        return {}
+
+    def _is_blank_adoption(rec):
+        """True for a row a BLANK adoption closed out. It names the pool as the
+        pair and carries no mint, so it knows nothing worth recovering — and its
+        age_min is measured from the adoption, not from the mint. Reading
+        provenance out of one just launders the original gap into the next
+        adoption, which is exactly what the newest STACY-SOL row would have done.
+        """
+        return rec.get("pair") == rec.get("pool") and not rec.get("base_mint")
+
+    # Newest first, filling only what is still missing: the most recent row that
+    # KNOWS a field wins, and a later blank never overwrites an earlier fact.
+    out = {}
+    for line in reversed(rows):
+        try:
+            rec = json.loads(line)
+        except Exception:
+            continue
+        if _is_blank_adoption(rec):
+            continue
+        is_position_match = rec.get("position") == pos_addr
+        if not is_position_match and rec.get("pool") != pool:
+            continue
+        for key in ("pair", "base_mint", "mode"):
+            if not out.get(key) and rec.get(key):
+                out[key] = rec[key]
+        if not out.get("base_symbol") and out.get("pair"):
+            out["base_symbol"] = out["pair"].split("-")[0]
+        if is_position_match:
+            for key in ("strategy", "recenter_of"):
+                if not out.get(key) and rec.get(key):
+                    out[key] = rec[key]
+            # log_close writes ts + age_min, so the mint time is recoverable —
+            # which is what lets an adopted position keep honest age protection
+            # instead of being treated as newborn (see the SUSPECT-READ GUARD).
+            if not out.get("deployed_at"):
+                try:
+                    out["deployed_at"] = int(rec["ts"]) - int(float(rec["age_min"]) * 60)
+                except (KeyError, TypeError, ValueError):
+                    pass
+    return {k: v for k, v in out.items() if v}
+
 
 def build_report_row(pos_addr, pair, pool, meta, pool_liquidity_usd, pnl_pct, pnl_sol_actual,
                       in_range, fee_per_tvl_24h, api_available, bp, active_price, entry_price,
@@ -1543,15 +1700,39 @@ def main():
                 if cli.report_only:
                     print(f"➕ [report-only] Untracked FUNDED position {oc_addr} ({bal_sol:.4f} SOL) — would adopt.")
                     continue
-                print(f"➕ Adopting untracked FUNDED position {oc_addr} (pool {oc_pool}, {bal_sol:.4f} SOL) into Redis.")
+                # Recover what we knew about this position before it was orphaned.
+                # Adopting it blank leaves it managed by the DEFAULT rails rather
+                # than its own — which is half of what made STACY-SOL expensive.
+                prov = recover_position_metadata(oc_addr, oc_pool)
+                adopt_deployed_at = prov.get("deployed_at")
+                print(f"➕ Adopting untracked FUNDED position {oc_addr} (pool {oc_pool}, {bal_sol:.4f} SOL) into Redis"
+                      + (f" as {prov['pair']}"
+                         + (f" ({prov['mode']})" if prov.get("mode") else "")
+                         if prov.get("pair") else " (provenance unknown)") + ".")
                 run_command(f"redis-cli sadd sol:dlmm:active_positions \"{oc_addr}\"")
                 adopt_meta = {
-                    "pool": oc_pool, "pair": oc_pool, "base_mint": "", "base_symbol": "",
+                    "pool": oc_pool,
+                    "pair": prov.get("pair") or oc_pool,
+                    "base_mint": prov.get("base_mint") or "",
+                    "base_symbol": prov.get("base_symbol") or "",
                     "entry_price": oc_bp.get("pool_price", 0.0), "entry_bin": 0,
                     "bins_below": 0, "bins_above": 0, "size_sol": bal_sol,
-                    "deployed_at": now, "tx_hash": "ADOPTED", "strategy": "spot",
-                    "amount_x": 0, "amount_y": 0, "adopted": True
+                    # The real mint time when the journal could name it; otherwise
+                    # now, which is a placeholder for "unknown" and is flagged as
+                    # such by adopted_age_known below — never read it as an age.
+                    "deployed_at": adopt_deployed_at or now,
+                    "tx_hash": "ADOPTED",
+                    "strategy": prov.get("strategy") or "spot",
+                    "amount_x": 0, "amount_y": 0, "adopted": True,
+                    "adopted_age_known": bool(adopt_deployed_at),
                 }
+                # Only ever set a mode we actually recovered. An absent mode makes
+                # the consumers fall back to `multiday`, and the re-center path
+                # below refuses to act on that guess.
+                if prov.get("mode"):
+                    adopt_meta["mode"] = prov["mode"]
+                if prov.get("recenter_of"):
+                    adopt_meta["recenter_of"] = prov["recenter_of"]
                 run_command("redis-cli set \"sol:dlmm:position:%s\" '%s'" % (oc_addr, json.dumps(adopt_meta)))
         # Refresh active set after adoption so the main loop manages newly-adopted entries.
         active_positions = get_active_positions()
@@ -1664,6 +1845,15 @@ def main():
         suspect_deployed_at = meta.get("deployed_at")
         suspect_age_min = ((now - suspect_deployed_at) / 60.0
                            if suspect_deployed_at else float("inf"))
+        # An ADOPTED position's deployed_at is when the reclaim wrote the key, not
+        # when the position was minted, so it reads as newborn no matter how old it
+        # is. That is the same "unknown age" the line above refuses to protect —
+        # and protecting it anyway is what dismissed STACY-SOL's genuine -23.73% as
+        # an indexing gap for five straight ticks on 2026-08-31, three minutes it
+        # spent falling. Only an adoption that recovered a real mint time keeps its
+        # age protection.
+        if meta.get("adopted") and not meta.get("adopted_age_known"):
+            suspect_age_min = float("inf")
         # -90% only ever caught the -100% shape of the indexing-lag bug. EYE-SOL and
         # CONK-SOL (2026-08-21/22) show it also lands shallower: two DIFFERENT
         # positions in the same pool, opened seconds apart, both read the identical
@@ -2429,6 +2619,11 @@ def main():
                 _rc_str, _, _ = run_command(f"redis-cli get \"{rebalance_count_key}\"")
                 rebalances_24h = int(_rc_str) if _rc_str and _rc_str.strip().isdigit() else 0
                 mode_cd = meta.get("mode", "multiday")
+                # An adopted orphan whose provenance the journal could not name has
+                # a DEFAULTED mode, not a known one. Re-centering re-commits capital
+                # on the strength of that label, so a guess must never buy one; a
+                # plain exit is always available and always correct here.
+                adopted_unknown_mode = bool(meta.get("adopted")) and not meta.get("mode")
                 # Direction needs live bin data; unknown bins fail closed (no rebalance).
                 oor_above = (active_bin is not None and upper_bin is not None and active_bin > upper_bin)
                 mode_allows_rebalance = (
@@ -2488,7 +2683,7 @@ def main():
                         "low yield", "fee pace death"))
                     and rebalance_budget_ok
                 )
-                is_oor_rebalance = is_turnover_churn or (
+                is_oor_rebalance = (not adopted_unknown_mode) and (is_turnover_churn or (
                     mode_allows_rebalance
                     and strategy != "single_sided_reseed"  # reseed path redeploys on its own — never both
                     and close_reason.startswith("Out of Range")
@@ -2504,7 +2699,7 @@ def main():
                     # the real -8% floor doesn't get re-centered on a stale read.
                     and pnl_pct > -6.0
                     and rebalance_budget_ok
-                )
+                ))
 
                 if is_oor_rebalance:
                     print(f"♻️ {mode_cd} rebalance eligible ({rebalances_24h}/{rebalance_cap} in 24h, pool rebalance PnL {rebalance_pnl_24h:+.4f} SOL) — skipping re-entry cooldown for {base_symbol_cd}")

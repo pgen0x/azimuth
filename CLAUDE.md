@@ -425,6 +425,28 @@ one pass per enabled mode per `POLL_INTERVAL`.
   rolling `SEEN_TTL`. The old `SAdd`+`Expire` refreshed the whole set's TTL every
   write so pools were deduped forever — see the comment in `store.go`; don't
   reintroduce a single-key set.
+- **A close is not closed until the chain says so, and an adopted orphan is not
+  young.** `close_position` verifies BOTH verdicts: a reported failure against
+  `position_gone_onchain` (since 2026-07-30) and, since 2026-09-01, a reported
+  SUCCESS against `position_residual_sol` — the portfolio API's `balances_sol`,
+  tie-broken by the executor's own SDK read (`position_live_onchain`) so indexer
+  lag can never be read as a partial close. A close that left value behind
+  returns `success: False` so the caller keeps Redis and the journal untouched
+  and the 20s loop retries with every rule still armed; unmeasurable keeps
+  trusting the report. STACY-SOL is why: on 2026-08-31 a fast-out exit printed
+  `✅ Successfully closed`, journaled -1.66% and dropped the Redis key while
+  0.2511 SOL sat in the position — unmanaged for 68 minutes, reclaimed at
+  -23.73%, realized -20.51%. Paired with that, the reclaim path
+  (`recover_position_metadata`) rebuilds an adopted position's pair, mint, mode
+  and mint TIME from the close journal instead of adopting it blank: a blank
+  inherits the DEFAULT rails rather than its own (turnover's 5m OOR fuse became
+  the 30m default), has no mint to auto-swap, and — because adoption stamped
+  `deployed_at = now` — reads as newborn, which is what let the SUSPECT-READ
+  guard dismiss that genuine -23.73% as an indexing gap for five straight ticks.
+  Only an adoption that recovered a real mint time (`adopted_age_known`) keeps
+  age protection, and a re-center refuses to act on a defaulted mode. Rows a
+  blank adoption itself journaled are skipped as evidence — otherwise each
+  adoption launders the previous one's gap forward.
 - **An exit is not a ban, and a TTL is not a bound.** The two are separate
   decisions in `maybe_blacklist_rug` and must stay that way. The RUG_M5_PCT
   velocity gate reads a 5m PRICE candle: right trigger for an emergency close,
