@@ -944,9 +944,8 @@ func (s *Scanner) pollMode(ctx context.Context, mp meteora.ModeParams) {
 			continue
 		}
 
-		// Momentum / downtrend gate (best-effort, fail-open). Momentum-rejected
-		// pools stay marked seen (no unmark) so we don't re-hit DexScreener for
-		// them every cycle within the SEEN_TTL window. Per-mode opt-out via
+		// Momentum / downtrend gate (best-effort, fail-open). Rejected pools
+		// retry next cycle: a transient dump is not a delivered signal. Opt-out via
 		// ModeParams.SkipMomentumGate — a directional gate does not fit every
 		// screen; see the Pulse comment in meteora/screen.go.
 		if s.cfg.EnableMomentumGate && !mp.SkipMomentumGate {
@@ -1007,20 +1006,14 @@ func (s *Scanner) pollMode(ctx context.Context, mp meteora.ModeParams) {
 		batchKeys = append(batchKeys, poolKey)
 	}
 
-	// A momentum reject normally stays marked seen for the whole SEEN_TTL so we
-	// don't re-hit DexScreener for a dumping pool every cycle. But when it took
-	// the LAST candidate with it, that trade-off silences the entire mode for
-	// hours: turnover's live supply is 1-4 qualifying pools per cycle, so a
-	// single -3.9% 5m print blanked it for the full 2h TTL (observed
-	// 2026-07-28). Momentum is the one *transient* reject — the price recovers
-	// in minutes — unlike the audit / GMGN safety rejects, which stay sticky by
-	// design. Unmark only when the batch ended up empty, so the extra
-	// DexScreener traffic is bounded to cycles that would have sent nothing.
-	if len(batch) == 0 && len(momRejectedKeys) > 0 {
+	// Recovery must not depend on another pool passing in the same batch.
+	// Audit/GMGN rejects and delivered candidates retain their existing TTL.
+	// One retry per screened pool per poll; all momentum thresholds still apply.
+	if len(momRejectedKeys) > 0 {
 		for _, k := range momRejectedKeys {
 			s.seen.Unmark(ctx, k)
 		}
-		log.Printf("scanner[%s]: batch empty — unmarked %d momentum-rejected pool(s) to retry next cycle",
+		log.Printf("scanner[%s]: unmarked %d momentum-rejected pool(s) to retry next cycle",
 			mp.Mode, len(momRejectedKeys))
 	}
 

@@ -3,11 +3,11 @@
 
 Computes the metrics rival bot screenshots brag about (positions/24h, avg
 hold, realized profit, volume churned) plus the ones that actually decide
-whether the fast-cycle rules earn: fees-vs-IL split, win rate, per-mode
+whether the fast-cycle rules earn: fees vs principal change, win rate, per-mode
 breakdown, and rebalance-chain PnL per pool (the circuit-breaker's view).
 
 Sources (all ground truth, no LLM):
-  * Meteora portfolio API   — per-pool realized PnL / fees / deposits (window)
+  * memories/dlmm_realized.jsonl — per-position LP flows, filtered by close time
   * memories/dlmm_closes.jsonl — per-close hold times, modes, reasons
   * Redis                   — open positions, rebalance counters + PnL tallies
 
@@ -16,49 +16,15 @@ Usage:
 """
 import argparse
 import json
-import math
 import os
 import subprocess
 import time
-import urllib.request
 
-from dlmm_realized import apply_realized
+from dlmm_realized import apply_realized, load_realized
 from tz_util import local_time_str
-
-PORTFOLIO_API = "https://dlmm.datapi.meteora.ag/portfolio"
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROFILE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(SCRIPT_DIR)))
-
-
-def get_wallet_address():
-    try:
-        with open(os.path.join(PROFILE_DIR, ".env")) as f:
-            for line in f:
-                if line.startswith("SOLANA_PUBLIC_KEY="):
-                    return line.split("=", 1)[1].strip().strip("\"'")
-    except Exception:
-        pass
-    return os.environ.get("SOLANA_PUBLIC_KEY")
-
-
-def fetch_portfolio(wallet, days):
-    """Per-pool aggregates from the Meteora datapi (same pagination as
-    dlmm_reconcile.py). Returns what it got on any failure — the journal/Redis
-    sections still render, the API block just reads n/a."""
-    pools, page = [], 1
-    try:
-        while True:
-            url = f"{PORTFOLIO_API}?user={wallet}&page={page}&pageSize=50&daysBack={days}"
-            req = urllib.request.Request(url, headers={"User-Agent": "dlmm-lp/1.0"})
-            with urllib.request.urlopen(req, timeout=20) as resp:
-                data = json.loads(resp.read())
-            pools += data.get("pools") or []
-            if not data.get("hasNext"):
-                return pools
-            page += 1
-    except Exception:
-        return pools
 
 
 def redis_get(key):
@@ -126,16 +92,14 @@ def build_card(hours):
     cutoff = now - hours * 3600
     closes = load_closes(cutoff)
 
-    wallet = get_wallet_address()
     f = lambda x: float(x or 0)
-    # daysBack is a coarse API-side prefilter — it still returns pools outside
-    # the window (observed: 100+ pools for daysBack=1). Filter to pools whose
-    # last close actually falls inside the card's window, same as reconcile.
-    pools = [p for p in fetch_portfolio(wallet, max(1, math.ceil(hours / 24)))
-             if f(p.get("lastClosedAt")) >= cutoff] if wallet else []
-    api_pnl = sum(f(p.get("pnlSol")) for p in pools)
-    api_fee = sum(f(p.get("totalFeeSol")) for p in pools)
-    api_dep = sum(f(p.get("totalDepositSol")) for p in pools)
+    # Portfolio pool totals are lifetime aggregates even with daysBack. A
+    # recent lastClosedAt does not put every deposit in that pool in this window.
+    flows = [r for r in load_realized(os.path.join(PROFILE_DIR, "memories", "dlmm_realized.jsonl")).values()
+             if cutoff <= f(r.get("closed_at")) <= now]
+    api_pnl = sum(f(r.get("realized_sol")) for r in flows)
+    api_fee = sum(f(r.get("fee_sol")) for r in flows)
+    api_dep = sum(f(r.get("deposit_sol")) for r in flows)
 
     # Say which basis the number is on: "chain" once every close in the window
     # has been reconciled to on-chain flows, otherwise how many are still marks.
@@ -180,18 +144,19 @@ def build_card(hours):
         "|--------|-------|",
         f"| Closes | {len(closes)} ({len(wins)}W/{len(losses)}L · {win_rate:.0f}% win) |",
         f"| Avg hold | {fmt_hold(avg_hold)} |",
-        f"| Realized PnL ({basis_label}) | {realized:+.4f} SOL |",
+        f"| Journal LP PnL ({basis_label}) | {realized:+.4f} SOL |",
     ]
-    if pools:
+    if flows:
         lines += [
-            f"| API PnL / fees / IL | {api_pnl:+.4f} / {api_fee:+.4f} / {api_pnl - api_fee:+.4f} SOL |",
-            f"| Volume churned | {api_dep:.2f} SOL across {len(pools)} pools |",
+            f"| Cached LP PnL / fees / principal change | {api_pnl:+.4f} / {api_fee:+.4f} / {api_pnl - api_fee:+.4f} SOL |",
+            f"| Deposits recycled | {api_dep:.2f} SOL across {len(flows)} cached closes |",
+            "| Basis | Position flows; excludes wallet swap/gas costs; principal change is not HODL-relative IL |",
         ]
     else:
-        lines.append("| API PnL / volume | n/a (portfolio API unreachable) |")
+        lines.append("| Cached LP flows | n/a (run dlmm_realized.py to reconcile this window) |")
     lines.append(f"| Open positions | {open_positions} |")
 
-    for m in ("turnover", "casual", "multiday", "unknown"):
+    for m in ("turnover", "pulse", "casual", "multiday", "unknown"):
         d = by_mode.get(m)
         if not d:
             continue

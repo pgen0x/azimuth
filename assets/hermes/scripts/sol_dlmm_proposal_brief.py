@@ -92,6 +92,9 @@ def load_closes():
             if (rec.get("ts") or 0) < cutoff:
                 continue
             out.append(rec)
+    # Same position-level dedup as dlmm_realized.apply_realized: a retry is
+    # not another trade. Keep legacy rows without a position separately.
+    out = list({rec.get("position") or id(rec): rec for rec in out}.values())
     realized = load_realized()
     for rec in out:
         got = realized.get(rec.get("position"))

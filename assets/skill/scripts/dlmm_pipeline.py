@@ -1019,6 +1019,13 @@ def main():
     print(f"🔍 Starting DLMM Ingestion Pipeline [{mode.upper()} mode]")
 
     params = load_soul_dlmm_params(mode=mode)
+    # Both automated entry paths share the SOL-only policy. A stale LLM prompt
+    # must not restore the two-sided exposure the deterministic picker removed.
+    if cli.from_batch or cli.from_signal:
+        automatic_strategy = select_batch_strategy(None, mode)
+        if cli.strategy and cli.strategy != automatic_strategy:
+            print(f"Signal strategy: {cli.strategy} overridden by {automatic_strategy} policy")
+        cli.strategy = automatic_strategy
     min_tvl = params["MIN_TVL_USD"]
     min_fee_tvl = params["MIN_FEE_TVL_24H"]
     min_organic = params["MIN_ORGANIC_SCORE"]
@@ -1409,7 +1416,7 @@ def main():
     # so the best *deployable* candidate still wins. Fails OPEN: a pool is dropped only
     # when the read-only check positively confirms it needs init.
     if cli.analyze_only:
-        soul_strat = params.get("STRATEGY", "spot")
+        soul_strat = cli.strategy or params.get("STRATEGY", "spot")
         bins_by_candidate = {}
         deployable_candidates = []
         for c in valid_candidates:

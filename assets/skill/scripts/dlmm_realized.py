@@ -114,6 +114,10 @@ def apply_realized(records, path=None):
     mark and are stamped "mark" — unmeasured, not zero. Mutates and returns the
     same list, so callers can drop it into an existing load path.
     """
+    # A timeout/re-adoption can journal the same closed position more than once.
+    # Keep its latest close; otherwise the scoreboard and learner count its
+    # entire lifetime cash flow repeatedly. Unidentified legacy rows stay apart.
+    records[:] = list({rec.get("position") or id(rec): rec for rec in records}.values())
     realized = load_realized(path or REALIZED_PATH)
     for rec in records:
         got = realized.get(rec.get("position"))
