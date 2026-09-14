@@ -5,6 +5,7 @@ import time
 import subprocess
 import os
 import re
+import shlex
 import urllib.request
 from decimal import Decimal
 from local_indicators import check_local_indicators
@@ -1133,6 +1134,19 @@ def recover_position_metadata(pos_addr, pool):
     a pool match yields POOL-level facts only, because an earlier ticket in the
     same pool is a different ticket.
     """
+    # Executor writes this exact-position provenance before broadcasting, so
+    # adoption after timeout does not invent a mode/root from an older close.
+    if re.fullmatch(r"[1-9A-HJ-NP-Za-km-z]{32,44}", pos_addr):
+        entry_path = os.path.join(PROFILE_DIR, "memories", "dlmm_entries", pos_addr + ".json")
+        try:
+            with open(entry_path, encoding="utf-8") as entry_file:
+                entry = json.load(entry_file)
+            if entry.get("position") == pos_addr and entry.get("pool") == pool:
+                return entry
+        except FileNotFoundError:
+            pass
+        except (OSError, ValueError) as exc:
+            print(f"⚠️ Entry provenance unreadable for {pos_addr}: {exc}")
     path = os.path.join(PROFILE_DIR, "memories", "dlmm_closes.jsonl")
     try:
         size = os.path.getsize(path)
@@ -1301,6 +1315,26 @@ def render_status_report(report_rows, sol_price_usd, trailing_trigger_pct, min_f
 # local indicators are imported and check_local_indicators is used directly below.
 
 LLM_HEALTH_CHECK_COOLDOWN_SEC = 150  # ~2.5min: cheaper than probing every 20s tick
+
+def protect_tight_exit(reason, mode, pnl_pct, change_h1, emergency=False):
+    """Risk floors outrank profit reasons; tight stops cannot be vetoed by holds."""
+    if mode not in ("turnover", "pulse"):
+        return reason, False
+    if emergency or (reason and "stop-loss" in reason.lower()):
+        return reason, True
+    # PERPSPAD: trailing occupied `close_reason`, hiding the -2.5% floor,
+    # then a bullish indicator deferred it all the way to the -8% hard SL.
+    if (change_h1 is not None and change_h1 <= DOWNTREND_1H_PCT
+            and pnl_pct <= DOWNTREND_PNL_TIGHT_PCT):
+        reason = (f"Sustained downtrend dump (1h {change_h1:+.1f}% <= {DOWNTREND_1H_PCT}% "
+                  f"& PnL {pnl_pct:.2f}% <= {DOWNTREND_PNL_TIGHT_PCT}%) — risk floor")
+    elif pnl_pct <= DOWNTREND_PNL_ONLY_TIGHT_PCT:
+        reason = (f"Downtrend dump, unconfirmed (PnL {pnl_pct:.2f}% <= "
+                  f"{DOWNTREND_PNL_ONLY_TIGHT_PCT}%, no 1h confirmation) — risk floor")
+    protected = bool(reason and any(label in reason.lower() for label in (
+        "trailing take-profit", "downtrend dump", "fast-out dump exit", "peak-giveback stop")))
+    return reason, protected
+
 
 def check_llm_health():
     """Best-effort probe of the local LLM router, so the Go daemon can fall
@@ -1726,6 +1760,10 @@ def main():
                     "amount_x": 0, "amount_y": 0, "adopted": True,
                     "adopted_age_known": bool(adopt_deployed_at),
                 }
+                for key in ("entry_price", "entry_bin", "bins_below", "bins_above",
+                            "size_sol", "amount_x", "amount_y", "sol_is_x", "signal"):
+                    if prov.get(key) is not None:
+                        adopt_meta[key] = prov[key]
                 # Only ever set a mode we actually recovered. An absent mode makes
                 # the consumers fall back to `multiday`, and the re-center path
                 # below refuses to act on that guess.
@@ -2450,8 +2488,12 @@ def main():
                         print(f"Partial harvested position tracked successfully: {new_pos}")
                     continue
 
-        # 7. Pre-exit Indicators Timing Check (for non-emergency exits)
-        if close_reason and params.get("INDICATORS_ENABLED"):
+        close_reason, protected_risk_exit = protect_tight_exit(
+            close_reason, meta.get("mode"), pnl_pct, price_change_h1, emergency_close)
+
+        # A risk exit remains executable through BOTH indicator and AI holds.
+        # Thesis-mode discretionary exits retain their existing timing checks.
+        if close_reason and not protected_risk_exit and params.get("INDICATORS_ENABLED"):
             reason_l = close_reason.lower()
             is_emergency = (emergency_close or "stop-loss" in reason_l
                             or "out of range" in reason_l or "pumped" in reason_l)
@@ -2518,7 +2560,7 @@ def main():
         # Bypass if trailing TP already dropped >= 3% from peak: that's a real dump, not a bounce dip
         # Emergency closes (SL floor / thin liquidity) are never suppressed.
         AI_HOLD_BYPASS_DROP_PCT = 3.0
-        if close_reason and not emergency_close:
+        if close_reason and not emergency_close and not protected_risk_exit:
             hold_val, _, _ = run_command(f"redis-cli get \"sol:dlmm:position:{pos_addr}:ai_hold_until\"")
             if hold_val and hold_val != "(nil)" and int(hold_val) > now:
                 reason_lc = close_reason.lower()
@@ -2884,9 +2926,14 @@ def main():
                     # purpose: a pool that keeps churning keeps its loss history.
                     run_command(f"redis-cli incrbyfloat \"{rebalance_pnl_key}\" {realized_sol:.6f}")
                     run_command(f"redis-cli expire \"{rebalance_pnl_key}\" 86400")
-                    rebalance_cmd = f"{env_prefix}node {EXECUTOR_PATH} deploy {pool} 0 {size_sol} {rebalance_bins} 0 bid_ask {params.get('SLIPPAGE_BPS', 1000)}"
+                    entry_context = {key: meta.get(key) for key in (
+                        "pair", "base_mint", "base_symbol", "sol_is_x", "signal")}
+                    entry_context.update(mode=mode_cd, strategy=f"{mode_cd}_rebalance",
+                                         size_sol=size_sol, recenter_of=meta.get("recenter_of") or pos_addr)
+                    context_env = "DLMM_ENTRY_CONTEXT=" + shlex.quote(json.dumps(entry_context))
+                    rebalance_cmd = f"{env_prefix}{context_env} node {EXECUTOR_PATH} deploy {pool} 0 {size_sol} {rebalance_bins} 0 bid_ask {params.get('SLIPPAGE_BPS', 1000)}"
                     print(f"♻️ {mode_cd} rebalance redeploy: {rebalance_cmd}")
-                    dep_res, dep_err = run_command_json(rebalance_cmd)
+                    dep_res, dep_err = run_command_json(rebalance_cmd, timeout=CLOSE_CMD_TIMEOUT)
                     if dep_res and dep_res.get("success"):
                         new_pos = dep_res.get("position")
                         ab_data, _ = run_command_json(f"node {EXECUTOR_PATH} active-bin {pool}")
@@ -2921,7 +2968,7 @@ def main():
                         swap_report += f"\n**Rebalanced**: re-centered {size_sol} SOL at the current price (re-center #{rebalances_24h + 1}/{rebalance_cap} in 24h). New position: {new_pos}"
                         print(f"♻️ {mode_cd} rebalance deployed: {new_pos}")
                     else:
-                        print(f"❌ {mode_cd} rebalance deploy failed: {dep_err or (dep_res or {}).get('error')} — position stays closed, normal cooldown applies")
+                        print(f"⚠️ {mode_cd} rebalance not confirmed: {dep_err or (dep_res or {}).get('error')} — no blind retry; on-chain adoption will reconcile any landed position")
                         run_command(f"redis-cli set \"{cooldown_key}\" \"{close_reason[:120]}\" ex 3600")
 
                 # Telegram report formatting

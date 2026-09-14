@@ -6,6 +6,7 @@ const bs58 = require("bs58");
 const dotenv = require("dotenv");
 const fs = require("fs");
 const path = require("path");
+const net = require("net");
 
 // Resolved from the invoked path (process.argv[1]), NOT __dirname — Node always
 // realpaths __dirname/__filename through symlinks, which would resolve to this repo
@@ -189,163 +190,154 @@ async function checkBinCoverage(poolAddressStr, binsBelow, binsAbove) {
   });
 }
 
-// Close a freshly-minted empty position (no/partial liquidity) to refund rent.
-// Used by deployPosition when phase-2 add-liquidity fails after the NFT is minted.
-async function cleanupEmptyPosition(connection, pool, wallet, positionPubKey, minBinId, maxBinId) {
-  try {
-    // Handles the case where phase-2 added partial liquidity before failing.
-    const closeTx = await pool.removeLiquidity({
-      user: wallet.publicKey,
-      position: positionPubKey,
-      fromBinId: minBinId,
-      toBinId: maxBinId,
-      bps: new BN(10000), // 100% — removes any partial liquidity and closes the NFT
-      shouldClaimAndClose: true
-    });
-    for (const tx of Array.isArray(closeTx) ? closeTx : [closeTx]) {
-      await sendAndConfirmTransaction(connection, tx, [wallet]);
+// ponytail: one deployment per wallet on this host; use a distributed lock
+// if a wallet is ever traded from multiple hosts. Same kernel-lock pattern as
+// uni_ladder: no stale PID files or lease expiry while a send is still running.
+async function acquireDeployLock(walletAddress) {
+  const server = net.createServer();
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(`\0azimuth-dlmm-entry-${walletAddress}`, resolve);
+  }).catch((err) => {
+    if (err.code === "EADDRINUSE") throw new Error("ENTRY BUSY: another deploy is active for this wallet");
+    throw err;
+  });
+  return () => new Promise((resolve) => server.close(resolve));
+}
+
+async function assertNoTokenExposure(pool, wallet) {
+  // Read position accounts, not cached portfolio values or bin arrays. Empty
+  // NFTs also block until the monitor reconciles them. Includes sibling pools
+  // of the same base mint, even before Python has written their Redis metadata.
+  const positions = await pool.program.account.positionV2.all([
+    DLMM.positionOwnerFilter(wallet.publicKey),
+  ]);
+  const sol = "So11111111111111111111111111111111111111112";
+  const mints = [pool.lbPair.tokenXMint, pool.lbPair.tokenYMint]
+    .map(String).filter((mint) => mint !== sol);
+  for (const position of positions) {
+    if (position.account.lbPair.toString() === pool.pubkey.toString()) {
+      throw new Error(`ENTRY REFUSED: pool already has position ${position.publicKey}`);
     }
-  } catch (rmErr) {
-    // No liquidity to remove (NFT minted but add never landed) — close the empty NFT directly.
-    console.warn(`[DLMM] removeLiquidity during cleanup failed (${rmErr.message}); using closePositionIfEmpty.`);
-    const positionData = await pool.getPosition(positionPubKey);
-    const emptyTx = await pool.closePositionIfEmpty({ owner: wallet.publicKey, position: positionData });
-    for (const tx of Array.isArray(emptyTx) ? emptyTx : [emptyTx]) {
-      await sendAndConfirmTransaction(connection, tx, [wallet]);
+    const pair = await pool.program.account.lbPair.fetch(position.account.lbPair);
+    if ([pair.tokenXMint, pair.tokenYMint].some((mint) => mints.includes(mint.toString()))) {
+      throw new Error(`ENTRY REFUSED: token already exposed through position ${position.publicKey}`);
     }
   }
 }
 
 async function deployPosition(poolAddressStr, amountX, amountY, binsBelow, binsAbove, strategyTypeStr = "spot", slippageBps = 1000) {
-  return await runWithFailover(async (connection) => {
-    const wallet = getWallet();
-    const pool = await DLMM.create(connection, new PublicKey(poolAddressStr));
-    const activeBin = await pool.getActiveBin();
-    
-    const minBinId = activeBin.binId - binsBelow;
-    const maxBinId = activeBin.binId + binsAbove;
-    
-    const tokenXDecimals = await getTokenDecimals(connection, pool.lbPair.tokenXMint);
-    const tokenYDecimals = await getTokenDecimals(connection, pool.lbPair.tokenYMint);
-    
-    const totalXLamports = new BN(Math.floor(amountX * Math.pow(10, tokenXDecimals)));
-    const totalYLamports = new BN(Math.floor(amountY * Math.pow(10, tokenYDecimals)));
-
-    const strategyMap = {
-      spot: StrategyType.Spot,
-      curve: StrategyType.Curve,
-      bid_ask: StrategyType.BidAsk,
-    };
-    const strategyType = strategyMap[strategyTypeStr.toLowerCase()] ?? StrategyType.Spot;
-
-    console.log(`[DLMM] Deploying ${amountX} X and ${amountY} Y in pool ${poolAddressStr} across bins ${minBinId} to ${maxBinId} (strategy: ${strategyTypeStr})`);
-    
-    if (process.env.DRY_RUN === "true") {
-      console.log("[DRY RUN] Would deploy position");
-      return { success: true, dryRun: true, position: "DRY_RUN_POSITION_ADDR" };
-    }
-
-    await assertRangeDoesNotRequireBinArrayInitialization(connection, pool, minBinId, maxBinId);
-
-    const newPosition = Keypair.generate();
-    const totalBins = binsBelow + binsAbove;
-    const isWideRange = totalBins > 69;
-    const txHashes = [];
-
-    if (isWideRange) {
-      console.log(`[DLMM] Range exceeds 69 bins (${totalBins} bins). Executing chunked wide range deployment...`);
-      // Wide-range deploy is two non-atomic phases: (1) mint empty position NFT,
-      // (2) add liquidity. If phase 2 fails after phase 1, an empty 0-deposit NFT is
-      // stranded on-chain. We track whether the NFT was minted: once it is, ANY later
-      // failure is handled by cleanup-then-return (NOT throw), so runWithFailover never
-      // re-runs phase 1 and mints duplicate orphans. Only a failure BEFORE the mint is
-      // rethrown for legitimate RPC failover.
-      let minted = false;
+  if (![amountX, amountY].every((n) => Number.isFinite(n) && n >= 0)
+      || amountX + amountY <= 0
+      || ![binsBelow, binsAbove].every((n) => Number.isSafeInteger(n) && n >= 0)
+      || !Number.isSafeInteger(slippageBps) || slippageBps < 0 || slippageBps > 10000
+      || !["spot", "curve", "bid_ask"].includes(strategyTypeStr)) {
+    throw new Error("Invalid deploy amounts, range, strategy or slippage");
+  }
+  const wallet = getWallet();
+  const dry = process.env.DRY_RUN === "true";
+  const release = dry ? async () => {} : await acquireDeployLock(wallet.publicKey.toString());
+  const pendingDir = path.join(PROFILE_DIR, "memories", "dlmm_pending_deploys");
+  const pendingPath = path.join(pendingDir, `${wallet.publicKey}.json`);
+  const entryDir = path.join(PROFILE_DIR, "memories", "dlmm_entries");
+  try {
+    return await runWithFailover(async (connection) => {
+      let submitted = false;
+      const txHashes = [];
+      const newPosition = Keypair.generate();
       try {
-        // Phase 1: Create empty position
-        const createTxs = await pool.createExtendedEmptyPosition(
-          minBinId,
-          maxBinId,
-          newPosition.publicKey,
-          wallet.publicKey
-        );
-        const createTxArray = Array.isArray(createTxs) ? createTxs : [createTxs];
-        for (let i = 0; i < createTxArray.length; i++) {
-          const signers = i === 0 ? [wallet, newPosition] : [wallet];
-          const txHash = await sendAndConfirmTransaction(connection, createTxArray[i], signers);
-          txHashes.push(txHash);
-          minted = true; // first create tx confirmed → NFT exists on-chain
-          console.log(`[DLMM] Create tx ${i + 1}/${createTxArray.length}: ${txHash}`);
+        if (!dry && fs.existsSync(pendingPath)) {
+          const pending = JSON.parse(fs.readFileSync(pendingPath, "utf8"));
+          // A timed-out or killed sender may still land. Never release its
+          // reservation by wall-clock timeout; wait for the actual blockhash
+          // validity to end, then re-read all on-chain exposure below.
+          if (!Number.isSafeInteger(pending.lastValidBlockHeight)
+              || await connection.getBlockHeight("finalized") <= pending.lastValidBlockHeight) {
+            return { success: false, pending: true, position: pending.position,
+              error: "ENTRY PENDING: previous submission requires on-chain reconciliation" };
+          }
         }
-
-        // Phase 2: Add liquidity chunkable
-        const addTxs = await pool.addLiquidityByStrategyChunkable({
-          positionPubKey: newPosition.publicKey,
-          user: wallet.publicKey,
-          totalXAmount: totalXLamports,
-          totalYAmount: totalYLamports,
-          strategy: { minBinId, maxBinId, strategyType },
-          slippage: slippageBps
-        });
-        const addTxArray = Array.isArray(addTxs) ? addTxs : [addTxs];
-        for (let i = 0; i < addTxArray.length; i++) {
-          const txHash = await sendAndConfirmTransaction(connection, addTxArray[i], [wallet]);
-          txHashes.push(txHash);
-          console.log(`[DLMM] Add liquidity tx ${i + 1}/${addTxArray.length}: ${txHash}`);
+        const pool = await DLMM.create(connection, new PublicKey(poolAddressStr));
+        if (!dry) await assertNoTokenExposure(pool, wallet);
+        const activeBin = await pool.getActiveBin();
+        const minBinId = activeBin.binId - binsBelow;
+        const maxBinId = activeBin.binId + binsAbove;
+        const tokenXDecimals = await getTokenDecimals(connection, pool.lbPair.tokenXMint);
+        const tokenYDecimals = await getTokenDecimals(connection, pool.lbPair.tokenYMint);
+        const totalXLamports = new BN(Math.floor(amountX * Math.pow(10, tokenXDecimals)));
+        const totalYLamports = new BN(Math.floor(amountY * Math.pow(10, tokenYDecimals)));
+        const strategyType = { spot: StrategyType.Spot, curve: StrategyType.Curve,
+          bid_ask: StrategyType.BidAsk }[strategyTypeStr];
+        if (dry) return { success: true, dryRun: true, position: "DRY_RUN_POSITION_ADDR" };
+        await assertRangeDoesNotRequireBinArrayInitialization(connection, pool, minBinId, maxBinId);
+        fs.mkdirSync(pendingDir, { recursive: true, mode: 0o700 });
+        fs.mkdirSync(entryDir, { recursive: true, mode: 0o700 });
+        // Persist provenance BEFORE submission, so timeout adoption keeps the
+        // caller's mode and re-center root. No wallet secret is recorded.
+        const context = JSON.parse(process.env.DLMM_ENTRY_CONTEXT || "{}");
+        fs.writeFileSync(path.join(entryDir, `${newPosition.publicKey}.json`), JSON.stringify({
+          ...context, pool: poolAddressStr, position: newPosition.publicKey.toString(),
+          entry_bin: activeBin.binId, entry_price: pool.fromPricePerLamport(Number(activeBin.price)),
+          bins_below: binsBelow, bins_above: binsAbove, amount_x: amountX, amount_y: amountY,
+          deployed_at: Math.floor(Date.now() / 1000),
+        }), { mode: 0o600 });
+        const send = async (tx, signers) => {
+          const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash("confirmed");
+          tx.recentBlockhash = blockhash;
+          tx.lastValidBlockHeight = lastValidBlockHeight;
+          tx.feePayer = wallet.publicKey;
+          tx.sign(...signers);
+          const raw = tx.serialize();
+          const signature = bs58.encode(tx.signature);
+          // Send the EXACT signed bytes whose expiry we persist. web3.js's
+          // sendTransaction helper can replace the blockhash behind our back.
+          fs.writeFileSync(pendingPath, JSON.stringify({ position: newPosition.publicKey.toString(),
+            pool: poolAddressStr, signature, lastValidBlockHeight, blockhash }), { mode: 0o600 });
+          submitted = true;
+          const hash = await connection.sendRawTransaction(raw, { preflightCommitment: "confirmed", maxRetries: 2 });
+          txHashes.push(hash);
+          const confirmation = await connection.confirmTransaction({ signature: hash, blockhash,
+            lastValidBlockHeight }, "confirmed");
+          if (confirmation.value.err) throw new Error(`Transaction failed: ${JSON.stringify(confirmation.value.err)}`);
+          return hash;
+        };
+        if (binsBelow + binsAbove > 69) {
+          const creates = await pool.createExtendedEmptyPosition(minBinId, maxBinId,
+            newPosition.publicKey, wallet.publicKey);
+          const createTxs = Array.isArray(creates) ? creates : [creates];
+          for (let i = 0; i < createTxs.length; i++) {
+            await send(createTxs[i], i === 0 ? [wallet, newPosition] : [wallet]);
+          }
+          const adds = await pool.addLiquidityByStrategyChunkable({
+            positionPubKey: newPosition.publicKey, user: wallet.publicKey,
+            totalXAmount: totalXLamports, totalYAmount: totalYLamports,
+            strategy: { minBinId, maxBinId, strategyType }, slippage: slippageBps,
+          });
+          for (const tx of Array.isArray(adds) ? adds : [adds]) await send(tx, [wallet]);
+        } else {
+          const tx = await pool.initializePositionAndAddLiquidityByStrategy({
+            positionPubKey: newPosition.publicKey, user: wallet.publicKey,
+            totalXAmount: totalXLamports, totalYAmount: totalYLamports,
+            strategy: { minBinId, maxBinId, strategyType }, slippage: slippageBps,
+          });
+          await send(tx, [wallet, newPosition]);
         }
-      } catch (deployErr) {
-        if (!minted) {
-          // NFT never minted — safe to fail over / retry from scratch, no orphan.
-          throw deployErr;
-        }
-        // NFT minted but deploy did not complete. Do NOT throw (would trigger
-        // runWithFailover to re-mint a second orphan). Clean up the empty position.
-        console.warn(`[DLMM] Deploy failed after position ${newPosition.publicKey.toString()} minted: ${deployErr.message}. Cleaning up empty position...`);
-        try {
-          await cleanupEmptyPosition(connection, pool, wallet, newPosition.publicKey, minBinId, maxBinId);
-          console.warn(`[DLMM] Cleaned up empty position ${newPosition.publicKey.toString()} (rent refunded).`);
-          return {
-            success: false,
-            error: `wide-range add-liquidity failed; empty position cleaned: ${deployErr.message}`,
-            cleaned: true,
-            position: newPosition.publicKey.toString(),
-            txHashes
-          };
-        } catch (cleanErr) {
-          // Cleanup also failed — surface the orphan so the caller registers it in
-          // Redis and the monitor reconciliation loop can reclaim it next cycle.
-          console.error(`[DLMM] Cleanup of empty position ${newPosition.publicKey.toString()} FAILED: ${cleanErr.message}. Returning orphan for monitor reclaim.`);
-          return {
-            success: false,
-            error: `wide-range add-liquidity failed AND cleanup failed: ${deployErr.message} / ${cleanErr.message}`,
-            orphan: true,
-            position: newPosition.publicKey.toString(),
-            pool: poolAddressStr,
-            txHashes
-          };
-        }
+        // Keep the reservation through blockhash expiry even on success: an
+        // immediately-following RPC may lag the confirming endpoint. Exits are
+        // never blocked; this briefly delays only the next wallet deployment.
+        return { success: true, position: newPosition.publicKey.toString(), txHash: txHashes[0], txHashes };
+      } catch (err) {
+        if (err.message.startsWith("ENTRY REFUSED:")) return { success: false, error: err.message };
+        if (!submitted) throw err; // Read/build failure: another RPC is safe.
+        // Sending then timing out does NOT mean failure. Never RPC-failover
+        // into a second mint or clean up possibly funded liquidity blindly.
+        return { success: false, pending: true, position: newPosition.publicKey.toString(),
+          pool: poolAddressStr, txHashes, error: `DEPLOY UNVERIFIED: ${err.message}` };
       }
-    } else {
-      // Standard Path (<= 69 bins)
-      const tx = await pool.initializePositionAndAddLiquidityByStrategy({
-        positionPubKey: newPosition.publicKey,
-        user: wallet.publicKey,
-        totalXAmount: totalXLamports,
-        totalYAmount: totalYLamports,
-        strategy: { maxBinId, minBinId, strategyType },
-        slippage: slippageBps
-      });
-      const txHash = await sendAndConfirmTransaction(connection, tx, [wallet, newPosition]);
-      txHashes.push(txHash);
-    }
-
-    return {
-      success: true,
-      position: newPosition.publicKey.toString(),
-      txHash: txHashes[0],
-      txHashes
-    };
-  });
+    });
+  } finally {
+    await release();
+  }
 }
 
 
@@ -882,4 +874,5 @@ async function main() {
   }
 }
 
-main();
+if (require.main === module) main();
+module.exports = { deployPosition, acquireDeployLock, assertNoTokenExposure };

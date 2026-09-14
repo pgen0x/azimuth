@@ -8,6 +8,7 @@ import urllib.parse
 import os
 import re
 import math
+import shlex
 from local_indicators import check_local_indicators
 from tz_util import local_time_str
 
@@ -1768,7 +1769,12 @@ def main():
             amount_x, amount_y = base_bal, half_sol
         print(f"balanced_tight: deploying {half_sol} SOL + {base_bal} {winner['base_symbol']} two-sided.")
 
-    deploy_cmd = f"node {EXECUTOR_PATH} deploy {winner['pool']} {amount_x} {amount_y} {bins_below} {bins_above} {strategy_type} {slippage_bps}"
+    entry_context = {key: winner.get(key) for key in ("pair", "base_mint", "base_symbol", "sol_is_x")}
+    entry_context.update(pair=winner["name"], mode=mode, strategy=strategy, size_sol=deploy_sol,
+                         signal={key: winner.get(key) for key in (
+                             "score", "organic_score", "fee_tvl_ratio", "volatility", "tvl")})
+    context_env = "DLMM_ENTRY_CONTEXT=" + shlex.quote(json.dumps(entry_context))
+    deploy_cmd = f"{context_env} node {EXECUTOR_PATH} deploy {winner['pool']} {amount_x} {amount_y} {bins_below} {bins_above} {strategy_type} {slippage_bps}"
     print(f"Running deploy: {deploy_cmd}")
     res, err = run_command_json(deploy_cmd)
     
