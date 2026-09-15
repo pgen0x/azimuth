@@ -1,6 +1,6 @@
 # Azimuth — Concentrated-Liquidity Pool Signal Daemon for AI Agents
 
-[![Version](https://img.shields.io/static/v1?label=version&message=2.7.2&color=informational)](CHANGELOG.md) <!-- x-release-please-version -->
+[![Version](https://img.shields.io/static/v1?label=version&message=2.7.3&color=informational)](CHANGELOG.md) <!-- x-release-please-version -->
 [![Go Version](https://img.shields.io/badge/go-1.22%2B-00ADD8?logo=go&logoColor=white)](go.mod)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Status](https://img.shields.io/badge/status-beta-yellow)](#project-status)
@@ -103,15 +103,11 @@ GMGN key and fail open without one.
 
 ## Architecture
 
-```
-┌─────────────────────────┐   HMAC-signed   ┌─────────────────────┐
-│ azimuth (this Go daemon)   │ POST /webhooks/ │ Hermes agent        │
-│                         ├────────────────▶│ ranks the batch,    │
-│                         │   dlmm-signal   │ picks 1 + strategy  │
-│ poll -> screen -> dedup │  (batch array)  │ -> dlmm_pipeline.py │
-└─────────────────────────┘                 └─────────────────────┘
-             │                                        │
-   Meteora discovery API              Meteora on-chain (deploy/monitor)
+```mermaid
+flowchart LR
+    A["azimuth (this Go daemon)<br/>poll → screen → dedup"] -->|"HMAC-signed POST /webhooks/dlmm-signal<br/>(batch array)"| B["Hermes agent<br/>ranks the batch,<br/>picks 1 + strategy<br/>→ dlmm_pipeline.py"]
+    C[(Meteora discovery API)] --> A
+    B --> D[(Meteora on-chain<br/>deploy/monitor)]
 ```
 
 The daemon (`internal/scanner`) does one thing on a loop: poll the discovery

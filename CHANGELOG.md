@@ -5,6 +5,13 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.7.3](https://github.com/pgen0x/azimuth/compare/v2.7.2...v2.7.3) (2026-08-24)
+
+
+### Bug Fixes
+
+* **solana:** cap dump-swap impact, tighten turnover OOR fuse, risk-scale ticket size ([#84](https://github.com/pgen0x/azimuth/issues/84)) ([c12005d](https://github.com/pgen0x/azimuth/commit/c12005dae186a5cefa30127fd2fd70e1a46f8fc8))
+
 ## [2.7.2](https://github.com/pgen0x/azimuth/compare/v2.7.1...v2.7.2) (2026-08-24)
 
 
