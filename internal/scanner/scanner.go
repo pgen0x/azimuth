@@ -944,9 +944,8 @@ func (s *Scanner) pollMode(ctx context.Context, mp meteora.ModeParams) {
 			continue
 		}
 
-		// Momentum / downtrend gate (best-effort, fail-open). Momentum-rejected
-		// pools stay marked seen (no unmark) so we don't re-hit DexScreener for
-		// them every cycle within the SEEN_TTL window. Per-mode opt-out via
+		// Momentum / downtrend gate (best-effort, fail-open). Rejected pools
+		// retry next cycle: a transient dump is not a delivered signal. Opt-out via
 		// ModeParams.SkipMomentumGate — a directional gate does not fit every
 		// screen; see the Pulse comment in meteora/screen.go.
 		if s.cfg.EnableMomentumGate && !mp.SkipMomentumGate {
@@ -1007,20 +1006,14 @@ func (s *Scanner) pollMode(ctx context.Context, mp meteora.ModeParams) {
 		batchKeys = append(batchKeys, poolKey)
 	}
 
-	// A momentum reject normally stays marked seen for the whole SEEN_TTL so we
-	// don't re-hit DexScreener for a dumping pool every cycle. But when it took
-	// the LAST candidate with it, that trade-off silences the entire mode for
-	// hours: turnover's live supply is 1-4 qualifying pools per cycle, so a
-	// single -3.9% 5m print blanked it for the full 2h TTL (observed
-	// 2026-07-28). Momentum is the one *transient* reject — the price recovers
-	// in minutes — unlike the audit / GMGN safety rejects, which stay sticky by
-	// design. Unmark only when the batch ended up empty, so the extra
-	// DexScreener traffic is bounded to cycles that would have sent nothing.
-	if len(batch) == 0 && len(momRejectedKeys) > 0 {
+	// Recovery must not depend on another pool passing in the same batch.
+	// Audit/GMGN rejects and delivered candidates retain their existing TTL.
+	// One retry per screened pool per poll; all momentum thresholds still apply.
+	if len(momRejectedKeys) > 0 {
 		for _, k := range momRejectedKeys {
 			s.seen.Unmark(ctx, k)
 		}
-		log.Printf("scanner[%s]: batch empty — unmarked %d momentum-rejected pool(s) to retry next cycle",
+		log.Printf("scanner[%s]: unmarked %d momentum-rejected pool(s) to retry next cycle",
 			mp.Mode, len(momRejectedKeys))
 	}
 
@@ -1048,18 +1041,35 @@ func (s *Scanner) pollMode(ctx context.Context, mp meteora.ModeParams) {
 
 	sent := 0
 	if len(batch) > 0 {
-		if s.dep.Enabled() {
-			sent = s.directDeploy(ctx, mp.Mode, batch, batchKeys)
-		} else if err := s.fwd.Send("meteora_pool_discovery", batch, time.Now().Unix()); err != nil {
-			// Delivery failed — unmark the whole batch so these pools retry on the
-			// next poll instead of being silently dropped for the SEEN_TTL window.
-			for _, k := range batchKeys {
-				s.seen.Unmark(ctx, k)
+		// LLM-webhook-first with a deterministic fallback (2026-08-28): when
+		// both a webhook and DEPLOY_CMD are configured, prefer the LLM pick
+		// (Hermes' dlmm-signal subscription) while the router health probe
+		// (dlmm_monitor.py's check_llm_health, read via s.seen.LLMHealthy)
+		// says it's reachable, and fall back to the deterministic pipeline
+		// the moment it isn't — the concrete answer to "LLM down/quota
+		// exhausted -> deterministic runs". A batch is not held open across
+		// this decision waiting on the LLM's own pick+deploy turn (that path
+		// is async and, per this package's own history, can take 19-54
+		// minutes — see deploy.go) — the health probe is a periodic,
+		// independent signal, not a per-batch wait. A config that only sets
+		// ONE of the two keeps today's unconditional behavior unchanged (a
+		// webhook-only setup must not silently stop sending just because no
+		// health probe has ever run).
+		useWebhook := s.cfg.WebhookURL != "" && (!s.dep.Enabled() || s.seen.LLMHealthy(ctx))
+		if useWebhook {
+			if err := s.fwd.Send("meteora_pool_discovery", batch, time.Now().Unix()); err != nil {
+				// Delivery failed — unmark the whole batch so these pools retry on the
+				// next poll instead of being silently dropped for the SEEN_TTL window.
+				for _, k := range batchKeys {
+					s.seen.Unmark(ctx, k)
+				}
+				log.Printf("scanner[%s]: webhook error for batch of %d (will retry): %v", mp.Mode, len(batch), err)
+			} else {
+				sent = len(batch)
+				log.Printf("scanner[%s]: SIGNAL batch sent %d pools: %s", mp.Mode, sent, batchSummary(batch))
 			}
-			log.Printf("scanner[%s]: webhook error for batch of %d (will retry): %v", mp.Mode, len(batch), err)
-		} else {
-			sent = len(batch)
-			log.Printf("scanner[%s]: SIGNAL batch sent %d pools: %s", mp.Mode, sent, batchSummary(batch))
+		} else if s.dep.Enabled() {
+			sent = s.directDeploy(ctx, mp.Mode, batch, batchKeys)
 		}
 	}
 

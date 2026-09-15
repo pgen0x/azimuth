@@ -8,6 +8,7 @@ import urllib.parse
 import os
 import re
 import math
+import shlex
 from local_indicators import check_local_indicators
 from tz_util import local_time_str
 
@@ -1019,6 +1020,13 @@ def main():
     print(f"🔍 Starting DLMM Ingestion Pipeline [{mode.upper()} mode]")
 
     params = load_soul_dlmm_params(mode=mode)
+    # Both automated entry paths share the SOL-only policy. A stale LLM prompt
+    # must not restore the two-sided exposure the deterministic picker removed.
+    if cli.from_batch or cli.from_signal:
+        automatic_strategy = select_batch_strategy(None, mode)
+        if cli.strategy and cli.strategy != automatic_strategy:
+            print(f"Signal strategy: {cli.strategy} overridden by {automatic_strategy} policy")
+        cli.strategy = automatic_strategy
     min_tvl = params["MIN_TVL_USD"]
     min_fee_tvl = params["MIN_FEE_TVL_24H"]
     min_organic = params["MIN_ORGANIC_SCORE"]
@@ -1409,7 +1417,7 @@ def main():
     # so the best *deployable* candidate still wins. Fails OPEN: a pool is dropped only
     # when the read-only check positively confirms it needs init.
     if cli.analyze_only:
-        soul_strat = params.get("STRATEGY", "spot")
+        soul_strat = cli.strategy or params.get("STRATEGY", "spot")
         bins_by_candidate = {}
         deployable_candidates = []
         for c in valid_candidates:
@@ -1761,7 +1769,12 @@ def main():
             amount_x, amount_y = base_bal, half_sol
         print(f"balanced_tight: deploying {half_sol} SOL + {base_bal} {winner['base_symbol']} two-sided.")
 
-    deploy_cmd = f"node {EXECUTOR_PATH} deploy {winner['pool']} {amount_x} {amount_y} {bins_below} {bins_above} {strategy_type} {slippage_bps}"
+    entry_context = {key: winner.get(key) for key in ("pair", "base_mint", "base_symbol", "sol_is_x")}
+    entry_context.update(pair=winner["name"], mode=mode, strategy=strategy, size_sol=deploy_sol,
+                         signal={key: winner.get(key) for key in (
+                             "score", "organic_score", "fee_tvl_ratio", "volatility", "tvl")})
+    context_env = "DLMM_ENTRY_CONTEXT=" + shlex.quote(json.dumps(entry_context))
+    deploy_cmd = f"{context_env} node {EXECUTOR_PATH} deploy {winner['pool']} {amount_x} {amount_y} {bins_below} {bins_above} {strategy_type} {slippage_bps}"
     print(f"Running deploy: {deploy_cmd}")
     res, err = run_command_json(deploy_cmd)
     
@@ -1798,7 +1811,24 @@ def main():
 
     position_address = res.get("position", "DRY_RUN_POSITION")
     tx_hash = res.get("txHash", "DRY_RUN_TX_HASH")
-    
+
+    # On-chain existence check before any DEPLOYED claim is trusted (2026-08-28,
+    # the precondition project-restore-ai-role-2026-08-12 named before entry-side
+    # LLM involvement: the executor's own "success" JSON was previously trusted
+    # unconditionally, which is exactly the gap the 2026-07-06 fabricated-deploy
+    # incident exploited). Bounded retry, not a hard gate — a real deploy can lag
+    # the datapi index by a few seconds, and aborting here risks a duplicate
+    # deploy against a position that may already be funded.
+    is_dry_run = res.get("dryRun") or (res.get("dry_run") == True)
+    verified = is_dry_run
+    if not is_dry_run:
+        for _ in range(3):
+            v_data, _ = run_command_json(f"node {EXECUTOR_PATH} pnl {winner['pool']} {position_address}")
+            if v_data and v_data.get("success"):
+                verified = True
+                break
+            time.sleep(4)
+
     active_bin = bins_below
     active_price = 0.0
     ab_data, ab_err = run_command_json(f"node {EXECUTOR_PATH} active-bin {winner['pool']}")
@@ -1840,7 +1870,6 @@ def main():
         ) if winner.get(k) is not None},
     }
 
-    is_dry_run = res.get("dryRun") or (res.get("dry_run") == True)
     if not is_dry_run:
         run_command(f"redis-cli set \"sol:dlmm:position:{position_address}\" '{json.dumps(tracking_data)}'")
         run_command(f"redis-cli sadd \"sol:dlmm:active_positions\" \"{position_address}\"")
@@ -1860,8 +1889,9 @@ def main():
 
     ts_str = local_time_str()
     status_label = "🧪 DRY RUN DEPLOY" if is_dry_run else "🚀 DEPLOYED"
+    verify_line = "" if verified else "⚠️ UNVERIFIED — not found via on-chain query after 3 retries\n"
     report = f"""{status_label} — {ts_str}
-{winner['name']} {position_address}
+{verify_line}{winner['name']} {position_address}
 Pool | {winner['pool']}
 Metric | Value
 Strategy | {strategy}

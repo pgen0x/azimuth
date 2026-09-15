@@ -5,6 +5,7 @@ import time
 import subprocess
 import os
 import re
+import shlex
 import urllib.request
 from decimal import Decimal
 from local_indicators import check_local_indicators
@@ -75,6 +76,17 @@ def get_meteora_portfolio_positions(wallet_address):
 # review over every open position on a 5m cadence, which this bot has no
 # equivalent of, so an unknown share of its edge is judgment rather than
 # threshold. Treat -8.0 as calibrated, not proven.
+# Was -12.0 from 2026-08-26 to 2026-08-31, on the argument that "that
+# reference's own config defaults to -50%". That premise read the reference's
+# CODE DEFAULT (config.js: `u.stopLossPct ?? -50`), not the config it actually
+# runs: its user-config.json sets `stopLossPct: -8`, so the live reference has
+# been at -8 the whole time and the -50 was never a threshold anyone traded.
+# Restored to -8.0 to match. This constant is a FALLBACK only — SOUL.md
+# section 9 "Hard Stop-Loss" governs at runtime and already reads -8.0, which
+# is why live closes journal "Hard Stop-Loss hit (-10.07% <= -8.0%)" while this
+# line said -12. Aligning the two so a profile without a SOUL.md does not
+# silently trade a floor 4 points wider than every calibration note here
+# assumes.
 STOP_LOSS_PCT = -8.0
 TAKE_PROFIT_PCT = 50.0
 MAX_OOR_MINUTES = 30
@@ -255,8 +267,15 @@ FAST_EXIT_UNDERWATER_PNL_PCT = -1.5
 # winners worth +0.011 SOL that dipped that far and recovered — a 12:1 trade.
 # Deliberately NOT a take-profit: the giveback lands near flat, well under
 # TRAILING_MIN_LOCK_PCT, so it must never route through the TP/cooldown path.
-GIVEBACK_ARM_PCT = 0.5
-GIVEBACK_DROP_PCT = 1.5
+# Widened 0.5/1.5 -> 2.5/2.5 on 2026-08-26: the 08-19 sample that motivated the
+# tight version was a 12:1 edge, but the 24h/7d comparison against a reference
+# bot running the same screen showed the opposite on Sue-SOL/Token-SOL/PANTS-SOL
+# — the same pool re-pinned, stopped on a dip that then reversed into a large
+# win the reference caught. That reference arms its own trailing rail at +3%
+# peak, not +0.5%; 2.5/2.5 moves partway there without fully matching it.
+# Re-tune again once enough post-change closes accumulate to judge the swap.
+GIVEBACK_ARM_PCT = 2.5
+GIVEBACK_DROP_PCT = 2.5
 # Sustained-downtrend exit: an underwater position whose token is in a steady 1h
 # decline closes early instead of riding to the SL floor (spurdo: -7.45% at the
 # last cron HOLD, hard SL -17.22% ten minutes later, -21.13% booked after swap
@@ -298,9 +317,12 @@ DOWNTREND_PNL_ONLY_PCT = -6.0
 # -5.21% against a win band of 1.2-2.5% — -0.0821 SOL from those 4 closes against
 # +0.0374 SOL from the other 23, i.e. the whole day's loss. Only the PnL leg is
 # knowable in real time, so for the tight modes it is the primary rail, not the
-# fallback: unconfirmed at -3% fires first, the confirmed leg at -2.5% only when
-# h1 happens to arrive early enough to matter, the -8% floor unchanged.
-DOWNTREND_PNL_ONLY_TIGHT_PCT = -3.0
+# fallback: unconfirmed at -2.5% fires first, the confirmed leg at -2.5% only when
+# h1 happens to arrive early enough to matter, the -8% floor unchanged. Tightened
+# from -3.0 on 2026-08-30 per the daily proposal cron: "downtrend dump,
+# unconfirmed" was the worst non-thin exit rule over the preceding 7d (16 closes,
+# 0% win rate, -0.0724 SOL net) and none of those 16 recovered before -3%.
+DOWNTREND_PNL_ONLY_TIGHT_PCT = -2.5
 # OOR-upside profit lock: above range the position is fully converted to SOL
 # (PnL frozen, fees stopped); at or above this banked gain, close immediately
 # instead of riding the OOR fuse and risking a retrace back into range.
@@ -966,18 +988,97 @@ def position_gone_onchain(wallet_address, pos_addr, attempts=2, gap_s=6):
         return None
     return all(verdicts)
 
+# A position still holding this much quote after a close that reported success
+# did not actually close. Well under any real ticket (the smallest observed is
+# ~0.16 SOL) and under the auto-swap's own 0.01 SOL "too small to bother" floor,
+# so ordinary leftovers never trip it.
+CLOSE_RESIDUAL_DUST_SOL = 0.005
+
+
+def position_residual_sol(wallet_address, pos_addr, attempts=2, gap_s=6):
+    """Smallest balance the portfolio API reports for `pos_addr` across `attempts`
+    polls; 0.0 when it is not listed at all, None when no poll could be read.
+
+    The MINIMUM is deliberate. The indexer lags a close by seconds and keeps
+    serving the pre-close balance, so a single reading of "settled" outweighs a
+    stale "still funded" — the same polarity `position_gone_onchain` uses in
+    reverse, for the same reason.
+    """
+    if not wallet_address:
+        return None
+    readings = []
+    for i in range(attempts):
+        if i:
+            time.sleep(gap_s)
+        positions, _err = get_meteora_portfolio_positions(wallet_address)
+        if positions is None:
+            continue
+        bp = positions.get(pos_addr)
+        try:
+            readings.append(float(bp.get("balances_sol", 0.0)) if bp else 0.0)
+        except (TypeError, ValueError):
+            continue
+    if not readings:
+        return None
+    return min(readings)
+
+
+def position_live_onchain(pos_addr):
+    """True/False from the executor's own SDK read, None when it cannot answer.
+
+    The portfolio API is an indexer; this is the chain. Used only to break the
+    tie when the API still shows a funded position after a close reported
+    success, so indexer lag can never be mistaken for a partial close.
+    """
+    data, _err = run_command_json(f"node {EXECUTOR_PATH} positions")
+    if not isinstance(data, list):
+        return None
+    return any(isinstance(p, dict) and p.get("position") == pos_addr for p in data)
+
+
 def close_position(pos_addr, env_prefix="", wallet_address=None, is_dry_run=False):
-    """Execute a close, reconciling a reported failure against the chain.
+    """Execute a close, reconciling BOTH verdicts against the chain.
 
     Same (result, error) shape as run_command_json. A close the subprocess gave
     up on but the chain confirms comes back as a success with no tx hashes —
     losing the hash is survivable, losing the close is not: an unrecorded close
     leaves a phantom open position in Redis and a hole in the PnL journal.
+
+    The inverse — a reported SUCCESS the chain does not confirm — was trusted
+    blind until 2026-09-01, and that is how STACY-SOL booked -20.51%: the 17:55
+    fast-out exit on 2026-08-31 printed "✅ Successfully closed", wrote its
+    journal row and dropped the Redis key while 0.2511 SOL of liquidity was
+    still in the position. Nothing managed it for 68 minutes; the orphan reclaim
+    found it again at -23.73%. The entry path has verified against the chain
+    since the 2026-07-06 fabricated-deploy incident (dlmm_pipeline.py confirms
+    the position exists before printing 🚀 DEPLOYED) — this is that guard's
+    missing other half.
+
+    An unsettled close returns success=False, so the caller keeps Redis state
+    and the journal untouched and the 20s loop simply tries again next tick with
+    every rule still armed. Unmeasurable (API down) keeps trusting the reported
+    success: blocking on missing data is its own failure mode, and this branch
+    only has to catch a close that lies, not one we cannot check.
     """
     cmd = f"{env_prefix}DLMM_CLOSE_AUTH=1 node {EXECUTOR_PATH} close {pos_addr}"
     res, err = run_command_json(cmd, timeout=CLOSE_CMD_TIMEOUT)
-    if (res and res.get("success")) or is_dry_run:
+    if is_dry_run:
         return res, err
+    if res and res.get("success"):
+        residual = position_residual_sol(wallet_address, pos_addr)
+        if residual is None or residual < CLOSE_RESIDUAL_DUST_SOL:
+            return res, err
+        # The indexer still shows value. Ask the chain before calling it a lie.
+        if position_live_onchain(pos_addr) is False:
+            print(f"✅ Close of {pos_addr} confirmed on-chain; portfolio API still "
+                  f"lists {residual:.4f} SOL (indexer lag) — treating as closed.")
+            return res, err
+        print(f"⚠️ Close of {pos_addr} reported SUCCESS but the position still holds "
+              f"{residual:.4f} SOL on-chain — partial close. Keeping it tracked and "
+              f"retrying next tick; NOT journaling a close that did not happen.")
+        return ({"success": False, "unsettled": True, "residualSol": residual,
+                 "txHashes": res.get("txHashes") or [],
+                 "error": f"partial close — {residual:.4f} SOL still in position"}, None)
     if position_gone_onchain(wallet_address, pos_addr) is True:
         detail = err or (res or {}).get("error") or "unknown error"
         print(f"⚠️ Close of {pos_addr} reported failure ({detail}) but the position "
@@ -1008,6 +1109,97 @@ def get_position_metadata(position_address):
         return json.loads(out)
     except:
         return None
+
+# How far back an adoption reads the close journal. The file grows ~1 MB a
+# month and adoption is rare, but this runs inside the 20s loop — a bounded tail
+# keeps a pathological file from stalling a tick.
+ADOPT_JOURNAL_TAIL_BYTES = 512 * 1024
+
+
+def recover_position_metadata(pos_addr, pool):
+    """Best-effort provenance for a position the reclaim path is adopting.
+
+    An adopted position used to enter Redis as a blank: no pair, no base_mint,
+    no mode, strategy "spot". That blank is not neutral — it silently opts the
+    position out of every mode-specific rail (STACY-SOL's turnover 5m OOR fuse
+    became the 30m default on 2026-08-31), out of the auto-swap that settles a
+    filled bag (no base_mint means nothing to sell), and out of the rug and
+    momentum checks that key on the mint.
+
+    Our own close journal is the authority here rather than the chain: mode and
+    strategy are labels we assigned and the chain never knew them. Returns {}
+    when nothing is recoverable — a blank adoption is still better than none.
+
+    POSITION-level facts (its real age) come only from an exact position match;
+    a pool match yields POOL-level facts only, because an earlier ticket in the
+    same pool is a different ticket.
+    """
+    # Executor writes this exact-position provenance before broadcasting, so
+    # adoption after timeout does not invent a mode/root from an older close.
+    if re.fullmatch(r"[1-9A-HJ-NP-Za-km-z]{32,44}", pos_addr):
+        entry_path = os.path.join(PROFILE_DIR, "memories", "dlmm_entries", pos_addr + ".json")
+        try:
+            with open(entry_path, encoding="utf-8") as entry_file:
+                entry = json.load(entry_file)
+            if entry.get("position") == pos_addr and entry.get("pool") == pool:
+                return entry
+        except FileNotFoundError:
+            pass
+        except (OSError, ValueError) as exc:
+            print(f"⚠️ Entry provenance unreadable for {pos_addr}: {exc}")
+    path = os.path.join(PROFILE_DIR, "memories", "dlmm_closes.jsonl")
+    try:
+        size = os.path.getsize(path)
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            if size > ADOPT_JOURNAL_TAIL_BYTES:
+                f.seek(size - ADOPT_JOURNAL_TAIL_BYTES)
+                f.readline()  # discard the partial line the seek landed inside
+            rows = f.readlines()
+    except Exception as e:
+        print(f"⚠️ Adoption metadata lookup failed: {e}")
+        return {}
+
+    def _is_blank_adoption(rec):
+        """True for a row a BLANK adoption closed out. It names the pool as the
+        pair and carries no mint, so it knows nothing worth recovering — and its
+        age_min is measured from the adoption, not from the mint. Reading
+        provenance out of one just launders the original gap into the next
+        adoption, which is exactly what the newest STACY-SOL row would have done.
+        """
+        return rec.get("pair") == rec.get("pool") and not rec.get("base_mint")
+
+    # Newest first, filling only what is still missing: the most recent row that
+    # KNOWS a field wins, and a later blank never overwrites an earlier fact.
+    out = {}
+    for line in reversed(rows):
+        try:
+            rec = json.loads(line)
+        except Exception:
+            continue
+        if _is_blank_adoption(rec):
+            continue
+        is_position_match = rec.get("position") == pos_addr
+        if not is_position_match and rec.get("pool") != pool:
+            continue
+        for key in ("pair", "base_mint", "mode"):
+            if not out.get(key) and rec.get(key):
+                out[key] = rec[key]
+        if not out.get("base_symbol") and out.get("pair"):
+            out["base_symbol"] = out["pair"].split("-")[0]
+        if is_position_match:
+            for key in ("strategy", "recenter_of"):
+                if not out.get(key) and rec.get(key):
+                    out[key] = rec[key]
+            # log_close writes ts + age_min, so the mint time is recoverable —
+            # which is what lets an adopted position keep honest age protection
+            # instead of being treated as newborn (see the SUSPECT-READ GUARD).
+            if not out.get("deployed_at"):
+                try:
+                    out["deployed_at"] = int(rec["ts"]) - int(float(rec["age_min"]) * 60)
+                except (KeyError, TypeError, ValueError):
+                    pass
+    return {k: v for k, v in out.items() if v}
+
 
 def build_report_row(pos_addr, pair, pool, meta, pool_liquidity_usd, pnl_pct, pnl_sol_actual,
                       in_range, fee_per_tvl_24h, api_available, bp, active_price, entry_price,
@@ -1122,6 +1314,66 @@ def render_status_report(report_rows, sol_price_usd, trailing_trigger_pct, min_f
 
 # local indicators are imported and check_local_indicators is used directly below.
 
+LLM_HEALTH_CHECK_COOLDOWN_SEC = 150  # ~2.5min: cheaper than probing every 20s tick
+
+def protect_tight_exit(reason, mode, pnl_pct, change_h1, emergency=False):
+    """Risk floors outrank profit reasons; tight stops cannot be vetoed by holds."""
+    if mode not in ("turnover", "pulse"):
+        return reason, False
+    if emergency or (reason and "stop-loss" in reason.lower()):
+        return reason, True
+    # PERPSPAD: trailing occupied `close_reason`, hiding the -2.5% floor,
+    # then a bullish indicator deferred it all the way to the -8% hard SL.
+    if (change_h1 is not None and change_h1 <= DOWNTREND_1H_PCT
+            and pnl_pct <= DOWNTREND_PNL_TIGHT_PCT):
+        reason = (f"Sustained downtrend dump (1h {change_h1:+.1f}% <= {DOWNTREND_1H_PCT}% "
+                  f"& PnL {pnl_pct:.2f}% <= {DOWNTREND_PNL_TIGHT_PCT}%) — risk floor")
+    elif pnl_pct <= DOWNTREND_PNL_ONLY_TIGHT_PCT:
+        reason = (f"Downtrend dump, unconfirmed (PnL {pnl_pct:.2f}% <= "
+                  f"{DOWNTREND_PNL_ONLY_TIGHT_PCT}%, no 1h confirmation) — risk floor")
+    protected = bool(reason and any(label in reason.lower() for label in (
+        "trailing take-profit", "downtrend dump", "fast-out dump exit", "peak-giveback stop")))
+    return reason, protected
+
+
+def check_llm_health():
+    """Best-effort probe of the local LLM router, so the Go daemon can fall
+    back to deterministic entry (dlmm_pipeline.py direct-deploy) when the LLM
+    webhook path (Hermes' dlmm-signal subscription) is down or every quota
+    tier behind it is exhausted — the failure mode behind the 2026-07-06
+    fabricated-deploy incident. Piggybacks on the already-running 20s monitor
+    loop instead of a new systemd unit; a Redis cooldown throttles the actual
+    probe to roughly once every LLM_HEALTH_CHECK_COOLDOWN_SEC so every tick
+    doesn't hit the router. Fails CLOSED: any exception, timeout, or malformed
+    response writes sol:dlmm:llm_healthy=0, and a probe that never runs at all
+    (Redis down, process not running) leaves the key to expire — the Go side
+    (store.LLMHealthy) reads missing/expired/non-"1" as unhealthy, so a probe
+    bug degrades to the deterministic path, never silently claims health.
+    """
+    cd_key = "sol:dlmm:llm_health_check_cd"
+    got, _, _ = run_command(f"redis-cli set \"{cd_key}\" 1 nx ex {LLM_HEALTH_CHECK_COOLDOWN_SEC}")
+    if got.strip() != "OK":
+        return  # checked recently by this or another tick
+    healthy = False
+    try:
+        router_url = os.environ.get("LLM_ROUTER_URL", "http://127.0.0.1:20128/v1/chat/completions")
+        router_model = os.environ.get("LLM_ROUTER_MODEL", "com")
+        req = urllib.request.Request(
+            router_url,
+            data=json.dumps({
+                "model": router_model,
+                "messages": [{"role": "user", "content": "ping"}],
+                "max_tokens": 4,
+                "stream": False,
+            }).encode("utf-8"),
+            headers={"Content-Type": "application/json"}, method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        healthy = bool(data.get("choices"))
+    except Exception:
+        healthy = False
+    run_command(f"redis-cli set \"sol:dlmm:llm_healthy\" {1 if healthy else 0} ex 300")
 
 def main():
     import argparse
@@ -1140,7 +1392,8 @@ def main():
     cli = parser.parse_args()
 
     print("🔄 Starting DLMM Position Monitor")
-    
+    check_llm_health()
+
     params = load_soul_dlmm_params()
     stop_loss_pct = params["STOP_LOSS_PCT"]
     trailing_trigger_pct = params["TRAILING_TRIGGER_PCT"]
@@ -1323,7 +1576,7 @@ def main():
             # Set re-entry cooldown (same as auto-close path)
             base_symbol_cd = meta.get("base_symbol", meta.get("pair", "").split("-")[0]).upper()
             reason_lower = cli.reason.lower()
-            is_dump_close = any(kw in reason_lower for kw in ("trailing", "dump", "stop-loss", "stop_loss", "sell pressure", "momentum"))
+            is_dump_close = any(kw in reason_lower for kw in ("trailing", "dump", "stop-loss", "stop_loss", "sell pressure", "momentum", "giveback"))
             cooldown_secs = 7200 if is_dump_close else 3600
             cooldown_key = f"sol:dlmm:cooldown:{base_symbol_cd}"
             run_command(f"redis-cli set \"{cooldown_key}\" \"{cli.reason[:120]}\" ex {cooldown_secs}")
@@ -1481,15 +1734,43 @@ def main():
                 if cli.report_only:
                     print(f"➕ [report-only] Untracked FUNDED position {oc_addr} ({bal_sol:.4f} SOL) — would adopt.")
                     continue
-                print(f"➕ Adopting untracked FUNDED position {oc_addr} (pool {oc_pool}, {bal_sol:.4f} SOL) into Redis.")
+                # Recover what we knew about this position before it was orphaned.
+                # Adopting it blank leaves it managed by the DEFAULT rails rather
+                # than its own — which is half of what made STACY-SOL expensive.
+                prov = recover_position_metadata(oc_addr, oc_pool)
+                adopt_deployed_at = prov.get("deployed_at")
+                print(f"➕ Adopting untracked FUNDED position {oc_addr} (pool {oc_pool}, {bal_sol:.4f} SOL) into Redis"
+                      + (f" as {prov['pair']}"
+                         + (f" ({prov['mode']})" if prov.get("mode") else "")
+                         if prov.get("pair") else " (provenance unknown)") + ".")
                 run_command(f"redis-cli sadd sol:dlmm:active_positions \"{oc_addr}\"")
                 adopt_meta = {
-                    "pool": oc_pool, "pair": oc_pool, "base_mint": "", "base_symbol": "",
+                    "pool": oc_pool,
+                    "pair": prov.get("pair") or oc_pool,
+                    "base_mint": prov.get("base_mint") or "",
+                    "base_symbol": prov.get("base_symbol") or "",
                     "entry_price": oc_bp.get("pool_price", 0.0), "entry_bin": 0,
                     "bins_below": 0, "bins_above": 0, "size_sol": bal_sol,
-                    "deployed_at": now, "tx_hash": "ADOPTED", "strategy": "spot",
-                    "amount_x": 0, "amount_y": 0, "adopted": True
+                    # The real mint time when the journal could name it; otherwise
+                    # now, which is a placeholder for "unknown" and is flagged as
+                    # such by adopted_age_known below — never read it as an age.
+                    "deployed_at": adopt_deployed_at or now,
+                    "tx_hash": "ADOPTED",
+                    "strategy": prov.get("strategy") or "spot",
+                    "amount_x": 0, "amount_y": 0, "adopted": True,
+                    "adopted_age_known": bool(adopt_deployed_at),
                 }
+                for key in ("entry_price", "entry_bin", "bins_below", "bins_above",
+                            "size_sol", "amount_x", "amount_y", "sol_is_x", "signal"):
+                    if prov.get(key) is not None:
+                        adopt_meta[key] = prov[key]
+                # Only ever set a mode we actually recovered. An absent mode makes
+                # the consumers fall back to `multiday`, and the re-center path
+                # below refuses to act on that guess.
+                if prov.get("mode"):
+                    adopt_meta["mode"] = prov["mode"]
+                if prov.get("recenter_of"):
+                    adopt_meta["recenter_of"] = prov["recenter_of"]
                 run_command("redis-cli set \"sol:dlmm:position:%s\" '%s'" % (oc_addr, json.dumps(adopt_meta)))
         # Refresh active set after adoption so the main loop manages newly-adopted entries.
         active_positions = get_active_positions()
@@ -1602,6 +1883,15 @@ def main():
         suspect_deployed_at = meta.get("deployed_at")
         suspect_age_min = ((now - suspect_deployed_at) / 60.0
                            if suspect_deployed_at else float("inf"))
+        # An ADOPTED position's deployed_at is when the reclaim wrote the key, not
+        # when the position was minted, so it reads as newborn no matter how old it
+        # is. That is the same "unknown age" the line above refuses to protect —
+        # and protecting it anyway is what dismissed STACY-SOL's genuine -23.73% as
+        # an indexing gap for five straight ticks on 2026-08-31, three minutes it
+        # spent falling. Only an adoption that recovered a real mint time keeps its
+        # age protection.
+        if meta.get("adopted") and not meta.get("adopted_age_known"):
+            suspect_age_min = float("inf")
         # -90% only ever caught the -100% shape of the indexing-lag bug. EYE-SOL and
         # CONK-SOL (2026-08-21/22) show it also lands shallower: two DIFFERENT
         # positions in the same pool, opened seconds apart, both read the identical
@@ -1807,6 +2097,38 @@ def main():
                      and active_bin <= upper_bin)
         oor_sol_side = (oor_below if sol_is_x_pos else oor_above)
         oor_token_side = (oor_above if sol_is_x_pos else oor_below)
+
+        # 3d. Gap-through close — the mirror of rule 3 on the LOSING side.
+        # Rule 3 tests only the UPPER edge, so the only thing watching a gap
+        # past the LOWER edge was the countdown below: a 5m fast fuse
+        # (OOR_DOWNSIDE_MAX_MINUTES) that the green-candle recovery grace can
+        # stretch to 10m while a bid_ask position holds a full, decaying token
+        # bag. That made the exit FAST on the harmless side (above range = 100%
+        # SOL, PnL frozen, nothing decays) and SLOW on the side that actually
+        # loses money — the same asymmetry the reference bot found and fixed in
+        # its own rule 3 ("dumped far below range ... A gap this far past the
+        # lower edge is not drift — close it without waiting the clock").
+        # At this distance price has crossed the WHOLE range plus
+        # MAX_BINS_PUMPED_ABOVE bins, so there is no re-entry to wait for and
+        # the token side decays every tick it is held. Same bin threshold as
+        # rule 3, so one number describes "gapped through" in both directions.
+        # The token side carries the "dump" keyword deliberately: is_dump_close
+        # keys on it, which routes the high-impact liquidation and the 2h
+        # cooldown, matching the OOR token-side exit. Neither string starts with
+        # "Out of Range", so is_oor_rebalance cannot re-center a gap-through;
+        # only is_turnover_churn can, and that already requires realized_sol > 0.
+        # Guarded by `not close_reason` so it never clobbers an emergency reason
+        # (rug velocity / emergency SL) already set above.
+        if (not close_reason and active_bin is not None and lower_bin is not None
+                and active_bin < lower_bin - max_bins_pumped_above):
+            gap_bins = lower_bin - active_bin
+            if oor_token_side:
+                close_reason = (f"Gap-through dump exit (active bin {active_bin} is {gap_bins} bins below "
+                                f"lower bin {lower_bin}, limit {max_bins_pumped_above}) — fully converted "
+                                f"to token, no clock to wait")
+            else:
+                close_reason = (f"Gapped far below range (active bin {active_bin} is {gap_bins} bins below "
+                                f"lower bin {lower_bin}, limit {max_bins_pumped_above})")
         if meta.get("mode") == "turnover":
             # Asymmetric here too: token-side is a decaying bag (fast fuse),
             # SOL-side is frozen SOL that may yet walk back into range or pump
@@ -2166,8 +2488,12 @@ def main():
                         print(f"Partial harvested position tracked successfully: {new_pos}")
                     continue
 
-        # 7. Pre-exit Indicators Timing Check (for non-emergency exits)
-        if close_reason and params.get("INDICATORS_ENABLED"):
+        close_reason, protected_risk_exit = protect_tight_exit(
+            close_reason, meta.get("mode"), pnl_pct, price_change_h1, emergency_close)
+
+        # A risk exit remains executable through BOTH indicator and AI holds.
+        # Thesis-mode discretionary exits retain their existing timing checks.
+        if close_reason and not protected_risk_exit and params.get("INDICATORS_ENABLED"):
             reason_l = close_reason.lower()
             is_emergency = (emergency_close or "stop-loss" in reason_l
                             or "out of range" in reason_l or "pumped" in reason_l)
@@ -2234,7 +2560,7 @@ def main():
         # Bypass if trailing TP already dropped >= 3% from peak: that's a real dump, not a bounce dip
         # Emergency closes (SL floor / thin liquidity) are never suppressed.
         AI_HOLD_BYPASS_DROP_PCT = 3.0
-        if close_reason and not emergency_close:
+        if close_reason and not emergency_close and not protected_risk_exit:
             hold_val, _, _ = run_command(f"redis-cli get \"sol:dlmm:position:{pos_addr}:ai_hold_until\"")
             if hold_val and hold_val != "(nil)" and int(hold_val) > now:
                 reason_lc = close_reason.lower()
@@ -2297,7 +2623,7 @@ def main():
                 # reads these two names is unchanged.
                 base_symbol_cd = meta.get("base_symbol", pair.split("-")[0]).upper()
                 reason_lower = close_reason.lower()
-                is_dump_close = any(kw in reason_lower for kw in ("trailing", "dump", "stop-loss", "stop_loss", "sell pressure", "momentum"))
+                is_dump_close = any(kw in reason_lower for kw in ("trailing", "dump", "stop-loss", "stop_loss", "sell pressure", "momentum", "giveback"))
 
                 # Journal every close with API-verified PnL (dlmm_reconcile.py audits
                 # this file against the Meteora portfolio API).
@@ -2335,6 +2661,11 @@ def main():
                 _rc_str, _, _ = run_command(f"redis-cli get \"{rebalance_count_key}\"")
                 rebalances_24h = int(_rc_str) if _rc_str and _rc_str.strip().isdigit() else 0
                 mode_cd = meta.get("mode", "multiday")
+                # An adopted orphan whose provenance the journal could not name has
+                # a DEFAULTED mode, not a known one. Re-centering re-commits capital
+                # on the strength of that label, so a guess must never buy one; a
+                # plain exit is always available and always correct here.
+                adopted_unknown_mode = bool(meta.get("adopted")) and not meta.get("mode")
                 # Direction needs live bin data; unknown bins fail closed (no rebalance).
                 oor_above = (active_bin is not None and upper_bin is not None and active_bin > upper_bin)
                 mode_allows_rebalance = (
@@ -2394,7 +2725,7 @@ def main():
                         "low yield", "fee pace death"))
                     and rebalance_budget_ok
                 )
-                is_oor_rebalance = is_turnover_churn or (
+                is_oor_rebalance = (not adopted_unknown_mode) and (is_turnover_churn or (
                     mode_allows_rebalance
                     and strategy != "single_sided_reseed"  # reseed path redeploys on its own — never both
                     and close_reason.startswith("Out of Range")
@@ -2410,7 +2741,7 @@ def main():
                     # the real -8% floor doesn't get re-centered on a stale read.
                     and pnl_pct > -6.0
                     and rebalance_budget_ok
-                )
+                ))
 
                 if is_oor_rebalance:
                     print(f"♻️ {mode_cd} rebalance eligible ({rebalances_24h}/{rebalance_cap} in 24h, pool rebalance PnL {rebalance_pnl_24h:+.4f} SOL) — skipping re-entry cooldown for {base_symbol_cd}")
@@ -2451,7 +2782,15 @@ def main():
                     # Real loss events (stop-loss / downtrend) stay excluded, and the
                     # pipeline's entry momentum gates still reject a re-signal if the
                     # token is dumping when the cooldown clears.
-                    if realized_sol > 0 and not any(kw in reason_lower for kw in ("stop-loss", "stop_loss", "downtrend")):
+                    # "rug" excluded too (2026-08-28): RUG_M5_PCT fires off a 5m price
+                    # candle the mark snapshot hasn't caught up to yet — the same lag
+                    # documented above for OOR — so a rug-velocity emergency exit can
+                    # read realized_sol > 0 on a pool that is still actively crashing.
+                    # BANDOS-SOL: a RUG dump close marked +0.010 SOL at 00:34:59, got the
+                    # 15m win cooldown instead of 2h, and a fresh entry 15m later into the
+                    # same still-falling pool booked a real -0.0506 SOL / -12.09% on-chain.
+                    if (realized_sol > 0
+                            and not any(kw in reason_lower for kw in ("stop-loss", "stop_loss", "downtrend", "rug"))):
                         cooldown_secs = 900
                     if realized_sol < 0:
                         # Track repeat losses within a 7-day window and escalate cooldown duration
@@ -2587,9 +2926,14 @@ def main():
                     # purpose: a pool that keeps churning keeps its loss history.
                     run_command(f"redis-cli incrbyfloat \"{rebalance_pnl_key}\" {realized_sol:.6f}")
                     run_command(f"redis-cli expire \"{rebalance_pnl_key}\" 86400")
-                    rebalance_cmd = f"{env_prefix}node {EXECUTOR_PATH} deploy {pool} 0 {size_sol} {rebalance_bins} 0 bid_ask {params.get('SLIPPAGE_BPS', 1000)}"
+                    entry_context = {key: meta.get(key) for key in (
+                        "pair", "base_mint", "base_symbol", "sol_is_x", "signal")}
+                    entry_context.update(mode=mode_cd, strategy=f"{mode_cd}_rebalance",
+                                         size_sol=size_sol, recenter_of=meta.get("recenter_of") or pos_addr)
+                    context_env = "DLMM_ENTRY_CONTEXT=" + shlex.quote(json.dumps(entry_context))
+                    rebalance_cmd = f"{env_prefix}{context_env} node {EXECUTOR_PATH} deploy {pool} 0 {size_sol} {rebalance_bins} 0 bid_ask {params.get('SLIPPAGE_BPS', 1000)}"
                     print(f"♻️ {mode_cd} rebalance redeploy: {rebalance_cmd}")
-                    dep_res, dep_err = run_command_json(rebalance_cmd)
+                    dep_res, dep_err = run_command_json(rebalance_cmd, timeout=CLOSE_CMD_TIMEOUT)
                     if dep_res and dep_res.get("success"):
                         new_pos = dep_res.get("position")
                         ab_data, _ = run_command_json(f"node {EXECUTOR_PATH} active-bin {pool}")
@@ -2624,7 +2968,7 @@ def main():
                         swap_report += f"\n**Rebalanced**: re-centered {size_sol} SOL at the current price (re-center #{rebalances_24h + 1}/{rebalance_cap} in 24h). New position: {new_pos}"
                         print(f"♻️ {mode_cd} rebalance deployed: {new_pos}")
                     else:
-                        print(f"❌ {mode_cd} rebalance deploy failed: {dep_err or (dep_res or {}).get('error')} — position stays closed, normal cooldown applies")
+                        print(f"⚠️ {mode_cd} rebalance not confirmed: {dep_err or (dep_res or {}).get('error')} — no blind retry; on-chain adoption will reconcile any landed position")
                         run_command(f"redis-cli set \"{cooldown_key}\" \"{close_reason[:120]}\" ex 3600")
 
                 # Telegram report formatting

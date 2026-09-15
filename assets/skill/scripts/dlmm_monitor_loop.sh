@@ -11,6 +11,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROFILE_DIR="$(dirname "$(dirname "$(dirname "$SCRIPT_DIR")")")"
 
 PYTHON="python3"
+# User systemd omits this directory; Hermes installs its CLI here.
+export PATH="$HOME/.local/bin:$PATH"
 
 echo "Starting DLMM Position Monitor Loop (20s interval)..."
 

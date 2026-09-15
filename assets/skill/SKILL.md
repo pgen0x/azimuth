@@ -23,16 +23,13 @@ Screen Pools (Fee/TVL, TVL, Volatility, Base Token Safety Gates) → Deploy Sing
 
 ## Tools & Commands
 
-2026-07-22 strategy merge: ground truth from the Meteora portfolio API (30d,
-119 closes) showed 47.9% winrate / PF 0.84 / net -0.34 SOL — a loss tail (9
-closes <= -8%) and zero-fee churn, both structural (position shape + exit
-shape), not screening thresholds. Entry now defaults to `sol_bidask`
-(single-sided SOL ladder, zero token exposure at entry); exits gained a fast
-rug-velocity gate (5m <= -20% = emergency close) and a fee-pace-death exit,
-which let the hard SL widen back out to -25% as a deep backstop instead of
-the primary tail defense. Robinhood venue and turnover mode stay off
-(negative edge in their own ground truth) and momentum entry gates stay
-tightened (5m <= -3%, 1h <= -7%, 6h <= -10%, 24h <= -20%).
+Automated signals (`--from-signal` and `--from-batch`) use `sol_bidask` in every
+mode, including turnover and pulse. The pipeline enforces this even when a stale
+prompt supplies another `--strategy`. It targets roughly 35% downside coverage,
+subject to bin-step and rent limits; filled bins still acquire token exposure.
+Manual runs without a signal retain strategy overrides. Venue toggles come from
+the daemon configuration; exit thresholds and position budgets come from SOUL.md
+with the script defaults as fallback. Do not infer live settings from old reports.
 
 ### 1. `dlmm_pipeline.py` — Ingestion Pipeline
 **Purpose**: Screens Meteora's pool discovery API and deploys into the best candidate.
@@ -58,10 +55,11 @@ Two modes with **isolated position budgets** (2 slots each, max 4 total):
 **Batch mode (`--from-batch '<payload array>' --mode <mode>`)**: consumes the
 azimuth daemon's whole signal batch and replaces the LLM agent's pick step —
 deterministic conviction re-rank (dev-exit / global-fees / PVP hard rejects,
-GMGN boosts+penalties, darwinian signal weights from Redis), strategy chosen
-from the same table the agent prompt used, and runner-up fallback when a live
+GMGN boosts+penalties, darwinian signal weights from Redis), `sol_bidask` strategy enforced in code, and runner-up fallback when a live
 gate (bin-array rent, entry timing) rejects the top pick. Used by the daemon's
 `DEPLOY_CMD` direct mode.
+
+**LLM candidate fallback**: when a live gate rejects the pick before submission, try the next candidate in the same batch. A timeout or an unverified deployment requires checking the process and on-chain positions before another attempt.
 
 **Entry memory gates (all modes, incl. `--from-signal` / `--from-batch`)**:
 *   Symbol cooldown (`sol:dlmm:cooldown:<SYMBOL>`) and pool cooldown (`sol:dlmm:cooldown:pool:<POOL>`) — skip while set.
@@ -73,7 +71,7 @@ gate (bin-array rent, entry timing) rejects the top pick. Used by the daemon's
 **Purpose**: Monitors all open positions in Redis and checks SL/TP or Out-of-Range limits.
 **Command**: `python3 ~/.hermes/profiles/<profile>/skills/solana-dlmm/scripts/dlmm_monitor.py`
 **Exits managed**:
-*   Stop-Loss: SOUL `Hard Stop-Loss` (currently -25%, widened 2026-07-22 — a deep backstop now that the fast rails below own the tail; fallback constant also -25%).
+*   Stop-Loss: SOUL `Hard Stop-Loss` (script default -8%); emergency floor is 3 percentage points lower and bypasses grace/AI holds.
 *   Rug velocity gate: 5m price change <= -20% (`RUG_M5_PCT`) — emergency close NOW, same class as the emergency SL floor. Fail-open on missing 5m data.
 *   Take-Profit: Price rises >= +50% from entry price.
 *   Out of Range: asymmetric fuse by pool geometry (sol_bidask is single-sided, so the two OOR directions mean opposite things). SOL-side OOR (fully converted to SOL, PnL frozen) gets the patient SOUL `Max Out of Range Minutes` fuse (currently 45m) plus a profit lock — `pnl_pct >= +1.5%` closes immediately, banking the frozen win. Token-side OOR (full token bag, decaying every tick) gets the fast SOUL `OOR Downside Max Minutes` fuse (currently 5m); one one-shot green-5m-candle grace extension, then closes via the dump path. Orientation must be positively known (`meta.sol_is_x`) — unknown defaults to the patient fuse.
