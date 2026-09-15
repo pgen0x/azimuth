@@ -5,6 +5,13 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.7.4](https://github.com/pgen0x/azimuth/compare/v2.7.3...v2.7.4) (2026-09-15)
+
+
+### Bug Fixes
+
+* **solana:** restore Redis-authenticated scanning and safety guards ([#86](https://github.com/pgen0x/azimuth/issues/86)) ([7d04e6f](https://github.com/pgen0x/azimuth/commit/7d04e6fcf5d1124af8dbc066f33086192d32d4bc))
+
 ## [2.7.3](https://github.com/pgen0x/azimuth/compare/v2.7.2...v2.7.3) (2026-08-24)
 
 
