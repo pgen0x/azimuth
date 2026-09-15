@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"encoding/json"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -26,7 +27,8 @@ type Seen struct {
 func New(addr, key string, ttl time.Duration) *Seen {
 	s := &Seen{key: key, ttl: ttl, mem: make(map[string]time.Time)}
 	if addr != "" {
-		s.rdb = redis.NewClient(&redis.Options{Addr: addr})
+		// Share redis-cli's credential with the monitor and deploy subprocesses.
+		s.rdb = redis.NewClient(&redis.Options{Addr: addr, Password: os.Getenv("REDISCLI_AUTH")})
 	}
 	return s
 }
