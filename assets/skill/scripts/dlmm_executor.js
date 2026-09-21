@@ -230,7 +230,7 @@ async function deployPosition(poolAddressStr, amountX, amountY, binsBelow, binsA
   if (![amountX, amountY].every((n) => Number.isFinite(n) && n >= 0)
       || amountX + amountY <= 0
       || ![binsBelow, binsAbove].every((n) => Number.isSafeInteger(n) && n >= 0)
-      || !Number.isSafeInteger(slippageBps) || slippageBps < 0 || slippageBps > 10000
+      || !Number.isSafeInteger(slippageBps) || slippageBps <= 0 || slippageBps > 10000
       || !["spot", "curve", "bid_ask"].includes(strategyTypeStr)) {
     throw new Error("Invalid deploy amounts, range, strategy or slippage");
   }
@@ -311,14 +311,14 @@ async function deployPosition(poolAddressStr, amountX, amountY, binsBelow, binsA
           const adds = await pool.addLiquidityByStrategyChunkable({
             positionPubKey: newPosition.publicKey, user: wallet.publicKey,
             totalXAmount: totalXLamports, totalYAmount: totalYLamports,
-            strategy: { minBinId, maxBinId, strategyType }, slippage: slippageBps,
+            strategy: { minBinId, maxBinId, strategyType }, slippage: slippageBpsToPercent(slippageBps),
           });
           for (const tx of Array.isArray(adds) ? adds : [adds]) await send(tx, [wallet]);
         } else {
           const tx = await pool.initializePositionAndAddLiquidityByStrategy({
             positionPubKey: newPosition.publicKey, user: wallet.publicKey,
             totalXAmount: totalXLamports, totalYAmount: totalYLamports,
-            strategy: { minBinId, maxBinId, strategyType }, slippage: slippageBps,
+            strategy: { minBinId, maxBinId, strategyType }, slippage: slippageBpsToPercent(slippageBps),
           });
           await send(tx, [wallet, newPosition]);
         }
@@ -537,6 +537,13 @@ function normalizeMint(mint) {
   return mint;
 }
 
+function slippageBpsToPercent(slippageBps) {
+  if (!Number.isSafeInteger(slippageBps) || slippageBps <= 0) {
+    throw new Error("Slippage must be a positive integer in basis points");
+  }
+  return slippageBps / 100;
+}
+
 async function getPositionPnl(poolAddressStr, positionAddressStr) {
   const walletAddress = getWallet().publicKey.toString();
   const url = `https://dlmm.datapi.meteora.ag/positions/${poolAddressStr}/pnl?user=${walletAddress}&status=open&pageSize=100&page=1`;
@@ -566,6 +573,8 @@ async function getPositionPnl(poolAddressStr, positionAddressStr) {
   return {
     success: true,
     pnl_pct: found.pnlSolPctChange != null ? parseFloat(found.pnlSolPctChange) : derivedPnlPct,
+    pnl_sol: found.pnlSol != null ? Number(found.pnlSol) : deposit * derivedPnlPct / 100,
+    pnl_currency: "SOL",
     derived_pnl_pct: derivedPnlPct,
     current_value_sol: balancesSol,
     unclaimed_fees_sol: unclaimedFeeSol,
@@ -702,23 +711,43 @@ async function swapToken(inputMintStr, outputMintStr, amountFloat, maxPriceImpac
     const swapTransactionBuf = Buffer.from(swapTransaction, "base64");
     const transaction = VersionedTransaction.deserialize(swapTransactionBuf);
     
-    const { blockhash } = await connection.getLatestBlockhash("confirmed");
+    const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash("confirmed");
     transaction.message.recentBlockhash = blockhash;
     transaction.sign([wallet]);
     
     // 5. Send and confirm
     const rawTransaction = transaction.serialize();
-    const txid = await connection.sendRawTransaction(rawTransaction, {
-      skipPreflight: true,
-      maxRetries: 2
-    });
-    
-    const latestBlockHash = await connection.getLatestBlockhash();
-    await connection.confirmTransaction({
-      blockhash: latestBlockHash.blockhash,
-      lastValidBlockHeight: latestBlockHash.lastValidBlockHeight,
-      signature: txid
-    }, "confirmed");
+    const signedTxid = bs58.encode(transaction.signatures[0]);
+    let txid;
+    try {
+      txid = await connection.sendRawTransaction(rawTransaction, {
+        skipPreflight: true,
+        maxRetries: 2
+      });
+    } catch (err) {
+      return { success: false, pending: true, txHash: signedTxid,
+        error: `Swap submission uncertain: ${err.message}` };
+    }
+
+    try {
+      const confirmation = await connection.confirmTransaction({
+        blockhash, lastValidBlockHeight, signature: txid
+      }, "confirmed");
+      if (confirmation.value.err) {
+        return { success: false, txHash: txid,
+          error: `Swap failed: ${JSON.stringify(confirmation.value.err)}` };
+      }
+    } catch (err) {
+      const status = (await connection.getSignatureStatuses([txid])).value[0];
+      if (!status || !["confirmed", "finalized"].includes(status.confirmationStatus)) {
+        return { success: false, pending: true, txHash: txid,
+          error: `Swap confirmation pending: ${err.message}` };
+      }
+      if (status.err) {
+        return { success: false, txHash: txid,
+          error: `Swap failed: ${JSON.stringify(status.err)}` };
+      }
+    }
     
     return {
       success: true,
@@ -875,4 +904,4 @@ async function main() {
 }
 
 if (require.main === module) main();
-module.exports = { deployPosition, acquireDeployLock, assertNoTokenExposure };
+module.exports = { deployPosition, acquireDeployLock, assertNoTokenExposure, slippageBpsToPercent };

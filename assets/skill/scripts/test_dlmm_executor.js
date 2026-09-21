@@ -8,6 +8,7 @@ const { execFileSync } = require("node:child_process");
 const source = fs.readFileSync(path.join(__dirname, "dlmm_executor.js"), "utf8");
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "dlmm-guards-"));
 let reads = 0, sends = 0, builds = 0, minted = 0, height = 100, sendError = false, buildError = false;
+let lastSlippage = null;
 let positions = [], confirmationError = false;
 const key = (value) => ({ toString: () => value });
 const wallet = { publicKey: key(`test-wallet-${process.pid}`) };
@@ -19,7 +20,7 @@ const pool = {
     lbPair: { fetch: async () => ({ tokenXMint: key("TOKEN"), tokenYMint: key("SOL") }) },
   } },
   getActiveBin: async () => ({ binId: 0, price: "1" }), fromPricePerLamport: (x) => x,
-  initializePositionAndAddLiquidityByStrategy: async () => { builds++; if (buildError) throw new Error("build failed"); return transaction(); },
+  initializePositionAndAddLiquidityByStrategy: async (args) => { lastSlippage = args.slippage; builds++; if (buildError) throw new Error("build failed"); return transaction(); },
   createExtendedEmptyPosition: async () => [transaction()],
   addLiquidityByStrategyChunkable: async () => { throw new Error("wide add failed"); },
 };
@@ -40,12 +41,17 @@ const sandbox = { require: (name) => deps[name] || require(name), module: { expo
   process: { argv: ["node", path.join(root, "skills/solana-dlmm/scripts/dlmm_executor.js")], env },
   console: { log() {}, warn() {}, error() {} }, Buffer, setTimeout, clearTimeout };
 vm.runInNewContext(source + "\ngetWallet = () => testWallet; getTokenDecimals = async () => 9; assertRangeDoesNotRequireBinArrayInitialization = async () => {};", Object.assign(sandbox, { testWallet: wallet }));
-const { deployPosition, acquireDeployLock, assertNoTokenExposure } = sandbox.module.exports;
+const { deployPosition, acquireDeployLock, assertNoTokenExposure, slippageBpsToPercent } = sandbox.module.exports;
 const marker = path.join(root, "memories/dlmm_pending_deploys", `${wallet.publicKey}.json`);
 const deploy = () => deployPosition("pool", 0, 0.1, 20, 0, "bid_ask", 1000);
 const clearMarker = () => fs.rmSync(marker, { force: true });
 
 (async () => {
+  assert.equal(slippageBpsToPercent(1000), 10);
+  assert.throws(() => slippageBpsToPercent(0), /positive integer/);
+  assert.doesNotMatch(source, /const latestBlockHash = await connection\.getLatestBlockhash/);
+  assert.match(source, /blockhash, lastValidBlockHeight, signature: txid/);
+  assert.match(source, /success: false, pending: true, txHash: signedTxid/);
   // The OS lock excludes another process, not only another Promise.
   const release = await acquireDeployLock(wallet.publicKey.toString());
   await assert.rejects(acquireDeployLock(wallet.publicKey.toString()), /ENTRY BUSY/);
@@ -55,6 +61,7 @@ const clearMarker = () => fs.rmSync(marker, { force: true });
   await (await acquireDeployLock(wallet.publicKey.toString()))();
   const parallel = await Promise.allSettled([deploy(), deploy()]);
   assert.equal(parallel.filter((r) => r.status === "fulfilled" && r.value.success).length, 1);
+  assert.equal(lastSlippage, 10);
   assert.equal(sends, 1);
   assert.equal((await deploy()).pending, true); // prior blockhash still valid
   assert.equal(sends, 1);

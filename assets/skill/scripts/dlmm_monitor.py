@@ -6,6 +6,7 @@ import subprocess
 import os
 import re
 import shlex
+import math
 import urllib.request
 from decimal import Decimal
 from local_indicators import check_local_indicators
@@ -42,13 +43,26 @@ def get_meteora_portfolio_positions(wallet_address):
         for pool_data in (data.get("pools") or []):
             pool_addr = pool_data.get("poolAddress")
             oor_set = set(pool_data.get("positionsOutOfRange") or [])
+            positions = pool_data.get("listPositions") or []
+            # Pool aggregates are position metrics only for a single position.
+            # Otherwise preserve discovery but require the per-position fallback.
+            pnl_sol = pool_data.get("pnlSol")
+            pnl_pct = pool_data.get("pnlSolPctChange")
+            deposit = float(pool_data.get("totalDepositSol") or 0)
+            if pnl_pct is None and pnl_sol is not None and deposit > 0:
+                pnl_pct = float(pnl_sol) / deposit * 100
+            if len(positions) != 1:
+                pnl_pct = pnl_sol = None
+            if pnl_pct is not None and not math.isfinite(float(pnl_pct)):
+                pnl_pct = None
             for pos_addr in (pool_data.get("listPositions") or []):
                 result[pos_addr] = {
                     "position": pos_addr,
                     "pool": pool_addr,
                     "is_out_of_range": pos_addr in oor_set,
-                    "pnl_pct": float(pool_data.get("pnlPctChange") or 0.0),
-                    "pnl_sol": float(pool_data.get("pnlSol") or 0.0),
+                    "pnl_pct": float(pnl_pct) if pnl_pct is not None else None,
+                    "pnl_sol": float(pnl_sol) if pnl_sol is not None else None,
+                    "pnl_currency": "SOL",
                     "fee_per_tvl_24h": float(pool_data.get("feePerTvl24h") or 0.0),
                     "pool_price": float(pool_data.get("poolPrice") or 0.0),
                     "unclaimed_fees_sol": float(pool_data.get("unclaimedFeesSol") or 0.0),
@@ -564,6 +578,12 @@ def trailing_floor_pct(peak_pnl, trailing_drop_pct):
         return max(2.0, peak_pnl - 2.5)
     return peak_pnl - trailing_drop_pct
 
+
+def downside_floor_bins(bin_step, coverage=0.20):
+    """Minimum bins needed to retain the requested downside price coverage."""
+    step = max(float(bin_step), 1.0) / 10000.0
+    return min(100, math.ceil(math.log(1 / (1 - coverage)) / math.log1p(step)))
+
 def _read_hold_count(pos_addr):
     """How many AI holds were placed on this position (see log_hold)."""
     out, _, _ = run_command(f"redis-cli get \"sol:dlmm:position:{pos_addr}:ai_hold_count\"")
@@ -572,18 +592,50 @@ def _read_hold_count(pos_addr):
     except (ValueError, TypeError):
         return 0
 
-def log_hold(pos_addr, hold_minutes, reason):
-    """Journal one AI hold to memories/ai_holds.jsonl and bump the per-position
-    hold counter that log_close() later stamps onto the close record.
+def hold_block_reason(meta, state):
+    """A discretionary hold needs productive liquidity, not a price narrative."""
+    if not meta or not state or state.get("success") is False:
+        return "position or live metrics unavailable"
+    in_range = state.get("in_range", not state.get("is_out_of_range", True))
+    if not in_range:
+        return "out of range: a hold cannot earn fees outside the funded range"
+    fees = state.get("unclaimed_fees_sol")
+    if fees is None or not math.isfinite(float(fees)) or float(fees) <= 0:
+        return "no observed position fees to justify extending the hold"
+    pace = meta.get("fee_pace_pct_30m")
+    if pace is not None and float(pace) <= 0:
+        return "position fee pace has stalled"
+    return None
 
-    Without this pair of writes the exit-review stage is unmeasurable: a hold
-    leaves no trace once its Redis key expires, so there is no way to ask
-    afterwards whether held positions closed better than unheld ones. The
-    counter carries a 7-day TTL — long enough to outlive any position, short
-    enough that a stale address cannot accumulate forever."""
-    meta = get_position_metadata(pos_addr) or {}
-    run_command(f"redis-cli incr \"sol:dlmm:position:{pos_addr}:ai_hold_count\"")
-    run_command(f"redis-cli expire \"sol:dlmm:position:{pos_addr}:ai_hold_count\" 604800")
+
+def set_ai_hold(pos_addr, hold_minutes, reason, dry_run=False):
+    if not re.fullmatch(r"[1-9A-HJ-NP-Za-km-z]{32,44}", pos_addr) or hold_minutes <= 0:
+        raise ValueError("Valid position address and positive hold duration required")
+    meta = get_position_metadata(pos_addr)
+    if not meta:
+        raise ValueError("Position metadata unavailable; hold not set")
+    state, err = run_command_json(f"node {shlex.quote(EXECUTOR_PATH)} pnl {shlex.quote(meta['pool'])} {pos_addr}")
+    blocked = hold_block_reason(meta, state)
+    if blocked:
+        raise ValueError(f"Hold refused: {blocked}")
+    if dry_run:
+        return
+    # Check position existence and write the flag/counter atomically. A close
+    # racing this request must not leave a success journal for a missing key.
+    script = """if redis.call('EXISTS',KEYS[1]) == 0 then return 0 end
+redis.call('SET',KEYS[2],ARGV[1],'EX',ARGV[2])
+local n=redis.call('INCR',KEYS[3]); redis.call('EXPIRE',KEYS[3],604800); return n"""
+    key = f"sol:dlmm:position:{pos_addr}"
+    until = int(time.time()) + hold_minutes * 60
+    out, err, code = run_command(f"redis-cli EVAL {shlex.quote(script)} 3 {key} {key}:ai_hold_until {key}:ai_hold_count {until} {hold_minutes * 60}")
+    if code != 0 or not out.isdigit() or int(out) <= 0:
+        raise RuntimeError("Hold was not committed to Redis")
+    log_hold(pos_addr, hold_minutes, reason, meta, int(out))
+
+
+def log_hold(pos_addr, hold_minutes, reason, meta=None, count=None):
+    """Journal an AI hold after set_ai_hold atomically bumps its counter."""
+    meta = meta or get_position_metadata(pos_addr) or {}
     entry = {
         "ts": int(time.time()),
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -592,6 +644,7 @@ def log_hold(pos_addr, hold_minutes, reason):
         "mode": meta.get("mode"),
         "hold_minutes": hold_minutes,
         "reason": reason,
+        "hold_count": count,
     }
     try:
         path = os.path.join(PROFILE_DIR, "memories", "ai_holds.jsonl")
@@ -674,7 +727,8 @@ def log_close(pool, pair, meta, pos_addr, pnl_pct, realized_sol, fee_per_tvl_24h
         # a threshold) needs to know NOT to trust this row's pnl_sol at face
         # value without reconciling against on-chain flows first. None means
         # unflagged / not applicable (normal exit, no swap, or pre-2026-08-21).
-        "pnl_basis": pnl_basis,
+        "pnl_basis": pnl_basis or "pre_swap_mark",
+        "pnl_currency": "SOL",
     }
     try:
         path = os.path.join(PROFILE_DIR, "memories", "dlmm_closes.jsonl")
@@ -739,7 +793,7 @@ def load_soul_dlmm_params():
         "SLIPPAGE_BPS": 1000,
         "MIN_EXIT_LIQUIDITY_USD": float(MIN_EXIT_LIQUIDITY_USD)
     }
-    
+
     soul_path = os.path.join(PROFILE_DIR, "SOUL.md")
     if not os.path.exists(soul_path):
         return params
@@ -937,6 +991,8 @@ EXECUTOR_PATH = os.path.join(SCRIPT_DIR, "dlmm_executor.js")
 
 def run_command(cmd, timeout=30):
     try:
+        if cmd.startswith("redis-cli "):
+            cmd = cmd.replace("redis-cli ", "redis-cli -e ", 1)
         res = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout)
         return res.stdout.strip(), res.stderr.strip(), res.returncode
     except Exception as e:
@@ -1482,23 +1538,12 @@ def main():
 
     # --override-hold: set AI hold flag in Redis, skip auto-close for N minutes
     if cli.override_hold:
-        hold_until = int(time.time()) + (cli.hold_minutes * 60)
-        if cli.dry_run:
-            # Prints the two writes it is skipping by name: the exit review is
-            # an LLM path, so being able to rehearse a hold — from the same
-            # command line the job uses, against a live position — is what
-            # separates testing the reviewer from testing on the wallet.
-            meta = get_position_metadata(cli.override_hold) or {}
-            pair = meta.get("pair") or "unknown pair"
-            print(f"🧪 DRY RUN — would hold {cli.override_hold} ({pair}) for {cli.hold_minutes}m. Reason: {cli.reason}")
-            print(f"   skipped: SET sol:dlmm:position:{cli.override_hold}:ai_hold_until {hold_until} EX {cli.hold_minutes * 60}")
-            print(f"   skipped: INCR sol:dlmm:position:{cli.override_hold}:ai_hold_count, append to memories/ai_holds.jsonl")
-            if not meta:
-                print("   ⚠️ position not found in Redis — a real hold would still write the key, but nothing reads it")
-            sys.exit(0)
-        run_command(f"redis-cli set \"sol:dlmm:position:{cli.override_hold}:ai_hold_until\" {hold_until} EX {cli.hold_minutes * 60}")
-        log_hold(cli.override_hold, cli.hold_minutes, cli.reason)
-        print(f"✋ AI HOLD set for {cli.override_hold} — auto-close suppressed for {cli.hold_minutes}m. Reason: {cli.reason}")
+        try:
+            set_ai_hold(cli.override_hold, cli.hold_minutes, cli.reason, cli.dry_run)
+        except (ValueError, RuntimeError) as exc:
+            print(str(exc))
+            sys.exit(2)
+        print(f"{'🧪 DRY RUN — would set' if cli.dry_run else '✋ Set'} AI HOLD for {cli.override_hold}, {cli.hold_minutes}m. Reason: {cli.reason}")
         sys.exit(0)
 
     # --override-close: force-close a specific position immediately (AI decision)
@@ -1523,7 +1568,7 @@ def main():
                     guard_pnl_pct = guard_bp.get("pnl_pct", 0.0)
                     guard_fee_tvl = guard_bp.get("fee_per_tvl_24h", 0.0)
                     guard_in_range = not guard_bp.get("is_out_of_range", False)
-                    if guard_pnl_pct < 0 and guard_fee_tvl > 0:
+                    if guard_pnl_pct is not None and guard_pnl_pct < 0 and guard_fee_tvl > 0:
                         guard_break_even = round(abs(guard_pnl_pct) / guard_fee_tvl, 2)
 
         # HEALTH GUARD — block closing a healthy, in-range, high-fee, near-break-even position.
@@ -1541,7 +1586,7 @@ def main():
         # --override-close bypasses the rules-based path where hold is normally checked,
         # so we must re-check here. Bypass only when: --force is passed, OR PnL <= hard SL (-25%)
         # — genuine emergency that no hold should block.
-        if not cli.force and not is_dry:
+        if not cli.force and not is_dry and guard_in_range is True:
             hold_val, _, _ = run_command(f"redis-cli get \"sol:dlmm:position:{cli.override_close}:ai_hold_until\"")
             if hold_val and hold_val != "(nil)":
                 try:
@@ -1826,7 +1871,7 @@ def main():
         fee_per_tvl_24h = 0.0
 
         pnl_sol_actual = None  # Meteora-exact SOL P&L; used at close-booking instead of size*pct
-        if api_available and bp:
+        if api_available and bp and bp.get("pnl_pct") is not None:
             # Use Meteora Portfolio API data (reliable, real-time)
             in_range = not bp.get("is_out_of_range", False)
             pnl_pct = bp.get("pnl_pct", 0.0)
@@ -1850,17 +1895,13 @@ def main():
             pnl_data, pnl_err = run_command_json(f"node {EXECUTOR_PATH} pnl {pool} {pos_addr}")
             if pnl_data and pnl_data.get("success") != False:
                 pnl_pct = float(pnl_data.get("pnl_pct", 0.0))
+                pnl_sol_actual = pnl_data.get("pnl_sol")
                 in_range = pnl_data.get("in_range", True)
                 fee_per_tvl_24h = float(pnl_data.get("fee_per_tvl_24h", 0.0))
                 print(f"Executor PnL: {pnl_pct:+.2f}% | Fee/TVL 24h: {fee_per_tvl_24h:.2f}% | Range: {'🟢 In' if in_range else '🔴 Out'}")
             else:
-                if entry_price > 0:
-                    pnl_pct = ((active_price - entry_price) / entry_price) * 100.0
-                if active_bin is not None:
-                    lower_bin = meta.get("entry_bin", 0) - bins_below
-                    upper_bin = meta.get("entry_bin", 0)
-                    in_range = (active_bin >= lower_bin) and (active_bin <= upper_bin)
-                print(f"Price proxy fallback: {pnl_pct:+.2f}% PnL | Range: {'🟢 In' if in_range else '🔴 Out'}")
+                print(f"⚠️ SOL PnL unavailable for {pair}; retry next tick. Token price return is not LP return.")
+                continue
         else:
             # Dry run
             ab_data, ab_err = run_command_json(f"node {EXECUTOR_PATH} active-bin {pool}")
@@ -1941,6 +1982,12 @@ def main():
         elif api_available and bp:
             run_command(f"redis-cli del \"{suspect_key}\"")
 
+        # Old peaks can be USD returns. Start a new SOL peak once; never compare
+        # a legacy USD high-water mark with a SOL-denominated exit threshold.
+        if meta.get("pnl_currency") != "SOL":
+            meta["legacy_peak_pnl"] = meta.get("peak_pnl")
+            meta.update(pnl_currency="SOL", peak_pnl=max(0.0, pnl_pct),
+                        trailing_active=False, trailing_grace_used=False)
         # Update Trailing Take-Profit State in Redis
         peak_pnl = float(meta.get("peak_pnl", 0.0))
         trailing_active = meta.get("trailing_active", False)
@@ -2562,7 +2609,9 @@ def main():
         AI_HOLD_BYPASS_DROP_PCT = 3.0
         if close_reason and not emergency_close and not protected_risk_exit:
             hold_val, _, _ = run_command(f"redis-cli get \"sol:dlmm:position:{pos_addr}:ai_hold_until\"")
-            if hold_val and hold_val != "(nil)" and int(hold_val) > now:
+            hold_state = dict(pnl_data or bp or {}, in_range=in_range)
+            if (hold_val and hold_val != "(nil)" and int(hold_val) > now
+                    and hold_block_reason(meta, hold_state) is None):
                 reason_lc = close_reason.lower()
                 is_large_trailing_drop = "trailing take-profit" in reason_lc and drop_from_peak >= AI_HOLD_BYPASS_DROP_PCT
                 # The two speed rules bypass too. A hold defers 10-20 minutes,
@@ -2855,14 +2904,19 @@ def main():
                             swap_max_impact = 18 if is_dump_close else 15
                             swap_slip_bps = 300 if is_dump_close else 300
                             print(f"Executing auto-swap back to SOL for {balance} tokens (max_impact {swap_max_impact}%, {'dump' if is_dump_close else 'normal'} exit)...")
-                            swap_res, swap_err = run_command_json(f"{env_prefix}node {EXECUTOR_PATH} swap {base_mint} SOL {balance} {swap_max_impact} {swap_slip_bps}")
+                            swap_res, swap_err = run_command_json(f"{env_prefix}node {EXECUTOR_PATH} swap {base_mint} SOL {balance} {swap_max_impact} {swap_slip_bps}", timeout=90)
                             if swap_res and swap_res.get("success"):
                                 swap_tx = swap_res.get("txHash", "DRY_RUN_SWAP_TX_HASH")
                                 swap_report = f"\n**Auto-Swap**: Swapped {balance:.4f} base tokens back to SOL.\n**Swap TX**: https://solscan.io/tx/{swap_tx}"
                                 print(f"✅ Auto-swapped back to SOL successfully. Tx: {swap_tx}")
+                            elif swap_res and swap_res.get("pending"):
+                                swap_tx = swap_res.get("txHash", "unknown")
+                                swap_report = f"\n**Auto-Swap**: Submitted; confirmation is pending. No retry was sent.\n**Swap TX**: https://solscan.io/tx/{swap_tx}"
+                                print(f"⏳ Auto-swap submitted; confirmation pending. Tx: {swap_tx}")
                             else:
-                                swap_report = f"\n**Auto-Swap**: Failed to swap back to SOL: {swap_err or swap_res.get('error')}"
-                                print(f"❌ Auto-swap failed: {swap_err or swap_res.get('error')}")
+                                swap_problem = swap_err or (swap_res or {}).get("error") or "unknown error"
+                                swap_report = f"\n**Auto-Swap**: Failed to swap back to SOL: {swap_problem}"
+                                print(f"❌ Auto-swap failed: {swap_problem}")
                         else:
                             print("Base token balance SOL value too small (<0.01 SOL), skipping swap")
                     else:
@@ -2917,7 +2971,11 @@ def main():
                 # wide to survive days of drift. Deploy failure falls back to a
                 # normal 1h cooldown so the pool isn't silently forgotten.
                 if is_oor_rebalance:
-                    rebalance_bins = {"turnover": 20, "casual": 25, "multiday": 40}.get(mode_cd, 40)
+                    bin_step = float(meta.get("bin_step") or (meta.get("signal") or {}).get("bin_step") or 100)
+                    rebalance_bins = max(
+                        {"turnover": 20, "casual": 25, "multiday": 40}.get(mode_cd, 40),
+                        downside_floor_bins(bin_step),
+                    )
                     run_command(f"redis-cli incr \"{rebalance_count_key}\"")
                     run_command(f"redis-cli expire \"{rebalance_count_key}\" 86400")
                     # Feed the circuit breaker: this close's realized PnL joins the
@@ -2927,7 +2985,13 @@ def main():
                     run_command(f"redis-cli incrbyfloat \"{rebalance_pnl_key}\" {realized_sol:.6f}")
                     run_command(f"redis-cli expire \"{rebalance_pnl_key}\" 86400")
                     entry_context = {key: meta.get(key) for key in (
-                        "pair", "base_mint", "base_symbol", "sol_is_x", "signal")}
+                        "pair", "base_mint", "base_symbol", "sol_is_x")}
+                    signal = dict(meta.get("signal") or {})
+                    signal.update(fee_tvl_ratio=fee_per_tvl_24h,
+                                  tvl=pool_liquidity_usd,
+                                  recentered_at=now,
+                                  recenter_source="monitor")
+                    entry_context["signal"] = signal
                     entry_context.update(mode=mode_cd, strategy=f"{mode_cd}_rebalance",
                                          size_sol=size_sol, recenter_of=meta.get("recenter_of") or pos_addr)
                     context_env = "DLMM_ENTRY_CONTEXT=" + shlex.quote(json.dumps(entry_context))
@@ -2948,6 +3012,7 @@ def main():
                             "entry_bin": rb_bin,
                             "bins_below": rebalance_bins,
                             "bins_above": 0,
+                            "bin_step": bin_step,
                             "size_sol": size_sol,
                             "deployed_at": now,
                             "tx_hash": dep_res.get("txHash"),
@@ -2961,6 +3026,7 @@ def main():
                             # MEOW-SOL's +1.33% close and the -2.82% leg it
                             # reseeded into looked like two independent trades.
                             "recenter_of": meta.get("recenter_of") or pos_addr,
+                            "signal": signal,
                         }
                         if not is_dry_run_stored:
                             run_command(f"redis-cli set \"sol:dlmm:position:{new_pos}\" '{json.dumps(tracking_data)}'")

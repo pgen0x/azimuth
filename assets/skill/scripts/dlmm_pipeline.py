@@ -424,6 +424,10 @@ def reconcile_redis_vs_meteora():
                 key = key.strip()
                 if not key:
                     continue
+                # Hold counters are audit history, not position metadata. Their
+                # own seven-day TTL also keeps them alive through close logging.
+                if key.endswith(":ai_hold_count"):
+                    continue
                 addr = key.replace("sol:dlmm:position:", "")
                 if any(addr.endswith(s) for s in meta_suffixes):
                     base_addr = addr.rsplit(":", 1)[0]
@@ -771,6 +775,8 @@ def run_swap_with_retry(cmd, attempts=3):
         last_res, last_err = run_command_json(cmd)
         if last_res and last_res.get("success"):
             return last_res, None
+        if last_res and last_res.get("pending"):
+            return last_res, last_err
         msg = str(last_err or (last_res.get("error") if last_res else "")).lower()
         if not any(t in msg for t in ("429", "rate limit", "timeout", "timed out")):
             return last_res, last_err
@@ -1846,6 +1852,7 @@ def main():
         "entry_bin": active_bin,
         "bins_below": bins_below,
         "bins_above": bins_above,
+        "bin_step": bin_step,
         "size_sol": deploy_sol,
         "deployed_at": ts,
         "tx_hash": tx_hash,
@@ -1866,7 +1873,7 @@ def main():
             "score", "organic_score", "fee_tvl_ratio", "fee_active_tvl_ratio",
             "volatility", "mcap", "holders", "tvl", "fee_pct",
             "volume_tvl_ratio", "swap_count", "unique_traders",
-            "bot_holders_pct", "global_fees_sol",
+            "bot_holders_pct", "global_fees_sol", "bin_step",
         ) if winner.get(k) is not None},
     }
 
