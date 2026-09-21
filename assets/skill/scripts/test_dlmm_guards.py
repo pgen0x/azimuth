@@ -11,6 +11,38 @@ import dlmm_monitor as monitor
 
 
 def main():
+    assert monitor.downside_floor_bins(100) == 23
+    assert monitor.hold_block_reason({}, {"in_range": True, "unclaimed_fees_sol": 1})
+    assert "out of range" in monitor.hold_block_reason(
+        {"pool": "pool"}, {"in_range": False, "unclaimed_fees_sol": 1})
+    assert monitor.hold_block_reason(
+        {"pool": "pool"}, {"in_range": True, "unclaimed_fees_sol": 0})
+    assert monitor.hold_block_reason(
+        {"pool": "pool"}, {"in_range": True, "unclaimed_fees_sol": 0.001}) is None
+
+    payload = {"solPrice": 150, "pools": [{"poolAddress": "pool", "listPositions": ["position"],
+        "pnlPctChange": -30, "pnlSolPctChange": 2, "pnlSol": 0.02,
+        "totalDepositSol": 1, "unclaimedFeesSol": 0.001}]}
+    class Response:
+        def read(self): return json.dumps(payload).encode()
+        def __enter__(self): return self
+        def __exit__(self, *args): return False
+    response = Response()
+    with patch.object(monitor.urllib.request, "urlopen", return_value=response):
+        portfolio, error = monitor.get_meteora_portfolio_positions("wallet")
+    assert error is None and portfolio["position"]["pnl_pct"] == 2
+    assert portfolio["position"]["pnl_currency"] == "SOL"
+
+    pos = "2G6rKc9ssZZxVagZpfKKfph8UARmAbh9GjpV9R3uxGGe"
+    commands = []
+    with patch.object(monitor, "get_position_metadata", return_value={"pool": "pool"}), \
+         patch.object(monitor, "run_command_json", return_value=({"success": True, "in_range": True, "unclaimed_fees_sol": 0.001}, None)), \
+         patch.object(monitor, "run_command", side_effect=lambda cmd: (commands.append(cmd) or ("1", "", 0))), \
+         patch.object(monitor, "log_hold") as journal:
+        monitor.set_ai_hold(pos, 30, "productive LP")
+    assert "EVAL" in commands[0]
+    journal.assert_called_once()
+
     # Execute the production hold/indicator section, not a mirrored decision.
     source = Path(monitor.__file__).read_text()
     start = source.index("        close_reason, protected_risk_exit =")
@@ -41,7 +73,6 @@ def main():
     # Missing profit signal above the risk floor must not invent an exit.
     assert monitor.protect_tight_exit(None, "pulse", 0.2, None) == (None, False)
     with tempfile.TemporaryDirectory() as tmp:
-        pos = "2G6rKc9ssZZxVagZpfKKfph8UARmAbh9GjpV9R3uxGGe"
         folder = Path(tmp) / "memories/dlmm_entries"
         folder.mkdir(parents=True)
         context = dict(position=pos, pool="pool", mode="turnover", strategy="turnover_rebalance",
