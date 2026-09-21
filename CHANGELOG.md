@@ -5,6 +5,13 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.7.5](https://github.com/pgen0x/azimuth/compare/v2.7.4...v2.7.5) (2026-09-21)
+
+
+### Bug Fixes
+
+* **solana:** tighten LP capital controls ([#88](https://github.com/pgen0x/azimuth/issues/88)) ([ff2694e](https://github.com/pgen0x/azimuth/commit/ff2694e44f621bb926231b0484707ae8781d26dc))
+
 ## [2.7.4](https://github.com/pgen0x/azimuth/compare/v2.7.3...v2.7.4) (2026-09-15)
 
 
