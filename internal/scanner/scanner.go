@@ -1041,22 +1041,14 @@ func (s *Scanner) pollMode(ctx context.Context, mp meteora.ModeParams) {
 
 	sent := 0
 	if len(batch) > 0 {
-		// LLM-webhook-first with a deterministic fallback (2026-08-28): when
-		// both a webhook and DEPLOY_CMD are configured, prefer the LLM pick
-		// (Hermes' dlmm-signal subscription) while the router health probe
-		// (dlmm_monitor.py's check_llm_health, read via s.seen.LLMHealthy)
-		// says it's reachable, and fall back to the deterministic pipeline
-		// the moment it isn't — the concrete answer to "LLM down/quota
-		// exhausted -> deterministic runs". A batch is not held open across
-		// this decision waiting on the LLM's own pick+deploy turn (that path
-		// is async and, per this package's own history, can take 19-54
-		// minutes — see deploy.go) — the health probe is a periodic,
-		// independent signal, not a per-batch wait. A config that only sets
-		// ONE of the two keeps today's unconditional behavior unchanged (a
-		// webhook-only setup must not silently stop sending just because no
-		// health probe has ever run).
-		useWebhook := s.cfg.WebhookURL != "" && (!s.dep.Enabled() || s.seen.LLMHealthy(ctx))
-		if useWebhook {
+		// DEPLOY_CMD owns live entry when configured. The webhook only confirms
+		// that Hermes accepted an asynchronous agent turn; it cannot confirm a
+		// pick or deploy, so using router health as a per-batch success signal
+		// stranded candidates in a 19-54 minute queue and made a timed fallback
+		// unsafe (the late agent turn could open a second position).
+		if s.dep.Enabled() {
+			sent = s.directDeploy(ctx, mp.Mode, batch, batchKeys)
+		} else if s.cfg.WebhookURL != "" {
 			if err := s.fwd.Send("meteora_pool_discovery", batch, time.Now().Unix()); err != nil {
 				// Delivery failed — unmark the whole batch so these pools retry on the
 				// next poll instead of being silently dropped for the SEEN_TTL window.
@@ -1068,8 +1060,6 @@ func (s *Scanner) pollMode(ctx context.Context, mp meteora.ModeParams) {
 				sent = len(batch)
 				log.Printf("scanner[%s]: SIGNAL batch sent %d pools: %s", mp.Mode, sent, batchSummary(batch))
 			}
-		} else if s.dep.Enabled() {
-			sent = s.directDeploy(ctx, mp.Mode, batch, batchKeys)
 		}
 	}
 

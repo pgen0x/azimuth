@@ -1370,8 +1370,6 @@ def render_status_report(report_rows, sol_price_usd, trailing_trigger_pct, min_f
 
 # local indicators are imported and check_local_indicators is used directly below.
 
-LLM_HEALTH_CHECK_COOLDOWN_SEC = 150  # ~2.5min: cheaper than probing every 20s tick
-
 def protect_tight_exit(reason, mode, pnl_pct, change_h1, emergency=False):
     """Risk floors outrank profit reasons; tight stops cannot be vetoed by holds."""
     if mode not in ("turnover", "pulse"):
@@ -1392,45 +1390,6 @@ def protect_tight_exit(reason, mode, pnl_pct, change_h1, emergency=False):
     return reason, protected
 
 
-def check_llm_health():
-    """Best-effort probe of the local LLM router, so the Go daemon can fall
-    back to deterministic entry (dlmm_pipeline.py direct-deploy) when the LLM
-    webhook path (Hermes' dlmm-signal subscription) is down or every quota
-    tier behind it is exhausted — the failure mode behind the 2026-07-06
-    fabricated-deploy incident. Piggybacks on the already-running 20s monitor
-    loop instead of a new systemd unit; a Redis cooldown throttles the actual
-    probe to roughly once every LLM_HEALTH_CHECK_COOLDOWN_SEC so every tick
-    doesn't hit the router. Fails CLOSED: any exception, timeout, or malformed
-    response writes sol:dlmm:llm_healthy=0, and a probe that never runs at all
-    (Redis down, process not running) leaves the key to expire — the Go side
-    (store.LLMHealthy) reads missing/expired/non-"1" as unhealthy, so a probe
-    bug degrades to the deterministic path, never silently claims health.
-    """
-    cd_key = "sol:dlmm:llm_health_check_cd"
-    got, _, _ = run_command(f"redis-cli set \"{cd_key}\" 1 nx ex {LLM_HEALTH_CHECK_COOLDOWN_SEC}")
-    if got.strip() != "OK":
-        return  # checked recently by this or another tick
-    healthy = False
-    try:
-        router_url = os.environ.get("LLM_ROUTER_URL", "http://127.0.0.1:20128/v1/chat/completions")
-        router_model = os.environ.get("LLM_ROUTER_MODEL", "com")
-        req = urllib.request.Request(
-            router_url,
-            data=json.dumps({
-                "model": router_model,
-                "messages": [{"role": "user", "content": "ping"}],
-                "max_tokens": 4,
-                "stream": False,
-            }).encode("utf-8"),
-            headers={"Content-Type": "application/json"}, method="POST",
-        )
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-        healthy = bool(data.get("choices"))
-    except Exception:
-        healthy = False
-    run_command(f"redis-cli set \"sol:dlmm:llm_healthy\" {1 if healthy else 0} ex 300")
-
 def main():
     import argparse
     parser = argparse.ArgumentParser()
@@ -1448,8 +1407,6 @@ def main():
     cli = parser.parse_args()
 
     print("🔄 Starting DLMM Position Monitor")
-    check_llm_health()
-
     params = load_soul_dlmm_params()
     stop_loss_pct = params["STOP_LOSS_PCT"]
     trailing_trigger_pct = params["TRAILING_TRIGGER_PCT"]

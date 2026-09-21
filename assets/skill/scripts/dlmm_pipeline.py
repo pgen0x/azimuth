@@ -938,6 +938,32 @@ def apply_batch_conviction(candidates, mode="multiday"):
     return kept
 
 
+def rank_cross_pool_candidates(candidates):
+    """Prefer the best live pool for each mint, keeping siblings as fallback."""
+    groups = {}
+    for c in candidates:
+        groups.setdefault(c.get("base_mint") or c.get("pool"), []).append(c)
+    for pools in groups.values():
+        pools.sort(key=lambda c: (
+            float(c.get("fee_active_tvl_ratio") or 0),
+            float(c.get("active_tvl") or 0),
+            float(c.get("fee_tvl_ratio") or 0),
+            float(c.get("tvl") or 0),
+        ), reverse=True)
+        for rank, c in enumerate(pools, 1):
+            c["_cross_pool_rank"] = rank
+        if len(pools) > 1:
+            print(f"Cross-pool pick {pools[0]['name']} for {pools[0].get('base_symbol', '?')} "
+                  f"({float(pools[0].get('fee_active_tvl_ratio') or 0):.3f}% fee/active-TVL, "
+                  f"${float(pools[0].get('active_tvl') or 0):,.0f} active TVL) over {len(pools)-1} sibling(s)")
+    return candidates
+
+
+def candidate_pick_key(candidate):
+    """Sort all best-per-mint pools first, then their live-gate fallbacks."""
+    return (-int(candidate.get("_cross_pool_rank", 1)), float(candidate.get("score", 0)))
+
+
 # sol_bidask price coverage below the active bin. Was 0.70, chosen from the
 # community-converged -65..-75% band (linclonlogging's "bread'n'butter"/sawtooth:
 # 69-bin ladders to -74%). That band describes a ladder held for DAYS, which is a
@@ -1110,6 +1136,7 @@ def main():
         if not candidates:
             print("No candidates survived batch conviction gates.")
             sys.exit(0)
+        candidates = rank_cross_pool_candidates(candidates)
         pools = []
     elif cli.from_signal:
         # azimuth signal daemon already discovered + screened this pool; deploy the
@@ -1269,7 +1296,7 @@ def main():
             "score": score
         })
 
-    candidates.sort(key=lambda x: x["score"], reverse=True)
+    candidates.sort(key=candidate_pick_key, reverse=True)
     print(f"Surviving candidates: {len(candidates)}")
     for c in candidates[:5]:
         print(f"- {c['name']} (Score: {c['score']:.1f}, TVL: ${c['tvl']:,.0f}, Vol: {c['volatility']:.2f})")
@@ -1410,7 +1437,7 @@ def main():
         sys.exit(0)
 
     # Re-rank after momentum adjustment so winner / analyze-only reflect final score.
-    valid_candidates.sort(key=lambda x: x["score"], reverse=True)
+    valid_candidates.sort(key=candidate_pick_key, reverse=True)
     print("Re-ranked valid candidates (post-momentum):")
     for c in valid_candidates[:5]:
         print(f"- {c['name']} (Score: {c['score']:.1f}, Vol: {c['volatility']:.2f}, "

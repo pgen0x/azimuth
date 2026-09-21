@@ -19,17 +19,11 @@ API, screens pools through quality gates, dedups, and hands each poll cycle's
 This daemon owns **entry signals only** — exits are the `dlmm_monitor.py`
 cron's job.
 
-**Where the LLM sits.** Restored to entry 2026-08-28, gated by a health probe:
-the Go daemon (`internal/scanner`) checks `store.LLMHealthy` — a periodic
-ping of the local LLM router recorded to `sol:dlmm:llm_healthy` by
-`dlmm_monitor.py`'s `check_llm_health()`, piggybacked on the existing 20s
-loop rather than a new process — and, only when **both** a webhook and
-`DEPLOY_CMD` are configured, routes each batch to whichever is currently
-trustworthy: Hermes' `dlmm-signal` webhook subscription (LLM picks the
-candidate, `dlmm_pipeline.py --from-signal` deploys it) when the probe says
-healthy, `dlmm_pipeline.py --from-batch` (fully deterministic) the moment it
-doesn't — the concrete fallback for "LLM down or quota exhausted." A config
-that sets only one of the two keeps its old unconditional behavior unchanged.
+**Where the LLM sits.** The Hermes `dlmm-signal` subscription owns entry only
+in webhook-only installations. When `DEPLOY_CMD` is configured, the Go daemon
+always runs `dlmm_pipeline.py --from-batch`; an HTTP webhook acceptance cannot
+prove that an asynchronous LLM turn picked or deployed anything, and a delayed
+fallback would allow the late turn to race a second entry.
 Neither path trusts a deploy claim blind anymore: `dlmm_pipeline.py` now
 confirms the position exists on-chain (`dlmm_executor.js pnl`, 3 retries)
 before printing `🚀 DEPLOYED`, flagging `⚠️ UNVERIFIED` rather than blocking
