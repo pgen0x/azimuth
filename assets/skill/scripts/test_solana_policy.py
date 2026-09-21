@@ -14,6 +14,20 @@ from dlmm_realized import apply_realized
 
 
 def main():
+    # Same token, different fee tiers: pool economics choose the primary;
+    # every mint's primary stays ahead of sibling fallbacks.
+    pools = [
+        {"pool": "thin", "name": "TOKEN-SOL 5%", "base_mint": "token", "base_symbol": "TOKEN",
+         "score": 95, "fee_active_tvl_ratio": 1.53, "active_tvl": 30_000, "fee_tvl_ratio": 1.0, "tvl": 50_000},
+        {"pool": "yield", "name": "TOKEN-SOL 1%", "base_mint": "token", "base_symbol": "TOKEN",
+         "score": 80, "fee_active_tvl_ratio": 2.33, "active_tvl": 40_000, "fee_tvl_ratio": 1.4, "tvl": 70_000},
+        {"pool": "other", "name": "OTHER-SOL", "base_mint": "other", "base_symbol": "OTHER",
+         "score": 85, "fee_active_tvl_ratio": 1.0, "active_tvl": 50_000, "fee_tvl_ratio": 0.8, "tvl": 80_000},
+    ]
+    ranked = sorted(pipeline.rank_cross_pool_candidates(pools),
+                    key=pipeline.candidate_pick_key, reverse=True)
+    assert [c["pool"] for c in ranked] == ["other", "yield", "thin"]
+
     # Exercise the real CLI entry path, stopping at its slot gate before any
     # wallet/network work. Neither a stale prompt nor SOUL can override signals.
     for mode in ("turnover", "pulse", "casual", "multiday"):

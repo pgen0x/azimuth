@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -80,5 +82,43 @@ func TestMomentumRecoveryRetriesAlongsideDeliveredPool(t *testing.T) {
 	s.pollMode(context.Background(), mp)
 	if strings.Join(delivered, ",") != "stable,recovering" {
 		t.Fatalf("recovery poll delivered %v; want stable once, then recovering", delivered)
+	}
+}
+
+func TestDirectDeployOwnsEntryWhenWebhookIsAlsoConfigured(t *testing.T) {
+	pool := meteora.Pool{PoolAddress: "directPoolAddress", Name: "DIRECT-SOL", TVL: 20_000,
+		Volatility: 2, TokenX: meteora.Token{Address: "direct", Symbol: "DIRECT"},
+		TokenY: meteora.Token{Address: meteora.SolMint, Symbol: "SOL"}}
+	discovery, err := json.Marshal(map[string]any{"data": []meteora.Pool{pool}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := http.DefaultTransport
+	t.Cleanup(func() { http.DefaultTransport = old })
+	hitWebhook := false
+	http.DefaultTransport = solanaTransport(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Host == "webhook.test" {
+			hitWebhook = true
+		}
+		return &http.Response{StatusCode: 200, Header: make(http.Header),
+			Body: io.NopCloser(strings.NewReader(string(discovery)))}, nil
+	})
+	marker := filepath.Join(t.TempDir(), "deploy-ran")
+	script := marker + ".sh"
+	if err := os.WriteFile(script, []byte("#!/bin/sh\ntouch \""+marker+"\"\necho deterministic reject\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	s := &Scanner{
+		cfg: config.Config{DiscoverURL: "https://discovery.test", WebhookURL: "https://webhook.test",
+			SeenTTL: time.Hour, DeployTimeout: time.Minute},
+		seen: store.New("", "test", time.Hour), dep: deploy.New(script, "", time.Minute),
+		fwd: webhook.New("https://webhook.test", "test"),
+	}
+	s.pollMode(context.Background(), meteora.ModeParams{Mode: "turnover", Timeframe: "30m", TfMinutes: 30})
+	if hitWebhook {
+		t.Fatal("webhook received live batch even though deterministic deploy was configured")
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("deterministic deploy did not run: %v", err)
 	}
 }
