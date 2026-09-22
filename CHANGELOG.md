@@ -5,6 +5,13 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.7.6](https://github.com/pgen0x/azimuth/compare/v2.7.5...v2.7.6) (2026-09-21)
+
+
+### Bug Fixes
+
+* **solana:** make entry routing deterministic ([#91](https://github.com/pgen0x/azimuth/issues/91)) ([05451c8](https://github.com/pgen0x/azimuth/commit/05451c83b5265d4870eb20409a420eaa20ff4007))
+
 ## [2.7.5](https://github.com/pgen0x/azimuth/compare/v2.7.4...v2.7.5) (2026-09-21)
 
 
