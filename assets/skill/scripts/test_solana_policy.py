@@ -28,6 +28,18 @@ def main():
                     key=pipeline.candidate_pick_key, reverse=True)
     assert [c["pool"] for c in ranked] == ["other", "yield", "thin"]
 
+    candidate = {"pool": "yield", "name": "TOKEN-SOL", "base_mint": "token",
+                 "fee_tvl_ratio": 2.0}
+    with patch.object(pipeline, "get_momentum", return_value=(-6.0, 0, 0, 0)):
+        assert "dumping" in pipeline.predeploy_live_gate_reject(candidate, 0.1, "30m")
+    with patch.object(pipeline, "get_momentum", return_value=(0, 0, 0, 0)), \
+         patch.object(pipeline, "fetch_live_fee_tvl", return_value=0.5):
+        assert "fee/TVL" in pipeline.predeploy_live_gate_reject(candidate, 0.1, "30m")
+    with patch.object(pipeline, "get_momentum", return_value=(0, 0, 0, 0)), \
+         patch.object(pipeline, "fetch_live_fee_tvl", return_value=2.0), \
+         patch.object(pipeline, "get_price_impact_sol_to_token", return_value=6.0):
+        assert "price impact" in pipeline.predeploy_live_gate_reject(candidate, 0.1, "30m")
+
     # Exercise the real CLI entry path, stopping at its slot gate before any
     # wallet/network work. Neither a stale prompt nor SOUL can override signals.
     for mode in ("turnover", "pulse", "casual", "multiday"):

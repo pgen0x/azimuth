@@ -65,6 +65,7 @@ def get_meteora_portfolio_positions(wallet_address):
                     "pnl_currency": "SOL",
                     "fee_per_tvl_24h": float(pool_data.get("feePerTvl24h") or 0.0),
                     "pool_price": float(pool_data.get("poolPrice") or 0.0),
+                    "bin_step": float(pool_data.get("binStep") or 0.0),
                     "unclaimed_fees_sol": float(pool_data.get("unclaimedFeesSol") or 0.0),
                     "balances_sol": float(pool_data.get("balancesSol") or 0.0),
                     "sol_price_usd": sol_price_usd,
@@ -1080,16 +1081,11 @@ def position_residual_sol(wallet_address, pos_addr, attempts=2, gap_s=6):
 
 
 def position_live_onchain(pos_addr):
-    """True/False from the executor's own SDK read, None when it cannot answer.
-
-    The portfolio API is an indexer; this is the chain. Used only to break the
-    tie when the API still shows a funded position after a close reported
-    success, so indexer lag can never be mistaken for a partial close.
-    """
-    data, _err = run_command_json(f"node {EXECUTOR_PATH} positions")
-    if not isinstance(data, list):
+    """True/False from a targeted position-account read, None on RPC failure."""
+    data, _err = run_command_json(f"node {EXECUTOR_PATH} position-exists {pos_addr}")
+    if not isinstance(data, dict) or not isinstance(data.get("exists"), bool):
         return None
-    return any(isinstance(p, dict) and p.get("position") == pos_addr for p in data)
+    return data["exists"]
 
 
 def close_position(pos_addr, env_prefix="", wallet_address=None, is_dry_run=False):
@@ -1112,29 +1108,26 @@ def close_position(pos_addr, env_prefix="", wallet_address=None, is_dry_run=Fals
 
     An unsettled close returns success=False, so the caller keeps Redis state
     and the journal untouched and the 20s loop simply tries again next tick with
-    every rule still armed. Unmeasurable (API down) keeps trusting the reported
-    success: blocking on missing data is its own failure mode, and this branch
-    only has to catch a close that lies, not one we cannot check.
+    every rule still armed. A reported success is accepted only after a targeted
+    account read confirms that the position account is gone.
     """
     cmd = f"{env_prefix}DLMM_CLOSE_AUTH=1 node {EXECUTOR_PATH} close {pos_addr}"
     res, err = run_command_json(cmd, timeout=CLOSE_CMD_TIMEOUT)
     if is_dry_run:
         return res, err
     if res and res.get("success"):
-        residual = position_residual_sol(wallet_address, pos_addr)
-        if residual is None or residual < CLOSE_RESIDUAL_DUST_SOL:
+        live = position_live_onchain(pos_addr)
+        if live is False:
             return res, err
-        # The indexer still shows value. Ask the chain before calling it a lie.
-        if position_live_onchain(pos_addr) is False:
-            print(f"✅ Close of {pos_addr} confirmed on-chain; portfolio API still "
-                  f"lists {residual:.4f} SOL (indexer lag) — treating as closed.")
-            return res, err
-        print(f"⚠️ Close of {pos_addr} reported SUCCESS but the position still holds "
-              f"{residual:.4f} SOL on-chain — partial close. Keeping it tracked and "
-              f"retrying next tick; NOT journaling a close that did not happen.")
+        residual = position_residual_sol(wallet_address, pos_addr, attempts=1, gap_s=0)
+        detail = f" and still holds {residual:.4f} SOL" if residual is not None else ""
+        state = "still exists" if live else "could not be verified"
+        print(f"⚠️ Close of {pos_addr} reported SUCCESS but its position account {state}"
+              f"{detail}. Keeping it tracked and retrying next tick; NOT journaling "
+              "a close that did not happen.")
         return ({"success": False, "unsettled": True, "residualSol": residual,
                  "txHashes": res.get("txHashes") or [],
-                 "error": f"partial close — {residual:.4f} SOL still in position"}, None)
+                 "error": f"close unverified — position account {state}"}, None)
     if position_gone_onchain(wallet_address, pos_addr) is True:
         detail = err or (res or {}).get("error") or "unknown error"
         print(f"⚠️ Close of {pos_addr} reported failure ({detail}) but the position "
@@ -1752,6 +1745,7 @@ def main():
                     "base_mint": prov.get("base_mint") or "",
                     "base_symbol": prov.get("base_symbol") or "",
                     "entry_price": oc_bp.get("pool_price", 0.0), "entry_bin": 0,
+                    "bin_step": oc_bp.get("bin_step") or prov.get("bin_step") or 0,
                     "bins_below": 0, "bins_above": 0, "size_sol": bal_sol,
                     # The real mint time when the journal could name it; otherwise
                     # now, which is a placeholder for "unknown" and is flagged as
@@ -2943,9 +2937,12 @@ def main():
                     run_command(f"redis-cli expire \"{rebalance_pnl_key}\" 86400")
                     entry_context = {key: meta.get(key) for key in (
                         "pair", "base_mint", "base_symbol", "sol_is_x")}
-                    signal = dict(meta.get("signal") or {})
-                    signal.update(fee_tvl_ratio=fee_per_tvl_24h,
+                    # A re-center is a new entry. Keep only values measured now;
+                    # inherited score/volatility/holder data would falsely look
+                    # like a fresh entry-time signal in the learning journal.
+                    signal = dict(fee_tvl_ratio=fee_per_tvl_24h,
                                   tvl=pool_liquidity_usd,
+                                  bin_step=bin_step,
                                   recentered_at=now,
                                   recenter_source="monitor")
                     entry_context["signal"] = signal

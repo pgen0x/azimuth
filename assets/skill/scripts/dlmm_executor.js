@@ -36,6 +36,8 @@ const RPC_URLS = (process.env.SOLANA_RPC_URLS || "https://api.mainnet-beta.solan
   .split(",")
   .map((s) => s.trim())
   .filter(Boolean);
+const RPC_SEND_MAX_RETRIES = Math.max(2, Number.parseInt(process.env.SOLANA_RPC_MAX_RETRIES || "20", 10) || 20);
+const CONFIRM_OPTIONS = { commitment: "confirmed", preflightCommitment: "confirmed", maxRetries: RPC_SEND_MAX_RETRIES };
 
 let currentRpcIndex = 0;
 
@@ -205,6 +207,47 @@ async function acquireDeployLock(walletAddress) {
   return () => new Promise((resolve) => server.close(resolve));
 }
 
+async function acquireSwapLock(walletAddress) {
+  const server = net.createServer();
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(`\0azimuth-dlmm-swap-${walletAddress}`, resolve);
+  }).catch((err) => {
+    if (err.code === "EADDRINUSE") throw new Error("SWAP BUSY: another matching swap is active for this wallet");
+    throw err;
+  });
+  return () => new Promise((resolve) => server.close(resolve));
+}
+
+async function reconcilePendingSwap(connection, pendingPath) {
+  if (!fs.existsSync(pendingPath)) return null;
+  let pending;
+  try {
+    pending = JSON.parse(fs.readFileSync(pendingPath, "utf8"));
+  } catch (err) {
+    return { success: false, pending: true, error: `Swap reconciliation blocked by invalid marker: ${err.message}` };
+  }
+  const status = (await connection.getSignatureStatuses(
+    [pending.signature], { searchTransactionHistory: true }
+  )).value[0];
+  if (status?.err) {
+    fs.rmSync(pendingPath, { force: true });
+    return null;
+  }
+  if (status && ["confirmed", "finalized"].includes(status.confirmationStatus)) {
+    fs.rmSync(pendingPath, { force: true });
+    return { success: true, reconciled: true, txHash: pending.signature,
+      inputAmount: pending.inputAmount, outputAmount: pending.outputAmount };
+  }
+  if (status || !Number.isSafeInteger(pending.lastValidBlockHeight)
+      || await connection.getBlockHeight("finalized") <= pending.lastValidBlockHeight) {
+    return { success: false, pending: true, txHash: pending.signature,
+      error: "Swap confirmation pending from a previous submission" };
+  }
+  fs.rmSync(pendingPath, { force: true });
+  return null;
+}
+
 async function assertNoTokenExposure(pool, wallet) {
   // Read position accounts, not cached portfolio values or bin arrays. Empty
   // NFTs also block until the monitor reconciles them. Includes sibling pools
@@ -278,7 +321,8 @@ async function deployPosition(poolAddressStr, amountX, amountY, binsBelow, binsA
         fs.writeFileSync(path.join(entryDir, `${newPosition.publicKey}.json`), JSON.stringify({
           ...context, pool: poolAddressStr, position: newPosition.publicKey.toString(),
           entry_bin: activeBin.binId, entry_price: pool.fromPricePerLamport(Number(activeBin.price)),
-          bins_below: binsBelow, bins_above: binsAbove, amount_x: amountX, amount_y: amountY,
+          bins_below: binsBelow, bins_above: binsAbove, bin_step: Number(pool.lbPair.binStep),
+          amount_x: amountX, amount_y: amountY,
           deployed_at: Math.floor(Date.now() / 1000),
         }), { mode: 0o600 });
         const send = async (tx, signers) => {
@@ -294,7 +338,9 @@ async function deployPosition(poolAddressStr, amountX, amountY, binsBelow, binsA
           fs.writeFileSync(pendingPath, JSON.stringify({ position: newPosition.publicKey.toString(),
             pool: poolAddressStr, signature, lastValidBlockHeight, blockhash }), { mode: 0o600 });
           submitted = true;
-          const hash = await connection.sendRawTransaction(raw, { preflightCommitment: "confirmed", maxRetries: 2 });
+          const hash = await connection.sendRawTransaction(raw, {
+            preflightCommitment: "confirmed", maxRetries: RPC_SEND_MAX_RETRIES
+          });
           txHashes.push(hash);
           const confirmation = await connection.confirmTransaction({ signature: hash, blockhash,
             lastValidBlockHeight }, "confirmed");
@@ -382,6 +428,15 @@ async function findPoolForPosition(connection, wallet, positionAddressStr) {
   return { pool, positionData: found, poolAddressStr };
 }
 
+function positionIsEmpty(position) {
+  const shares = position?.positionData?.liquidityShares;
+  return Array.isArray(shares) ? shares.every((share) => share.isZero()) : null;
+}
+
+async function positionAccountExists(connection, positionAddressStr) {
+  return Boolean(await connection.getAccountInfo(new PublicKey(positionAddressStr), "confirmed"));
+}
+
 async function claimFees(positionAddressStr) {
   if (process.env.DRY_RUN === "true" && (positionAddressStr.includes("DRY_RUN") || positionAddressStr.length < 32)) {
     console.warn(JSON.stringify({ success: true, dryRun: true }));
@@ -408,7 +463,7 @@ async function claimFees(positionAddressStr) {
 
     const txHashes = [];
     for (const tx of txs) {
-      const txHash = await sendAndConfirmTransaction(connection, tx, [wallet]);
+      const txHash = await sendAndConfirmTransaction(connection, tx, [wallet], CONFIRM_OPTIONS);
       txHashes.push(txHash);
     }
     return {
@@ -444,7 +499,7 @@ async function closePosition(positionAddressStr) {
         position: positionData
       });
       for (const tx of claimTxs) {
-        await sendAndConfirmTransaction(connection, tx, [wallet]);
+        await sendAndConfirmTransaction(connection, tx, [wallet], CONFIRM_OPTIONS);
       }
     } catch (err) {
       console.warn(`[DLMM] Fee claim during close warning: ${err.message}`);
@@ -467,17 +522,17 @@ async function closePosition(positionAddressStr) {
         shouldClaimAndClose: true
       });
       for (const tx of Array.isArray(closeTx) ? closeTx : [closeTx]) {
-        const txHash = await sendAndConfirmTransaction(connection, tx, [wallet]);
+        const txHash = await sendAndConfirmTransaction(connection, tx, [wallet], CONFIRM_OPTIONS);
         txHashes.push(txHash);
       }
     } catch (rmErr) {
-      // Empty positions (0-deposit zombie NFTs from a failed wide-range deploy) have no
-      // liquidity to remove — removeLiquidity throws. Fall back to closePositionIfEmpty,
-      // which closes the NFT account directly and refunds rent.
+      // closePositionIfEmpty succeeds as a no-op on funded positions. Only use it when
+      // the SDK snapshot positively proves every liquidity share is zero.
+      if (positionIsEmpty(positionData) !== true) throw rmErr;
       console.warn(`[DLMM] removeLiquidity failed (${rmErr.message}); attempting closePositionIfEmpty for empty position ${positionAddressStr}`);
       const emptyTx = await pool.closePositionIfEmpty({ owner: wallet.publicKey, position: positionData });
       for (const tx of Array.isArray(emptyTx) ? emptyTx : [emptyTx]) {
-        const txHash = await sendAndConfirmTransaction(connection, tx, [wallet]);
+        const txHash = await sendAndConfirmTransaction(connection, tx, [wallet], CONFIRM_OPTIONS);
         txHashes.push(txHash);
       }
     }
@@ -627,9 +682,23 @@ async function swapToken(inputMintStr, outputMintStr, amountFloat, maxPriceImpac
     return { success: true, dryRun: true, txHash: "DRY_RUN_SWAP_TX_HASH", inputAmount: "0", outputAmount: "0" };
   }
 
-  // Fetch quote outside runWithFailover as it's a HTTP call to Jupiter, then execute/send via standard RPC rotation
-  let quoteResponse;
+  const wallet = getWallet();
+  const release = await acquireSwapLock(wallet.publicKey.toString());
+  const pendingDir = path.join(PROFILE_DIR, "memories", "dlmm_pending_swaps");
+  const pendingPath = path.join(pendingDir, `${wallet.publicKey}-${input_mint}-${output_mint}.json`);
+
   try {
+    try {
+      const previous = await runWithFailover((connection) => reconcilePendingSwap(connection, pendingPath));
+      if (previous) return previous;
+    } catch (err) {
+      return { success: false, pending: true,
+        error: `Swap reconciliation unavailable; refusing duplicate submission: ${err.message}` };
+    }
+
+    // Fetch quote outside runWithFailover as it's a HTTP call to Jupiter, then execute/send via standard RPC rotation
+    let quoteResponse;
+    try {
     // 1. Get input decimals
     let decimals = 9;
     if (input_mint !== "So11111111111111111111111111111111111111112") {
@@ -685,12 +754,11 @@ async function swapToken(inputMintStr, outputMintStr, amountFloat, maxPriceImpac
     if (impactPct > 1) {
       console.warn(`[DLMM] Swap price impact ${impactPct.toFixed(2)}% (within ${maxPriceImpactPct}% limit)`);
     }
-  } catch (err) {
-    throw new Error(`Failed to fetch quote from Jupiter: ${err.message}`);
-  }
+    } catch (err) {
+      throw new Error(`Failed to fetch quote from Jupiter: ${err.message}`);
+    }
 
-  return await runWithFailover(async (connection) => {
-    const wallet = getWallet();
+    return await runWithFailover(async (connection) => {
     
     // 3. Fetch swap transaction
     const swapRes = await fetch("https://api.jup.ag/swap/v1/swap", {
@@ -718,11 +786,17 @@ async function swapToken(inputMintStr, outputMintStr, amountFloat, maxPriceImpac
     // 5. Send and confirm
     const rawTransaction = transaction.serialize();
     const signedTxid = bs58.encode(transaction.signatures[0]);
+    fs.mkdirSync(pendingDir, { recursive: true, mode: 0o700 });
+    const markerTmp = `${pendingPath}.${process.pid}.tmp`;
+    fs.writeFileSync(markerTmp, JSON.stringify({ signature: signedTxid, blockhash,
+      lastValidBlockHeight, inputMint: input_mint, outputMint: output_mint,
+      inputAmount: quoteResponse.inAmount, outputAmount: quoteResponse.outAmount }), { mode: 0o600 });
+    fs.renameSync(markerTmp, pendingPath);
     let txid;
     try {
       txid = await connection.sendRawTransaction(rawTransaction, {
         skipPreflight: true,
-        maxRetries: 2
+        maxRetries: RPC_SEND_MAX_RETRIES
       });
     } catch (err) {
       return { success: false, pending: true, txHash: signedTxid,
@@ -734,28 +808,41 @@ async function swapToken(inputMintStr, outputMintStr, amountFloat, maxPriceImpac
         blockhash, lastValidBlockHeight, signature: txid
       }, "confirmed");
       if (confirmation.value.err) {
+        fs.rmSync(pendingPath, { force: true });
         return { success: false, txHash: txid,
           error: `Swap failed: ${JSON.stringify(confirmation.value.err)}` };
       }
     } catch (err) {
-      const status = (await connection.getSignatureStatuses([txid])).value[0];
+      let status;
+      try {
+        status = (await connection.getSignatureStatuses(
+          [txid], { searchTransactionHistory: true }
+        )).value[0];
+      } catch (statusErr) {
+        return { success: false, pending: true, txHash: txid,
+          error: `Swap confirmation status unavailable: ${statusErr.message}` };
+      }
       if (!status || !["confirmed", "finalized"].includes(status.confirmationStatus)) {
         return { success: false, pending: true, txHash: txid,
           error: `Swap confirmation pending: ${err.message}` };
       }
       if (status.err) {
+        fs.rmSync(pendingPath, { force: true });
         return { success: false, txHash: txid,
           error: `Swap failed: ${JSON.stringify(status.err)}` };
       }
     }
-    
+    fs.rmSync(pendingPath, { force: true });
     return {
       success: true,
       txHash: txid,
       inputAmount: quoteResponse.inAmount,
       outputAmount: quoteResponse.outAmount
     };
-  });
+    });
+  } finally {
+    await release();
+  }
 }
 
 async function main() {
@@ -763,7 +850,7 @@ async function main() {
   const command = args[0];
   
   if (!command) {
-    console.error("No command provided. Exposing: active-bin, deploy, check-bins, claim, close, positions, pnl, spl-balance, swap");
+    console.error("No command provided. Exposing: active-bin, deploy, check-bins, claim, close, position-exists, positions, pnl, spl-balance, swap");
     process.exit(1);
   }
   
@@ -847,6 +934,11 @@ async function main() {
       }
       const res = await closePosition(position);
       console.log(JSON.stringify(res));
+    } else if (command === "position-exists") {
+      const position = args[1];
+      if (!position) throw new Error("Usage: position-exists <position_address>");
+      const exists = await runWithFailover((connection) => positionAccountExists(connection, position));
+      console.log(JSON.stringify({ success: true, exists }));
     } else if (command === "positions") {
       const wallet = args[1];
       const res = await getPositions(wallet);
@@ -904,4 +996,5 @@ async function main() {
 }
 
 if (require.main === module) main();
-module.exports = { deployPosition, acquireDeployLock, assertNoTokenExposure, slippageBpsToPercent };
+module.exports = { deployPosition, acquireDeployLock, acquireSwapLock, reconcilePendingSwap,
+  assertNoTokenExposure, positionIsEmpty, positionAccountExists, slippageBpsToPercent };

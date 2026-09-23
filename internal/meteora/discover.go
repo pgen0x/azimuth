@@ -57,7 +57,7 @@ func buildFilters(mp ModeParams) string {
 		"base_token_has_high_supply_concentration=false",
 		fmt.Sprintf("base_token_market_cap>=%.0f", mp.MinMcap),
 		fmt.Sprintf("base_token_holders>=%d", mp.MinHolders),
-		fmt.Sprintf("tvl>=%.0f", mp.MinTVL),
+		fmt.Sprintf("active_tvl>=%.0f", mp.MinTVL),
 		fmt.Sprintf("base_token_organic_score>=%.0f", mp.MinOrganic),
 	}
 	if mp.MinQuoteOrganic > 0 {
@@ -77,7 +77,7 @@ func buildFilters(mp ModeParams) string {
 	// Turnover-mode thresholds. CAUTION: the API silently returns zero rows for
 	// unknown filter fields (no error), so only fields verified live belong here.
 	if mp.MaxTVL > 0 {
-		f = append(f, fmt.Sprintf("tvl<=%.0f", mp.MaxTVL))
+		f = append(f, fmt.Sprintf("active_tvl<=%.0f", mp.MaxTVL))
 	}
 	if mp.MinFeePct > 0 {
 		f = append(f, fmt.Sprintf("fee_pct>=%.2f", mp.MinFeePct))

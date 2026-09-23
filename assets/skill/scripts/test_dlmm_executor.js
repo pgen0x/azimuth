@@ -8,13 +8,13 @@ const { execFileSync } = require("node:child_process");
 const source = fs.readFileSync(path.join(__dirname, "dlmm_executor.js"), "utf8");
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "dlmm-guards-"));
 let reads = 0, sends = 0, builds = 0, minted = 0, height = 100, sendError = false, buildError = false;
-let lastSlippage = null;
-let positions = [], confirmationError = false;
+let lastSlippage = null, lastMaxRetries = null;
+let positions = [], confirmationError = false, signatureStatus = null;
 const key = (value) => ({ toString: () => value });
 const wallet = { publicKey: key(`test-wallet-${process.pid}`) };
 const transaction = () => ({ signature: Buffer.from([1]), sign() {}, serialize() { return Buffer.from(this.recentBlockhash); } });
 const pool = {
-  pubkey: key("pool"), lbPair: { tokenXMint: key("TOKEN"), tokenYMint: key("So11111111111111111111111111111111111111112") },
+  pubkey: key("pool"), lbPair: { tokenXMint: key("TOKEN"), tokenYMint: key("So11111111111111111111111111111111111111112"), binStep: 100 },
   program: { account: {
     positionV2: { all: async () => { reads++; return positions; } },
     lbPair: { fetch: async () => ({ tokenXMint: key("TOKEN"), tokenYMint: key("SOL") }) },
@@ -26,8 +26,12 @@ const pool = {
 };
 class Connection {
   async getBlockHeight() { return height; }
+  async getSignatureStatuses(signatures, options) {
+    assert.equal(options.searchTransactionHistory, true);
+    return { value: [signatureStatus] };
+  }
   async getLatestBlockhash() { return { blockhash: "exact-blockhash", lastValidBlockHeight: 150 }; }
-  async sendRawTransaction(raw) { sends++; assert.equal(raw.toString(), "exact-blockhash"); if (sendError) throw new Error("timeout after send"); return "sig"; }
+  async sendRawTransaction(raw, options) { sends++; lastMaxRetries = options.maxRetries; assert.equal(raw.toString(), "exact-blockhash"); if (sendError) throw new Error("timeout after send"); return "sig"; }
   async confirmTransaction(strategy) { assert.equal(strategy.blockhash, "exact-blockhash"); return { value: { err: confirmationError ? "chain error" : null } }; }
 }
 const deps = {
@@ -41,17 +45,36 @@ const sandbox = { require: (name) => deps[name] || require(name), module: { expo
   process: { argv: ["node", path.join(root, "skills/solana-dlmm/scripts/dlmm_executor.js")], env },
   console: { log() {}, warn() {}, error() {} }, Buffer, setTimeout, clearTimeout };
 vm.runInNewContext(source + "\ngetWallet = () => testWallet; getTokenDecimals = async () => 9; assertRangeDoesNotRequireBinArrayInitialization = async () => {};", Object.assign(sandbox, { testWallet: wallet }));
-const { deployPosition, acquireDeployLock, assertNoTokenExposure, slippageBpsToPercent } = sandbox.module.exports;
+const { deployPosition, acquireDeployLock, reconcilePendingSwap, assertNoTokenExposure,
+  positionIsEmpty, slippageBpsToPercent } = sandbox.module.exports;
 const marker = path.join(root, "memories/dlmm_pending_deploys", `${wallet.publicKey}.json`);
 const deploy = () => deployPosition("pool", 0, 0.1, 20, 0, "bid_ask", 1000);
 const clearMarker = () => fs.rmSync(marker, { force: true });
 
 (async () => {
   assert.equal(slippageBpsToPercent(1000), 10);
+  assert.equal(positionIsEmpty({ positionData: { liquidityShares: [{ isZero: () => true }] } }), true);
+  assert.equal(positionIsEmpty({ positionData: { liquidityShares: [{ isZero: () => false }] } }), false);
+  assert.equal(positionIsEmpty({ positionData: {} }), null);
   assert.throws(() => slippageBpsToPercent(0), /positive integer/);
   assert.doesNotMatch(source, /const latestBlockHash = await connection\.getLatestBlockhash/);
   assert.match(source, /blockhash, lastValidBlockHeight, signature: txid/);
   assert.match(source, /success: false, pending: true, txHash: signedTxid/);
+  assert.ok(source.indexOf("fs.renameSync(markerTmp, pendingPath)") < source.indexOf("txid = await connection.sendRawTransaction(rawTransaction"));
+  const swapMarker = path.join(root, "pending-swap.json");
+  fs.writeFileSync(swapMarker, JSON.stringify({ signature: "swap-sig", lastValidBlockHeight: 150,
+    inputAmount: "10", outputAmount: "20" }));
+  signatureStatus = null; height = 100;
+  assert.equal((await reconcilePendingSwap(new Connection(), swapMarker)).pending, true);
+  signatureStatus = { confirmationStatus: "confirmed", err: null };
+  const reconciled = await reconcilePendingSwap(new Connection(), swapMarker);
+  assert.equal(reconciled.success, true); assert.equal(reconciled.txHash, "swap-sig");
+  assert.ok(!fs.existsSync(swapMarker));
+  fs.writeFileSync(swapMarker, JSON.stringify({ signature: "expired", lastValidBlockHeight: 150 }));
+  signatureStatus = null; height = 151;
+  assert.equal(await reconcilePendingSwap(new Connection(), swapMarker), null);
+  assert.ok(!fs.existsSync(swapMarker));
+  height = 100;
   // The OS lock excludes another process, not only another Promise.
   const release = await acquireDeployLock(wallet.publicKey.toString());
   await assert.rejects(acquireDeployLock(wallet.publicKey.toString()), /ENTRY BUSY/);
@@ -63,11 +86,13 @@ const clearMarker = () => fs.rmSync(marker, { force: true });
   assert.equal(parallel.filter((r) => r.status === "fulfilled" && r.value.success).length, 1);
   assert.equal(lastSlippage, 10);
   assert.equal(sends, 1);
+  assert.equal(lastMaxRetries, 20);
   assert.equal((await deploy()).pending, true); // prior blockhash still valid
   assert.equal(sends, 1);
   const provenance = JSON.parse(fs.readFileSync(path.join(root, "memories/dlmm_entries/position-1.json")));
   assert.equal(provenance.mode, "turnover"); assert.equal(provenance.recenter_of, "root");
   assert.equal(provenance.pool, "pool");
+  assert.equal(provenance.bin_step, 100);
   height = 151;
   positions = [{ publicKey: key("existing"), account: { lbPair: key("pool") } }];
   assert.match((await deploy()).error, /pool already has position/); assert.equal(sends, 1);

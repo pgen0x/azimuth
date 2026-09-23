@@ -73,7 +73,7 @@ func TestPulseGates(t *testing.T) {
 	}{
 		{"fee/active-TVL below bar", func(p *Pool) { p.FeeActiveTVLRatio = 0.04 }, "fee/active-TVL"},
 		{"window volume below bar", func(p *Pool) { p.VolumeWindow = 480 }, "volume $480"},
-		{"TVL above ceiling", func(p *Pool) { p.TVL = 160_000 }, "cap"},
+		{"active TVL above ceiling", func(p *Pool) { p.ActiveTVL = 160_000 }, "cap"},
 		{"mcap below floor", func(p *Pool) { p.TokenX.MarketCap = 140_000 }, "mcap"},
 		{"holders below floor", func(p *Pool) { p.TokenX.Holders = 499 }, "holders"},
 		{"organic below 60", func(p *Pool) { p.TokenX.OrganicScore = 59 }, "organic"},
@@ -154,8 +154,8 @@ func TestPulseDiscoveryFilters(t *testing.T) {
 	for _, want := range []string{
 		"fee_active_tvl_ratio>=0.050",
 		"volume>=500",
-		"tvl>=10000",
-		"tvl<=150000",
+		"active_tvl>=10000",
+		"active_tvl<=150000",
 		"base_token_market_cap<=10000000",
 		"dlmm_bin_step<=125",
 	} {
