@@ -1,47 +1,80 @@
-# Solana accounting evidence
+# Solana accounting and review
 
-Run from the profile script path (not the repository path):
+Run commands through the profile scripts path, or pass `--profile` explicitly.
 
 ```sh
 python3 ~/.hermes/profiles/solanza/skills/solana-dlmm/scripts/dlmm_accounting.py --refresh --hours 24
+python3 ~/.hermes/profiles/solanza/skills/solana-dlmm/scripts/dlmm_shadow.py
+python3 ~/.hermes/profiles/solanza/skills/solana-dlmm/scripts/dlmm_evaluate.py --start START_EPOCH --end END_EPOCH --output REVIEW_DIRECTORY
 ```
 
-The optional `azimuth-sol-accounting.timer` runs reconciliation every five minutes
-in a separate service with a 45-second timeout, outside the trading loop. Its
-unit targets the `solanza` profile; adjust the path for other installations.
+## Accounting basis
 
-`--refresh` only reads RPC and appends finalized facts to the local cache.
-The window selects recently active roots; each root includes all recorded legs,
-including legs before the window. This is not a period-return calculation.
+The executor journals signed submissions before broadcast. The read-only collector
+reconciles finalized wallet transactions and caches their actual balance changes,
+fees (including failed transactions), SPL movements, and account creation costs.
+Missing transactions are unresolved; duplicate signatures count once. External
+native transfers are classified only when all instructions prove a simple transfer.
+Unrecognized/manual operations block flow-adjusted performance and root promotion.
 
-## Files in the profile memories directory
+Marked NAV = native SOL + current SPL marks/quotes + Meteora open LP balance and
+unclaimed fees + recoverable token/position account reserves. SPL marks use batched
+Jupiter prices bounded by observed timestamp and price slot; at most ten missing
+marks per pass fall back to full-balance quotes. Stale, absent or changing snapshots
+return null NAV plus a known-asset subtotal. Marked NAV is not liquidation proceeds.
+Wealth change subtracts external flows between the first and last complete marks;
+it is not an annualized return or a closed-position ROI.
 
-- `dlmm_transactions.jsonl`: signature, wallet, position, root, operation and expiry;
-  written before broadcast, including submissions whose confirmation times out.
-- `dlmm_transaction_facts.jsonl`: finalized native balance change, fee paid by
-  this wallet, raw SPL balance changes, chain outcome, block time and observation time.
-- `dlmm_recenter_decisions.jsonl`: contemporaneous policy inputs and decision;
-  existing live policy still uses its pool counters and LP marks.
-- `dlmm_entries/*.json`: explicit root and immediate parent for new monitor reentries.
+Each root report separates LP PnL, swap native cash movement, token inventory movement,
+network fees, nonrefundable account costs, and final cash settlement. Cash already
+includes fees and net rent movements: never subtract those costs twice. Root cash
+PnL conservatively charges rent still held in recoverable accounts; portfolio NAV
+includes those reserves separately. The difference from LP PnL combines settlement
+valuation and execution effects; it is not described as pure slippage or IL.
 
-A journal write failure blocks new LP deployment, but does not block an exit or
-liquidation; a warning records the coverage gap. Reports remain incomplete.
+Historical transactions/positions without complete provenance remain unmeasured.
+The 60-transaction per-pass fetch budget resumes from the durable wallet cache;
+coverage is incomplete until the whole interval has been fetched. Trading during a
+multi-source snapshot invalidates it. Collector services never send transactions.
 
-Duplicate signatures count once. Missing transactions remain unresolved, including
-expired submissions whose historical absence has not been proven. Failed on-chain
-transactions still contribute their fee. Raw token quantities retain integer precision.
+## Root policy
 
-Native wallet change already includes network fees and account rent movements:
-subtracting the reported fee again would double charge it. It is **not net PnL**.
-LP PnL remains a separate Meteora-valued measure. The report returns null for NAV
-and net PnL until wallet-wide transaction coverage and asset marks are verified.
+All deploy callers with a root/recenter link use the same gate before signing.
+The gate refreshes transaction coverage without fetching all wallet price quotes.
+It requires reconciled entry/close evidence, no unsettled token inventory, fresh
+wallet coverage, the full-root strike/loss budget, and observed 30-minute fee
+opportunity greater than cumulative cash loss plus the next cycle's average observed
+execution cost. Missing evidence or fee pace stops the reentry. Existing exit paths
+remain available. This is a conservative cost guard, not a promise of future fees.
 
-Historical/manual transactions and cleanup swaps without a position cannot be
-attributed by guessing. Pre-existing token balances can mix with exit proceeds.
-Still required for #93: wallet-wide reconciliation, external-flow classification,
-open LP/SPL valuation, separate refundable rent vs permanent costs, inventory/swap
-attribution, and root-chain policy replay. Replay must honor `observed_at` as well
-as block time; facts fetched later were not available to the original decision.
+`dlmm_root_decisions.jsonl` persists the evidence, cost, strikes and reason.
+`dlmm_recenter_decisions.jsonl` preserves the earlier eligibility decision and market
+inputs. Replay filters on observation time, not merely transaction block time;
+future-fetched facts cannot justify historical decisions. Unknown historical cases
+remain unknown; no counterfactual profit is invented for paths not executed.
 
-The executor scripts are shared through profile symlinks. Local changes affect
-new invocations immediately; use an isolated checkout for future development.
+## Shadow study
+
+Scanner cooldown, momentum, audit and bundler/insider rejects preserve full candidate,
+pool and gate evidence under stable five-minute cohort IDs. Repeated IDs count once.
+Forward horizons are pulse 30 minutes, turnover 1 hour, casual 4 hours, multiday 24
+hours. Outcomes collected more than ten minutes late are censored. The reported
+false-rejection *proxy* is a pool-price gain above a fixed 1% hurdle, with measured,
+pending, unmeasured and censored denominators. It is not simulated LP profit.
+
+Entry bin state is captured before broadcast; subsequent bin states retain reserves,
+supply and fee-growth counters. Fixed uniform, near-active and far-active allocations
+are replayed under an infinitesimal fixed-share assumption. Results show fees,
+inventory change, HODL-relative IL, sampled OOR, utilization and observed-cost-adjusted
+PnL where costs exist. Empty/reset/missing bins are unmeasured. Price impact and
+hypothetical recenter/slippage costs are not inferred. Live weights are unchanged.
+
+## Operations
+
+`azimuth-sol-accounting.timer` and `azimuth-sol-shadow.timer` collect outside the
+trading loop. Unit templates target the solanza profile; adapt the path elsewhere.
+Evaluation writes `report.md`, `evaluation.json`, and redacted runtime logs. Optional
+`--reference-wallet` adds the same full-life LP cohort for Meridian; LP comparison
+is explicitly separate from Azimuth wallet NAV. No reports are automatically sent.
+
+Use an isolated checkout for development: the live profile scripts are symlinks.

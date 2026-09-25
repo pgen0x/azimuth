@@ -911,6 +911,7 @@ func (s *Scanner) pollMode(ctx context.Context, mp meteora.ModeParams) {
 		// its cooldown lapses instead of staying silenced for SEEN_TTL.
 		if cd := s.seen.CooldownRemaining(ctx, cand.BaseSymbol); cd > 0 {
 			cooldownBlocked++
+			recordSolanaReject(mp.Mode, p, cand, "cooldown", cd.String(), nil)
 			log.Printf("scanner[%s]: %s (%s) in re-entry cooldown (%s left)",
 				mp.Mode, cand.BaseSymbol, cand.Pool[:8], cd.Round(time.Minute))
 			continue
@@ -952,6 +953,7 @@ func (s *Scanner) pollMode(ctx context.Context, mp meteora.ModeParams) {
 			if m, ok := meteora.GetMomentum(cand.BaseMint); ok {
 				if r := meteora.MomentumReject(m, mp); r != "" {
 					momRejected++
+					recordSolanaReject(mp.Mode, p, cand, "momentum", r, m)
 					momRejectedKeys = append(momRejectedKeys, poolKey)
 					log.Printf("scanner[%s]: %s (%s) rejected on momentum: %s", mp.Mode, cand.BaseSymbol, cand.Pool[:8], r)
 					continue
@@ -967,6 +969,7 @@ func (s *Scanner) pollMode(ctx context.Context, mp meteora.ModeParams) {
 			if a, ok := meteora.FetchAudit(cand.BaseMint); ok {
 				if r := meteora.AuditReject(a); r != "" {
 					auditRejected++
+					recordSolanaReject(mp.Mode, p, cand, "audit", r, a)
 					log.Printf("scanner[%s]: %s (%s) rejected on audit: %s", mp.Mode, cand.BaseSymbol, cand.Pool[:8], r)
 					continue
 				}
@@ -985,6 +988,7 @@ func (s *Scanner) pollMode(ctx context.Context, mp meteora.ModeParams) {
 			if g, ok := meteora.FetchGmgn(s.cfg.GmgnAPIKey, cand.BaseMint, time.Now().Unix()); ok {
 				if r := meteora.GmgnReject(g, s.cfg.GmgnMaxRatPct, s.cfg.GmgnMaxBundlerPct); r != "" {
 					gmgnRejected++
+					recordSolanaReject(mp.Mode, p, cand, "bundler_or_insider", r, g)
 					log.Printf("scanner[%s]: %s (%s) rejected on gmgn: %s", mp.Mode, cand.BaseSymbol, cand.Pool[:8], r)
 					continue
 				}

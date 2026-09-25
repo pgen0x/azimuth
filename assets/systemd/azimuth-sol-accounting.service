@@ -4,4 +4,4 @@ Description=Azimuth Solana transaction accounting (read-only RPC)
 [Service]
 Type=oneshot
 ExecStart=/usr/bin/node %h/.hermes/profiles/solanza/skills/solana-dlmm/scripts/dlmm_executor.js accounting
-TimeoutStartSec=45
+TimeoutStartSec=180

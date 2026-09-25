@@ -12,6 +12,7 @@ type Warning struct {
 // Token is one side of a pool (token_x or token_y) as returned by the
 // Meteora pool-discovery API. Field names mirror the JSON exactly.
 type Token struct {
+	Price         float64   `json:"price"`
 	Address       string    `json:"address"`
 	Symbol        string    `json:"symbol"`
 	OrganicScore  float64   `json:"organic_score"`
@@ -43,6 +44,7 @@ type DlmmParams struct {
 
 // Pool is one entry from the discovery API data array.
 type Pool struct {
+	PoolPrice            float64    `json:"pool_price"`
 	PoolAddress          string     `json:"pool_address"`
 	Name                 string     `json:"name"`
 	TVL                  float64    `json:"tvl"`

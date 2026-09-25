@@ -28,6 +28,8 @@ with TemporaryDirectory() as root:
              fee_lamports=6000, failed=False, token_deltas_raw={}),
         dict(signature="c", wallet="wallet", wallet_delta_lamports=-7000,
              fee_lamports=7000, failed=True, token_deltas_raw={})])
+    historical = report(root, 100)
+    assert historical["chains"][0]["wallet_delta_lamports"] is None  # undated facts are not historical evidence
     result = report(root)
     assert result["nav_sol"] is None
     c, = result["chains"]

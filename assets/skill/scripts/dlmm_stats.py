@@ -21,6 +21,7 @@ import subprocess
 import time
 
 from dlmm_realized import apply_realized, load_realized
+from dlmm_accounting import report as accounting_report
 from tz_util import local_time_str
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -154,7 +155,15 @@ def build_card(hours):
         ]
     else:
         lines.append("| Cached LP flows | n/a (run dlmm_realized.py to reconcile this window) |")
-    lines.append("| Portfolio NAV / net ROI | Unmeasured: wallet-wide settlement coverage and asset marks not verified |")
+    try:
+        accounting = accounting_report(PROFILE_DIR)
+        nav = accounting.get("nav_sol")
+        change = accounting.get("flow_adjusted_wealth_change_sol")
+        lines.append(f"| Marked wallet NAV | {nav:.6f} SOL |" if nav is not None else "| Marked wallet NAV | Unmeasured: missing/stale asset marks |")
+        lines.append(f"| Wealth change since first valid NAV mark (external flows removed) | {change:+.6f} SOL |" if change is not None else "| Flow-adjusted wealth change | Unmeasured: wallet coverage/classification incomplete |")
+        lines.append("| NAV basis | Native SOL + SPL liquidation quotes + LP marks + refundable rent; not a realized return |")
+    except Exception:
+        lines.append("| Wallet NAV | Unavailable: accounting evidence could not be read |")
     lines.append(f"| Open positions | {open_positions} |")
 
     for m in ("turnover", "pulse", "casual", "multiday", "unknown"):

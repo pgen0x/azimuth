@@ -88,7 +88,7 @@ function recordSubmission(wallet, position, kind, signature, lastValidBlockHeigh
     fs.appendFileSync(path.join(dir, "dlmm_transactions.jsonl"), JSON.stringify({
       ts: Math.floor(Date.now() / 1000), wallet: wallet.publicKey.toString(),
       position: position || null, root_chain_id: context.root_chain_id || context.recenter_of || position || null,
-      kind, signature, lastValidBlockHeight,
+      entry_id: context.entry_id || process.env.DLMM_ENTRY_ID || null, kind, signature, lastValidBlockHeight,
     }) + "\n", { mode: 0o600 });
   } catch (err) {
     if (kind === "deploy") throw err;
@@ -323,6 +323,24 @@ async function assertNoTokenExposure(pool, wallet) {
   }
 }
 
+async function assertRootBudget() {
+  const context = JSON.parse(process.env.DLMM_ENTRY_CONTEXT || "{}");
+  const root = context.root_chain_id || context.recenter_of;
+  if (!root || process.env.DRY_RUN === "true") return;
+  await reconcileAccounting();
+  const {collect} = require("./dlmm_nav.js");
+  await collect({dir:path.join(PROFILE_DIR,"memories"),wallet:getWallet().publicKey.toString(),PublicKey,rpc:runWithFailover,historyOnly:true});
+  const args = [path.join(SCRIPT_DIR,"dlmm_accounting.py"), "--profile", PROFILE_DIR, "--check-root", root];
+  if (Number.isFinite(context.fee_opportunity_sol) && Number.isFinite(context.fee_opportunity_observed_at)
+      && Date.now()/1000-context.fee_opportunity_observed_at >= 0
+      && Date.now()/1000-context.fee_opportunity_observed_at <= 1800) args.push("--opportunity", String(context.fee_opportunity_sol));
+  if (Number.isFinite(context.root_floor_sol)) args.push("--floor", String(context.root_floor_sol));
+  if (Number.isInteger(context.root_strike_cap)) args.push("--strike-cap", String(context.root_strike_cap));
+  const decision = JSON.parse(require("child_process").execFileSync("python3", args, {encoding:"utf8",timeout:20000}));
+  console.warn(`[ROOT] ${JSON.stringify(decision)}`);
+  if (!decision.allow) throw new Error(`ENTRY REFUSED: ${decision.reason}`);
+}
+
 async function deployPosition(poolAddressStr, amountX, amountY, binsBelow, binsAbove, strategyTypeStr = "spot", slippageBps = 1000) {
   if (![amountX, amountY].every((n) => Number.isFinite(n) && n >= 0)
       || amountX + amountY <= 0
@@ -333,6 +351,7 @@ async function deployPosition(poolAddressStr, amountX, amountY, binsBelow, binsA
   }
   const wallet = getWallet();
   const dry = process.env.DRY_RUN === "true";
+  await assertRootBudget();
   const release = dry ? async () => {} : await acquireDeployLock(wallet.publicKey.toString());
   const pendingDir = path.join(PROFILE_DIR, "memories", "dlmm_pending_deploys");
   const pendingPath = path.join(pendingDir, `${wallet.publicKey}.json`);
@@ -372,8 +391,12 @@ async function deployPosition(poolAddressStr, amountX, amountY, binsBelow, binsA
         // Persist provenance BEFORE submission, so timeout adoption keeps the
         // caller's mode and re-center root. No wallet secret is recorded.
         const context = JSON.parse(process.env.DLMM_ENTRY_CONTEXT || "{}");
+        let bin_snapshot = null;
+        try { bin_snapshot = await binSnapshot(pool, minBinId, maxBinId); }
+        catch { console.warn("[SHADOW] Entry bin snapshot unavailable"); }
+
         fs.writeFileSync(path.join(entryDir, `${newPosition.publicKey}.json`), JSON.stringify({
-          ...context, root_chain_id: context.root_chain_id || context.recenter_of || newPosition.publicKey.toString(),
+          ...context, bin_snapshot, root_chain_id: context.root_chain_id || context.recenter_of || newPosition.publicKey.toString(),
           pool: poolAddressStr, position: newPosition.publicKey.toString(),
           entry_bin: activeBin.binId, entry_price: pool.fromPricePerLamport(Number(activeBin.price)),
           bins_below: binsBelow, bins_above: binsAbove, bin_step: Number(pool.lbPair.binStep),
@@ -927,6 +950,18 @@ async function swapToken(inputMintStr, outputMintStr, amountFloat, maxPriceImpac
   }
 }
 
+async function binSnapshot(pool, lower, upper) {
+  const data = await pool.getBinsBetweenLowerAndUpperBound(lower, upper);
+  const active = await pool.getActiveBin();
+  return {ts: Math.floor(Date.now()/1000), active_bin: active.binId,
+    price: Number(pool.fromPricePerLamport(Number(active.price))),
+    decimals_x: pool.tokenX.mint.decimals, decimals_y: pool.tokenY.mint.decimals,
+    sol_is_x: pool.lbPair.tokenXMint.toString() === "So11111111111111111111111111111111111111112",
+    bins: data.bins.map(b => ({id:b.binId, x:b.xAmount.toString(), y:b.yAmount.toString(),
+      supply:b.supply.toString(), fee_x:b.feeAmountXPerTokenStored.toString(),
+      fee_y:b.feeAmountYPerTokenStored.toString(), price:Number(b.pricePerToken)}))};
+}
+
 // Read-only reconciliation. A missing transaction remains unknown, never zero.
 async function reconcileAccounting() {
   const dir = path.join(PROFILE_DIR, "memories");
@@ -985,7 +1020,16 @@ async function main() {
   
   try {
     if (command === "accounting") {
-      console.log(JSON.stringify(await reconcileAccounting()));
+      const recorded = await reconcileAccounting();
+      const { collect } = require("./dlmm_nav.js");
+      const wallet = process.env.SOLANA_PUBLIC_KEY || getWallet().publicKey.toString();
+      const nav = await collect({dir: path.join(PROFILE_DIR, "memories"), wallet, PublicKey, rpc: runWithFailover});
+      console.log(JSON.stringify({recorded, nav}));
+    } else if (command === "bin-snapshot") {
+      const lower = Number(args[2]), upper = Number(args[3]);
+      if (!Number.isInteger(lower) || !Number.isInteger(upper) || upper < lower || upper-lower > 200) throw new Error("Invalid snapshot bounds");
+      console.log(JSON.stringify(await runWithFailover(async connection =>
+        binSnapshot(await DLMM.create(connection, new PublicKey(args[1])), lower, upper))));
     } else if (command === "active-bin") {
       const pool = args[1];
       if (!pool) throw new Error("Usage: active-bin <pool_address>");
@@ -1127,5 +1171,5 @@ async function main() {
 }
 
 if (require.main === module) main();
-module.exports = { reconcileAccounting, recordSubmission, closePosition, swapToken, confirmSignedTransaction, deployPosition, acquireDeployLock, acquireSwapLock, reconcilePendingSwap,
+module.exports = { assertRootBudget, reconcileAccounting, recordSubmission, closePosition, swapToken, confirmSignedTransaction, deployPosition, acquireDeployLock, acquireSwapLock, reconcilePendingSwap,
   assertNoTokenExposure, positionIsEmpty, positionAccountExists, slippageBpsToPercent };
