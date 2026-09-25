@@ -18,7 +18,7 @@ import (
 // This only FLAGS candidates (is_pvp + rival stats in the payload) so the
 // agent can compare the pick against its rival; it never rejects. Everything
 // fails open: search errors or missing fields leave the candidate unflagged.
-const meteoraPoolSearchURL = "https://dlmm.datapi.meteora.ag/pools"
+const meteoraPoolSearchURL = "https://pool-discovery-api.datapi.meteora.ag/pools"
 
 // Rival legitimacy thresholds (screening thresholds live in this package by
 // convention, values ported from the reference config). A "rival" below these is a dust
@@ -41,13 +41,12 @@ type pvpAsset struct {
 	Liquidity   float64 `json:"liquidity"`
 }
 
-// rivalPoolSearch mirrors the Meteora DLMM pool-search response (a different
-// API from the discovery endpoint — field is `address`, not `pool_address`).
+// rivalPoolSearch uses the same discovery response and active depth as screening.
 type rivalPoolSearch struct {
 	Data []struct {
-		Address string  `json:"address"`
-		TVL     float64 `json:"tvl"`
-		TokenX  struct {
+		Address   string  `json:"pool_address"`
+		ActiveTVL float64 `json:"active_tvl"`
+		TokenX    struct {
 			Address string `json:"address"`
 		} `json:"token_x"`
 		TokenY struct {
@@ -85,8 +84,10 @@ func searchAssetsBySymbol(symbol string) []pvpAsset {
 func findRivalPool(mint string) (address string, tvl float64, ok bool) {
 	q := url.Values{}
 	q.Set("query", mint)
-	q.Set("sort_by", "tvl:desc")
-	q.Set("filter_by", "tvl>5000")
+	q.Set("page_size", "10")
+	q.Set("timeframe", "30m")
+	q.Set("sort_by", "active_tvl:desc")
+	q.Set("filter_by", "pool_type=dlmm&&active_tvl>=5000")
 	req, err := http.NewRequest(http.MethodGet, meteoraPoolSearchURL+"?"+q.Encode(), nil)
 	if err != nil {
 		return "", 0, false
@@ -105,8 +106,8 @@ func findRivalPool(mint string) (address string, tvl float64, ok bool) {
 		return "", 0, false
 	}
 	for _, p := range out.Data {
-		if (p.TokenX.Address == mint || p.TokenY.Address == mint) && p.TVL >= pvpMinActiveTVL {
-			return p.Address, p.TVL, true
+		if (p.TokenX.Address == mint || p.TokenY.Address == mint) && p.ActiveTVL >= pvpMinActiveTVL {
+			return p.Address, p.ActiveTVL, true
 		}
 	}
 	return "", 0, false

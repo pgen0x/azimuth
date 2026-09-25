@@ -20,7 +20,7 @@ def main():
     assert monitor.hold_block_reason(
         {"pool": "pool"}, {"in_range": True, "unclaimed_fees_sol": 0.001}) is None
 
-    payload = {"solPrice": 150, "pools": [{"poolAddress": "pool", "listPositions": ["position"],
+    payload = {"solPrice": 150, "pools": [{"poolAddress": "pool", "binStep": 80, "listPositions": ["position"],
         "pnlPctChange": -30, "pnlSolPctChange": 2, "pnlSol": 0.02,
         "totalDepositSol": 1, "unclaimedFeesSol": 0.001}]}
     class Response:
@@ -32,6 +32,17 @@ def main():
         portfolio, error = monitor.get_meteora_portfolio_positions("wallet")
     assert error is None and portfolio["position"]["pnl_pct"] == 2
     assert portfolio["position"]["pnl_currency"] == "SOL"
+    assert portfolio["position"]["bin_step"] == 80
+
+    with patch.object(monitor, "run_command_json", return_value=({"success": True}, None)), \
+         patch.object(monitor, "position_live_onchain", return_value=True), \
+         patch.object(monitor, "position_residual_sol", return_value=0.1):
+        close_result, _ = monitor.close_position("position", wallet_address="wallet")
+    assert close_result["success"] is False and close_result["unsettled"] is True
+    with patch.object(monitor, "run_command_json", return_value=({"success": True}, None)), \
+         patch.object(monitor, "position_live_onchain", return_value=False):
+        close_result, _ = monitor.close_position("position", wallet_address="wallet")
+    assert close_result["success"] is True
 
     pos = "2G6rKc9ssZZxVagZpfKKfph8UARmAbh9GjpV9R3uxGGe"
     commands = []

@@ -263,8 +263,12 @@ func Screen(p Pool, mp ModeParams) (*Candidate, string) {
 		return nil, "base token high supply concentration"
 	}
 
-	if p.TVL < mp.MinTVL {
-		return nil, fmt.Sprintf("TVL $%.0f < $%.0f", p.TVL, mp.MinTVL)
+	depthTVL := p.ActiveTVL
+	if depthTVL <= 0 {
+		return nil, "active TVL unavailable or zero"
+	}
+	if depthTVL < mp.MinTVL {
+		return nil, fmt.Sprintf("active TVL $%.0f < $%.0f", depthTVL, mp.MinTVL)
 	}
 	if p.FeeTVLRatio < mp.MinFeeTVL {
 		return nil, fmt.Sprintf("fee/TVL %.2f%% < %.2f%%", p.FeeTVLRatio, mp.MinFeeTVL)
@@ -299,8 +303,8 @@ func Screen(p Pool, mp ModeParams) (*Candidate, string) {
 	}
 
 	// Turnover-mode gates (zero-disabled for the other modes).
-	if mp.MaxTVL > 0 && p.TVL > mp.MaxTVL {
-		return nil, fmt.Sprintf("TVL $%.0f > $%.0f cap", p.TVL, mp.MaxTVL)
+	if mp.MaxTVL > 0 && depthTVL > mp.MaxTVL {
+		return nil, fmt.Sprintf("active TVL $%.0f > $%.0f cap", depthTVL, mp.MaxTVL)
 	}
 	if mp.MinFeePct > 0 && p.FeePct < mp.MinFeePct {
 		return nil, fmt.Sprintf("base fee %.2f%% < %.2f%%", p.FeePct, mp.MinFeePct)

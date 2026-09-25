@@ -632,6 +632,32 @@ def fetch_live_fee_tvl(pool_address, timeframe="24h"):
         print(f"Warning: live fee/TVL fetch failed for {pool_address[:8]}: {e}")
         return None
 
+def predeploy_live_gate_reject(candidate, deploy_sol, timeframe):
+    """Return a live-gate rejection so batch selection can try the next pool."""
+    if os.environ.get("DRY_RUN") == "true":
+        return None
+    base_mint = candidate.get("base_mint", "")
+    if not base_mint:
+        return "base mint unavailable"
+    m5, _, _, _ = get_momentum(base_mint)
+    if m5 is not None:
+        print(f"Pre-deploy momentum check {candidate['name']}: 5m price change = {m5:+.2f}%")
+        if m5 < -5.0:
+            return f"dumping {m5:.2f}% in last 5m"
+    screened = float(candidate.get("fee_tvl_ratio") or 0)
+    live = fetch_live_fee_tvl(candidate["pool"], timeframe)
+    if live is not None and screened > 0:
+        drop_pct = (screened - live) / screened * 100
+        print(f"Fee/TVL freshness {candidate['name']}: screened={screened:.2f}% live={live:.2f}% (drop={drop_pct:.1f}%)")
+        if drop_pct > 50:
+            return f"fee/TVL dropped {drop_pct:.1f}% since screening"
+    impact = get_price_impact_sol_to_token(base_mint, deploy_sol)
+    if impact is not None:
+        print(f"Pre-deploy depth check {candidate['name']}: price impact = {impact:.2f}% at {deploy_sol} SOL")
+        if impact > MAX_PRICE_IMPACT_PCT:
+            return f"price impact {impact:.2f}% > {MAX_PRICE_IMPACT_PCT}%"
+    return None
+
 # Entry trend gates (multi-timeframe). A token can show positive h1 (dead-cat bounce)
 # while bleeding on the higher timeframes — LPing into that = a falling knife.
 # These reject sustained downtrends before ranking. Hardcoded like the m5/h1 screen below.
@@ -1558,6 +1584,11 @@ def main():
                     continue
                 elif confirmed is None:
                     print(f"Entry timing: indicator data unavailable for {c['base_symbol']} — proceeding on other gates (fail-open).")
+            if batch_mode:
+                rejection = predeploy_live_gate_reject(c, deploy_sol, timeframe)
+                if rejection:
+                    print(f"Skipping {c['name']} - live gate rejected: {rejection}")
+                    continue
             winner = c
             break
         if not winner:
@@ -1739,7 +1770,7 @@ def main():
     if not base_mint:
         print(f"Aborting deploy: {winner['name']} has no base_mint resolved — cannot guarantee auto-swap on exit.")
         sys.exit(1)
-    if base_mint and os.environ.get("DRY_RUN") != "true":
+    if base_mint and os.environ.get("DRY_RUN") != "true" and not batch_mode:
         # B. Momentum gate: abort if 5m price < -5% (dumping token)
         try:
             dex_url = f"https://api.dexscreener.com/latest/dex/tokens/{base_mint}"
