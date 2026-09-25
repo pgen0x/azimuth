@@ -49,6 +49,7 @@ function transactionFact(tx, wallet, signature, event) {
     wallet_delta_lamports: meta.postBalances[index]-meta.preBalances[index], fee_lamports: index === 0 ? meta.fee : 0,
     token_deltas_raw: Object.fromEntries(Object.entries(tokenDeltas).map(([m,a]) => [m,a.toString()])),
     external_flow_lamports: simpleTransfer ? external : null,
+    position_account_closed: !meta.err && !!event?.position && keys.includes(event.position) && meta.preBalances[keys.indexOf(event.position)]>0 && meta.postBalances[keys.indexOf(event.position)]===0,
     classification: event ? 'recorded_bot' : simpleTransfer ? 'external_transfer' : meta.err ? 'failed' : 'unclassified',
     refundable_rent_locked_lamports: rentLocked, nonrefundable_account_cost_lamports: permanentRent,
     basis: 'finalized_transaction_balances'};

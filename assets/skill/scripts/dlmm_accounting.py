@@ -123,7 +123,9 @@ def report(profile, as_of=None):
             c["reasons"].append("wallet_wide_coverage_not_verified")
         for position in c["positions"]:
             kinds = {e.get("kind") for e in events if e.get("position") == position and e.get("signature") in facts}
-            if not {"deploy", "close"} <= kinds:
+            if not {"deploy", "close"} <= kinds or not any(
+                    facts[e["signature"]].get("position_account_closed") for e in events
+                    if e.get("position") == position and e.get("signature") in facts):
                 c["reasons"].append("entry_or_close_evidence_missing")
                 break
         if c["root_chain_id"] == "unattributed":
