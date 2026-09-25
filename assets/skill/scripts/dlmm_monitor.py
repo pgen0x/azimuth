@@ -720,6 +720,7 @@ def log_close(pool, pair, meta, pos_addr, pnl_pct, realized_sol, fee_per_tvl_24h
         # Position this one was re-pinned from, so a re-center run can be chained
         # back to its first leg instead of reading as unrelated tickets.
         "recenter_of": meta.get("recenter_of"),
+        "root_chain_id": meta.get("root_chain_id") or meta.get("recenter_of") or pos_addr,
         # "pre_swap_mark" on a dump-class close (2026-08-21+): pnl_sol/pnl_pct
         # above were read BEFORE the auto-swap-back-to-SOL block runs, from a
         # portfolio-API mark. CYBERCAT-SOL's RUG_M5_PCT exit journaled -1.44%
@@ -1236,7 +1237,7 @@ def recover_position_metadata(pos_addr, pool):
         if not out.get("base_symbol") and out.get("pair"):
             out["base_symbol"] = out["pair"].split("-")[0]
         if is_position_match:
-            for key in ("strategy", "recenter_of"):
+            for key in ("strategy", "recenter_of", "root_chain_id", "parent_position"):
                 if not out.get(key) and rec.get(key):
                     out[key] = rec[key]
             # log_close writes ts + age_min, so the mint time is recoverable —
@@ -1658,7 +1659,7 @@ def main():
                         swap_max_impact = 18 if is_dump_close else 15
                         swap_slip_bps = 300 if is_dump_close else 300
                         print(f"Executing auto-swap back to SOL for {token_balance} tokens (max_impact {swap_max_impact}%)...")
-                        swap_res, swap_err = run_command_json(f"{env_prefix}node {EXECUTOR_PATH} swap {base_mint} SOL {token_balance} {swap_max_impact} {swap_slip_bps}", timeout=90)
+                        swap_res, swap_err = run_command_json(f"{env_prefix}DLMM_SETTLEMENT_POSITION={shlex.quote(pos_addr)} node {EXECUTOR_PATH} swap {base_mint} SOL {token_balance} {swap_max_impact} {swap_slip_bps}", timeout=90)
                         if swap_res and swap_res.get("success"):
                             print(f"✅ Auto-swapped back to SOL. Tx: {swap_res.get('txHash', 'DRY_RUN_SWAP_TX_HASH')}")
                         else:
@@ -1757,7 +1758,8 @@ def main():
                     "adopted_age_known": bool(adopt_deployed_at),
                 }
                 for key in ("entry_price", "entry_bin", "bins_below", "bins_above",
-                            "size_sol", "amount_x", "amount_y", "sol_is_x", "signal"):
+                            "size_sol", "amount_x", "amount_y", "sol_is_x", "signal",
+                            "root_chain_id", "parent_position"):
                     if prov.get(key) is not None:
                         adopt_meta[key] = prov[key]
                 # Only ever set a mode we actually recovered. An absent mode makes
@@ -2399,7 +2401,11 @@ def main():
                                   event="compound", unclaimed_fees_sol=unclaimed_fees_sol)
                         new_deploy_sol = meta.get("size_sol", DEFAULT_DEPLOY_SOL) + unclaimed_fees_sol
                         compound_shape = "bid_ask" if is_turnover_compound else "spot"
-                        deploy_cmd = f"node {EXECUTOR_PATH} deploy {pool} 0 {new_deploy_sol} {bins_below} {meta.get('bins_above', 0)} {compound_shape} {params.get('SLIPPAGE_BPS', 1000)}"
+                        context = dict(pair=pair, base_mint=meta.get("base_mint"), mode=meta.get("mode"),
+                                       strategy=strategy, recenter_of=meta.get("recenter_of") or pos_addr,
+                                       parent_position=pos_addr, size_sol=new_deploy_sol)
+                        context_env = "DLMM_ENTRY_CONTEXT=" + shlex.quote(json.dumps(context))
+                        deploy_cmd = f"{context_env} node {EXECUTOR_PATH} deploy {pool} 0 {new_deploy_sol} {bins_below} {meta.get('bins_above', 0)} {compound_shape} {params.get('SLIPPAGE_BPS', 1000)}"
                         print(f"Compounded redeploy: {deploy_cmd}")
                         dep_res, dep_err = run_command_json(deploy_cmd)
                         if dep_res and dep_res.get("success"):
@@ -2743,6 +2749,27 @@ def main():
                     and rebalance_budget_ok
                 ))
 
+                if not is_dry_run_stored:
+                    # Persist only inputs available at this decision; settlement
+                    # fetched later must not be treated as known in policy replay.
+                    decision = dict(ts=int(time.time()), position=pos_addr, pool=pool,
+                                    root_chain_id=meta.get("root_chain_id") or meta.get("recenter_of") or pos_addr,
+                                    decision="recenter" if is_oor_rebalance else "stop",
+                                    close_reason=close_reason, mode=mode_cd,
+                                    pool_strikes=rebalances_24h, strike_cap=rebalance_cap,
+                                    pool_lp_mark_sol=rebalance_pnl_24h, cb_floor_sol=cb_floor_sol,
+                                    leg_lp_mark_sol=realized_sol, leg_pnl_pct=pnl_pct,
+                                    fee_per_tvl_24h=fee_per_tvl_24h, pool_liquidity_usd=pool_liquidity_usd,
+                                    active_bin=active_bin, lower_bin=lower_bin, upper_bin=upper_bin,
+                                    fee_pace_pct_30m=meta.get("fee_pace_pct_30m"),
+                                    emergency=bool(emergency_close), budget_ok=rebalance_budget_ok,
+                                    accounting_basis="pre_swap_lp_mark")
+                    try:
+                        with open(os.path.join(PROFILE_DIR, "memories", "dlmm_recenter_decisions.jsonl"), "a") as journal:
+                            journal.write(json.dumps(decision) + "\n")
+                    except OSError as exc:
+                        print(f"⚠️ Recenter decision journal failed: {exc}")
+
                 if is_oor_rebalance:
                     print(f"♻️ {mode_cd} rebalance eligible ({rebalances_24h}/{rebalance_cap} in 24h, pool rebalance PnL {rebalance_pnl_24h:+.4f} SOL) — skipping re-entry cooldown for {base_symbol_cd}")
                 else:
@@ -2855,7 +2882,7 @@ def main():
                             swap_max_impact = 18 if is_dump_close else 15
                             swap_slip_bps = 300 if is_dump_close else 300
                             print(f"Executing auto-swap back to SOL for {balance} tokens (max_impact {swap_max_impact}%, {'dump' if is_dump_close else 'normal'} exit)...")
-                            swap_res, swap_err = run_command_json(f"{env_prefix}node {EXECUTOR_PATH} swap {base_mint} SOL {balance} {swap_max_impact} {swap_slip_bps}", timeout=90)
+                            swap_res, swap_err = run_command_json(f"{env_prefix}DLMM_SETTLEMENT_POSITION={shlex.quote(pos_addr)} node {EXECUTOR_PATH} swap {base_mint} SOL {balance} {swap_max_impact} {swap_slip_bps}", timeout=90)
                             if swap_res and swap_res.get("success"):
                                 swap_tx = swap_res.get("txHash", "DRY_RUN_SWAP_TX_HASH")
                                 swap_report = f"\n**Auto-Swap**: Swapped {balance:.4f} base tokens back to SOL.\n**Swap TX**: https://solscan.io/tx/{swap_tx}"
@@ -2884,7 +2911,11 @@ def main():
                         if ab_data:
                             active_price = float(ab_data.get("price", entry_price))
                             active_bin = ab_data.get("binId")
-                            deploy_cmd = f"node {EXECUTOR_PATH} deploy {pool} {amount_x} 0 40 0 bid_ask {params.get('SLIPPAGE_BPS', 1000)}"
+                            context = dict(pair=pair, base_mint=base_mint, mode=meta.get("mode"),
+                                           strategy=strategy, recenter_of=meta.get("recenter_of") or pos_addr,
+                                           parent_position=pos_addr, size_sol=size_sol)
+                            context_env = "DLMM_ENTRY_CONTEXT=" + shlex.quote(json.dumps(context))
+                            deploy_cmd = f"{context_env} node {EXECUTOR_PATH} deploy {pool} {amount_x} 0 40 0 bid_ask {params.get('SLIPPAGE_BPS', 1000)}"
                             print(f"Running re-seed LP deploy: {deploy_cmd}")
                             dep_res, dep_err = run_command_json(deploy_cmd)
                             if dep_res and dep_res.get("success"):
@@ -2947,7 +2978,7 @@ def main():
                                   recenter_source="monitor")
                     entry_context["signal"] = signal
                     entry_context.update(mode=mode_cd, strategy=f"{mode_cd}_rebalance",
-                                         size_sol=size_sol, recenter_of=meta.get("recenter_of") or pos_addr)
+                                         size_sol=size_sol, parent_position=pos_addr, recenter_of=meta.get("recenter_of") or pos_addr)
                     context_env = "DLMM_ENTRY_CONTEXT=" + shlex.quote(json.dumps(entry_context))
                     rebalance_cmd = f"{env_prefix}{context_env} node {EXECUTOR_PATH} deploy {pool} 0 {size_sol} {rebalance_bins} 0 bid_ask {params.get('SLIPPAGE_BPS', 1000)}"
                     print(f"♻️ {mode_cd} rebalance redeploy: {rebalance_cmd}")

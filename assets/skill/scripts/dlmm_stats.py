@@ -154,6 +154,7 @@ def build_card(hours):
         ]
     else:
         lines.append("| Cached LP flows | n/a (run dlmm_realized.py to reconcile this window) |")
+    lines.append("| Portfolio NAV / net ROI | Unmeasured: wallet-wide settlement coverage and asset marks not verified |")
     lines.append(f"| Open positions | {open_positions} |")
 
     for m in ("turnover", "pulse", "casual", "multiday", "unknown"):
@@ -165,7 +166,7 @@ def build_card(hours):
 
     if chains:
         lines.append("")
-        lines.append("♻️ Rebalance chains (24h):")
+        lines.append("♻️ Pool rebalance counters (rolling TTL; LP marks, not root-chain net PnL):")
         for pool, cnt, pnl in chains:
             lines.append(f"- {pool[:8]}… ×{cnt} · {pnl:+.4f} SOL")
     if not closes and not chains:

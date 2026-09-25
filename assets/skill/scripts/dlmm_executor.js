@@ -1,4 +1,4 @@
-const { Connection, Keypair, PublicKey, sendAndConfirmTransaction, VersionedTransaction } = require("@solana/web3.js");
+const { Connection, Keypair, PublicKey, VersionedTransaction } = require("@solana/web3.js");
 const DLMM = require("@meteora-ag/dlmm");
 const { StrategyType } = require("@meteora-ag/dlmm");
 const BN = require("bn.js");
@@ -72,6 +72,35 @@ async function runWithFailover(fn) {
     }
   }
   throw new Error(`All ${RPC_URLS.length} RPC endpoints failed to execute the command.`);
+}
+
+// Durable accounting evidence is written before broadcast, including uncertain sends.
+function recordSubmission(wallet, position, kind, signature, lastValidBlockHeight) {
+  let context = {};
+  if (position) {
+    if (path.basename(position) !== position) throw new Error("Invalid position address");
+    const file = path.join(PROFILE_DIR, "memories", "dlmm_entries", `${position}.json`);
+    if (fs.existsSync(file)) context = JSON.parse(fs.readFileSync(file, "utf8"));
+  }
+  const dir = path.join(PROFILE_DIR, "memories");
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  fs.appendFileSync(path.join(dir, "dlmm_transactions.jsonl"), JSON.stringify({
+    ts: Math.floor(Date.now() / 1000), wallet: wallet.publicKey.toString(),
+    position: position || null, root_chain_id: context.root_chain_id || context.recenter_of || position || null,
+    kind, signature, lastValidBlockHeight,
+  }) + "\n", { mode: 0o600 });
+}
+
+async function recordedClaim(connection, tx, wallet, position) {
+  const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash("confirmed");
+  tx.recentBlockhash = blockhash;
+  tx.feePayer = wallet.publicKey;
+  tx.sign(wallet);
+  const raw = tx.serialize();
+  recordSubmission(wallet, position, "claim", bs58.encode(tx.signature), lastValidBlockHeight);
+  const signature = await connection.sendRawTransaction(raw, CONFIRM_OPTIONS);
+  await confirmSignedTransaction(connection, { signature, blockhash, lastValidBlockHeight });
+  return signature;
 }
 
 // Confirm the signed transaction before treating a timeout as a failed send.
@@ -338,7 +367,8 @@ async function deployPosition(poolAddressStr, amountX, amountY, binsBelow, binsA
         // caller's mode and re-center root. No wallet secret is recorded.
         const context = JSON.parse(process.env.DLMM_ENTRY_CONTEXT || "{}");
         fs.writeFileSync(path.join(entryDir, `${newPosition.publicKey}.json`), JSON.stringify({
-          ...context, pool: poolAddressStr, position: newPosition.publicKey.toString(),
+          ...context, root_chain_id: context.root_chain_id || context.recenter_of || newPosition.publicKey.toString(),
+          pool: poolAddressStr, position: newPosition.publicKey.toString(),
           entry_bin: activeBin.binId, entry_price: pool.fromPricePerLamport(Number(activeBin.price)),
           bins_below: binsBelow, bins_above: binsAbove, bin_step: Number(pool.lbPair.binStep),
           amount_x: amountX, amount_y: amountY,
@@ -356,6 +386,7 @@ async function deployPosition(poolAddressStr, amountX, amountY, binsBelow, binsA
           // sendTransaction helper can replace the blockhash behind our back.
           fs.writeFileSync(pendingPath, JSON.stringify({ position: newPosition.publicKey.toString(),
             pool: poolAddressStr, signature, lastValidBlockHeight, blockhash }), { mode: 0o600 });
+          recordSubmission(wallet, newPosition.publicKey.toString(), "deploy", signature, lastValidBlockHeight);
           submitted = true;
           txHashes.push(signature);
           console.warn(`[TX] ${JSON.stringify({stage: "send", signature, blockhash, lastValidBlockHeight})}`);
@@ -481,7 +512,7 @@ async function claimFees(positionAddressStr) {
 
     const txHashes = [];
     for (const tx of txs) {
-      const txHash = await sendAndConfirmTransaction(connection, tx, [wallet], CONFIRM_OPTIONS);
+      const txHash = await recordedClaim(connection, tx, wallet, positionAddressStr);
       txHashes.push(txHash);
     }
     return {
@@ -525,7 +556,7 @@ async function closePosition(positionAddressStr) {
         position: positionData
       });
       for (const tx of claimTxs) {
-        await sendAndConfirmTransaction(connection, tx, [wallet], CONFIRM_OPTIONS);
+        await recordedClaim(connection, tx, wallet, positionAddressStr);
       }
     } catch (err) {
       console.warn(`[DLMM] Fee claim during close warning: ${err.message}`);
@@ -537,7 +568,9 @@ async function closePosition(positionAddressStr) {
       tx.feePayer = wallet.publicKey;
       tx.sign(wallet);
       const raw = tx.serialize();
-      submittedSignature = bs58.encode(tx.signature);
+      const signature = bs58.encode(tx.signature);
+      recordSubmission(wallet, positionAddressStr, "close", signature, lastValidBlockHeight);
+      submittedSignature = signature;
       console.warn(`[TX] ${JSON.stringify({stage: "close-send", signature: submittedSignature,
         position: positionAddressStr, blockhash, lastValidBlockHeight})}`);
       const txHash = await connection.sendRawTransaction(raw, CONFIRM_OPTIONS);
@@ -834,6 +867,7 @@ async function swapToken(inputMintStr, outputMintStr, amountFloat, maxPriceImpac
       inputAmount: quoteResponse.inAmount, outputAmount: quoteResponse.outAmount }), { mode: 0o600 });
     fs.renameSync(markerTmp, pendingPath);
     let txid;
+    recordSubmission(wallet, process.env.DLMM_SETTLEMENT_POSITION, "swap", signedTxid, lastValidBlockHeight);
     submittedSignature = signedTxid;
     try {
       txid = await connection.sendRawTransaction(rawTransaction, {
@@ -887,6 +921,53 @@ async function swapToken(inputMintStr, outputMintStr, amountFloat, maxPriceImpac
   }
 }
 
+// Read-only reconciliation. A missing transaction remains unknown, never zero.
+async function reconcileAccounting() {
+  const dir = path.join(PROFILE_DIR, "memories");
+  const readRows = (name) => {
+    const file = path.join(dir, name);
+    return fs.existsSync(file) ? fs.readFileSync(file, "utf8").split("\n").filter(Boolean).map(JSON.parse) : [];
+  };
+  const events = readRows("dlmm_transactions.jsonl");
+  const facts = new Map(readRows("dlmm_transaction_facts.jsonl").map(r => [r.signature, r]));
+  let pending = 0;
+  for (const event of events) {
+    if (facts.has(event.signature)) continue;
+    try {
+      const tx = await runWithFailover(async connection => {
+        const result = await connection.getParsedTransaction(event.signature,
+          { commitment: "finalized", maxSupportedTransactionVersion: 0 });
+        if (!result?.meta) throw new Error("Transaction not indexed/finalized");
+        return result;
+      });
+      const keys = tx.transaction.message.accountKeys.map(k => k.pubkey.toString());
+      const index = keys.indexOf(event.wallet);
+      if (index < 0) throw new Error("Wallet missing from transaction");
+      if (![tx.meta.preBalances[index], tx.meta.postBalances[index], tx.meta.fee].every(Number.isSafeInteger)) {
+        throw new Error("Unsafe native balance precision");
+      }
+      const tokens = {};
+      for (const [rows, sign] of [[tx.meta.preTokenBalances, -1n], [tx.meta.postTokenBalances, 1n]]) {
+        for (const row of rows || []) {
+          if (row.owner === event.wallet) tokens[row.mint] = (tokens[row.mint] || 0n) + sign * BigInt(row.uiTokenAmount.amount);
+        }
+      }
+      const fact = { signature: event.signature, wallet: event.wallet, slot: tx.slot,
+        block_time: tx.blockTime, observed_at: Math.floor(Date.now() / 1000), failed: !!tx.meta.err,
+        wallet_delta_lamports: tx.meta.postBalances[index] - tx.meta.preBalances[index],
+        fee_lamports: index === 0 ? tx.meta.fee : 0,
+        token_deltas_raw: Object.fromEntries(Object.entries(tokens).map(([mint, amount]) => [mint, amount.toString()])),
+        basis: "finalized_transaction_balances" };
+      fs.appendFileSync(path.join(dir, "dlmm_transaction_facts.jsonl"), JSON.stringify(fact) + "\n", { mode: 0o600 });
+      facts.set(event.signature, fact);
+    } catch (err) {
+      pending++;
+      console.warn(`[ACCOUNTING] ${event.signature}: reconciliation pending`);
+    }
+  }
+  return { recorded: new Set(events.map(e => e.signature)).size, reconciled: facts.size, pending };
+}
+
 async function main() {
   const args = process.argv.slice(2);
   const command = args[0];
@@ -897,7 +978,9 @@ async function main() {
   }
   
   try {
-    if (command === "active-bin") {
+    if (command === "accounting") {
+      console.log(JSON.stringify(await reconcileAccounting()));
+    } else if (command === "active-bin") {
       const pool = args[1];
       if (!pool) throw new Error("Usage: active-bin <pool_address>");
       const res = await getActiveBin(pool);
@@ -1038,5 +1121,5 @@ async function main() {
 }
 
 if (require.main === module) main();
-module.exports = { closePosition, swapToken, confirmSignedTransaction, deployPosition, acquireDeployLock, acquireSwapLock, reconcilePendingSwap,
+module.exports = { reconcileAccounting, recordSubmission, closePosition, swapToken, confirmSignedTransaction, deployPosition, acquireDeployLock, acquireSwapLock, reconcilePendingSwap,
   assertNoTokenExposure, positionIsEmpty, positionAccountExists, slippageBpsToPercent };
