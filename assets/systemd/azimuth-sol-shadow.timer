@@ -1,0 +1,10 @@
+[Unit]
+Description=Collect Azimuth shadow observations every five minutes
+
+[Timer]
+OnStartupSec=2min
+OnUnitInactiveSec=5min
+Unit=azimuth-sol-shadow.service
+
+[Install]
+WantedBy=timers.target

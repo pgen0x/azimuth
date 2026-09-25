@@ -1,0 +1,8 @@
+[Unit]
+Description=Azimuth rejected-candidate outcomes and bin snapshots (read-only)
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 %h/.hermes/profiles/solanza/skills/solana-dlmm/scripts/dlmm_shadow.py
+TimeoutStartSec=300
+UMask=0077

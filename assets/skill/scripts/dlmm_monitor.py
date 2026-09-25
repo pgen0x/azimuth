@@ -2319,6 +2319,7 @@ def main():
                 # number has to be a rate or it cannot be compared at all.
                 if growth_pct is not None and window_min > 0:
                     meta["fee_pace_pct_30m"] = round(growth_pct / window_min * FEE_STALL_WINDOW_MINUTES, 5)
+                    meta["fee_pace_observed_at"] = now
                 if growth_pct is not None and growth_pct < FEE_STALL_MIN_PCT:
                     close_reason = (f"Fee pace death (+{growth_sol:.5f} SOL fees in {window_min:.0f}m = "
                                     f"{growth_pct:.3f}% of position < {FEE_STALL_MIN_PCT}%) — rotating dead capital")
@@ -2403,7 +2404,9 @@ def main():
                         compound_shape = "bid_ask" if is_turnover_compound else "spot"
                         context = dict(pair=pair, base_mint=meta.get("base_mint"), mode=meta.get("mode"),
                                        strategy=strategy, recenter_of=meta.get("root_chain_id") or meta.get("recenter_of") or pos_addr,
-                                       parent_position=pos_addr, size_sol=new_deploy_sol)
+                                       parent_position=pos_addr, size_sol=new_deploy_sol,
+                                       fee_opportunity_observed_at=meta.get("fee_pace_observed_at"),
+                                       fee_opportunity_sol=(float(meta["fee_pace_pct_30m"])*new_deploy_sol/100 if meta.get("fee_pace_pct_30m") is not None else None))
                         context_env = "DLMM_ENTRY_CONTEXT=" + shlex.quote(json.dumps(context))
                         deploy_cmd = f"{context_env} node {EXECUTOR_PATH} deploy {pool} 0 {new_deploy_sol} {bins_below} {meta.get('bins_above', 0)} {compound_shape} {params.get('SLIPPAGE_BPS', 1000)}"
                         print(f"Compounded redeploy: {deploy_cmd}")
@@ -2758,10 +2761,10 @@ def main():
                                     close_reason=close_reason, mode=mode_cd,
                                     pool_strikes=rebalances_24h, strike_cap=rebalance_cap,
                                     pool_lp_mark_sol=rebalance_pnl_24h, cb_floor_sol=cb_floor_sol,
-                                    leg_lp_mark_sol=realized_sol, leg_pnl_pct=pnl_pct,
+                                    leg_lp_mark_sol=realized_sol, leg_pnl_pct=pnl_pct, size_sol=size_sol,
                                     fee_per_tvl_24h=fee_per_tvl_24h, pool_liquidity_usd=pool_liquidity_usd,
                                     active_bin=active_bin, lower_bin=lower_bin, upper_bin=upper_bin,
-                                    fee_pace_pct_30m=meta.get("fee_pace_pct_30m"),
+                                    fee_pace_pct_30m=meta.get("fee_pace_pct_30m"), fee_pace_observed_at=meta.get("fee_pace_observed_at"),
                                     emergency=bool(emergency_close), budget_ok=rebalance_budget_ok,
                                     accounting_basis="pre_swap_lp_mark")
                     try:
@@ -2913,7 +2916,9 @@ def main():
                             active_bin = ab_data.get("binId")
                             context = dict(pair=pair, base_mint=base_mint, mode=meta.get("mode"),
                                            strategy=strategy, recenter_of=meta.get("root_chain_id") or meta.get("recenter_of") or pos_addr,
-                                           parent_position=pos_addr, size_sol=size_sol)
+                                           parent_position=pos_addr, size_sol=size_sol,
+                                           fee_opportunity_observed_at=meta.get("fee_pace_observed_at"),
+                                       fee_opportunity_sol=(float(meta["fee_pace_pct_30m"])*size_sol/100 if meta.get("fee_pace_pct_30m") is not None else None))
                             context_env = "DLMM_ENTRY_CONTEXT=" + shlex.quote(json.dumps(context))
                             deploy_cmd = f"{context_env} node {EXECUTOR_PATH} deploy {pool} {amount_x} 0 40 0 bid_ask {params.get('SLIPPAGE_BPS', 1000)}"
                             print(f"Running re-seed LP deploy: {deploy_cmd}")
@@ -2978,6 +2983,9 @@ def main():
                                   recenter_source="monitor")
                     entry_context["signal"] = signal
                     entry_context.update(mode=mode_cd, strategy=f"{mode_cd}_rebalance",
+                                         fee_opportunity_observed_at=meta.get("fee_pace_observed_at"),
+                                       fee_opportunity_sol=(float(meta["fee_pace_pct_30m"])*size_sol/100 if meta.get("fee_pace_pct_30m") is not None else None),
+                                         root_floor_sol=cb_floor_sol, root_strike_cap=rebalance_cap,
                                          size_sol=size_sol, parent_position=pos_addr, recenter_of=meta.get("root_chain_id") or meta.get("recenter_of") or pos_addr)
                     context_env = "DLMM_ENTRY_CONTEXT=" + shlex.quote(json.dumps(entry_context))
                     rebalance_cmd = f"{env_prefix}{context_env} node {EXECUTOR_PATH} deploy {pool} 0 {size_sol} {rebalance_bins} 0 bid_ask {params.get('SLIPPAGE_BPS', 1000)}"

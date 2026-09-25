@@ -52,7 +52,7 @@ const sandbox = { require: (name) => deps[name] || require(name), module: { expo
     ? { inAmount: "100000000", outAmount: "20", priceImpactPct: "0" }
     : { swapTransaction: "AA==" } }),
   console: { log() {}, warn() {}, error() {} }, Buffer, setTimeout, clearTimeout };
-vm.runInNewContext(source + "\ngetWallet = () => testWallet; getTokenDecimals = async () => 9; assertRangeDoesNotRequireBinArrayInitialization = async () => {};", Object.assign(sandbox, { testWallet: wallet }));
+vm.runInNewContext(source + "\nassertRootBudget = async () => {}; getWallet = () => testWallet; getTokenDecimals = async () => 9; assertRangeDoesNotRequireBinArrayInitialization = async () => {};", Object.assign(sandbox, { testWallet: wallet }));
 const { closePosition, swapToken, confirmSignedTransaction, deployPosition, acquireDeployLock, reconcilePendingSwap, assertNoTokenExposure,
   positionIsEmpty, slippageBpsToPercent } = sandbox.module.exports;
 const marker = path.join(root, "memories/dlmm_pending_deploys", `${wallet.publicKey}.json`);
@@ -167,6 +167,11 @@ const clearMarker = () => fs.rmSync(marker, { force: true });
   await assert.rejects(deployPosition("pool", 0, -1, 20, 0), /Invalid deploy/);
   clearMarker(); height = 151; confirmationError = false;
   assert.equal((await deploy()).success, true); assert.equal(sends, 5); // expired reservation recovers
+  deps["./dlmm_nav.js"] = {collect: async () => ({})};
+  deps.child_process = {execFileSync: () => JSON.stringify({allow:false,reason:"incomplete_chain"})};
+  await assert.rejects(sandbox.module.exports.assertRootBudget(), /ENTRY REFUSED: incomplete_chain/);
+  deps.child_process.execFileSync = () => JSON.stringify({allow:true});
+  await sandbox.module.exports.assertRootBudget();
   const journal = path.join(root, "memories/dlmm_transactions.jsonl");
   const written = fs.readFileSync(journal, "utf8").trim().split("\n").map(JSON.parse);
   assert.ok(written.some(e => e.kind === "deploy" && e.root_chain_id === "root"));
