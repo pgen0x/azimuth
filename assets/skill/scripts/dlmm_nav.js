@@ -45,7 +45,7 @@ function transactionFact(tx, wallet, signature, event) {
       }
     }
   }
-  return {signature, wallet, slot: tx.slot, block_time: tx.blockTime, observed_at: now(), failed: !!meta.err,
+  return {schema_version:2,event_position:event?.position,signature, wallet, slot: tx.slot, block_time: tx.blockTime, observed_at: now(), failed: !!meta.err,
     wallet_delta_lamports: meta.postBalances[index]-meta.preBalances[index], fee_lamports: index === 0 ? meta.fee : 0,
     token_deltas_raw: Object.fromEntries(Object.entries(tokenDeltas).map(([m,a]) => [m,a.toString()])),
     external_flow_lamports: simpleTransfer ? external : null,
@@ -72,7 +72,7 @@ async function collect({dir, wallet, PublicKey, rpc, historyOnly=false}) {
   }
   let fetched = 0;
   for (const r of signatures) {
-    if (cache.has(r.signature)) continue;
+    if (cache.get(r.signature)?.schema_version===2 && cache.get(r.signature)?.event_position===events.get(r.signature)?.position) continue;
     if (fetched++ >= 60) break; // Each invocation resumes from the durable cache.
     try {
       const tx = await rpc(async c => {

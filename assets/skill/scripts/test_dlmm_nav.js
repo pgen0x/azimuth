@@ -5,6 +5,9 @@ const tx={slot:100,blockTime:Math.floor(Date.now()/1000),transaction:{message:{a
 const fact=transactionFact(tx,wallet,'sig');
 assert.equal(fact.wallet_delta_lamports,-105);assert.equal(fact.external_flow_lamports,-100);assert.equal(fact.fee_lamports,5);
 assert.equal(transactionFact(tx,wallet,'sig',{position:'position'}).external_flow_lamports,null);
+const closed={...tx,meta:{...tx.meta,preBalances:[1000,100],postBalances:[1095,0]}};
+assert.equal(transactionFact(closed,wallet,'closed',{position:'outside'}).position_account_closed,true);
+assert.equal(transactionFact(tx,wallet,'open',{position:'outside'}).position_account_closed,false);
 const failed=JSON.parse(JSON.stringify(tx));failed.transaction.message.accountKeys=tx.transaction.message.accountKeys;failed.meta.err={InstructionError:[0,'failed']};failed.meta.postBalances=[995,0];
 assert.equal(transactionFact(failed,wallet,'fail').fee_lamports,5);
 assert.equal(transactionFact(failed,wallet,'fail').external_flow_lamports,null);
