@@ -265,7 +265,7 @@ func Screen(p Pool, mp ModeParams) (*Candidate, string) {
 
 	depthTVL := p.ActiveTVL
 	if depthTVL <= 0 {
-		depthTVL = p.TVL
+		return nil, "active TVL unavailable or zero"
 	}
 	if depthTVL < mp.MinTVL {
 		return nil, fmt.Sprintf("active TVL $%.0f < $%.0f", depthTVL, mp.MinTVL)

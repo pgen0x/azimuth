@@ -6,6 +6,7 @@ import io
 import json
 from pathlib import Path
 import tempfile
+import textwrap
 from unittest.mock import patch
 
 import dlmm_pipeline as pipeline
@@ -39,6 +40,22 @@ def main():
          patch.object(pipeline, "fetch_live_fee_tvl", return_value=2.0), \
          patch.object(pipeline, "get_price_impact_sol_to_token", return_value=6.0):
         assert "price impact" in pipeline.predeploy_live_gate_reject(candidate, 0.1, "30m")
+
+    # Execute the actual selection loop, including its live gate and continue.
+    source = Path(pipeline.__file__).read_text()
+    start = source.index("        winner = None", source.index("# Auto-pick:"))
+    end = source.index("    if batch_mode:", source.index("        if not winner:", start))
+    section = textwrap.dedent(source[start:end])
+    siblings = [dict(c, volatility=1, bin_step=100) for c in pools[:2]]
+    ns = dict(vars(pipeline), valid_candidates=siblings, batch_mode=True,
+              cli=argparse.Namespace(strategy="sol_bidask"), params={},
+              mode="turnover", deploy_sol=0.1, timeframe="30m",
+              check_bin_coverage=lambda *args: {"deployable": True})
+    with patch.object(pipeline, "get_momentum", return_value=(0, 0, 0, 0)), \
+         patch.object(pipeline, "fetch_live_fee_tvl", side_effect=[0.1, 1.4]), \
+         patch.object(pipeline, "get_price_impact_sol_to_token", return_value=0.1):
+        exec(compile(section, pipeline.__file__, "exec"), ns)
+    assert ns["winner"]["pool"] == "yield"
 
     # Exercise the real CLI entry path, stopping at its slot gate before any
     # wallet/network work. Neither a stale prompt nor SOUL can override signals.

@@ -102,6 +102,8 @@ func Summarize(out, mode string) string {
 // meant reading the pipeline source and re-probing the API by hand; these
 // prefixes make the journal answer it directly.
 var gateLinePrefixes = []string{
+	"[TX] ",             // signature, send stage and confirmation reconciliation
+	"Cross-pool pick ",  // sibling ranking evidence
 	"Batch reject ",     // conviction hard-reject
 	"Batch conviction ", // conviction score adjustment
 	"Skipping ",         // per-candidate live gate (bin-array rent, entry timing, cooldown, ...)

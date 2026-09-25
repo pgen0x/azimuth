@@ -41,8 +41,7 @@ type pvpAsset struct {
 	Liquidity   float64 `json:"liquidity"`
 }
 
-// rivalPoolSearch mirrors the Meteora DLMM pool-search response (a different
-// API from the discovery endpoint — field is `address`, not `pool_address`).
+// rivalPoolSearch uses the same discovery response and active depth as screening.
 type rivalPoolSearch struct {
 	Data []struct {
 		Address   string  `json:"pool_address"`
@@ -88,7 +87,7 @@ func findRivalPool(mint string) (address string, tvl float64, ok bool) {
 	q.Set("page_size", "10")
 	q.Set("timeframe", "30m")
 	q.Set("sort_by", "active_tvl:desc")
-	q.Set("filter_by", "active_tvl>=5000")
+	q.Set("filter_by", "pool_type=dlmm&&active_tvl>=5000")
 	req, err := http.NewRequest(http.MethodGet, meteoraPoolSearchURL+"?"+q.Encode(), nil)
 	if err != nil {
 		return "", 0, false

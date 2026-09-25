@@ -102,3 +102,14 @@ func TestScreenUnverifiedScorePenalty(t *testing.T) {
 		t.Errorf("unverified score = %v, want %v (%.2f x %v)", bad.Score, want, unverifiedScorePenalty, ok.Score)
 	}
 }
+
+func TestScreenRejectsMissingActiveDepth(t *testing.T) {
+	for _, depth := range []float64{0, -1, 1} {
+		p := turnoverPool(boolPtr(true))
+		p.ActiveTVL = depth
+		p.TVL = 100000
+		if candidate, reason := Screen(p, Turnover); candidate != nil || reason == "" {
+			t.Fatalf("accepted active depth %v using total TVL", depth)
+		}
+	}
+}

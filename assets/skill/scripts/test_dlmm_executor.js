@@ -6,12 +6,14 @@ const path = require("node:path");
 const vm = require("node:vm");
 const { execFileSync } = require("node:child_process");
 const source = fs.readFileSync(path.join(__dirname, "dlmm_executor.js"), "utf8");
-const root = fs.mkdtempSync(path.join(os.tmpdir(), "dlmm-guards-"));
+const worker = process.argv[2];
+const root = worker ? process.argv[3] : fs.mkdtempSync(path.join(os.tmpdir(), "dlmm-guards-"));
 let reads = 0, sends = 0, builds = 0, minted = 0, height = 100, sendError = false, buildError = false;
 let lastSlippage = null, lastMaxRetries = null;
 let positions = [], confirmationError = false, signatureStatus = null;
+let confirmTimeout = false, accountExists = true;
 const key = (value) => ({ toString: () => value });
-const wallet = { publicKey: key(`test-wallet-${process.pid}`) };
+const wallet = { publicKey: key(`test-wallet-${worker ? "swap" : process.pid}`) };
 const transaction = () => ({ signature: Buffer.from([1]), sign() {}, serialize() { return Buffer.from(this.recentBlockhash); } });
 const pool = {
   pubkey: key("pool"), lbPair: { tokenXMint: key("TOKEN"), tokenYMint: key("So11111111111111111111111111111111111111112"), binStep: 100 },
@@ -19,12 +21,15 @@ const pool = {
     positionV2: { all: async () => { reads++; return positions; } },
     lbPair: { fetch: async () => ({ tokenXMint: key("TOKEN"), tokenYMint: key("SOL") }) },
   } },
+  claimSwapFee: async () => [],
+  removeLiquidity: async () => transaction(),
   getActiveBin: async () => ({ binId: 0, price: "1" }), fromPricePerLamport: (x) => x,
   initializePositionAndAddLiquidityByStrategy: async (args) => { lastSlippage = args.slippage; builds++; if (buildError) throw new Error("build failed"); return transaction(); },
   createExtendedEmptyPosition: async () => [transaction()],
   addLiquidityByStrategyChunkable: async () => { throw new Error("wide add failed"); },
 };
 class Connection {
+  async getAccountInfo() { return accountExists ? {} : null; }
   async getBlockHeight() { return height; }
   async getSignatureStatuses(signatures, options) {
     assert.equal(options.searchTransactionHistory, true);
@@ -32,10 +37,10 @@ class Connection {
   }
   async getLatestBlockhash() { return { blockhash: "exact-blockhash", lastValidBlockHeight: 150 }; }
   async sendRawTransaction(raw, options) { sends++; lastMaxRetries = options.maxRetries; assert.equal(raw.toString(), "exact-blockhash"); if (sendError) throw new Error("timeout after send"); return "sig"; }
-  async confirmTransaction(strategy) { assert.equal(strategy.blockhash, "exact-blockhash"); return { value: { err: confirmationError ? "chain error" : null } }; }
+  async confirmTransaction(strategy) { if (confirmTimeout) throw new Error("confirmation timeout"); assert.equal(strategy.blockhash, "exact-blockhash"); return { value: { err: confirmationError ? "chain error" : null } }; }
 }
 const deps = {
-  "@solana/web3.js": { Connection, Keypair: { generate: () => ({ publicKey: key(`position-${++minted}`) }) }, PublicKey: function (v) { return key(v); } },
+  "@solana/web3.js": { Connection, Keypair: { generate: () => ({ publicKey: key(`position-${++minted}`) }) }, PublicKey: function (v) { return key(v); }, VersionedTransaction: { deserialize: () => ({ message: {}, signatures: [Buffer.from([1])], sign() {}, serialize() { return Buffer.from(this.message.recentBlockhash); } }) } },
   "@meteora-ag/dlmm": { create: async () => pool, StrategyType: { Spot: 0, Curve: 1, BidAsk: 2 }, positionOwnerFilter: () => ({}) },
   "bn.js": function (value) { this.value = value; }, "bs58": { encode: () => "signature" },
   "dotenv": { config() {}, parse: () => ({}) },
@@ -43,15 +48,59 @@ const deps = {
 const env = { SOLANA_RPC_URLS: "fake-rpc-1,fake-rpc-2", DLMM_ENTRY_CONTEXT: JSON.stringify({ mode: "turnover", recenter_of: "root", pair: "TEST-SOL" }) };
 const sandbox = { require: (name) => deps[name] || require(name), module: { exports: {} },
   process: { argv: ["node", path.join(root, "skills/solana-dlmm/scripts/dlmm_executor.js")], env },
+  fetch: async (url) => ({ ok: true, json: async () => url.includes("/quote?")
+    ? { inAmount: "100000000", outAmount: "20", priceImpactPct: "0" }
+    : { swapTransaction: "AA==" } }),
   console: { log() {}, warn() {}, error() {} }, Buffer, setTimeout, clearTimeout };
 vm.runInNewContext(source + "\ngetWallet = () => testWallet; getTokenDecimals = async () => 9; assertRangeDoesNotRequireBinArrayInitialization = async () => {};", Object.assign(sandbox, { testWallet: wallet }));
-const { deployPosition, acquireDeployLock, reconcilePendingSwap, assertNoTokenExposure,
+const { closePosition, swapToken, confirmSignedTransaction, deployPosition, acquireDeployLock, reconcilePendingSwap, assertNoTokenExposure,
   positionIsEmpty, slippageBpsToPercent } = sandbox.module.exports;
 const marker = path.join(root, "memories/dlmm_pending_deploys", `${wallet.publicKey}.json`);
 const deploy = () => deployPosition("pool", 0, 0.1, 20, 0, "bid_ask", 1000);
 const clearMarker = () => fs.rmSync(marker, { force: true });
 
 (async () => {
+  if (worker) {
+    sendError = true;
+    signatureStatus = worker === "confirmed" ? { confirmationStatus: "confirmed", err: null } : null;
+    if (worker === "unavailable") Connection.prototype.getSignatureStatuses = async () => { throw new Error("offline"); };
+    const result = await swapToken("So11111111111111111111111111111111111111112", "TOKEN", 0.1);
+    console.log(JSON.stringify({ result, sends }));
+    return;
+  }
+  for (const [mode, count] of [["submit", 1], ["pending", 0], ["unavailable", 0], ["confirmed", 0]]) {
+    const out = JSON.parse(execFileSync(process.execPath, [__filename, mode, root], { encoding: "utf8" }));
+    assert.equal(out.sends, count);
+    assert.equal(mode === "confirmed" ? out.result.success : out.result.pending, true);
+  }
+  // A local cleanup failure after confirmation must not send a second swap.
+  const originalRm = fs.rmSync;
+  fs.rmSync = (target, options) => {
+    if (String(target).includes("dlmm_pending_swaps")) throw new Error("cleanup denied");
+    return originalRm(target, options);
+  };
+  try {
+    assert.equal((await swapToken("So11111111111111111111111111111111111111112", "TOKEN", 0.1)).pending, true);
+    assert.equal(sends, 1);
+  } finally {
+    fs.rmSync = originalRm;
+  }
+  sends = 0;
+  confirmTimeout = true;
+  signatureStatus = { confirmationStatus: "confirmed", err: null };
+  await confirmSignedTransaction(new Connection(), { signature: "signature", blockhash: "exact-blockhash", lastValidBlockHeight: 150 });
+  signatureStatus = null;
+  await assert.rejects(confirmSignedTransaction(new Connection(), { signature: "signature" }), /timeout/);
+  confirmTimeout = false;
+  vm.runInNewContext("findPoolForPosition = async () => ({pool: testPool, positionData: {publicKey: testWallet.publicKey, positionData: {lowerBinId: 0, upperBinId: 1}}});", Object.assign(sandbox, {testPool: pool}));
+  sendError = true;
+  const beforeClose = sends;
+  assert.equal((await closePosition("position")).pending, true);
+  assert.equal(sends, beforeClose + 1); // no second signed close on another RPC
+  accountExists = false;
+  assert.equal((await closePosition("position")).reconciled, true);
+  assert.equal(sends, beforeClose + 2);
+  accountExists = true; sendError = false; sends = 0;
   assert.equal(slippageBpsToPercent(1000), 10);
   assert.equal(positionIsEmpty({ positionData: { liquidityShares: [{ isZero: () => true }] } }), true);
   assert.equal(positionIsEmpty({ positionData: { liquidityShares: [{ isZero: () => false }] } }), false);
@@ -119,4 +168,4 @@ const clearMarker = () => fs.rmSync(marker, { force: true });
   clearMarker(); height = 151; confirmationError = false;
   assert.equal((await deploy()).success, true); assert.equal(sends, 5); // expired reservation recovers
   console.log("Cross-process lock, concurrent mint, chain exposure, signed expiry and uncertain-send checks passed");
-})().catch((err) => { console.error(err); process.exitCode = 1; }).finally(() => fs.rmSync(root, { recursive: true, force: true }));
+})().catch((err) => { console.error(err); process.exitCode = 1; }).finally(() => { if (!worker) fs.rmSync(root, { recursive: true, force: true }); });

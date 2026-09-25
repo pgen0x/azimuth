@@ -29,7 +29,7 @@ func TestMomentumRecoveryRetriesAlongsideDeliveredPool(t *testing.T) {
 	pools := []meteora.Pool{}
 	for _, name := range []string{"stable", "recovering"} {
 		pools = append(pools, meteora.Pool{
-			PoolAddress: name + "PoolAddress", Name: name + "-SOL", TVL: 20_000,
+			PoolAddress: name + "PoolAddress", Name: name + "-SOL", TVL: 20_000, ActiveTVL: 20_000,
 			Volatility: 2, TokenX: meteora.Token{Address: name, Symbol: name},
 			TokenY: meteora.Token{Address: meteora.SolMint, Symbol: "SOL"},
 		})
@@ -86,7 +86,7 @@ func TestMomentumRecoveryRetriesAlongsideDeliveredPool(t *testing.T) {
 }
 
 func TestDirectDeployOwnsEntryWhenWebhookIsAlsoConfigured(t *testing.T) {
-	pool := meteora.Pool{PoolAddress: "directPoolAddress", Name: "DIRECT-SOL", TVL: 20_000,
+	pool := meteora.Pool{PoolAddress: "directPoolAddress", Name: "DIRECT-SOL", TVL: 20_000, ActiveTVL: 20_000,
 		Volatility: 2, TokenX: meteora.Token{Address: "direct", Symbol: "DIRECT"},
 		TokenY: meteora.Token{Address: meteora.SolMint, Symbol: "SOL"}}
 	discovery, err := json.Marshal(map[string]any{"data": []meteora.Pool{pool}})

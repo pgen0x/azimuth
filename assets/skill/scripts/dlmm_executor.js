@@ -74,6 +74,24 @@ async function runWithFailover(fn) {
   throw new Error(`All ${RPC_URLS.length} RPC endpoints failed to execute the command.`);
 }
 
+// Confirm the signed transaction before treating a timeout as a failed send.
+async function confirmSignedTransaction(connection, strategy) {
+  console.warn(`[TX] ${JSON.stringify({stage: "confirm", ...strategy})}`);
+  let confirmation;
+  try {
+    confirmation = await connection.confirmTransaction(strategy, "confirmed");
+  } catch (err) {
+    const status = (await connection.getSignatureStatuses(
+      [strategy.signature], { searchTransactionHistory: true }
+    )).value[0];
+    console.warn(`[TX] ${JSON.stringify({stage: "reconcile", signature: strategy.signature,
+      status: status?.confirmationStatus || "unknown", chainError: status?.err || null})}`);
+    if (!status || !["confirmed", "finalized"].includes(status.confirmationStatus)) throw err;
+    confirmation = { value: { err: status.err } };
+  }
+  if (confirmation.value.err) throw new Error(`Transaction failed: ${JSON.stringify(confirmation.value.err)}`);
+}
+
 async function getActiveBin(poolAddressStr) {
   return await runWithFailover(async (connection) => {
     const pool = await DLMM.create(connection, new PublicKey(poolAddressStr));
@@ -227,6 +245,7 @@ async function reconcilePendingSwap(connection, pendingPath) {
   } catch (err) {
     return { success: false, pending: true, error: `Swap reconciliation blocked by invalid marker: ${err.message}` };
   }
+  const finalizedHeight = await connection.getBlockHeight("finalized");
   const status = (await connection.getSignatureStatuses(
     [pending.signature], { searchTransactionHistory: true }
   )).value[0];
@@ -240,7 +259,7 @@ async function reconcilePendingSwap(connection, pendingPath) {
       inputAmount: pending.inputAmount, outputAmount: pending.outputAmount };
   }
   if (status || !Number.isSafeInteger(pending.lastValidBlockHeight)
-      || await connection.getBlockHeight("finalized") <= pending.lastValidBlockHeight) {
+      || finalizedHeight <= pending.lastValidBlockHeight) {
     return { success: false, pending: true, txHash: pending.signature,
       error: "Swap confirmation pending from a previous submission" };
   }
@@ -338,13 +357,12 @@ async function deployPosition(poolAddressStr, amountX, amountY, binsBelow, binsA
           fs.writeFileSync(pendingPath, JSON.stringify({ position: newPosition.publicKey.toString(),
             pool: poolAddressStr, signature, lastValidBlockHeight, blockhash }), { mode: 0o600 });
           submitted = true;
+          txHashes.push(signature);
+          console.warn(`[TX] ${JSON.stringify({stage: "send", signature, blockhash, lastValidBlockHeight})}`);
           const hash = await connection.sendRawTransaction(raw, {
             preflightCommitment: "confirmed", maxRetries: RPC_SEND_MAX_RETRIES
           });
-          txHashes.push(hash);
-          const confirmation = await connection.confirmTransaction({ signature: hash, blockhash,
-            lastValidBlockHeight }, "confirmed");
-          if (confirmation.value.err) throw new Error(`Transaction failed: ${JSON.stringify(confirmation.value.err)}`);
+          await confirmSignedTransaction(connection, { signature: hash, blockhash, lastValidBlockHeight });
           return hash;
         };
         if (binsBelow + binsAbove > 69) {
@@ -478,7 +496,15 @@ async function closePosition(positionAddressStr) {
     console.warn(JSON.stringify({ success: true, dryRun: true, txHashes: ["DRY_RUN_TX_HASH"] }));
     return { success: true, dryRun: true, txHashes: ["DRY_RUN_TX_HASH"] };
   }
+  let submittedSignature;
   return await runWithFailover(async (connection) => {
+    if (submittedSignature) {
+      if (!await positionAccountExists(connection, positionAddressStr)) {
+        return { success: true, txHashes: [submittedSignature], reconciled: true };
+      }
+      return { success: false, pending: true, txHash: submittedSignature,
+        error: "Close submission requires on-chain reconciliation; position still exists" };
+    }
     const wallet = getWallet();
 
     const foundPos = await findPoolForPosition(connection, wallet, positionAddressStr);
@@ -505,6 +531,21 @@ async function closePosition(positionAddressStr) {
       console.warn(`[DLMM] Fee claim during close warning: ${err.message}`);
     }
 
+    const sendClose = async (tx) => {
+      const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash("confirmed");
+      tx.recentBlockhash = blockhash;
+      tx.feePayer = wallet.publicKey;
+      tx.sign(wallet);
+      const raw = tx.serialize();
+      submittedSignature = bs58.encode(tx.signature);
+      console.warn(`[TX] ${JSON.stringify({stage: "close-send", signature: submittedSignature,
+        position: positionAddressStr, blockhash, lastValidBlockHeight})}`);
+      const txHash = await connection.sendRawTransaction(raw, CONFIRM_OPTIONS);
+      await confirmSignedTransaction(connection, { signature: txHash, blockhash, lastValidBlockHeight });
+      submittedSignature = null;
+      return txHash;
+    };
+
     // Step 2: Remove all liquidity and close position
     const lowerBin = positionData.positionData.lowerBinId;
     const upperBin = positionData.positionData.upperBinId;
@@ -522,18 +563,16 @@ async function closePosition(positionAddressStr) {
         shouldClaimAndClose: true
       });
       for (const tx of Array.isArray(closeTx) ? closeTx : [closeTx]) {
-        const txHash = await sendAndConfirmTransaction(connection, tx, [wallet], CONFIRM_OPTIONS);
-        txHashes.push(txHash);
+        txHashes.push(await sendClose(tx));
       }
     } catch (rmErr) {
       // closePositionIfEmpty succeeds as a no-op on funded positions. Only use it when
       // the SDK snapshot positively proves every liquidity share is zero.
-      if (positionIsEmpty(positionData) !== true) throw rmErr;
+      if (submittedSignature || positionIsEmpty(positionData) !== true) throw rmErr;
       console.warn(`[DLMM] removeLiquidity failed (${rmErr.message}); attempting closePositionIfEmpty for empty position ${positionAddressStr}`);
       const emptyTx = await pool.closePositionIfEmpty({ owner: wallet.publicKey, position: positionData });
       for (const tx of Array.isArray(emptyTx) ? emptyTx : [emptyTx]) {
-        const txHash = await sendAndConfirmTransaction(connection, tx, [wallet], CONFIRM_OPTIONS);
-        txHashes.push(txHash);
+        txHashes.push(await sendClose(tx));
       }
     }
 
@@ -758,8 +797,10 @@ async function swapToken(inputMintStr, outputMintStr, amountFloat, maxPriceImpac
       throw new Error(`Failed to fetch quote from Jupiter: ${err.message}`);
     }
 
+    let submittedSignature;
     return await runWithFailover(async (connection) => {
-    
+    if (submittedSignature) return { success: false, pending: true, txHash: submittedSignature,
+      error: "Previous swap submission needs reconciliation" };
     // 3. Fetch swap transaction
     const swapRes = await fetch("https://api.jup.ag/swap/v1/swap", {
       method: "POST",
@@ -793,6 +834,7 @@ async function swapToken(inputMintStr, outputMintStr, amountFloat, maxPriceImpac
       inputAmount: quoteResponse.inAmount, outputAmount: quoteResponse.outAmount }), { mode: 0o600 });
     fs.renameSync(markerTmp, pendingPath);
     let txid;
+    submittedSignature = signedTxid;
     try {
       txid = await connection.sendRawTransaction(rawTransaction, {
         skipPreflight: true,
@@ -996,5 +1038,5 @@ async function main() {
 }
 
 if (require.main === module) main();
-module.exports = { deployPosition, acquireDeployLock, acquireSwapLock, reconcilePendingSwap,
+module.exports = { closePosition, swapToken, confirmSignedTransaction, deployPosition, acquireDeployLock, acquireSwapLock, reconcilePendingSwap,
   assertNoTokenExposure, positionIsEmpty, positionAccountExists, slippageBpsToPercent };
