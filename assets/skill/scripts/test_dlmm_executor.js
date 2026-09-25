@@ -173,6 +173,12 @@ const clearMarker = () => fs.rmSync(marker, { force: true });
   assert.ok(written.some(e => e.kind === "close"));
   fs.writeFileSync(journal, "");
   const { recordSubmission, reconcileAccounting } = sandbox.module.exports;
+  const append = fs.appendFileSync;
+  fs.appendFileSync = () => { throw new Error("disk full"); };
+  try {
+    assert.throws(() => recordSubmission(wallet, "position-1", "deploy", "blocked", 150), /disk full/);
+    assert.doesNotThrow(() => recordSubmission(wallet, "position-1", "close", "exit", 150));
+  } finally { fs.appendFileSync = append; }
   recordSubmission(wallet, "position-1", "deploy", "measured", 150);
   recordSubmission(wallet, "position-1", "deploy", "missing", 150);
   Connection.prototype.getParsedTransaction = async signature => signature === "missing" ? null : ({

@@ -76,19 +76,25 @@ async function runWithFailover(fn) {
 
 // Durable accounting evidence is written before broadcast, including uncertain sends.
 function recordSubmission(wallet, position, kind, signature, lastValidBlockHeight) {
-  let context = {};
-  if (position) {
-    if (path.basename(position) !== position) throw new Error("Invalid position address");
-    const file = path.join(PROFILE_DIR, "memories", "dlmm_entries", `${position}.json`);
-    if (fs.existsSync(file)) context = JSON.parse(fs.readFileSync(file, "utf8"));
+  try {
+    let context = {};
+    if (position) {
+      if (path.basename(position) !== position) throw new Error("Invalid position address");
+      const file = path.join(PROFILE_DIR, "memories", "dlmm_entries", `${position}.json`);
+      if (fs.existsSync(file)) context = JSON.parse(fs.readFileSync(file, "utf8"));
+    }
+    const dir = path.join(PROFILE_DIR, "memories");
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    fs.appendFileSync(path.join(dir, "dlmm_transactions.jsonl"), JSON.stringify({
+      ts: Math.floor(Date.now() / 1000), wallet: wallet.publicKey.toString(),
+      position: position || null, root_chain_id: context.root_chain_id || context.recenter_of || position || null,
+      kind, signature, lastValidBlockHeight,
+    }) + "\n", { mode: 0o600 });
+  } catch (err) {
+    if (kind === "deploy") throw err;
+    // Accounting storage must not prevent an exit or liquidation.
+    console.warn(`[ACCOUNTING] Recording failed for ${kind} ${signature}; coverage incomplete`);
   }
-  const dir = path.join(PROFILE_DIR, "memories");
-  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-  fs.appendFileSync(path.join(dir, "dlmm_transactions.jsonl"), JSON.stringify({
-    ts: Math.floor(Date.now() / 1000), wallet: wallet.publicKey.toString(),
-    position: position || null, root_chain_id: context.root_chain_id || context.recenter_of || position || null,
-    kind, signature, lastValidBlockHeight,
-  }) + "\n", { mode: 0o600 });
 }
 
 async function recordedClaim(connection, tx, wallet, position) {

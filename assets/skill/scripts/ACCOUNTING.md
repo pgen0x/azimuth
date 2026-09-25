@@ -24,6 +24,9 @@ including legs before the window. This is not a period-return calculation.
   existing live policy still uses its pool counters and LP marks.
 - `dlmm_entries/*.json`: explicit root and immediate parent for new monitor reentries.
 
+A journal write failure blocks new LP deployment, but does not block an exit or
+liquidation; a warning records the coverage gap. Reports remain incomplete.
+
 Duplicate signatures count once. Missing transactions remain unresolved, including
 expired submissions whose historical absence has not been proven. Failed on-chain
 transactions still contribute their fee. Raw token quantities retain integer precision.
