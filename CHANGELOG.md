@@ -5,6 +5,29 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.8.0](https://github.com/pgen0x/azimuth/compare/v2.7.6...v2.8.0) (2026-09-25)
+
+
+### Features
+
+* **solana:** add wallet NAV, root cost guard and forward shadow evaluation ([273831b](https://github.com/pgen0x/azimuth/commit/273831b179942de0d39d0752700d72904998b0de))
+* **solana:** complete accounting, root cost guard and shadow evaluation paths ([f5cf4bc](https://github.com/pgen0x/azimuth/commit/f5cf4bcd277d2dbb654c4947e8a8578d9ff2d410))
+* **solana:** record settlement cash flows and root-chain evidence ([f0f7860](https://github.com/pgen0x/azimuth/commit/f0f786010aca1b17cec458297b42e0bf199d1c36))
+* **solana:** record transaction cash flows and root-chain evidence ([e0eb963](https://github.com/pgen0x/azimuth/commit/e0eb963fe117f37402cd5ee89daef4bef3f35c3e))
+
+
+### Bug Fixes
+
+* **solana:** address 24h audit execution gaps ([b3e2267](https://github.com/pgen0x/azimuth/commit/b3e2267c551c380494e8acd754ac8fe90df13629))
+* **solana:** address 24h audit execution gaps ([f8ae238](https://github.com/pgen0x/azimuth/commit/f8ae238e3b997c0a1c58678514eadc86a018abc3))
+* **solana:** keep liquidation available during accounting storage failure ([951986c](https://github.com/pgen0x/azimuth/commit/951986cd370e1aa9fe4e0bdac9d1a8ab6b663cb3))
+* **solana:** link pre-entry token purchases to the deployed root ([b99129e](https://github.com/pgen0x/azimuth/commit/b99129e16186d9f592a091e1fcbda5463242318c))
+* **solana:** preserve explicit roots across monitor reentries ([2ae3c6e](https://github.com/pgen0x/azimuth/commit/2ae3c6e348633b7323f59b12e496ef2f381a4c2d))
+* **solana:** reconcile uncertain sends and require active depth ([8a60295](https://github.com/pgen0x/azimuth/commit/8a602955c9d490fe2908c7441cef10b818d55661))
+* **solana:** refresh cached facts when attribution schema changes ([80f97c6](https://github.com/pgen0x/azimuth/commit/80f97c67a46db452dfa59be91525731c1b151a63))
+* **solana:** require finalized account deletion in root settlement proof ([faa6366](https://github.com/pgen0x/azimuth/commit/faa6366917cecd6b86c6fe5a5f2bdd56b465ab61))
+* **solana:** rotate bin sampling fairly and reject undated LP marks ([fe763ce](https://github.com/pgen0x/azimuth/commit/fe763ce1a5876c9c66ff55898aad23a3e0a3f8cd))
+
 ## [2.7.6](https://github.com/pgen0x/azimuth/compare/v2.7.5...v2.7.6) (2026-09-21)
 
 
