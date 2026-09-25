@@ -130,7 +130,7 @@ def collect(profile, reject_file):
     latest={}
     for sample in existing: latest[sample['position']]=sample['ts']
     count=0
-    for file in sorted((memory/'dlmm_entries').glob('*.json'),key=lambda p:p.stat().st_mtime,reverse=True):
+    for file in sorted((memory/'dlmm_entries').glob('*.json'),key=lambda p:latest.get(p.stem,0)):
         entry=json.loads(file.read_text()); initial=entry.get('bin_snapshot')
         if not initial or time.time()-initial['ts']>86400: continue
         position=entry['position']

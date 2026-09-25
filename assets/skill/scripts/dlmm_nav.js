@@ -140,7 +140,7 @@ async function collect({dir, wallet, PublicKey, rpc, historyOnly=false}) {
     apiPositions=Number(data.totalPositions);
     for (const pool of data.pools || []) {
       const value=Number(pool.balancesSol), fees=Number(pool.unclaimedFeesSol);
-      if (pool.balancesSol==null || pool.unclaimedFeesSol==null || !Number.isFinite(value+fees) || value<0 || fees<0 || now()-Number(pool.updatedAt)>180) issues.push(`stale_or_invalid_lp:${pool.poolAddress}`);
+      if (pool.balancesSol==null || pool.unclaimedFeesSol==null || !Number.isFinite(value+fees) || value<0 || fees<0 || pool.updatedAt==null || !Number.isFinite(Number(pool.updatedAt)) || Number(pool.updatedAt)>now()+5 || now()-Number(pool.updatedAt)>180) issues.push(`stale_or_invalid_lp:${pool.poolAddress}`);
       else lpValue+=value+fees;
       for (const position of pool.listPositions || []) {
         const account=await rpc(c => c.getAccountInfo(new PublicKey(position),'finalized'));
