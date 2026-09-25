@@ -37,3 +37,14 @@ jobs:
 
       - name: Smoke test (-version)
         run: ./azimuth -version
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Solana execution and accounting regression checks
+        run: |
+          node assets/skill/scripts/test_dlmm_executor.js
+          python3 assets/skill/scripts/test_dlmm_guards.py
+          python3 assets/skill/scripts/test_solana_policy.py
+          python3 assets/skill/scripts/test_dlmm_accounting.py

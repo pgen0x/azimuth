@@ -167,5 +167,33 @@ const clearMarker = () => fs.rmSync(marker, { force: true });
   await assert.rejects(deployPosition("pool", 0, -1, 20, 0), /Invalid deploy/);
   clearMarker(); height = 151; confirmationError = false;
   assert.equal((await deploy()).success, true); assert.equal(sends, 5); // expired reservation recovers
+  const journal = path.join(root, "memories/dlmm_transactions.jsonl");
+  const written = fs.readFileSync(journal, "utf8").trim().split("\n").map(JSON.parse);
+  assert.ok(written.some(e => e.kind === "deploy" && e.root_chain_id === "root"));
+  assert.ok(written.some(e => e.kind === "close"));
+  fs.writeFileSync(journal, "");
+  const { recordSubmission, reconcileAccounting } = sandbox.module.exports;
+  const append = fs.appendFileSync;
+  fs.appendFileSync = () => { throw new Error("disk full"); };
+  try {
+    assert.throws(() => recordSubmission(wallet, "position-1", "deploy", "blocked", 150), /disk full/);
+    assert.doesNotThrow(() => recordSubmission(wallet, "position-1", "close", "exit", 150));
+  } finally { fs.appendFileSync = append; }
+  recordSubmission(wallet, "position-1", "deploy", "measured", 150);
+  recordSubmission(wallet, "position-1", "deploy", "missing", 150);
+  Connection.prototype.getParsedTransaction = async signature => signature === "missing" ? null : ({
+    slot: 100, blockTime: 200,
+    transaction: {message: {accountKeys: [{pubkey: wallet.publicKey}]}},
+    meta: {err: null, fee: 5000, preBalances: [100000], postBalances: [70000],
+      preTokenBalances: [], postTokenBalances: [{owner: wallet.publicKey.toString(), mint: "TOKEN",
+        uiTokenAmount: {amount: "9007199254740993"}}]},
+  });
+  assert.equal((await reconcileAccounting()).pending, 1);
+  assert.equal((await reconcileAccounting()).pending, 1);
+  const facts = fs.readFileSync(path.join(root, "memories/dlmm_transaction_facts.jsonl"), "utf8").trim().split("\n");
+  assert.equal(facts.length, 1); // refresh never counts the same signature twice
+  assert.equal(JSON.parse(facts[0]).wallet_delta_lamports, -30000);
+  assert.equal(JSON.parse(facts[0]).fee_lamports, 5000);
+  assert.equal(JSON.parse(facts[0]).token_deltas_raw.TOKEN, "9007199254740993");
   console.log("Cross-process lock, concurrent mint, chain exposure, signed expiry and uncertain-send checks passed");
 })().catch((err) => { console.error(err); process.exitCode = 1; }).finally(() => { if (!worker) fs.rmSync(root, { recursive: true, force: true }); });

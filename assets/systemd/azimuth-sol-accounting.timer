@@ -1,0 +1,10 @@
+[Unit]
+Description=Reconcile Azimuth Solana accounting every five minutes
+
+[Timer]
+OnStartupSec=2min
+OnUnitInactiveSec=5min
+Unit=azimuth-sol-accounting.service
+
+[Install]
+WantedBy=timers.target
