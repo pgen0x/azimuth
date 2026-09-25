@@ -2402,7 +2402,7 @@ def main():
                         new_deploy_sol = meta.get("size_sol", DEFAULT_DEPLOY_SOL) + unclaimed_fees_sol
                         compound_shape = "bid_ask" if is_turnover_compound else "spot"
                         context = dict(pair=pair, base_mint=meta.get("base_mint"), mode=meta.get("mode"),
-                                       strategy=strategy, recenter_of=meta.get("recenter_of") or pos_addr,
+                                       strategy=strategy, recenter_of=meta.get("root_chain_id") or meta.get("recenter_of") or pos_addr,
                                        parent_position=pos_addr, size_sol=new_deploy_sol)
                         context_env = "DLMM_ENTRY_CONTEXT=" + shlex.quote(json.dumps(context))
                         deploy_cmd = f"{context_env} node {EXECUTOR_PATH} deploy {pool} 0 {new_deploy_sol} {bins_below} {meta.get('bins_above', 0)} {compound_shape} {params.get('SLIPPAGE_BPS', 1000)}"
@@ -2437,7 +2437,7 @@ def main():
                                 "amount_y": new_deploy_sol,
                                 # Chain back to the leg this compounded out of,
                                 # keeping the run's first position as the root.
-                                "recenter_of": meta.get("recenter_of") or pos_addr,
+                                "recenter_of": meta.get("root_chain_id") or meta.get("recenter_of") or pos_addr,
                              }
                             if not is_dry_run_stored:
                                 run_command(f"redis-cli set \"sol:dlmm:position:{new_pos}\" '{json.dumps(tracking_data)}'")
@@ -2912,7 +2912,7 @@ def main():
                             active_price = float(ab_data.get("price", entry_price))
                             active_bin = ab_data.get("binId")
                             context = dict(pair=pair, base_mint=base_mint, mode=meta.get("mode"),
-                                           strategy=strategy, recenter_of=meta.get("recenter_of") or pos_addr,
+                                           strategy=strategy, recenter_of=meta.get("root_chain_id") or meta.get("recenter_of") or pos_addr,
                                            parent_position=pos_addr, size_sol=size_sol)
                             context_env = "DLMM_ENTRY_CONTEXT=" + shlex.quote(json.dumps(context))
                             deploy_cmd = f"{context_env} node {EXECUTOR_PATH} deploy {pool} {amount_x} 0 40 0 bid_ask {params.get('SLIPPAGE_BPS', 1000)}"
@@ -2978,7 +2978,7 @@ def main():
                                   recenter_source="monitor")
                     entry_context["signal"] = signal
                     entry_context.update(mode=mode_cd, strategy=f"{mode_cd}_rebalance",
-                                         size_sol=size_sol, parent_position=pos_addr, recenter_of=meta.get("recenter_of") or pos_addr)
+                                         size_sol=size_sol, parent_position=pos_addr, recenter_of=meta.get("root_chain_id") or meta.get("recenter_of") or pos_addr)
                     context_env = "DLMM_ENTRY_CONTEXT=" + shlex.quote(json.dumps(entry_context))
                     rebalance_cmd = f"{env_prefix}{context_env} node {EXECUTOR_PATH} deploy {pool} 0 {size_sol} {rebalance_bins} 0 bid_ask {params.get('SLIPPAGE_BPS', 1000)}"
                     print(f"♻️ {mode_cd} rebalance redeploy: {rebalance_cmd}")
@@ -3010,7 +3010,7 @@ def main():
                             # this a re-center run reads as unrelated tickets —
                             # MEOW-SOL's +1.33% close and the -2.82% leg it
                             # reseeded into looked like two independent trades.
-                            "recenter_of": meta.get("recenter_of") or pos_addr,
+                            "recenter_of": meta.get("root_chain_id") or meta.get("recenter_of") or pos_addr,
                             "signal": signal,
                         }
                         if not is_dry_run_stored:
