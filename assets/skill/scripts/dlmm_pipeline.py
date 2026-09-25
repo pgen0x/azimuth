@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import sys
 import json
+import uuid
 import time
 import subprocess
 import urllib.request
@@ -1642,6 +1643,7 @@ def main():
     bins_linear = int(MIN_BINS_BELOW + (vol / 5.0) * (MAX_BINS_BELOW - MIN_BINS_BELOW))
     bins_below = max(MIN_BINS_BELOW, min(MAX_BINS_BELOW, max(bins_physics, bins_linear // 2)))
 
+    entry_id = uuid.uuid4().hex
     strategy = cli.strategy
     if not strategy and batch_mode:
         # The agent used to choose the strategy per pick; in batch mode the
@@ -1667,7 +1669,7 @@ def main():
     if strategy == "single_sided_reseed":
         # Swaps SOL for base token first to deploy token-only Bid-Ask
         print(f"Strategy: single_sided_reseed (token-only Bid-Ask). Swapping {deploy_sol} SOL to base token {winner['base_symbol']} first...")
-        swap_cmd = f"node {EXECUTOR_PATH} swap SOL {winner['base_mint']} {deploy_sol}"
+        swap_cmd = f"DLMM_ENTRY_ID={entry_id} node {EXECUTOR_PATH} swap SOL {winner['base_mint']} {deploy_sol}"
         swap_res, swap_err = run_swap_with_retry(swap_cmd)
         if not swap_res or not swap_res.get("success"):
             print(f"Pre-LP Swap failed: {swap_err or swap_res.get('error') if swap_res else 'No response'}. Aborting deploy.")
@@ -1816,7 +1818,7 @@ def main():
     if strategy == "balanced_tight":
         half_sol = deploy_sol / 2.0
         print(f"balanced_tight: swapping {half_sol} SOL to {winner['base_symbol']} for the ask side...")
-        swap_res, swap_err = run_swap_with_retry(f"node {EXECUTOR_PATH} swap SOL {winner['base_mint']} {half_sol}")
+        swap_res, swap_err = run_swap_with_retry(f"DLMM_ENTRY_ID={entry_id} node {EXECUTOR_PATH} swap SOL {winner['base_mint']} {half_sol}")
         if not swap_res or not swap_res.get("success"):
             print(f"Pre-LP swap failed: {swap_err or (swap_res.get('error') if swap_res else 'No response')}. Aborting deploy.")
             sys.exit(1)
@@ -1834,7 +1836,7 @@ def main():
         print(f"balanced_tight: deploying {half_sol} SOL + {base_bal} {winner['base_symbol']} two-sided.")
 
     entry_context = {key: winner.get(key) for key in ("pair", "base_mint", "base_symbol", "sol_is_x")}
-    entry_context.update(pair=winner["name"], mode=mode, strategy=strategy, size_sol=deploy_sol,
+    entry_context.update(entry_id=entry_id, pair=winner["name"], mode=mode, strategy=strategy, size_sol=deploy_sol,
                          signal={key: winner.get(key) for key in (
                              "score", "organic_score", "fee_tvl_ratio", "volatility", "tvl")})
     context_env = "DLMM_ENTRY_CONTEXT=" + shlex.quote(json.dumps(entry_context))

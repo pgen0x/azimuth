@@ -65,6 +65,7 @@ def report(profile, as_of=None):
         c["last_activity"] = max(c["last_activity"], metadata.get("ts") or 0, metadata.get("deployed_at") or 0)
         c["first_activity"] = min(c["first_activity"], metadata.get("deployed_at") or 0)
 
+    entry_roots = {e["entry_id"]: position_roots[p] for p,e in entries.items() if e.get("entry_id")}
     seen = {}
     for event in events:
         signature = event["signature"]
@@ -75,7 +76,7 @@ def report(profile, as_of=None):
                 raise ValueError("Conflicting signature attribution: " + signature)
             continue
         seen[signature] = identity
-        root = position_roots.get(event.get("position")) or event.get("root_chain_id") or "unattributed"
+        root = position_roots.get(event.get("position")) or entry_roots.get(event.get("entry_id")) or event.get("root_chain_id") or "unattributed"
         c = chain(root)
         c["recorded_signatures"].add(signature)
         c["last_activity"] = max(c["last_activity"], event.get("ts") or 0)

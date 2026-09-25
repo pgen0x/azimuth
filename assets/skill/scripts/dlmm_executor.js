@@ -88,7 +88,7 @@ function recordSubmission(wallet, position, kind, signature, lastValidBlockHeigh
     fs.appendFileSync(path.join(dir, "dlmm_transactions.jsonl"), JSON.stringify({
       ts: Math.floor(Date.now() / 1000), wallet: wallet.publicKey.toString(),
       position: position || null, root_chain_id: context.root_chain_id || context.recenter_of || position || null,
-      kind, signature, lastValidBlockHeight,
+      entry_id: context.entry_id || process.env.DLMM_ENTRY_ID || null, kind, signature, lastValidBlockHeight,
     }) + "\n", { mode: 0o600 });
   } catch (err) {
     if (kind === "deploy") throw err;
