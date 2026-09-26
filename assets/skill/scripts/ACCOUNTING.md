@@ -99,3 +99,23 @@ Use an isolated checkout for development: the live profile scripts are symlinks.
 Quote fallbacks are paced at least 1.1 seconds apart and stop for the remainder
 of the collection pass after HTTP 429; the next scheduled pass resumes the rotated
 budget. Rate-limit deferrals never become zero-valued assets.
+
+## Helius supplementary valuation
+
+The collector reuses `HELIUS_API_KEY` or keys from HTTPS `*.helius-rpc.com`
+entries in `SOLANA_RPC_URLS`. Wallet API requests use an authentication header,
+follow pagination, and rotate keys after failures within a 12-second budget.
+No credentials or provider response bodies are persisted. No extra key is required
+when a configured Helius RPC key grants Wallet API access.
+
+Fresh Jupiter marks remain preferred. Missing marks can use positive Helius
+`pricePerToken` values with matching token decimals and a Helius SOL conversion
+price; quantities always come from finalized RPC, never Wallet API totals/balances.
+Helius-valued tokens do not consume Jupiter's quote fallback budget.
+
+Wallet API prices lack a source update timestamp. Such values are labeled
+`helius_wallet_estimate` with `provider_timestamp_unavailable`, included in the
+known-asset subtotal, and leave strict NAV incomplete (`undated_helius_price`).
+Response receipt time is not presented as price freshness. Zero/missing/invalid
+prices and incomplete paginated responses are not usable prices. Trading swap
+routing and root authorization are unchanged; history-only collection skips prices.

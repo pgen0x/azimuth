@@ -16,6 +16,44 @@ async function json(url, attempts=3, timeout=12000) {
   }
 }
 
+// Additional provider marks only; finalized RPC remains the balance source.
+async function heliusPrices(wallet, env=process.env) {
+  const keys=new Set([env.HELIUS_API_KEY].filter(Boolean));
+  for (const endpoint of (env.SOLANA_RPC_URLS || '').split(',')) {
+    try {
+      const u=new URL(endpoint.trim());
+      if (u.protocol==='https:' && (u.hostname==='helius-rpc.com' || u.hostname.endsWith('.helius-rpc.com'))) {
+        const key=u.searchParams.get('api-key'); if(key) keys.add(key);
+      }
+    } catch { /* Non-Helius endpoints provide no Wallet API credentials. */ }
+  }
+  let status=keys.size ? 'unavailable' : 'not_configured';
+  const deadline=Date.now()+12000;
+  for (const key of keys) {
+    const marks=new Map();
+    try {
+      for (let page=1;page<=20;page++) {
+        if (Date.now()>=deadline) throw new Error('budget_exhausted');
+        const response=await fetch(`https://api.helius.xyz/v1/wallet/${encodeURIComponent(wallet)}/balances?page=${page}&limit=100&showNative=true`,
+          {headers:{'X-Api-Key':key},redirect:'error',signal:AbortSignal.timeout(Math.max(1,Math.min(4000,deadline-Date.now())))});
+        if (!response.ok) { status=`http_${response.status}`; break; }
+        const data=await response.json();
+        if (!Array.isArray(data.balances) || typeof data.pagination?.hasMore!=='boolean') throw new Error('invalid_response');
+        for (const b of data.balances) {
+          if (typeof b.mint!=='string' || !Number.isFinite(b.pricePerToken) || b.pricePerToken<=0
+              || !Number.isInteger(b.decimals) || b.decimals<0 || b.decimals>255) continue;
+          const mint=b.mint==='So11111111111111111111111111111111111111111' ? SOL : b.mint;
+          marks.set(mint,{usdPrice:b.pricePerToken,decimals:b.decimals,observed_at:now()});
+        }
+        if (!data.pagination.hasMore) return {marks,status:'ok'};
+        if (page===20) status='pagination_incomplete';
+      }
+    } catch { status='unavailable'; } // Never persist credentials or response bodies.
+    if (Date.now()>=deadline) break;
+  }
+  return {marks:new Map(),status}; // Discard partial pages before trying another key.
+}
+
 function transactionFact(tx, wallet, signature, event) {
   const keys = tx.transaction.message.accountKeys.map(k => k.pubkey.toString());
   const index = keys.indexOf(wallet), meta = tx.meta;
@@ -138,12 +176,14 @@ async function collect({dir, wallet, PublicKey, rpc, historyOnly=false}) {
       }
     } catch { /* Fall back to bounded executable quotes; never invent missing prices. */ }
   }
+  const helius=await heliusPrices(wallet);
+  const heliusMark=info=>helius.marks.get(SOL)?.decimals===9 && helius.marks.has(info.mint) && helius.marks.get(info.mint).decimals===info.tokenAmount.decimals;
   // Rotate the bounded quote budget: illiquid early accounts must not starve later ones.
   const cursorPath=path.join(dir,'dlmm_quote_cursor.json');
   const cursor=fs.existsSync(cursorPath) ? JSON.parse(fs.readFileSync(cursorPath,'utf8')).offset : 0;
   const missingAccounts=allAccounts.filter(a=>{
     const i=a.account.data.parsed.info;
-    return BigInt(i.tokenAmount.amount)>0n && i.mint!==SOL && !(marks.has(i.mint)&&marks.has(SOL));
+    return BigInt(i.tokenAmount.amount)>0n && i.mint!==SOL && !(marks.has(i.mint)&&marks.has(SOL)) && !heliusMark(i);
   });
   const selected=new Set();
   for(let i=0;i<Math.min(10,missingAccounts.length);i++) selected.add(missingAccounts[(cursor+i)%missingAccounts.length]);
@@ -154,21 +194,26 @@ async function collect({dir, wallet, PublicKey, rpc, historyOnly=false}) {
       // Include recoverable ATA reserves, but never count wrapped principal twice.
       rent += account.account.lamports-(mint===SOL ? Number(raw) : 0);
       if (BigInt(raw)===0n) continue;
-      let value = null, basis="spot_mark", markError=null;
+      let value = null, basis="spot_mark", markError=null, priceObservedAt=null, freshness="timestamp_and_slot_checked";
       try {
-        if (mint===SOL) value=Number(raw)/1e9;
+        if (mint===SOL) { value=Number(raw)/1e9; freshness="finalized_balance"; }
         else if (marks.has(mint) && marks.has(SOL)) {
           value=Number(raw)/10**info.tokenAmount.decimals*marks.get(mint).usdPrice/marks.get(SOL).usdPrice;
+        } else if (heliusMark(info)) {
+          const mark=helius.marks.get(mint);
+          value=Number(raw)/10**info.tokenAmount.decimals*mark.usdPrice/helius.marks.get(SOL).usdPrice;
+          basis='helius_wallet_estimate'; freshness='provider_timestamp_unavailable'; priceObservedAt=mark.observed_at;
+          issues.push(`undated_helius_price:${mint}`);
         } else {
           if (quoteRateLimited) throw new Error('quote_rate_limit_deferred');
           if (!selected.has(account)) throw new Error('quote_budget_deferred');
           const q=await json(`https://api.jup.ag/swap/v1/quote?inputMint=${mint}&outputMint=${SOL}&amount=${raw}&slippageBps=100`,1,2500);
           if (q.inAmount!==raw || !q.outAmount) throw new Error('Quote mismatch');
-          value=Number(q.outAmount)/1e9; basis="full_balance_quote";
+          value=Number(q.outAmount)/1e9; basis="full_balance_quote"; freshness="quote_received_now";
         }
         if (!Number.isFinite(value) || value<0) throw new Error('Invalid mark');
-      } catch (err) { value=null; markError=err.message; if (err.message==='HTTP 429') quoteRateLimited=true; issues.push(`unpriced_token:${mint}`); }
-      tokens.push({mint,raw,mark_sol:value,basis,mark_error:markError,observed_at:now()});
+      } catch (err) { value=null; freshness="unavailable"; markError=err.message; if (err.message==='HTTP 429') quoteRateLimited=true; issues.push(`unpriced_token:${mint}`); }
+      tokens.push({mint,raw,mark_sol:value,basis,mark_error:markError,price_freshness:freshness,price_observed_at:priceObservedAt,observed_at:now()});
       if (value!==null) tokenValue+=value;
   }
   let apiPositions=0;
@@ -200,10 +245,11 @@ async function collect({dir, wallet, PublicKey, rpc, historyOnly=false}) {
     native_sol:balance/1e9,spl_mark_sol:tokenValue,lp_mark_sol:lpValue,refundable_rent_sol:rent/1e9,
     known_asset_subtotal_sol:balance/1e9+tokenValue+lpValue+rent/1e9,
     nav_sol:issues.length ? null : balance/1e9+tokenValue+lpValue+rent/1e9,
-    tokens,positions,issues,basis:'native_plus_Jupiter_SPL_marks_or_quotes_plus_Meteora_LP_marks_plus_refundable_rent',
+    tokens,positions,issues,price_sources:{helius_wallet:helius.status},
+    basis:'native_plus_Jupiter_SPL_marks_or_quotes_and_Helius_estimates_plus_Meteora_LP_marks_plus_refundable_rent',
     external_flow_lamports: [...cache.values()].filter(r=>r.block_time>=since).reduce((sum,r)=>sum+(r.external_flow_lamports || 0),0),
     unclassified_transactions:[...cache.values()].filter(r=>r.block_time>=since && !events.has(r.signature) && r.classification==='unclassified').map(r=>r.signature)};
   append(path.join(dir,'dlmm_nav.jsonl'),snapshot);
   return {nav_sol:snapshot.nav_sol,issues,missing_transactions:missing,wallet_history_complete:snapshot.wallet_history_complete};
 }
-module.exports={collect,transactionFact};
+module.exports={collect,transactionFact,heliusPrices};
