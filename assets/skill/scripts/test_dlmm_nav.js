@@ -1,5 +1,5 @@
 const assert=require('node:assert/strict'), fs=require('node:fs'), os=require('node:os'), path=require('node:path');
-const {collect,transactionFact}=require('./dlmm_nav.js');
+const {collect,transactionFact,heliusPrices}=require('./dlmm_nav.js');
 const wallet='wallet',key=s=>({toString:()=>s});
 const tx={slot:100,blockTime:Math.floor(Date.now()/1000),transaction:{message:{accountKeys:[{pubkey:key(wallet)},{pubkey:key('outside')}],instructions:[{program:'system',parsed:{type:'transfer',info:{source:wallet,destination:'outside',lamports:100}}}]}},meta:{err:null,fee:5,preBalances:[1000,0],postBalances:[895,100],preTokenBalances:[],postTokenBalances:[]}};
 const fact=transactionFact(tx,wallet,'sig');
@@ -54,5 +54,40 @@ global.fetch=async url=>{if(url.includes('/quote?'))throw new Error('no route');
  assert.equal(rateLimitedRequests,1);assert.equal(limited.nav_sol,null);
  const latest=JSON.parse(fs.readFileSync(path.join(dir,'dlmm_nav.jsonl'),'utf8').trim().split('\n').at(-1));
  assert.ok(latest.tokens.some(t=>t.mark_error==='quote_rate_limit_deferred'));
+ // Helius paginates, rotates keys, rejects unusable prices and keeps secrets out of URLs.
+ const sol='So11111111111111111111111111111111111111112';
+ const calls=[];
+ global.fetch=async(url,options)=>{
+   assert.ok(!url.includes('test-key'));
+   const key=options.headers['X-Api-Key'], page=new URL(url).searchParams.get('page');calls.push([key,page]);
+   if(key==='test-key-bad')return {ok:false,status:429};
+   return {ok:true,json:async()=>({balances:page==='1' ? [{mint:'So11111111111111111111111111111111111111111',decimals:9,pricePerToken:100}] :
+     [{mint:'valid',decimals:9,pricePerToken:2},{mint:'zero',decimals:9,pricePerToken:0},{mint:'invalid',decimals:9,pricePerToken:'3'}],pagination:{hasMore:page==='1'}})};
+ };
+ const h=await heliusPrices(wallet,{HELIUS_API_KEY:'test-key-bad',SOLANA_RPC_URLS:'https://mainnet.helius-rpc.com/?api-key=test-key-good,https://attacker.invalid/?api-key=wrong'});
+ assert.equal(h.status,'ok');assert.equal(h.marks.size,2);assert.equal(h.marks.get(sol).usdPrice,100);assert.equal(calls.length,3);
+ // Incomplete pagination cannot silently promote partial provider data.
+ global.fetch=async(url)=>new URL(url).searchParams.get('page')==='1' ? {ok:true,json:async()=>({balances:[{mint:sol,decimals:9,pricePerToken:100}],pagination:{hasMore:true}})} : {ok:false,status:503};
+ assert.equal((await heliusPrices(wallet,{HELIUS_API_KEY:'test-key-good'})).marks.size,0);
+ const savedKey=process.env.HELIUS_API_KEY;process.env.HELIUS_API_KEY='test-key-good';
+ let quotesWithHelius=0;
+ global.fetch=async(url)=>{
+   if(url.includes('api.helius.xyz'))return {ok:true,json:async()=>({balances:[{mint:sol,decimals:9,pricePerToken:100},...Array.from({length:12},(_,i)=>({mint:'unknown'+i,decimals:9,pricePerToken:2,balance:99999999,usdValue:99999999}))],pagination:{hasMore:false}})};
+   if(url.includes('/quote?')){quotesWithHelius++;throw new Error('unexpected quote');}
+   return{ok:true,json:async()=>({totalPositions:0,pools:[],hasNext:false})};
+ };
+ const enriched=await collect(args);
+ assert.equal(quotesWithHelius,0);assert.equal(enriched.nav_sol,null);
+ const enrichedSnapshot=JSON.parse(fs.readFileSync(path.join(dir,'dlmm_nav.jsonl'),'utf8').trim().split('\n').at(-1));
+ assert.ok(Math.abs(enrichedSnapshot.tokens[0].mark_sol-0.00000000002)<1e-24); // finalized RPC quantity, not provider wallet total
+ assert.equal(enrichedSnapshot.tokens[0].basis,'helius_wallet_estimate');
+ assert.ok(enriched.issues.every(i=>i.startsWith('undated_helius_price:')));
+ const heliusFetch=global.fetch;
+ global.fetch=async(url,options)=>url.includes('/assets/search') ? {ok:true,json:async()=>[sol,'unknown0'].map(id=>({id,usdPrice:id===sol?100:3,updatedAt:new Date().toISOString(),priceBlockId:101}))} : heliusFetch(url,options);
+ await collect(args);
+ const preferred=JSON.parse(fs.readFileSync(path.join(dir,'dlmm_nav.jsonl'),'utf8').trim().split('\n').at(-1));
+ assert.equal(preferred.tokens[0].basis,'spot_mark');
+ assert.ok(Math.abs(preferred.tokens[0].mark_sol-0.00000000003)<1e-24);
+ if(savedKey===undefined)delete process.env.HELIUS_API_KEY;else process.env.HELIUS_API_KEY=savedKey;
  console.log('NAV includes reserves once, classifies external flows, keeps failed fees and rejects unpriced assets');
 })().catch(e=>{console.error(e);process.exitCode=1}).finally(()=>fs.rmSync(dir,{recursive:true,force:true}));
