@@ -193,8 +193,14 @@ const clearMarker = () => fs.rmSync(marker, { force: true });
       preTokenBalances: [], postTokenBalances: [{owner: wallet.publicKey.toString(), mint: "TOKEN",
         uiTokenAmount: {amount: "9007199254740993"}}]},
   });
+  const warnings=[];
+  sandbox.console.warn=message=>warnings.push(message);
   assert.equal((await reconcileAccounting()).pending, 1);
   assert.equal((await reconcileAccounting()).pending, 1);
+  assert.equal(warnings.some(message=>message.includes('[RPC WARN]')),false);
+  fs.writeFileSync(path.join(root,'memories/dlmm_wallet_transactions.jsonl'),JSON.stringify({signature:'missing',wallet:wallet.publicKey.toString(),landed:false,classification:'expired_unlanded'})+'\n');
+  const resolved=await reconcileAccounting();
+  assert.equal(resolved.pending,0);assert.equal(resolved.expired_unlanded,1);assert.equal(resolved.reconciled,1);
   const facts = fs.readFileSync(path.join(root, "memories/dlmm_transaction_facts.jsonl"), "utf8").trim().split("\n");
   assert.equal(facts.length, 1); // refresh never counts the same signature twice
   assert.equal(JSON.parse(facts[0]).wallet_delta_lamports, -30000);

@@ -41,6 +41,11 @@ with TemporaryDirectory() as root:
     assert c["token_deltas_raw"]["TOKEN"] == "9007199254740993"
     assert c["net_pnl_sol"] is None
     assert c["accounting_status"] == "incomplete"
+    write("dlmm_wallet_transactions.jsonl", [dict(signature="pending",wallet="wallet",landed=False,classification="expired_unlanded")])
+    assert report(root)["chains"][0]["pending_signatures"] == []
+    assert report(root)["chains"][0]["wallet_delta_lamports"] == -10007000
+    assert report(root)["chains"][0]["expired_unlanded_signatures"] == ["pending"]
+    write("dlmm_wallet_transactions.jsonl", [])
     write("dlmm_transaction_facts.jsonl", [])
     assert len(report(root)["chains"][0]["pending_signatures"]) == 4
     assert report(root)["chains"][0]["wallet_delta_lamports"] is None

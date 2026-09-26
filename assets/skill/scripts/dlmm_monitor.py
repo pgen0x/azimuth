@@ -68,6 +68,7 @@ def get_meteora_portfolio_positions(wallet_address):
                     "bin_step": float(pool_data.get("binStep") or 0.0),
                     "unclaimed_fees_sol": float(pool_data.get("unclaimedFeesSol") or 0.0),
                     "balances_sol": float(pool_data.get("balancesSol") or 0.0),
+                    "updated_at": pool_data.get("updatedAt"),
                     "sol_price_usd": sol_price_usd,
                 }
         return result, None
@@ -592,6 +593,33 @@ def _read_hold_count(pos_addr):
         return int(out) if out and out != "(nil)" else 0
     except (ValueError, TypeError):
         return 0
+
+def observe_root_fee_pace(meta, state, now):
+    """Measure a full 30-minute window, including positions with an exit trigger."""
+    if not state:
+        return False
+    try:
+        observed=float(state['updated_at'])
+        fees=float(state['unclaimed_fees_sol'])
+        value=float(state['balances_sol'])
+    except (KeyError, TypeError, ValueError):
+        return False
+    if not all(math.isfinite(v) for v in (observed,fees,value)) or not 0 <= now-observed <= 180 or fees<0 or value<=0:
+        return False
+    baseline=meta.get('root_fee_baseline')
+    if not baseline or fees<baseline['fees']:
+        meta['root_fee_baseline']={'fees':fees,'ts':observed}
+        meta.pop('fee_pace_pct_30m',None)
+        meta.pop('fee_pace_observed_at',None)
+        return True
+    elapsed=observed-baseline['ts']
+    if elapsed<FEE_STALL_WINDOW_MINUTES*60:
+        return False
+    meta['fee_pace_pct_30m']=(fees-baseline['fees'])/value*100*1800/elapsed
+    meta['fee_pace_observed_at']=observed
+    meta['root_fee_baseline']={'fees':fees,'ts':observed}
+    return True
+
 
 def hold_block_reason(meta, state):
     """A discretionary hold needs productive liquidity, not a price narrative."""
@@ -1815,6 +1843,9 @@ def main():
             run_command(f"redis-cli del \"sol:dlmm:position:{pos_addr}:ai_hold_until\"")
             continue
             
+        if not is_dry_run_stored and observe_root_fee_pace(meta, bp, now):
+            run_command(f"redis-cli set \"sol:dlmm:position:{pos_addr}\" '{json.dumps(meta)}'")
+
         # Get current pool price and active bin (executor active-bin still used for binId)
         active_price = entry_price
         active_bin = meta.get("entry_bin")
@@ -2311,15 +2342,6 @@ def main():
                 window_min = (now - float(snap_at)) / 60.0
                 growth_sol = unclaimed_fees_sol - float(snap_sol)
                 growth_pct = (growth_sol / position_value_sol * 100.0) if position_value_sol > 0 else None
-                # Normalize to the window length before storing: the tick that
-                # closes the window can overshoot FEE_STALL_WINDOW_MINUTES, so a
-                # raw growth_pct is not comparable between positions. The
-                # threshold test below stays on the raw figure — it asks "did
-                # this window pay", not "at what rate" — but the journalled
-                # number has to be a rate or it cannot be compared at all.
-                if growth_pct is not None and window_min > 0:
-                    meta["fee_pace_pct_30m"] = round(growth_pct / window_min * FEE_STALL_WINDOW_MINUTES, 5)
-                    meta["fee_pace_observed_at"] = now
                 if growth_pct is not None and growth_pct < FEE_STALL_MIN_PCT:
                     close_reason = (f"Fee pace death (+{growth_sol:.5f} SOL fees in {window_min:.0f}m = "
                                     f"{growth_pct:.3f}% of position < {FEE_STALL_MIN_PCT}%) — rotating dead capital")

@@ -78,3 +78,20 @@ Evaluation writes `report.md`, `evaluation.json`, and redacted runtime logs. Opt
 is explicitly separate from Azimuth wallet NAV. No reports are automatically sent.
 
 Use an isolated checkout for development: the live profile scripts are symlinks.
+
+## September 26 evaluation corrections
+
+- Executor authorization replay uses its persisted post-refresh evidence; the earlier
+  pre-settlement eligibility replay is reported separately. Historical facts are not backdated.
+- Root fee pace starts observing at the first fresh portfolio sample, independently
+  of exit triggers, and still requires a full 30-minute window. Missing opportunity
+  has its own reason, separate from insufficient measured fees.
+- Missing finalized transaction responses remain pending without declaring an RPC
+  outage. Expired submissions are excluded from cash flows only with complete
+  finalized wallet history, a finalized height beyond signed expiry captured before
+  the history scan, and a history-enabled null signature status. RPC errors never
+  prove non-landing. Failed landed transactions still count their fees.
+- Read-only, unsigned Bubblegum activity with no native/SPL balance involvement is
+  classified outside the SOL/SPL/LP asset scope. NFTs are excluded, not valued at zero.
+- The ten-quote fallback budget rotates between missing accounts; errors and budget
+  deferrals are recorded separately. Unavailable token prices still leave NAV null.

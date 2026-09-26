@@ -969,18 +969,16 @@ async function reconcileAccounting() {
     const file = path.join(dir, name);
     return fs.existsSync(file) ? fs.readFileSync(file, "utf8").split("\n").filter(Boolean).map(JSON.parse) : [];
   };
-  const events = readRows("dlmm_transactions.jsonl");
-  const facts = new Map(readRows("dlmm_transaction_facts.jsonl").map(r => [r.signature, r]));
+  const events = [...new Map(readRows("dlmm_transactions.jsonl").map(e => [e.signature,e])).values()];
+  const facts = new Map([...readRows("dlmm_transaction_facts.jsonl"), ...readRows("dlmm_wallet_transactions.jsonl")].map(r => [r.signature, r]));
   let pending = 0;
   for (const event of events) {
     if (facts.has(event.signature)) continue;
     try {
-      const tx = await runWithFailover(async connection => {
-        const result = await connection.getParsedTransaction(event.signature,
-          { commitment: "finalized", maxSupportedTransactionVersion: 0 });
-        if (!result?.meta) throw new Error("Transaction not indexed/finalized");
-        return result;
-      });
+      const tx = await runWithFailover(connection => connection.getParsedTransaction(event.signature,
+        { commitment: "finalized", maxSupportedTransactionVersion: 0 }));
+      // A successful RPC returning null means missing evidence, not provider failure.
+      if (!tx?.meta) { pending++; continue; }
       const keys = tx.transaction.message.accountKeys.map(k => k.pubkey.toString());
       const index = keys.indexOf(event.wallet);
       if (index < 0) throw new Error("Wallet missing from transaction");
@@ -1006,7 +1004,8 @@ async function reconcileAccounting() {
       console.warn(`[ACCOUNTING] ${event.signature}: reconciliation pending`);
     }
   }
-  return { recorded: new Set(events.map(e => e.signature)).size, reconciled: facts.size, pending };
+  return { recorded: events.length, reconciled: events.filter(e => facts.has(e.signature) && facts.get(e.signature).landed !== false).length,
+    expired_unlanded: events.filter(e => facts.get(e.signature)?.landed === false).length, pending };
 }
 
 async function main() {

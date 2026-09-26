@@ -51,7 +51,7 @@ def report(profile, as_of=None):
 
     def chain(root):
         return chains.setdefault(root, {"root_chain_id": root, "positions": set(),
-            "recorded_signatures": set(), "pending_signatures": [], "wallet_delta_lamports": 0,
+            "recorded_signatures": set(), "pending_signatures": [], "expired_unlanded_signatures": [], "wallet_delta_lamports": 0,
             "network_fee_lamports": 0, "reconciled_transactions": 0, "failed_transactions": 0, "token_deltas_raw": {},
             "first_activity": float("inf"), "swap_delta_lamports": 0, "nonrefundable_account_cost_lamports": 0, "last_activity": 0, "lp_pnl_sol": 0.0, "lp_unmeasured_positions": [], "reasons": []})
 
@@ -86,6 +86,9 @@ def report(profile, as_of=None):
         fact = facts.get(signature)
         if fact is None or fact.get("wallet") != event.get("wallet"):
             c["pending_signatures"].append(signature)
+            continue
+        if fact.get("landed") is False and fact.get("classification") == "expired_unlanded":
+            c["expired_unlanded_signatures"].append(signature)
             continue
         c["reconciled_transactions"] += 1
         c["wallet_delta_lamports"] += fact["wallet_delta_lamports"]
@@ -123,7 +126,8 @@ def report(profile, as_of=None):
                 or as_of - coverage.get("ts", 0) > 600):
             c["reasons"].append("wallet_wide_coverage_not_verified")
         for position in c["positions"]:
-            kinds = {e.get("kind") for e in events if e.get("position") == position and e.get("signature") in facts}
+            kinds = {e.get("kind") for e in events if e.get("position") == position and e.get("signature") in facts
+                     and facts[e["signature"]].get("landed") is not False and not facts[e["signature"]].get("failed")}
             if not {"deploy", "close"} <= kinds or not any(
                     facts[e["signature"]].get("position_account_closed") for e in events
                     if e.get("position") == position and e.get("signature") in facts):
@@ -172,7 +176,9 @@ def root_decision(chain, opportunity_sol, floor_sol=-0.015, strike_cap=3):
         result["reason"] = "root_strike_cap"
     elif net <= floor_sol:
         result["reason"] = "root_loss_floor"
-    elif opportunity_sol is None or not math.isfinite(opportunity_sol) or opportunity_sol <= max(0, -net)+next_cost:
+    elif opportunity_sol is None or not math.isfinite(opportunity_sol):
+        result["reason"] = "fee_opportunity_unavailable"
+    elif opportunity_sol <= max(0, -net)+next_cost:
         result["reason"] = "fee_opportunity_below_loss_and_cost"
     else:
         result.update(allow=True, reason="root_cost_budget_pass")

@@ -11,6 +11,17 @@ import dlmm_monitor as monitor
 
 
 def main():
+    meta={}
+    state=dict(updated_at=1000,unclaimed_fees_sol=0.001,balances_sol=0.1)
+    assert monitor.observe_root_fee_pace(meta,state,1000)
+    assert 'fee_pace_pct_30m' not in meta
+    assert not monitor.observe_root_fee_pace(meta,dict(state,updated_at=1100),1100)
+    assert monitor.observe_root_fee_pace(meta,dict(state,updated_at=2800,unclaimed_fees_sol=0.002),2800)
+    assert abs(meta['fee_pace_pct_30m']-1)<1e-10
+    assert not monitor.observe_root_fee_pace(meta,dict(state,updated_at=2800),3100)  # stale API sample
+    assert monitor.observe_root_fee_pace(meta,dict(state,updated_at=2900,unclaimed_fees_sol=0),2900)
+    assert 'fee_pace_pct_30m' not in meta  # claimed fees reset observation
+
     assert monitor.downside_floor_bins(100) == 23
     assert monitor.hold_block_reason({}, {"in_range": True, "unclaimed_fees_sol": 1})
     assert "out of range" in monitor.hold_block_reason(
