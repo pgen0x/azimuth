@@ -388,6 +388,12 @@ funds:
 | sizing | set in `SOUL.md` / the pipeline | `ROBINHOOD_DEPLOY_PCT`, `..._FLOOR_WETH`, `..._CEIL_WETH`, `..._RESERVE_WETH`, `..._MIN_GAS_ETH` (+ `_USDG` variants) |
 | exit monitor | `azimuth-sol-monitor.service` (enabled by `install.sh`) | `azimuth-rh-monitor.service` — **ships disabled** |
 
+For **AI-first Solana entry**, configure `AI_HEALTH_CMD` alongside `DEPLOY_CMD`
+and the Hermes webhook (see `.env.example`). A successful inference probe sends
+the batch to Hermes; a failed probe chooses deterministic entry before dispatch.
+There is no fallback after an accepted or ambiguous webhook, or after an AI
+rejection, because a late agent turn could otherwise execute a second entry.
+
 > ⚠️ Enabling `ROBINHOOD_DEPLOY_ENABLED` without also enabling
 > `azimuth-rh-monitor.service` gives you positions with **no automated exits** —
 > no stop-loss, no take-profit, no out-of-range close:

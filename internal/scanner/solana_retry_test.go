@@ -86,6 +86,28 @@ func TestMomentumRecoveryRetriesAlongsideDeliveredPool(t *testing.T) {
 }
 
 func TestDirectDeployOwnsEntryWhenWebhookIsAlsoConfigured(t *testing.T) {
+	testEntryRouting(t, "", 200, false, true)
+}
+
+func TestAIPrimaryFallbackBeforeDispatch(t *testing.T) {
+	for _, tc := range []struct {
+		name, command   string
+		status          int
+		webhook, direct bool
+	}{
+		{"healthy", "/bin/true", 200, true, false},
+		{"model_unavailable", "/bin/false", 200, false, true},
+		{"probe_missing", "/nonexistent/probe", 200, false, true},
+		{"ambiguous_webhook_failure", "/bin/true", 504, true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			testEntryRouting(t, tc.command, tc.status, tc.webhook, tc.direct)
+		})
+	}
+}
+
+func testEntryRouting(t *testing.T, healthCmd string, status int, wantWebhook, wantDirect bool) {
+	t.Helper()
 	pool := meteora.Pool{PoolAddress: "directPoolAddress", Name: "DIRECT-SOL", TVL: 20_000, ActiveTVL: 20_000,
 		Volatility: 2, TokenX: meteora.Token{Address: "direct", Symbol: "DIRECT"},
 		TokenY: meteora.Token{Address: meteora.SolMint, Symbol: "SOL"}}
@@ -97,10 +119,12 @@ func TestDirectDeployOwnsEntryWhenWebhookIsAlsoConfigured(t *testing.T) {
 	t.Cleanup(func() { http.DefaultTransport = old })
 	hitWebhook := false
 	http.DefaultTransport = solanaTransport(func(r *http.Request) (*http.Response, error) {
+		code := 200
 		if r.URL.Host == "webhook.test" {
 			hitWebhook = true
+			code = status
 		}
-		return &http.Response{StatusCode: 200, Header: make(http.Header),
+		return &http.Response{StatusCode: code, Header: make(http.Header),
 			Body: io.NopCloser(strings.NewReader(string(discovery)))}, nil
 	})
 	marker := filepath.Join(t.TempDir(), "deploy-ran")
@@ -110,15 +134,24 @@ func TestDirectDeployOwnsEntryWhenWebhookIsAlsoConfigured(t *testing.T) {
 	}
 	s := &Scanner{
 		cfg: config.Config{DiscoverURL: "https://discovery.test", WebhookURL: "https://webhook.test",
-			SeenTTL: time.Hour, DeployTimeout: time.Minute},
+			SeenTTL: time.Hour, TurnoverSeenTTL: time.Hour, DeployTimeout: time.Minute, AIHealthCmd: healthCmd},
 		seen: store.New("", "test", time.Hour), dep: deploy.New(script, "", time.Minute),
 		fwd: webhook.New("https://webhook.test", "test"),
 	}
 	s.pollMode(context.Background(), meteora.ModeParams{Mode: "turnover", Timeframe: "30m", TfMinutes: 30})
-	if hitWebhook {
-		t.Fatal("webhook received live batch even though deterministic deploy was configured")
+	if hitWebhook != wantWebhook {
+		t.Fatalf("webhook called=%v, want %v", hitWebhook, wantWebhook)
 	}
-	if _, err := os.Stat(marker); err != nil {
-		t.Fatalf("deterministic deploy did not run: %v", err)
+	_, err = os.Stat(marker)
+	if (err == nil) != wantDirect {
+		t.Fatalf("direct deploy called=%v, want %v", err == nil, wantDirect)
+	}
+	if wantWebhook && status >= 400 {
+		// Model failure on the next poll must not replay an ambiguous delivery.
+		s.cfg.AIHealthCmd = "/bin/false"
+		s.pollMode(context.Background(), meteora.ModeParams{Mode: "turnover", Timeframe: "30m", TfMinutes: 30})
+		if _, err := os.Stat(marker); !os.IsNotExist(err) {
+			t.Fatal("ambiguous webhook was replayed through direct deploy")
+		}
 	}
 }

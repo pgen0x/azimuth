@@ -277,8 +277,13 @@ type Config struct {
 	// `--from-batch <payload JSON> --mode <mode>` appended and the pipeline
 	// picks + deploys deterministically in seconds. Point it at the skill's
 	// pipeline, e.g. `python3 <profile>/skills/solana-dlmm/scripts/dlmm_pipeline.py`.
-	// Empty (default) keeps the webhook flow. Whitespace-split; no spaces in paths.
+	// AIHealthCmd makes this the pre-dispatch fallback instead. Empty (default)
+	// keeps the webhook flow. Whitespace-split; no spaces in paths.
 	DeployCmd string
+	// AIHealthCmd enables AI-first routing when both webhook and DeployCmd are
+	// configured. Exit 0 sends to Hermes; failure selects direct deploy BEFORE
+	// dispatch. Whitespace-split like DeployCmd. Bounded to 20 seconds.
+	AIHealthCmd string
 	// DeployTimeout bounds one direct-deploy run (pre-swap + on-chain deploy
 	// can take a couple of minutes on congested RPC).
 	DeployTimeout time.Duration
@@ -482,6 +487,7 @@ func loadConfig() Config {
 		RobinhoodStockSeenTTL:     getdur("ROBINHOOD_STOCK_SEEN_TTL", 90*time.Minute),
 		RobinhoodMinHolders:       getint("ROBINHOOD_MIN_HOLDERS", 50),
 		DeployCmd:                 getenv("DEPLOY_CMD", ""),
+		AIHealthCmd:               getenv("AI_HEALTH_CMD", ""),
 		DeployTimeout:             getdur("DEPLOY_TIMEOUT", 5*time.Minute),
 		ReportCmd:                 getenv("REPORT_CMD", ""),
 		ReportRejects:             getbool("REPORT_REJECTS", false),
