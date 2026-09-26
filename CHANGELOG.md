@@ -5,6 +5,24 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.9.0](https://github.com/pgen0x/azimuth/compare/v2.8.0...v2.9.0) (2026-09-26)
+
+
+### Features
+
+* **solana:** add Helius supplementary NAV valuation ([497cd49](https://github.com/pgen0x/azimuth/commit/497cd491660681ae5da4b19bee527d3a5ceba737))
+* **solana:** add Helius supplementary NAV valuation ([d3a6001](https://github.com/pgen0x/azimuth/commit/d3a60013651be8ef1b93e06c03bf6628fffcfaed))
+
+
+### Bug Fixes
+
+* **solana:** pace NAV quotes and stop on rate limits ([0129715](https://github.com/pgen0x/azimuth/commit/01297153b6babac2c5310c0f4b46c1a2b0ffa1c6))
+* **solana:** pace NAV quotes and stop on rate limits ([14ea4af](https://github.com/pgen0x/azimuth/commit/14ea4af75b36ca93fd39094e07ed837f9806f6e3))
+* **solana:** prefer Hermes AI with deterministic availability fallback ([485809c](https://github.com/pgen0x/azimuth/commit/485809caedaba9bf8b453c552fb8b8a99d3ef125))
+* **solana:** prefer Hermes AI with pre-dispatch deterministic fallback ([9abdf82](https://github.com/pgen0x/azimuth/commit/9abdf820f209ab8b3e1ecdf698f4f5eaff306f23))
+* **solana:** reconcile evaluation blockers and replay actual root decisions ([21a0317](https://github.com/pgen0x/azimuth/commit/21a0317d9ed351368dec2153486e9fc3c3d6755d))
+* **solana:** reconcile evaluation blockers and root decision evidence ([c45d035](https://github.com/pgen0x/azimuth/commit/c45d035fe513ea6c39af30d06f79465918ee08e8))
+
 ## [2.8.0](https://github.com/pgen0x/azimuth/compare/v2.7.6...v2.8.0) (2026-09-25)
 
 
