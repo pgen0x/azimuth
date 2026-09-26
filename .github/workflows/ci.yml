@@ -50,3 +50,4 @@ jobs:
           python3 assets/skill/scripts/test_dlmm_accounting.py
           node assets/skill/scripts/test_dlmm_nav.js
           python3 assets/skill/scripts/test_dlmm_shadow.py
+          python3 assets/skill/scripts/test_dlmm_ai_health.py

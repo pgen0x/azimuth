@@ -15,15 +15,23 @@ API, screens pools through quality gates, dedups, and hands each poll cycle's
   `dlmm_pipeline.py --from-batch` itself — the pipeline re-ranks the batch
   deterministically (same heuristics the agent prompt encoded) and deploys the
   strongest survivor in seconds instead of an LLM agent turn.
+- **AI-first mode** (`DEPLOY_CMD` + `AI_HEALTH_CMD` + webhook): probe the
+  subscription/profile model before dispatch. A successful probe sends to
+  Hermes; an unavailable model selects deterministic entry for that batch.
 
 This daemon owns **entry signals only** — exits are the `dlmm_monitor.py`
 cron's job.
 
 **Where the LLM sits.** The Hermes `dlmm-signal` subscription owns entry only
-in webhook-only installations. When `DEPLOY_CMD` is configured, the Go daemon
-always runs `dlmm_pipeline.py --from-batch`; an HTTP webhook acceptance cannot
-prove that an asynchronous LLM turn picked or deployed anything, and a delayed
-fallback would allow the late turn to race a second entry.
+in webhook-only and AI-first installations. `DEPLOY_CMD` without `AI_HEALTH_CMD`
+keeps deterministic-only routing. `dlmm_ai_health.py` uses Hermes' own provider
+resolver and the subscription/profile model (currently required to match).
+The probe is a bounded read-only inference request, not a trade or a completed
+pick acknowledgement. A healthy probe cannot guarantee a later agent turn will
+succeed. After webhook dispatch there is no timeout-based fallback, including
+ambiguous delivery errors; dedup is retained. Explicit AI rejects are respected.
+Post-acceptance fallback would require durable ownership/cancellation of the
+agent turn before another executor could safely take over.
 Neither path trusts a deploy claim blind anymore: `dlmm_pipeline.py` now
 confirms the position exists on-chain (`dlmm_executor.js pnl`, 3 retries)
 before printing `🚀 DEPLOYED`, flagging `⚠️ UNVERIFIED` rather than blocking

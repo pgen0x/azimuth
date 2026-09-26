@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"os/exec"
 	"sort"
 	"strings"
 	"time"
@@ -1045,15 +1046,39 @@ func (s *Scanner) pollMode(ctx context.Context, mp meteora.ModeParams) {
 
 	sent := 0
 	if len(batch) > 0 {
-		// DEPLOY_CMD owns live entry when configured. The webhook only confirms
-		// that Hermes accepted an asynchronous agent turn; it cannot confirm a
-		// pick or deploy, so using router health as a per-batch success signal
-		// stranded candidates in a 19-54 minute queue and made a timed fallback
-		// unsafe (the late agent turn could open a second position).
-		if s.dep.Enabled() {
+		// Choose one owner BEFORE dispatch. Never retry an accepted or ambiguous
+		// webhook through direct deploy: a late Hermes turn could still execute.
+		useDirect := s.dep.Enabled()
+		if useDirect && s.cfg.WebhookURL != "" && s.cfg.AIHealthCmd != "" {
+			args := strings.Fields(s.cfg.AIHealthCmd)
+			probeCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+			var err error
+			if len(args) == 0 {
+				err = fmt.Errorf("empty AI health command")
+			} else {
+				err = exec.CommandContext(probeCtx, args[0], args[1:]...).Run()
+			}
+			cancel()
+			if ctx.Err() != nil {
+				return
+			}
+			useDirect = err != nil
+			if useDirect {
+				log.Printf("scanner[%s]: entry_route=deterministic_fallback AI probe failed; batch not sent to Hermes", mp.Mode)
+			} else {
+				log.Printf("scanner[%s]: entry_route=hermes_ai AI probe passed", mp.Mode)
+			}
+		}
+		if useDirect {
 			sent = s.directDeploy(ctx, mp.Mode, batch, batchKeys)
 		} else if s.cfg.WebhookURL != "" {
 			if err := s.fwd.Send("meteora_pool_discovery", batch, time.Now().Unix()); err != nil {
+				if s.dep.Enabled() && s.cfg.AIHealthCmd != "" {
+					// A transport timeout can happen AFTER Hermes accepted the turn.
+					// Retain dedup so the next poll cannot turn this into fallback.
+					log.Printf("scanner[%s]: AI webhook delivery unconfirmed; retaining dedup, no deterministic fallback: %v", mp.Mode, err)
+					return
+				}
 				// Delivery failed — unmark the whole batch so these pools retry on the
 				// next poll instead of being silently dropped for the SEEN_TTL window.
 				for _, k := range batchKeys {
