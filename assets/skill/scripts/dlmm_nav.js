@@ -45,12 +45,18 @@ function transactionFact(tx, wallet, signature, event) {
       }
     }
   }
-  return {schema_version:2,event_position:event?.position,signature, wallet, slot: tx.slot, block_time: tx.blockTime, observed_at: now(), failed: !!meta.err,
+  // Passive NFT activity is outside the SOL/SPL/LP accounting scope.
+  const passiveNFT = !event && !meta.err && tx.transaction.message.accountKeys[index].writable === false
+    && tx.transaction.message.accountKeys[index].signer === false
+    && meta.preBalances[index] === meta.postBalances[index] && tokenAccounts.size === 0
+    && tx.transaction.message.instructions.length > 0
+    && tx.transaction.message.instructions.every(i => i.programId?.toString() === 'BGUMAp9Gq7iTEuizy4pqaxsTyUCBK68MDfK752saRPUY');
+  return {schema_version:3,event_position:event?.position,signature, wallet, slot: tx.slot, block_time: tx.blockTime, observed_at: now(), failed: !!meta.err,
     wallet_delta_lamports: meta.postBalances[index]-meta.preBalances[index], fee_lamports: index === 0 ? meta.fee : 0,
     token_deltas_raw: Object.fromEntries(Object.entries(tokenDeltas).map(([m,a]) => [m,a.toString()])),
     external_flow_lamports: simpleTransfer ? external : null,
     position_account_closed: !meta.err && !!event?.position && keys.includes(event.position) && meta.preBalances[keys.indexOf(event.position)]>0 && meta.postBalances[keys.indexOf(event.position)]===0,
-    classification: event ? 'recorded_bot' : simpleTransfer ? 'external_transfer' : meta.err ? 'failed' : 'unclassified',
+    classification: event ? 'recorded_bot' : simpleTransfer ? 'external_transfer' : passiveNFT ? 'passive_nft_outside_scope' : meta.err ? 'failed' : 'unclassified',
     refundable_rent_locked_lamports: rentLocked, nonrefundable_account_cost_lamports: permanentRent,
     basis: 'finalized_transaction_balances'};
 }
@@ -62,6 +68,7 @@ async function collect({dir, wallet, PublicKey, rpc, historyOnly=false}) {
   const cache = new Map(read(cachePath).map(r => [r.signature,r]));
   const snapshots = read(path.join(dir,'dlmm_nav.jsonl'));
   const since = snapshots.length ? snapshots[0].started_at : now()-86400;
+  const finalizedHeight=await rpc(c=>c.getBlockHeight('finalized'));
   let before, boundary = false, signatures = [];
   // Bounded pagination; coverage is explicitly incomplete if the bound is hit.
   for (let page=0; page<20; page++) {
@@ -70,27 +77,46 @@ async function collect({dir, wallet, PublicKey, rpc, historyOnly=false}) {
     if (!batch.length || batch.some(r => r.blockTime != null && r.blockTime < since)) { boundary=true; break; }
     before = batch[batch.length-1].signature;
   }
+  const currentFact=r=>{const f=cache.get(r.signature); return f?.wallet===wallet && f?.schema_version>=2
+    && (f.schema_version>=3 || f.classification!=='unclassified')
+    && f.event_position===events.get(r.signature)?.position;};
   let fetched = 0;
   for (const r of signatures) {
-    if (cache.get(r.signature)?.schema_version===2 && cache.get(r.signature)?.event_position===events.get(r.signature)?.position) continue;
+    if (currentFact(r)) continue;
     if (fetched++ >= 60) break; // Each invocation resumes from the durable cache.
     try {
-      const tx = await rpc(async c => {
-        const tx = await c.getParsedTransaction(r.signature,{commitment:'finalized',maxSupportedTransactionVersion:0});
-        if (!tx?.meta) throw new Error('Unindexed transaction');
-        return tx;
-      });
+      const tx = await rpc(c => c.getParsedTransaction(r.signature,{commitment:'finalized',maxSupportedTransactionVersion:0}));
+      if (!tx?.meta) continue; // Successful null response: await indexing, not RPC failover.
       const fact = transactionFact(tx,wallet,r.signature,events.get(r.signature));
       append(cachePath,fact); cache.set(r.signature,fact);
     } catch { /* Missing evidence remains missing; retry on the next run. */ }
   }
   const coverageSlot=await rpc(c=>c.getSlot('finalized'));
   const historyHead=await rpc(c=>c.getSignaturesForAddress(publicKey,{limit:1},'finalized'));
-  const missing=signatures.filter(r=>!cache.has(r.signature)).length;
+  const missing=signatures.filter(r=>!currentFact(r)).length;
   const coverage={ts:now(),coverage_since:since,end_slot:coverageSlot,
     wallet_history_complete:boundary && missing===0 && historyHead[0]?.signature===signatures[0]?.signature,
     missing_transactions:missing,
     unclassified_transactions:[...cache.values()].filter(r=>r.block_time>=since && !events.has(r.signature) && r.classification==='unclassified').map(r=>r.signature)};
+  // A signed submission is not a landed transaction. Require complete finalized
+  // wallet history, expired blockhash, and a history-enabled null status together.
+  if (coverage.wallet_history_complete) {
+    const height=finalizedHeight;
+    const present=new Set(signatures.map(r=>r.signature));
+    const absent=[...events.values()].filter(e=>e.wallet===wallet && !present.has(e.signature) && !cache.has(e.signature)
+      && e.ts>=since && now()-e.ts>120 && Number.isSafeInteger(e.lastValidBlockHeight) && height>e.lastValidBlockHeight).slice(0,60);
+    if (absent.length) {
+      const statuses=await rpc(c=>c.getSignatureStatuses(absent.map(e=>e.signature),{searchTransactionHistory:true}));
+      if (statuses.value.length===absent.length) absent.forEach((e,i)=>{
+        if (statuses.value[i]!==null) return;
+        const fact={schema_version:3,signature:e.signature,wallet,event_position:e.position,
+          observed_at:now(),landed:false,classification:'expired_unlanded',
+          last_valid_block_height:e.lastValidBlockHeight,finalized_block_height:height,
+          coverage_since:since,end_slot:coverageSlot,basis:'finalized_wallet_history_and_expiry'};
+        append(cachePath,fact);cache.set(e.signature,fact);
+      });
+    }
+  }
   append(path.join(dir,'dlmm_wallet_coverage.jsonl'),coverage);
   if (historyOnly) return coverage;
   const started = now(), issues = [], tokens = [], positions = [];
@@ -112,26 +138,35 @@ async function collect({dir, wallet, PublicKey, rpc, historyOnly=false}) {
       }
     } catch { /* Fall back to bounded executable quotes; never invent missing prices. */ }
   }
-  let quotes=0;
+  // Rotate the bounded quote budget: illiquid early accounts must not starve later ones.
+  const cursorPath=path.join(dir,'dlmm_quote_cursor.json');
+  const cursor=fs.existsSync(cursorPath) ? JSON.parse(fs.readFileSync(cursorPath,'utf8')).offset : 0;
+  const missingAccounts=allAccounts.filter(a=>{
+    const i=a.account.data.parsed.info;
+    return BigInt(i.tokenAmount.amount)>0n && i.mint!==SOL && !(marks.has(i.mint)&&marks.has(SOL));
+  });
+  const selected=new Set();
+  for(let i=0;i<Math.min(10,missingAccounts.length);i++) selected.add(missingAccounts[(cursor+i)%missingAccounts.length]);
+  fs.writeFileSync(cursorPath,JSON.stringify({offset:missingAccounts.length ? (cursor+selected.size)%missingAccounts.length : 0}),{mode:0o600});
   for (const account of allAccounts) {
       const info=account.account.data.parsed.info, raw=info.tokenAmount.amount, mint=info.mint;
       // Include recoverable ATA reserves, but never count wrapped principal twice.
       rent += account.account.lamports-(mint===SOL ? Number(raw) : 0);
       if (BigInt(raw)===0n) continue;
-      let value = null, basis="spot_mark";
+      let value = null, basis="spot_mark", markError=null;
       try {
         if (mint===SOL) value=Number(raw)/1e9;
         else if (marks.has(mint) && marks.has(SOL)) {
           value=Number(raw)/10**info.tokenAmount.decimals*marks.get(mint).usdPrice/marks.get(SOL).usdPrice;
         } else {
-          if (quotes++ >= 10) throw new Error('Quote budget exhausted');
+          if (!selected.has(account)) throw new Error('quote_budget_deferred');
           const q=await json(`https://api.jup.ag/swap/v1/quote?inputMint=${mint}&outputMint=${SOL}&amount=${raw}&slippageBps=100`,1,2500);
           if (q.inAmount!==raw || !q.outAmount) throw new Error('Quote mismatch');
           value=Number(q.outAmount)/1e9; basis="full_balance_quote";
         }
         if (!Number.isFinite(value) || value<0) throw new Error('Invalid mark');
-      } catch { value=null; issues.push(`unpriced_token:${mint}`); }
-      tokens.push({mint,raw,mark_sol:value,basis,observed_at:now()});
+      } catch (err) { value=null; markError=err.message; issues.push(`unpriced_token:${mint}`); }
+      tokens.push({mint,raw,mark_sol:value,basis,mark_error:markError,observed_at:now()});
       if (value!==null) tokenValue+=value;
   }
   let apiPositions=0;
@@ -159,6 +194,7 @@ async function collect({dir, wallet, PublicKey, rpc, historyOnly=false}) {
   if (head[0]?.slot>slot || now()-started>120) issues.push('snapshot_changed_or_slow');
   const snapshot={ts:now(),started_at:started,wallet,slot,end_slot:endSlot,coverage_since:since,
     wallet_history_complete:coverage.wallet_history_complete,missing_transactions:missing,
+    asset_scope:'native_SOL_SPL_Meteora_LP_and_reserves; NFTs_excluded',
     native_sol:balance/1e9,spl_mark_sol:tokenValue,lp_mark_sol:lpValue,refundable_rent_sol:rent/1e9,
     known_asset_subtotal_sol:balance/1e9+tokenValue+lpValue+rent/1e9,
     nav_sol:issues.length ? null : balance/1e9+tokenValue+lpValue+rent/1e9,

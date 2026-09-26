@@ -24,3 +24,9 @@ for v in replay['schemes'].values():
  assert v['net_after_observed_cost_sol']<v['gross_pnl_sol']
 assert bin_replay({},[end])['status']=='unmeasured'
 print('Root loss/cost gates and forward shadow outcomes/bin replay passed')
+
+from dlmm_evaluate import replay_root_decision
+r=dict(ts=200,root_chain_id='a',chain=root,opportunity_sol=0.02,allow=True,reason='root_cost_budget_pass')
+assert replay_root_decision(r)['proposed']=='recenter'
+assert replay_root_decision(dict(r,opportunity_sol=None))['reason']=='fee_opportunity_unavailable'
+assert replay_root_decision(dict(r,chain=None))['reason']=='incomplete_chain'
