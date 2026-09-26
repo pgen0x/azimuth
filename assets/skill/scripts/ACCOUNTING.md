@@ -95,3 +95,7 @@ Use an isolated checkout for development: the live profile scripts are symlinks.
   classified outside the SOL/SPL/LP asset scope. NFTs are excluded, not valued at zero.
 - The ten-quote fallback budget rotates between missing accounts; errors and budget
   deferrals are recorded separately. Unavailable token prices still leave NAV null.
+
+Quote fallbacks are paced at least 1.1 seconds apart and stop for the remainder
+of the collection pass after HTTP 429; the next scheduled pass resumes the rotated
+budget. Rate-limit deferrals never become zero-valued assets.

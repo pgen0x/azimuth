@@ -8,7 +8,7 @@ const append = (file, row) => fs.appendFileSync(file, JSON.stringify(row) + '\n'
 const now = () => Math.floor(Date.now()/1000);
 async function json(url, attempts=3, timeout=12000) {
   for (let attempt=0; attempt<attempts; attempt++) {
-    if (url.includes("/quote?")) await new Promise(resolve=>setTimeout(resolve,250));
+    if (url.includes("/quote?")) await new Promise(resolve=>setTimeout(resolve,1100));
     const response = await fetch(url, {headers: {'User-Agent': 'curl/8.5.0'}, signal: AbortSignal.timeout(timeout)});
     if (response.status===429 && attempt<attempts-1) { await new Promise(resolve=>setTimeout(resolve,1000*(attempt+1))); continue; }
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -148,6 +148,7 @@ async function collect({dir, wallet, PublicKey, rpc, historyOnly=false}) {
   const selected=new Set();
   for(let i=0;i<Math.min(10,missingAccounts.length);i++) selected.add(missingAccounts[(cursor+i)%missingAccounts.length]);
   fs.writeFileSync(cursorPath,JSON.stringify({offset:missingAccounts.length ? (cursor+selected.size)%missingAccounts.length : 0}),{mode:0o600});
+  let quoteRateLimited=false;
   for (const account of allAccounts) {
       const info=account.account.data.parsed.info, raw=info.tokenAmount.amount, mint=info.mint;
       // Include recoverable ATA reserves, but never count wrapped principal twice.
@@ -159,13 +160,14 @@ async function collect({dir, wallet, PublicKey, rpc, historyOnly=false}) {
         else if (marks.has(mint) && marks.has(SOL)) {
           value=Number(raw)/10**info.tokenAmount.decimals*marks.get(mint).usdPrice/marks.get(SOL).usdPrice;
         } else {
+          if (quoteRateLimited) throw new Error('quote_rate_limit_deferred');
           if (!selected.has(account)) throw new Error('quote_budget_deferred');
           const q=await json(`https://api.jup.ag/swap/v1/quote?inputMint=${mint}&outputMint=${SOL}&amount=${raw}&slippageBps=100`,1,2500);
           if (q.inAmount!==raw || !q.outAmount) throw new Error('Quote mismatch');
           value=Number(q.outAmount)/1e9; basis="full_balance_quote";
         }
         if (!Number.isFinite(value) || value<0) throw new Error('Invalid mark');
-      } catch (err) { value=null; markError=err.message; issues.push(`unpriced_token:${mint}`); }
+      } catch (err) { value=null; markError=err.message; if (err.message==='HTTP 429') quoteRateLimited=true; issues.push(`unpriced_token:${mint}`); }
       tokens.push({mint,raw,mark_sol:value,basis,mark_error:markError,observed_at:now()});
       if (value!==null) tokenValue+=value;
   }
