@@ -3,6 +3,7 @@ package scanner
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os/exec"
@@ -1058,13 +1059,24 @@ func (s *Scanner) pollMode(ctx context.Context, mp meteora.ModeParams) {
 			} else {
 				err = exec.CommandContext(probeCtx, args[0], args[1:]...).Run()
 			}
+			probeTimedOut := probeCtx.Err() == context.DeadlineExceeded
 			cancel()
 			if ctx.Err() != nil {
 				return
 			}
 			useDirect = err != nil
 			if useDirect {
-				log.Printf("scanner[%s]: entry_route=deterministic_fallback AI probe failed; batch not sent to Hermes", mp.Mode)
+				reason := "command_failure"
+				var exitErr *exec.ExitError
+				if errors.As(err, &exitErr) {
+					if label, ok := map[int]string{10: "rate_limit", 11: "http_error", 12: "timeout", 13: "invalid_response", 14: "config_error", 15: "auth_error", 16: "connection_error"}[exitErr.ExitCode()]; ok {
+						reason = label
+					}
+				}
+				if probeTimedOut {
+					reason = "command_timeout"
+				}
+				log.Printf("scanner[%s]: entry_route=deterministic_fallback reason=%s; batch not sent to Hermes", mp.Mode, reason)
 			} else {
 				log.Printf("scanner[%s]: entry_route=hermes_ai AI probe passed", mp.Mode)
 			}

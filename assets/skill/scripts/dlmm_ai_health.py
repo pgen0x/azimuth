@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import sys
 import urllib.request
+import urllib.error
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -44,9 +45,20 @@ def probe(runtime, model, opener=None):
     if not choices:
         return False
     calls = choices[0].get("message", {}).get("tool_calls") or []
-    return any(call.get("function", {}).get("name") == "health_check"
-               and json.loads(call["function"].get("arguments", "null")) == {}
-               for call in calls)
+    for call in calls:
+        function = call.get("function", {})
+        if function.get("name") != "health_check":
+            continue
+        try:
+            arguments = json.loads(function.get("arguments", "null"))
+        except (TypeError, ValueError):
+            continue
+        # This tool is never executed. Extra arguments such as {"reason": ...}
+        # still prove inference is available; exact schema conformance is not
+        # a provider availability check.
+        if isinstance(arguments, dict):
+            return True
+    return False
 
 
 def main():
@@ -58,6 +70,7 @@ def main():
     profile = Path(args.profile).resolve()
     os.environ["HERMES_HOME"] = str(profile)
     sys.path.insert(0, str(Path(args.hermes_root).resolve()))
+    stage = "config"
     try:
         from dotenv import load_dotenv
         load_dotenv(profile / ".env", override=True)
@@ -74,13 +87,23 @@ def main():
         if model != model_cfg["default"]:
             raise ValueError("route/profile model mismatch")
         runtime = resolve_runtime_provider(requested=model_cfg.get("provider"), target_model=model)
+        stage = "inference"
         healthy = probe(runtime, model)
         print("AI probe healthy" if healthy else "AI probe unavailable")
-        return 0 if healthy else 1
+        return 0 if healthy else 13
+    except urllib.error.HTTPError as exc:
+        print("AI probe HTTP status: " + str(exc.code))
+        return 10 if exc.code == 429 else 15 if exc.code in (401, 403) else 11
+    except TimeoutError:
+        print("AI probe timeout")
+        return 12
+    except urllib.error.URLError as exc:
+        print("AI probe connection failed")
+        return 12 if isinstance(exc.reason, TimeoutError) else 16
     except Exception as exc:
         # HTTP bodies, URLs and resolver errors can contain credentials.
         print("AI probe unavailable: " + type(exc).__name__)
-        return 1
+        return 14 if stage == "config" else 13
 
 
 if __name__ == "__main__":
