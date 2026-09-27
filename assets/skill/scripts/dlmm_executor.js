@@ -328,7 +328,7 @@ async function reclaimEmptyAccounts(execute = false) {
       }
       const excluded = new Set(["So11111111111111111111111111111111111111112"]);
       const positions = await DLMM.getAllLbPairPositionsByUser(connection, wallet.publicKey);
-      for (const [address, data] of Object.entries(positions)) {
+      for (const [address, data] of positions) {
         if (!data.lbPairPositionsData.length) continue;
         const pool = await DLMM.create(connection, new PublicKey(address));
         excluded.add(pool.lbPair.tokenXMint.toString());
@@ -550,7 +550,7 @@ async function deployPosition(poolAddressStr, amountX, amountY, binsBelow, binsA
 async function findPoolForPosition(connection, wallet, positionAddressStr) {
   // Try SDK first
   const allPositions = await DLMM.getAllLbPairPositionsByUser(connection, wallet.publicKey);
-  for (const [lbPairKey, posData] of Object.entries(allPositions)) {
+  for (const [lbPairKey, posData] of allPositions) {
     const found = posData.lbPairPositionsData.find(p => p.publicKey.toString() === positionAddressStr);
     if (found) {
       const pool = await DLMM.create(connection, new PublicKey(lbPairKey));
@@ -733,7 +733,7 @@ async function getPositions(walletAddressStr) {
     const allPositions = await DLMM.getAllLbPairPositionsByUser(connection, targetWallet);
     
     const result = [];
-    for (const [lbPairKey, posData] of Object.entries(allPositions)) {
+    for (const [lbPairKey, posData] of allPositions) {
       const pool = await DLMM.create(connection, new PublicKey(lbPairKey));
       const activeBin = await pool.getActiveBin();
       
@@ -746,14 +746,14 @@ async function getPositions(walletAddressStr) {
         result.push({
           position: pos.publicKey.toString(),
           pool: lbPairKey,
-          tokenX: pool.tokenX.symbol,
-          tokenY: pool.tokenY.symbol,
+          tokenX: pool.tokenX.symbol || pool.lbPair.tokenXMint.toString(),
+          tokenY: pool.tokenY.symbol || pool.lbPair.tokenYMint.toString(),
           lower_bin: lowerBinId,
           upper_bin: upperBinId,
           active_bin: activeBin.binId,
           in_range: inRange,
-          feeX: pos.feeX.toString(),
-          feeY: pos.feeY.toString()
+          feeX: data.feeX.toString(),
+          feeY: data.feeY.toString()
         });
       }
     }
