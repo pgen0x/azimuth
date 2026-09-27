@@ -18,6 +18,8 @@ assert.equal(transactionFact(passive,wallet,'nft').classification,'unclassified'
 const gift={slot:150,blockTime:150,transaction:{message:{accountKeys:[{pubkey:'payer'}, {pubkey:wallet,writable:false,signer:false},{pubkey:'ata'}],instructions:[{programId:'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA',parsed:{type:'transfer'}}]}},meta:{err:null,fee:5,preBalances:[3000000,10,0],postBalances:[960715,10,2039280],preTokenBalances:[],postTokenBalances:[{owner:wallet,mint:'gift',accountIndex:2,uiTokenAmount:{amount:'10000000000'}}]}};
 assert.equal(transactionFact(gift,wallet,'gift').classification,'external_token_inflow');
 assert.equal(transactionFact(gift,wallet,'gift').external_flow_lamports,null);
+assert.deepEqual(transactionFact(gift,wallet,'gift').token_pre_balances_raw,{});
+assert.deepEqual(transactionFact(gift,wallet,'gift').token_post_balances_raw,{gift:'10000000000'});
 assert.equal(transactionFact(gift,wallet,'gift',{position:'p'}).classification,'recorded_bot');
 for(const alter of [
   t=>{t.transaction.message.accountKeys[1].signer=true},

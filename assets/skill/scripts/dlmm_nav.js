@@ -58,10 +58,12 @@ function transactionFact(tx, wallet, signature, event) {
   const keys = tx.transaction.message.accountKeys.map(k => k.pubkey.toString());
   const index = keys.indexOf(wallet), meta = tx.meta;
   if (index < 0 || !meta || ![meta.preBalances[index], meta.postBalances[index], meta.fee].every(Number.isSafeInteger)) throw new Error('Invalid wallet balances');
-  const tokenDeltas = {}, tokenAccounts = new Set();
+  const tokenDeltas = {}, tokenPre = {}, tokenPost = {}, tokenAccounts = new Set();
   for (const [rows, sign] of [[meta.preTokenBalances, -1n], [meta.postTokenBalances, 1n]]) {
     for (const r of rows || []) if (r.owner === wallet) {
       tokenDeltas[r.mint] = (tokenDeltas[r.mint] || 0n) + sign*BigInt(r.uiTokenAmount.amount);
+      const balances=sign<0n ? tokenPre : tokenPost;
+      balances[r.mint]=(balances[r.mint] || 0n)+BigInt(r.uiTokenAmount.amount);
       tokenAccounts.add(keys[r.accountIndex]);
     }
   }
@@ -104,9 +106,11 @@ function transactionFact(tx, wallet, signature, event) {
         || id==='ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL' && ['create','createIdempotent'].includes(type)
         || TOKEN_PROGRAMS.includes(id) && ['transfer','transferChecked','getAccountDataSize','initializeImmutableOwner','initializeAccount','initializeAccount2','initializeAccount3'].includes(type);
     });
-  return {schema_version:4,event_position:event?.position,signature, wallet, slot: tx.slot, block_time: tx.blockTime, observed_at: now(), failed: !!meta.err,
+  return {schema_version:5,event_position:event?.position,signature, wallet, slot: tx.slot, block_time: tx.blockTime, observed_at: now(), failed: !!meta.err,
     wallet_delta_lamports: meta.postBalances[index]-meta.preBalances[index], fee_lamports: index === 0 ? meta.fee : 0,
     token_deltas_raw: Object.fromEntries(Object.entries(tokenDeltas).map(([m,a]) => [m,a.toString()])),
+    token_pre_balances_raw: Object.fromEntries(Object.entries(tokenPre).map(([m,a]) => [m,a.toString()])),
+    token_post_balances_raw: Object.fromEntries(Object.entries(tokenPost).map(([m,a]) => [m,a.toString()])),
     external_flow_lamports: simpleTransfer ? external : null,
     position_account_closed: !meta.err && !!event?.position && keys.includes(event.position) && meta.preBalances[keys.indexOf(event.position)]>0 && meta.postBalances[keys.indexOf(event.position)]===0,
     classification: event ? 'recorded_bot' : simpleTransfer ? 'external_transfer' : passiveNFT ? 'passive_nft_outside_scope' : passiveToken ? 'external_token_inflow' : meta.err ? 'failed' : 'unclassified',
@@ -132,6 +136,7 @@ async function collect({dir, wallet, PublicKey, rpc, historyOnly=false}) {
   }
   const currentFact=r=>{const f=cache.get(r.signature); return f?.wallet===wallet && f?.schema_version>=2
     && (f.schema_version>=4 || f.classification!=='unclassified')
+    && (!(events.get(r.signature)?.kind==='swap' && !events.get(r.signature)?.position) || f.token_pre_balances_raw!=null)
     && f.event_position===events.get(r.signature)?.position;};
   let fetched = 0;
   for (const r of signatures) {
