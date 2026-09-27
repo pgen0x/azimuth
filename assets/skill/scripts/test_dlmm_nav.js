@@ -15,6 +15,17 @@ const passive={...tx,transaction:{message:{accountKeys:[{pubkey:key('payer')},{p
 assert.equal(transactionFact(passive,wallet,'nft').classification,'passive_nft_outside_scope');
 passive.transaction.message.accountKeys[1].writable=true;
 assert.equal(transactionFact(passive,wallet,'nft').classification,'unclassified');
+const gift={slot:150,blockTime:150,transaction:{message:{accountKeys:[{pubkey:'payer'}, {pubkey:wallet,writable:false,signer:false},{pubkey:'ata'}],instructions:[{programId:'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA',parsed:{type:'transfer'}}]}},meta:{err:null,fee:5,preBalances:[3000000,10,0],postBalances:[960715,10,2039280],preTokenBalances:[],postTokenBalances:[{owner:wallet,mint:'gift',accountIndex:2,uiTokenAmount:{amount:'10000000000'}}]}};
+assert.equal(transactionFact(gift,wallet,'gift').classification,'external_token_inflow');
+assert.equal(transactionFact(gift,wallet,'gift').external_flow_lamports,null);
+assert.equal(transactionFact(gift,wallet,'gift',{position:'p'}).classification,'recorded_bot');
+for(const alter of [
+  t=>{t.transaction.message.accountKeys[1].signer=true},
+  t=>{t.meta.postBalances[1]=9},
+  t=>{t.transaction.message.instructions[0].parsed.type='approve'},
+  t=>{t.meta.innerInstructions=[{instructions:[{programId:'unknown-hook'}]}]},
+  t=>{t.meta.preTokenBalances=[{owner:wallet,mint:'sold',accountIndex:2,uiTokenAmount:{amount:'1'}}]},
+]){const t=JSON.parse(JSON.stringify(gift));alter(t);assert.equal(transactionFact(t,wallet,'unknown').classification,'unclassified');}
 const dir=fs.mkdtempSync(path.join(os.tmpdir(),'nav-check-'));
 let unknown=false, height=101, signatureStatus=null;
 const connection={

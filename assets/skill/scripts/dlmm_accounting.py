@@ -34,6 +34,7 @@ def report(profile, as_of=None):
     facts = {r["signature"]: r for r in rows(memories / "dlmm_transaction_facts.jsonl") if r.get("observed_at", float("inf") if replay else 0) <= as_of}
     wallet_facts = {r["signature"]: r for r in rows(memories / "dlmm_wallet_transactions.jsonl") if r.get("observed_at", float("inf") if replay else 0) <= as_of}
     facts.update(wallet_facts)
+    token_inflows = [r for r in wallet_facts.values() if r.get("classification") == "external_token_inflow"]
     snapshots = [r for r in rows(memories / "dlmm_nav.jsonl") if r["ts"] <= as_of]
     latest = snapshots[-1] if snapshots else {}
     coverages = [r for r in rows(memories / "dlmm_wallet_coverage.jsonl") if r["ts"] <= as_of]
@@ -52,7 +53,7 @@ def report(profile, as_of=None):
     def chain(root):
         return chains.setdefault(root, {"root_chain_id": root, "positions": set(),
             "recorded_signatures": set(), "pending_signatures": [], "expired_unlanded_signatures": [], "wallet_delta_lamports": 0,
-            "network_fee_lamports": 0, "reconciled_transactions": 0, "failed_transactions": 0, "token_deltas_raw": {},
+            "network_fee_lamports": 0, "reconciled_transactions": 0, "failed_transactions": 0, "token_deltas_raw": {}, "touched_mints": set(),
             "first_activity": float("inf"), "swap_delta_lamports": 0, "nonrefundable_account_cost_lamports": 0, "last_activity": 0, "lp_pnl_sol": 0.0, "lp_unmeasured_positions": [], "reasons": []})
 
     position_roots = {}
@@ -98,6 +99,7 @@ def report(profile, as_of=None):
         if event.get("kind") == "swap":
             c["swap_delta_lamports"] += fact["wallet_delta_lamports"]
         for mint, amount in fact["token_deltas_raw"].items():
+            c["touched_mints"].add(mint)
             c["token_deltas_raw"][mint] = c["token_deltas_raw"].get(mint, 0) + int(amount)
 
     for c in chains.values():
@@ -109,7 +111,12 @@ def report(profile, as_of=None):
                 c["lp_unmeasured_positions"].append(position)
         c["positions"] = sorted(c["positions"])
         c["recorded_signatures"] = sorted(c["recorded_signatures"])
+        c["touched_mints"] = sorted(c["touched_mints"])
         c["token_deltas_raw"] = {m: str(v) for m, v in c["token_deltas_raw"].items() if v}
+        if any((r.get("block_time") is None or c["first_activity"] <= r["block_time"] <= c["last_activity"])
+               and any(m in c["touched_mints"] and int(v)>0 for m,v in r.get("token_deltas_raw", {}).items())
+               for r in token_inflows):
+            c["reasons"].append("external_token_inflow_requires_attribution")
         if c["pending_signatures"]:
             c["reasons"].append("unresolved_transactions")
         if any(p not in closes for p in c["positions"]):
@@ -150,12 +157,17 @@ def report(profile, as_of=None):
     nav = latest.get("nav_sol") if as_of - latest.get("ts", 0) <= 600 else None
     first = next((r for r in snapshots if r.get("nav_sol") is not None), {})
     change = None
-    if nav is not None and first and latest.get("wallet_history_complete") and not latest.get("unclassified_transactions"):
+    # A gifted token (and externally funded ATA rent) increases wallet wealth,
+    # but its transfer-time value is not known. Never count it as trading profit.
+    unvalued_inflows = [r["signature"] for r in token_inflows if first
+                       and (r.get("slot") is None or first["end_slot"] < r["slot"] <= latest.get("end_slot", 0))]
+    if nav is not None and first and latest.get("wallet_history_complete") and not latest.get("unclassified_transactions") and not unvalued_inflows:
         external = sum(r.get("external_flow_lamports") or 0 for r in wallet_facts.values()
                        if first["end_slot"] < r.get("slot", 0) <= latest.get("end_slot", 0)) / 1e9
         change = nav - first["nav_sol"] - external
     return {"basis": "recorded_finalized_wallet_cash_flows", "nav_sol": nav,
             "nav_snapshot": latest, "flow_adjusted_wealth_change_sol": change,
+            "unvalued_external_token_inflows": unvalued_inflows,
             "note": "Wallet delta already includes network fees and net account rent movements; do not subtract fees again. LP PnL uses Meteora valuations. Neither is portfolio NAV. Rent, inventory drift and swap attribution require further reconciliation.",
             "chains": sorted(chains.values(), key=lambda c: c["root_chain_id"])}
 

@@ -1,5 +1,13 @@
 # Solana accounting and review
 
+Unsigned, read-only-wallet SPL credits made solely through known transfer/ATA
+instructions are classified as `external_token_inflow`. They do not invalidate
+unrelated bot root chains. A chain touching the same mint during the inflow stays
+incomplete pending attribution, even if its recorded token deltas net to zero.
+Wallet wealth change remains unmeasured across such inflows: neither donated
+tokens nor externally funded ATA reserves are trading profit. Unknown programs,
+authority changes, outflows, wallet signatures or SOL changes remain unclassified.
+
 Run commands through the profile scripts path, or pass `--profile` explicitly.
 
 ```sh

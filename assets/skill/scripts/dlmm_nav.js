@@ -89,12 +89,27 @@ function transactionFact(tx, wallet, signature, event) {
     && meta.preBalances[index] === meta.postBalances[index] && tokenAccounts.size === 0
     && tx.transaction.message.instructions.length > 0
     && tx.transaction.message.instructions.every(i => i.programId?.toString() === 'BGUMAp9Gq7iTEuizy4pqaxsTyUCBK68MDfK752saRPUY');
-  return {schema_version:3,event_position:event?.position,signature, wallet, slot: tx.slot, block_time: tx.blockTime, observed_at: now(), failed: !!meta.err,
+  // A plain unsolicited SPL credit is an external asset inflow, not bot PnL.
+  // Require all outer/inner instructions to be known transfer/ATA operations;
+  // custom programs, delegate/authority changes and token-hook calls stay unknown.
+  const passiveToken = !event && !meta.err && index !== 0
+    && tx.transaction.message.accountKeys[index].writable === false
+    && tx.transaction.message.accountKeys[index].signer === false
+    && meta.preBalances[index] === meta.postBalances[index]
+    && Object.values(tokenDeltas).some(v=>v>0n) && Object.values(tokenDeltas).every(v=>v>=0n)
+    && instructions.length>0 && instructions.every(i=>{
+      const id=i.programId?.toString(), type=i.parsed?.type;
+      return id==='ComputeBudget111111111111111111111111111111'
+        || id==='11111111111111111111111111111111' && type==='createAccount'
+        || id==='ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL' && ['create','createIdempotent'].includes(type)
+        || TOKEN_PROGRAMS.includes(id) && ['transfer','transferChecked','getAccountDataSize','initializeImmutableOwner','initializeAccount','initializeAccount2','initializeAccount3'].includes(type);
+    });
+  return {schema_version:4,event_position:event?.position,signature, wallet, slot: tx.slot, block_time: tx.blockTime, observed_at: now(), failed: !!meta.err,
     wallet_delta_lamports: meta.postBalances[index]-meta.preBalances[index], fee_lamports: index === 0 ? meta.fee : 0,
     token_deltas_raw: Object.fromEntries(Object.entries(tokenDeltas).map(([m,a]) => [m,a.toString()])),
     external_flow_lamports: simpleTransfer ? external : null,
     position_account_closed: !meta.err && !!event?.position && keys.includes(event.position) && meta.preBalances[keys.indexOf(event.position)]>0 && meta.postBalances[keys.indexOf(event.position)]===0,
-    classification: event ? 'recorded_bot' : simpleTransfer ? 'external_transfer' : passiveNFT ? 'passive_nft_outside_scope' : meta.err ? 'failed' : 'unclassified',
+    classification: event ? 'recorded_bot' : simpleTransfer ? 'external_transfer' : passiveNFT ? 'passive_nft_outside_scope' : passiveToken ? 'external_token_inflow' : meta.err ? 'failed' : 'unclassified',
     refundable_rent_locked_lamports: rentLocked, nonrefundable_account_cost_lamports: permanentRent,
     basis: 'finalized_transaction_balances'};
 }
@@ -116,7 +131,7 @@ async function collect({dir, wallet, PublicKey, rpc, historyOnly=false}) {
     before = batch[batch.length-1].signature;
   }
   const currentFact=r=>{const f=cache.get(r.signature); return f?.wallet===wallet && f?.schema_version>=2
-    && (f.schema_version>=3 || f.classification!=='unclassified')
+    && (f.schema_version>=4 || f.classification!=='unclassified')
     && f.event_position===events.get(r.signature)?.position;};
   let fetched = 0;
   for (const r of signatures) {
