@@ -39,8 +39,14 @@ class Connection {
   async sendRawTransaction(raw, options) { sends++; lastMaxRetries = options.maxRetries; assert.equal(raw.toString(), "exact-blockhash"); if (sendError) throw new Error("timeout after send"); return "sig"; }
   async confirmTransaction(strategy) { if (confirmTimeout) throw new Error("confirmation timeout"); assert.equal(strategy.blockhash, "exact-blockhash"); return { value: { err: confirmationError ? "chain error" : null } }; }
 }
+const rentInstructions = [];
+class RentTransaction {
+  constructor() { Object.assign(this, transaction()); }
+  add(instruction) { rentInstructions.push(instruction); return this; }
+  compileMessage() { return {}; }
+}
 const deps = {
-  "@solana/web3.js": { Connection, Keypair: { generate: () => ({ publicKey: key(`position-${++minted}`) }) }, PublicKey: function (v) { return key(v); }, VersionedTransaction: { deserialize: () => ({ message: {}, signatures: [Buffer.from([1])], sign() {}, serialize() { return Buffer.from(this.message.recentBlockhash); } }) } },
+  "@solana/web3.js": { Transaction: RentTransaction, Connection, Keypair: { generate: () => ({ publicKey: key(`position-${++minted}`) }) }, PublicKey: function (v) { return key(v); }, VersionedTransaction: { deserialize: () => ({ message: {}, signatures: [Buffer.from([1])], sign() {}, serialize() { return Buffer.from(this.message.recentBlockhash); } }) } },
   "@meteora-ag/dlmm": { create: async () => pool, StrategyType: { Spot: 0, Curve: 1, BidAsk: 2 }, positionOwnerFilter: () => ({}) },
   "bn.js": function (value) { this.value = value; }, "bs58": { encode: () => "signature" },
   "dotenv": { config() {}, parse: () => ({}) },
@@ -206,5 +212,62 @@ const clearMarker = () => fs.rmSync(marker, { force: true });
   assert.equal(JSON.parse(facts[0]).wallet_delta_lamports, -30000);
   assert.equal(JSON.parse(facts[0]).fee_lamports, 5000);
   assert.equal(JSON.parse(facts[0]).token_deltas_raw.TOKEN, "9007199254740993");
+  // Rent maintenance never burns/sells tokens, pays only this wallet, and does
+  // not re-broadcast after an uncertain send (including across invocations).
+  const { reclaimEmptyAccounts } = sandbox.module.exports;
+  const tokenProgram = key("classic-token");
+  let fee = 5000;
+  deps["@solana/spl-token"] = { TOKEN_PROGRAM_ID: tokenProgram,
+    createCloseAccountInstruction: (account, destination, authority) => {
+      assert.equal(destination, wallet.publicKey); assert.equal(authority, wallet.publicKey);
+      return account.toString();
+    } };
+  // Transaction was destructured when the executor loaded; use its injected class.
+  let tokenAccounts = [];
+  Connection.prototype.getParsedTokenAccountsByOwner = async () => ({ value: tokenAccounts });
+  Connection.prototype.getFeeForMessage = async () => ({ value: fee });
+  deps["@meteora-ag/dlmm"].getAllLbPairPositionsByUser = async () => ({ pool: { lbPairPositionsData: [{}] } });
+  const account = (name, overrides = {}, accountOverrides = {}) => ({ pubkey: key(name), account: {
+    owner: tokenProgram, lamports: 1488440, data: { parsed: { info: {
+      owner: wallet.publicKey.toString(), tokenAmount: { amount: "0" }, state: "initialized",
+      isNative: false, mint: "unused-token", ...overrides } } }, ...accountOverrides } });
+  tokenAccounts = [account("eligible"), account("nonzero", {tokenAmount: {amount: "1"}}),
+    account("active", {mint: "TOKEN"}), account("wrapped", {mint: "So11111111111111111111111111111111111111112"}),
+    account("foreign", {owner: "other"}), account("authority", {closeAuthority: "other"}),
+    account("frozen", {state: "frozen"}), account("native", {isNative: true}),
+    account("delegate", {delegate: "someone"}), account("2022", {}, {owner: key("token2022")})];
+  fs.rmSync(path.dirname(marker), {recursive: true, force: true});
+  fs.rmSync(path.join(root, "memories/dlmm_pending_swaps"), {recursive: true, force: true});
+  const beforeRent = sends;
+  assert.equal((await reclaimEmptyAccounts()).eligible, 1); assert.equal(sends, beforeRent);
+  fee = null;
+  await assert.rejects(reclaimEmptyAccounts(true), /unknown or uneconomic/); assert.equal(sends, beforeRent);
+  fee = 5000;
+  const eligibleSet = tokenAccounts;
+  tokenAccounts = Array.from({length: 12}, (_, i) => account(`empty-${i}`));
+  const bounded = await reclaimEmptyAccounts();
+  assert.equal(bounded.eligible, 12); assert.equal(bounded.accounts.length, 8);
+  tokenAccounts = eligibleSet; env.DRY_RUN = "true";
+  assert.equal((await reclaimEmptyAccounts(true)).dry_run, true); assert.equal(sends, beforeRent);
+  delete env.DRY_RUN;
+  const releaseRentLock = await acquireDeployLock(wallet.publicKey.toString());
+  try { await assert.rejects(reclaimEmptyAccounts(true), /ENTRY BUSY/); }
+  finally { await releaseRentLock(); }
+  env.DLMM_ENTRY_ID = "must-not-attribute-rent-to-entry";
+  const reclaimed = await reclaimEmptyAccounts(true);
+  assert.equal(reclaimed.recovered_lamports_before_fee, 1488440); assert.equal(sends, beforeRent + 1);
+  assert.deepEqual(rentInstructions, ["eligible", "eligible"]); // fee rejection builds but never sends
+  const rentEvent = JSON.parse(fs.readFileSync(journal, "utf8").trim().split("\n").at(-1));
+  assert.equal(rentEvent.kind, "rent_reclaim"); assert.equal(rentEvent.entry_id, null); assert.equal(rentEvent.root_chain_id, null);
+  signatureStatus = null; sendError = true; confirmTimeout = true; height = 100;
+  await assert.rejects(reclaimEmptyAccounts(true), /confirmation timeout/);
+  assert.equal(sends, beforeRent + 2);
+  assert.equal((await reclaimEmptyAccounts(true)).pending, true); assert.equal(sends, beforeRent + 2);
+  signatureStatus = { confirmationStatus: "finalized", err: null };
+  assert.equal((await reclaimEmptyAccounts(true)).reconciled, true); assert.equal(sends, beforeRent + 2);
+  sendError = false; confirmTimeout = false; signatureStatus = null;
+  fs.appendFileSync = () => { throw new Error("disk full"); };
+  try { await assert.rejects(reclaimEmptyAccounts(true), /disk full/); assert.equal(sends, beforeRent + 2); }
+  finally { fs.appendFileSync = append; }
   console.log("Cross-process lock, concurrent mint, chain exposure, signed expiry and uncertain-send checks passed");
 })().catch((err) => { console.error(err); process.exitCode = 1; }).finally(() => { if (!worker) fs.rmSync(root, { recursive: true, force: true }); });

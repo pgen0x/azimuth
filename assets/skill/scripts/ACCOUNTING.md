@@ -135,3 +135,18 @@ known-asset subtotal, and leave strict NAV incomplete (`undated_helius_price`).
 Response receipt time is not presented as price freshness. Zero/missing/invalid
 prices and incomplete paginated responses are not usable prices. Trading swap
 routing and root authorization are unchanged; history-only collection skips prices.
+
+### Empty SPL account rent
+
+`node dlmm_executor.js reclaim-empty-accounts` previews up to eight eligible
+classic SPL accounts. Add `--execute` to close that batch back to the same wallet.
+This is manual maintenance, not a scheduled trading action. Nonzero balances,
+wrapped SOL, Token-2022, delegated/frozen accounts, foreign close authorities and
+mints with open Meteora positions are excluded. Entry and swap locks are held;
+unexpired trading reservations block maintenance. An uncertain send retains its
+signed transaction identity for reconciliation before another batch can run.
+
+Submissions use `rent_reclaim` with no entry/root attribution. Reclaimed lamports
+are a move from recoverable account reserves to spendable SOL, **not trading
+profit**. Portfolio NAV includes both sides; the network fee is a cost. Historical
+root cash accounting is not retroactively credited with these wallet-level funds.

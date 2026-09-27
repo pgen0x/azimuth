@@ -1,4 +1,4 @@
-const { Connection, Keypair, PublicKey, VersionedTransaction } = require("@solana/web3.js");
+const { Connection, Keypair, PublicKey, VersionedTransaction, Transaction } = require("@solana/web3.js");
 const DLMM = require("@meteora-ag/dlmm");
 const { StrategyType } = require("@meteora-ag/dlmm");
 const BN = require("bn.js");
@@ -88,10 +88,10 @@ function recordSubmission(wallet, position, kind, signature, lastValidBlockHeigh
     fs.appendFileSync(path.join(dir, "dlmm_transactions.jsonl"), JSON.stringify({
       ts: Math.floor(Date.now() / 1000), wallet: wallet.publicKey.toString(),
       position: position || null, root_chain_id: context.root_chain_id || context.recenter_of || position || null,
-      entry_id: context.entry_id || process.env.DLMM_ENTRY_ID || null, kind, signature, lastValidBlockHeight,
-    }) + "\n", { mode: 0o600 });
+      entry_id: kind === "rent_reclaim" ? null : context.entry_id || process.env.DLMM_ENTRY_ID || null, kind, signature, lastValidBlockHeight,
+    }) + "\n", { mode: 0o600, flush: kind === "rent_reclaim" });
   } catch (err) {
-    if (kind === "deploy") throw err;
+    if (kind === "deploy" || kind === "rent_reclaim") throw err;
     // Accounting storage must not prevent an exit or liquidation.
     console.warn(`[ACCOUNTING] Recording failed for ${kind} ${signature}; coverage incomplete`);
   }
@@ -272,13 +272,13 @@ async function acquireSwapLock(walletAddress) {
   return () => new Promise((resolve) => server.close(resolve));
 }
 
-async function reconcilePendingSwap(connection, pendingPath) {
+async function reconcilePendingSwap(connection, pendingPath, label = "Swap") {
   if (!fs.existsSync(pendingPath)) return null;
   let pending;
   try {
     pending = JSON.parse(fs.readFileSync(pendingPath, "utf8"));
   } catch (err) {
-    return { success: false, pending: true, error: `Swap reconciliation blocked by invalid marker: ${err.message}` };
+    return { success: false, pending: true, error: `${label} reconciliation blocked by invalid marker: ${err.message}` };
   }
   const finalizedHeight = await connection.getBlockHeight("finalized");
   const status = (await connection.getSignatureStatuses(
@@ -296,10 +296,92 @@ async function reconcilePendingSwap(connection, pendingPath) {
   if (status || !Number.isSafeInteger(pending.lastValidBlockHeight)
       || finalizedHeight <= pending.lastValidBlockHeight) {
     return { success: false, pending: true, txHash: pending.signature,
-      error: "Swap confirmation pending from a previous submission" };
+      error: `${label} confirmation pending from a previous submission` };
   }
   fs.rmSync(pendingPath, { force: true });
   return null;
+}
+
+// Manual maintenance only. Token-2022/extensions and wrapped SOL are deliberately
+// excluded. The SPL program also rejects closure if tokens arrive after this read.
+async function reclaimEmptyAccounts(execute = false) {
+  const { TOKEN_PROGRAM_ID, createCloseAccountInstruction } = require("@solana/spl-token");
+  const wallet = getWallet(), owner = wallet.publicKey.toString();
+  const releaseEntry = await acquireDeployLock(owner);
+  let releaseSwap;
+  try {
+    releaseSwap = await acquireSwapLock(owner);
+    const pendingPath = path.join(PROFILE_DIR, "memories", "dlmm_pending_rent", `${owner}.json`);
+    // Read failover is safe. Broadcast below runs once, on this connection only.
+    const state = await runWithFailover(async connection => {
+      const pending = await reconcilePendingSwap(connection, pendingPath, "Rent reclaim");
+      if (pending) return { pending };
+      const finalizedHeight = await connection.getBlockHeight("finalized");
+      for (const name of ["dlmm_pending_swaps", "dlmm_pending_deploys"]) {
+        const dir = path.join(PROFILE_DIR, "memories", name);
+        for (const file of fs.existsSync(dir) ? fs.readdirSync(dir).filter(f => f.endsWith(".json")) : []) {
+          const marker = JSON.parse(fs.readFileSync(path.join(dir, file), "utf8"));
+          if (!Number.isSafeInteger(marker.lastValidBlockHeight) || finalizedHeight <= marker.lastValidBlockHeight) {
+            throw new Error("Rent reclaim refused: wait for pending trading blockhash expiry");
+          }
+        }
+      }
+      const excluded = new Set(["So11111111111111111111111111111111111111112"]);
+      const positions = await DLMM.getAllLbPairPositionsByUser(connection, wallet.publicKey);
+      for (const [address, data] of Object.entries(positions)) {
+        if (!data.lbPairPositionsData.length) continue;
+        const pool = await DLMM.create(connection, new PublicKey(address));
+        excluded.add(pool.lbPair.tokenXMint.toString());
+        excluded.add(pool.lbPair.tokenYMint.toString());
+      }
+      const response = await connection.getParsedTokenAccountsByOwner(wallet.publicKey,
+        { programId: TOKEN_PROGRAM_ID }, "finalized");
+      const accounts = response.value.filter(({ account }) => {
+        const info = account.data?.parsed?.info;
+        return account.owner.toString() === TOKEN_PROGRAM_ID.toString()
+          && info?.owner === owner && (info.closeAuthority || owner) === owner
+          && info.tokenAmount?.amount === "0" && info.state === "initialized"
+          && info.isNative === false && !info.delegate && !excluded.has(info.mint)
+          && Number.isSafeInteger(account.lamports) && account.lamports > 0;
+      });
+      return { connection, accounts };
+    });
+    if (state.pending) return state.pending;
+    // ponytail: eight accounts per manual call keeps legacy transactions small;
+    // rerun after confirmation for more, rather than introducing a background job.
+    const accounts = state.accounts.slice(0, 8);
+    const result = { success: true, dry_run: !execute || process.env.DRY_RUN === "true",
+      eligible: state.accounts.length, accounts: accounts.map(a => ({ account: a.pubkey.toString(),
+        mint: a.account.data.parsed.info.mint, rent_lamports: a.account.lamports })),
+      recovered_lamports_before_fee: accounts.reduce((sum, a) => sum + a.account.lamports, 0) };
+    if (result.dry_run || !accounts.length) return result;
+    const connection = state.connection;
+    const tx = new Transaction();
+    for (const a of accounts) tx.add(createCloseAccountInstruction(a.pubkey, wallet.publicKey, wallet.publicKey));
+    const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash("confirmed");
+    tx.recentBlockhash = blockhash;
+    tx.feePayer = wallet.publicKey;
+    const fee = (await connection.getFeeForMessage(tx.compileMessage(), "confirmed")).value;
+    if (!Number.isSafeInteger(fee) || fee < 0 || fee >= result.recovered_lamports_before_fee) {
+      throw new Error("Rent reclaim refused: unknown or uneconomic network fee");
+    }
+    tx.sign(wallet);
+    const raw = tx.serialize(), signature = bs58.encode(tx.signature);
+    fs.mkdirSync(path.dirname(pendingPath), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(pendingPath, JSON.stringify({ signature, blockhash, lastValidBlockHeight }), { mode: 0o600, flag: "wx", flush: true });
+    recordSubmission(wallet, null, "rent_reclaim", signature, lastValidBlockHeight);
+    try {
+      await connection.sendRawTransaction(raw, CONFIRM_OPTIONS);
+    } catch (_) {
+      // Sending may have succeeded despite the RPC error. Never rebuild/retry.
+    }
+    await confirmSignedTransaction(connection, { signature, blockhash, lastValidBlockHeight });
+    fs.rmSync(pendingPath);
+    return { ...result, txHash: signature, fee_lamports: fee };
+  } finally {
+    if (releaseSwap) await releaseSwap();
+    await releaseEntry();
+  }
 }
 
 async function assertNoTokenExposure(pool, wallet) {
@@ -1018,7 +1100,10 @@ async function main() {
   }
   
   try {
-    if (command === "accounting") {
+    if (command === "reclaim-empty-accounts") {
+      if (args.slice(1).some(arg => arg !== "--execute")) throw new Error("Usage: reclaim-empty-accounts [--execute]");
+      console.log(JSON.stringify(await reclaimEmptyAccounts(args.includes("--execute"))));
+    } else if (command === "accounting") {
       const recorded = await reconcileAccounting();
       const { collect } = require("./dlmm_nav.js");
       const wallet = process.env.SOLANA_PUBLIC_KEY || getWallet().publicKey.toString();
@@ -1170,5 +1255,5 @@ async function main() {
 }
 
 if (require.main === module) main();
-module.exports = { assertRootBudget, reconcileAccounting, recordSubmission, closePosition, swapToken, confirmSignedTransaction, deployPosition, acquireDeployLock, acquireSwapLock, reconcilePendingSwap,
+module.exports = { reclaimEmptyAccounts, assertRootBudget, reconcileAccounting, recordSubmission, closePosition, swapToken, confirmSignedTransaction, deployPosition, acquireDeployLock, acquireSwapLock, reconcilePendingSwap,
   assertNoTokenExposure, positionIsEmpty, positionAccountExists, slippageBpsToPercent };
