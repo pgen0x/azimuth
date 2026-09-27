@@ -1,5 +1,13 @@
 # Solana accounting and review
 
+Unlinked cleanup swaps can be attributed to a root only when finalized transaction
+balances show an exact sale of its entire residual inventory, one closed root is
+the sole recorded owner, and wallet coverage is complete and fresh. Shared mint
+balances, partial sales, unresolved submissions, same-mint external inflows and
+missing transaction-time balances remain unresolved. Attribution is recorded in
+`cleanup_settlements`; it never edits the original event journal. Cash proceeds
+and fees are counted once. Historical replay still uses evidence observation time.
+
 Unsigned, read-only-wallet SPL credits made solely through known transfer/ATA
 instructions are classified as `external_token_inflow`. They do not invalidate
 unrelated bot root chains. A chain touching the same mint during the inflow stays

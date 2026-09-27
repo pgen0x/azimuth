@@ -26,6 +26,39 @@ def rows(path):
     return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
 
 
+def cleanup_owner(event, fact, chains, closes, coverage, inflows, unresolved_since, as_of):
+    """Attribute only an exact full-inventory sale with one proven closed owner.
+
+    Never allocate a shared balance pro rata or infer ownership from matching
+    amounts alone. This consumes transaction-time balances, not today's marks.
+    """
+    if (event.get("kind") != "swap" or not fact or fact.get("failed")
+            or fact.get("landed") is False or fact.get("wallet") != event.get("wallet")
+            or not coverage.get("wallet_history_complete") or coverage.get("unclassified_transactions")
+            or as_of-coverage.get("ts", 0)>600 or fact.get("slot", float("inf"))>coverage.get("end_slot", 0)
+            or unresolved_since <= event.get("ts", 0)):
+        return None
+    deltas = {m:int(v) for m,v in fact.get("token_deltas_raw", {}).items() if int(v)}
+    if len(deltas) != 1:
+        return None
+    mint, delta = next(iter(deltas.items()))
+    if (delta >= 0 or int(fact.get("token_pre_balances_raw", {}).get(mint, -1)) != -delta
+            or int(fact.get("token_post_balances_raw", {}).get(mint, 0)) != 0):
+        return None
+    owners = [c for c in chains.values() if int(c["token_deltas_raw"].get(mint, 0)) != 0]
+    if len(owners) != 1:
+        return None
+    c = owners[0]
+    if (c["root_chain_id"] == "unattributed" or not c["positions"] or c["pending_signatures"]
+            or int(c["token_deltas_raw"][mint]) != -delta
+            or c["first_activity"] < coverage.get("coverage_since", float("inf"))
+            or any(p not in closes or closes[p].get("ts", float("inf"))>event.get("ts", 0) for p in c["positions"])
+            or any(int(r.get("token_deltas_raw", {}).get(mint, 0))>0
+                   and (r.get("block_time") is None or c["first_activity"]<=r["block_time"]<=event.get("ts", 0)) for r in inflows)):
+        return None
+    return c["root_chain_id"]
+
+
 def report(profile, as_of=None):
     replay = as_of is not None
     as_of = time.time() if as_of is None else as_of
@@ -52,7 +85,7 @@ def report(profile, as_of=None):
 
     def chain(root):
         return chains.setdefault(root, {"root_chain_id": root, "positions": set(),
-            "recorded_signatures": set(), "pending_signatures": [], "expired_unlanded_signatures": [], "wallet_delta_lamports": 0,
+            "recorded_signatures": set(), "pending_signatures": [], "expired_unlanded_signatures": [], "cleanup_settlements": [], "wallet_delta_lamports": 0,
             "network_fee_lamports": 0, "reconciled_transactions": 0, "failed_transactions": 0, "token_deltas_raw": {}, "touched_mints": set(),
             "first_activity": float("inf"), "swap_delta_lamports": 0, "nonrefundable_account_cost_lamports": 0, "last_activity": 0, "lp_pnl_sol": 0.0, "lp_unmeasured_positions": [], "reasons": []})
 
@@ -67,6 +100,12 @@ def report(profile, as_of=None):
         c["first_activity"] = min(c["first_activity"], metadata.get("deployed_at") or 0)
 
     entry_roots = {e["entry_id"]: position_roots[p] for p,e in entries.items() if e.get("entry_id")}
+    unresolved_since = min((e.get("ts", 0) for e in events
+                            if e.get("ts", 0)>=coverage.get("coverage_since", 0)
+                            and (e["signature"] not in facts or facts[e["signature"]].get("wallet") != e.get("wallet"))), default=float("inf"))
+    # Settlements can only consume inventory established by earlier finalized
+    # transactions. Missing facts remain unresolved and cannot supply inventory.
+    events = sorted(events, key=lambda e:(facts.get(e["signature"], {}).get("slot", float("inf")), e.get("ts", 0)))
     seen = {}
     for event in events:
         signature = event["signature"]
@@ -78,13 +117,18 @@ def report(profile, as_of=None):
             continue
         seen[signature] = identity
         root = position_roots.get(event.get("position")) or entry_roots.get(event.get("entry_id")) or event.get("root_chain_id") or "unattributed"
+        fact = facts.get(signature)
+        owner = cleanup_owner(event, fact, chains, closes, coverage, token_inflows, unresolved_since, as_of) if root == "unattributed" else None
+        if owner:
+            root = owner
         c = chain(root)
+        if owner:
+            c["cleanup_settlements"].append(dict(signature=signature, basis="unique_closed_inventory_exact_full_balance_sale", observed_at=fact["observed_at"]))
         c["recorded_signatures"].add(signature)
         c["last_activity"] = max(c["last_activity"], event.get("ts") or 0)
         c["first_activity"] = min(c["first_activity"], event.get("ts") or 0)
         if event.get("position"):
             c["positions"].add(event["position"])
-        fact = facts.get(signature)
         if fact is None or fact.get("wallet") != event.get("wallet"):
             c["pending_signatures"].append(signature)
             continue

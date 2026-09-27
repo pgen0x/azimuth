@@ -3,7 +3,7 @@
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from dlmm_accounting import report
+from dlmm_accounting import report, cleanup_owner
 
 with TemporaryDirectory() as root:
     memories = Path(root) / "memories"
@@ -85,3 +85,47 @@ with TemporaryDirectory() as root:
     assert report(root,200)["chains"][0]["settled_cash_pnl_sol"] is None
     assert "external_token_inflow_requires_attribution" in report(root,200)["chains"][0]["reasons"]
 print("Passive token inflows do not fabricate wallet profit or contaminate unrelated settled chains")
+
+with TemporaryDirectory() as root:
+    memories = Path(root) / "memories"
+    (memories / "dlmm_entries").mkdir(parents=True)
+    def write(name, records):
+        (memories / name).write_text("".join(json.dumps(r) + "\n" for r in records))
+    (memories / "dlmm_entries/p.json").write_text(json.dumps(dict(position="p", deployed_at=100)))
+    closes = {"p":dict(position="p",ts=180)}
+    write("dlmm_closes.jsonl",list(closes.values()))
+    events = [dict(signature=s,position=p,wallet="wallet",kind=k,ts=t)
+              for s,p,k,t in [("entry","p","deploy",110),("exit","p","close",180),("cleanup",None,"swap",200)]]
+    facts = [dict(signature=s,wallet="wallet",observed_at=t,block_time=t,slot=slot,
+                  wallet_delta_lamports=amount,fee_lamports=5000,failed=False,
+                  token_deltas_raw=delta,position_account_closed=s=="exit")
+             for s,t,slot,amount,delta in [("entry",110,10,-100000000,{}),("exit",180,40,90000000,{"BOT":"100"}),
+                                          ("cleanup",230,45,11000000,{"BOT":"-100"})]]
+    facts[-1].update(token_pre_balances_raw={"BOT":"100"},token_post_balances_raw={})
+    write("dlmm_transactions.jsonl",list(reversed(events)))  # journal append order is not chain order
+    write("dlmm_wallet_transactions.jsonl",facts)
+    coverage=dict(ts=240,coverage_since=0,end_slot=50,wallet_history_complete=True,unclassified_transactions=[])
+    write("dlmm_wallet_coverage.jsonl",[coverage])
+    result=report(root,240)
+    c,=result["chains"]
+    assert c["root_chain_id"] == "p" and c["settled_cash_pnl_sol"] == 0.001
+    assert c["network_fee_lamports"] == 15000  # already included in cash, never deducted twice
+    assert c["token_deltas_raw"] == {} and c["cleanup_settlements"][0]["signature"] == "cleanup"
+    assert all(x["net_pnl_sol"] is None for x in report(root,220)["chains"])  # later evidence cannot backfill a decision
+    chain=dict(root_chain_id="p",positions={"p"},token_deltas_raw={"BOT":100},pending_signatures=[],first_activity=100)
+    args=[events[-1],facts[-1],{"p":chain},closes,coverage,[],float("inf"),240]
+    assert cleanup_owner(*args)=="p"
+    import copy
+    for alter in (
+        lambda a:a[1].pop("token_pre_balances_raw"),
+        lambda a:a[1]["token_pre_balances_raw"].update(BOT="150"),
+        lambda a:a[2].update(other=dict(a[2]["p"],root_chain_id="other",token_deltas_raw={"BOT":1})),
+        lambda a:a[5].append(dict(block_time=150,token_deltas_raw={"BOT":"1"})),
+        lambda a:a[2]["p"]["pending_signatures"].append("unknown"),
+        lambda a:a[4].update(wallet_history_complete=False),
+        lambda a:a[3]["p"].update(ts=201),
+        lambda a:a.__setitem__(6,150),
+        lambda a:a.__setitem__(7,1000),
+    ):
+        test=copy.deepcopy(args);alter(test);assert cleanup_owner(*test) is None
+print("Exact cleanup settlement attribution preserves cash/fees and rejects ambiguous ownership or historical lookahead")
