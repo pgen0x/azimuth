@@ -57,3 +57,31 @@ with TemporaryDirectory() as root:
     else:
         raise AssertionError("conflicting attribution accepted")
 print("Root-chain cash flows, deduplication, missing data and fee accounting passed")
+
+with TemporaryDirectory() as root:
+    memories = Path(root) / "memories"
+    (memories / "dlmm_entries").mkdir(parents=True)
+    def write(name, records):
+        (memories / name).write_text("".join(json.dumps(r) + "\n" for r in records))
+    (memories / "dlmm_entries/p.json").write_text(json.dumps(dict(position="p", deployed_at=100)))
+    write("dlmm_closes.jsonl", [dict(position="p", ts=180)])
+    write("dlmm_transactions.jsonl", [dict(signature=s, position="p", wallet="wallet", kind=k, ts=t)
+          for s,k,t in [("entry","deploy",110),("exit","close",180)]])
+    facts = [dict(signature=s,wallet="wallet",observed_at=t,block_time=t,slot=slot,
+                  wallet_delta_lamports=amount,fee_lamports=5000,failed=False,
+                  token_deltas_raw={"BOT":delta},position_account_closed=s=="exit")
+             for s,t,slot,amount,delta in [("entry",110,10,-100000000,"1"),("exit",180,40,101000000,"-1")]]
+    gift = dict(signature="gift",wallet="wallet",observed_at=150,block_time=150,slot=30,
+                classification="external_token_inflow",token_deltas_raw={"GIFT":"10"})
+    write("dlmm_wallet_transactions.jsonl", facts+[gift])
+    write("dlmm_wallet_coverage.jsonl", [dict(ts=200,coverage_since=0,end_slot=50,wallet_history_complete=True,unclassified_transactions=[])])
+    write("dlmm_nav.jsonl", [dict(ts=90,end_slot=9,nav_sol=1),dict(ts=200,end_slot=50,nav_sol=2,wallet_history_complete=True,unclassified_transactions=[])])
+    result = report(root,200)
+    assert result["chains"][0]["settled_cash_pnl_sol"] == 0.001  # unrelated gift does not contaminate bot chain
+    assert result["flow_adjusted_wealth_change_sol"] is None  # gifted wealth is never profit
+    assert result["unvalued_external_token_inflows"] == ["gift"]
+    gift["token_deltas_raw"] = {"BOT":"10"}
+    write("dlmm_wallet_transactions.jsonl", facts+[gift])
+    assert report(root,200)["chains"][0]["settled_cash_pnl_sol"] is None
+    assert "external_token_inflow_requires_attribution" in report(root,200)["chains"][0]["reasons"]
+print("Passive token inflows do not fabricate wallet profit or contaminate unrelated settled chains")
