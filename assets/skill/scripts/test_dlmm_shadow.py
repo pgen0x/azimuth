@@ -30,3 +30,28 @@ r=dict(ts=200,root_chain_id='a',chain=root,opportunity_sol=0.02,allow=True,reaso
 assert replay_root_decision(r)['proposed']=='recenter'
 assert replay_root_decision(dict(r,opportunity_sol=None))['reason']=='fee_opportunity_unavailable'
 assert replay_root_decision(dict(r,chain=None))['reason']=='incomplete_chain'
+
+# Evaluate the actual report path, not just the shared inflow predicate.
+import json
+import tempfile
+from pathlib import Path
+from dlmm_evaluate import evaluate
+with tempfile.TemporaryDirectory() as directory:
+ profile=Path(directory); memory=profile/'memories'; memory.mkdir()
+ snapshots=[dict(ts=100,end_slot=10,nav_sol=1,wallet_history_complete=True),
+            dict(ts=200,end_slot=20,nav_sol=1.5,wallet_history_complete=True)]
+ (memory/'dlmm_nav.jsonl').write_text(''.join(json.dumps(s)+'\n' for s in snapshots))
+ fact=dict(signature='gift',observed_at=150,slot=15,classification='external_token_inflow',token_deltas_raw={'mint':'10'})
+ def assessment(record):
+  (memory/'dlmm_wallet_transactions.jsonl').write_text(json.dumps(record)+'\n')
+  return evaluate(profile,100,200,profile/'rejects.jsonl')
+ result=assessment(fact)
+ assert result['wealth_change'] is None
+ assert result['unvalued_external_token_inflows']==['gift']
+ assert result['accounting']['flow_adjusted_wealth_change_sol'] is None
+ cash=assessment(dict(fact,classification='external_transfer',external_flow_lamports=500000000))
+ assert cash['wealth_change']['flow_adjusted_change_sol']==0
+ assert cash['accounting']['flow_adjusted_wealth_change_sol']==0
+ assert assessment(dict(fact,slot=9))['wealth_change']['flow_adjusted_change_sol']==0.5
+ assert assessment(dict(fact,slot=None))['wealth_change'] is None
+print('Evaluation excludes unvalued gifts and subtracts known external cash flows')

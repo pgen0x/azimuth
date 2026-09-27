@@ -26,6 +26,13 @@ def rows(path):
     return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
 
 
+def unvalued_token_inflows(facts, first_slot, last_slot):
+    """Unknown transfer-time token/ATA value cannot be subtracted from wealth."""
+    return [r["signature"] for r in facts if r.get("classification") == "external_token_inflow"
+            and r.get("landed") is not False and not r.get("failed")
+            and (r.get("slot") is None or first_slot < r["slot"] <= last_slot)]
+
+
 def cleanup_owner(event, fact, chains, closes, coverage, inflows, unresolved_since, as_of):
     """Attribute only an exact full-inventory sale with one proven closed owner.
 
@@ -203,8 +210,7 @@ def report(profile, as_of=None):
     change = None
     # A gifted token (and externally funded ATA rent) increases wallet wealth,
     # but its transfer-time value is not known. Never count it as trading profit.
-    unvalued_inflows = [r["signature"] for r in token_inflows if first
-                       and (r.get("slot") is None or first["end_slot"] < r["slot"] <= latest.get("end_slot", 0))]
+    unvalued_inflows = unvalued_token_inflows(wallet_facts.values(), first["end_slot"], latest.get("end_slot", 0)) if first else []
     if nav is not None and first and latest.get("wallet_history_complete") and not latest.get("unclassified_transactions") and not unvalued_inflows:
         external = sum(r.get("external_flow_lamports") or 0 for r in wallet_facts.values()
                        if first["end_slot"] < r.get("slot", 0) <= latest.get("end_slot", 0)) / 1e9
