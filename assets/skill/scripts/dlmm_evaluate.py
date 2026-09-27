@@ -9,7 +9,7 @@ from pathlib import Path
 import re
 import subprocess
 import time
-from dlmm_accounting import report, root_decision, rows
+from dlmm_accounting import report, root_decision, rows, unvalued_token_inflows
 from dlmm_shadow import bin_replay, HORIZONS
 from dlmm_realized import fetch_pools, fetch_closed_positions
 
@@ -75,17 +75,20 @@ def evaluate(profile, start, end, rejects):
     snapshots=[s for s in rows(memory/'dlmm_nav.jsonl') if start<=s['ts']<=end]
     valid=[s for s in snapshots if s.get('nav_sol') is not None]
     wealth=None
+    unvalued_inflows=[]
     if len(valid)>=2 and valid[-1].get('wallet_history_complete') and not valid[-1].get('unclassified_transactions'):
         facts={r['signature']:r for r in rows(memory/'dlmm_wallet_transactions.jsonl') if r.get('observed_at',end+1)<=end and r.get('landed') is not False}
-        external=sum(r.get('external_flow_lamports') or 0 for r in facts.values() if valid[0]['end_slot']<r['slot']<=valid[-1]['end_slot'])/1e9
-        wealth=dict(start_ts=valid[0]['ts'],end_ts=valid[-1]['ts'],start_nav_sol=valid[0]['nav_sol'],end_nav_sol=valid[-1]['nav_sol'],external_flow_sol=external,
+        unvalued_inflows=unvalued_token_inflows(facts.values(),valid[0]['end_slot'],valid[-1]['end_slot'])
+        if not unvalued_inflows:
+            external=sum(r.get('external_flow_lamports') or 0 for r in facts.values() if valid[0]['end_slot']<r['slot']<=valid[-1]['end_slot'])/1e9
+            wealth=dict(start_ts=valid[0]['ts'],end_ts=valid[-1]['ts'],start_nav_sol=valid[0]['nav_sol'],end_nav_sol=valid[-1]['nav_sol'],external_flow_sol=external,
                     flow_adjusted_change_sol=valid[-1]['nav_sol']-valid[0]['nav_sol']-external)
     last_nav=snapshots[-1] if snapshots else {}
     price_coverage=dict(collection_status=last_nav.get('price_sources',{}),
         token_counts=dict(collections.Counter(t.get('basis','unknown') if t.get('mark_sol') is not None else 'unpriced' for t in last_nav.get('tokens',[]))))
     live=[r for r in rows(memory/'dlmm_root_decisions.jsonl') if start<=r['ts']<=end]
     return dict(start=start,end=end,generated_at=int(time.time()),close_count=len(closes),close_account_proofs=close_proofs,accounting=accounting,
-                wealth_change=wealth,price_coverage=price_coverage,nav_samples=len(snapshots),complete_nav_samples=len(valid),
+                wealth_change=wealth,unvalued_external_token_inflows=unvalued_inflows,price_coverage=price_coverage,nav_samples=len(snapshots),complete_nav_samples=len(valid),
                 root_replay=[replay_root_decision(r) for r in live],eligibility_replay=comparisons,root_live_decisions=live,
                 rejected_candidates=groups,bin_replay=bins,
                 limits=['Rejected-candidate rate is a price proxy above a fixed 1% hurdle, not realized LP profit.',
@@ -146,7 +149,8 @@ def main():
     (a.output/'evaluation.json').write_text(json.dumps(data,indent=2,allow_nan=False))
     lines=['# Azimuth Solana evaluation',f"Window UTC epoch: {a.start} – {a.end}",
         f"Closes: {data['close_count']}; account deletion proofs: {sum(bool(v) for v in data['close_account_proofs'].values())}; complete marked NAV samples: {data['complete_nav_samples']}/{data['nav_samples']}.",
-        '## LP comparison (full-life cohort)',json.dumps({k:{field:value for field,value in v.items() if field!="positions"} for k,v in data.get('lp_comparison',{}).items()}),'## Wallet wealth',json.dumps(data['wealth_change']) if data['wealth_change'] else 'Unmeasured: missing complete marks or wallet transaction classification.',
+        '## LP comparison (full-life cohort)',json.dumps({k:{field:value for field,value in v.items() if field!="positions"} for k,v in data.get('lp_comparison',{}).items()}),'## Wallet wealth',json.dumps(data['wealth_change']) if data['wealth_change'] else 'Unmeasured: incomplete marks/history or external token inflows without transfer-time valuation.',
+        'Unvalued external token inflows: '+json.dumps(data['unvalued_external_token_inflows']),
         '## Latest token valuation coverage',json.dumps(data['price_coverage']),
         '## Root-chain replay',f"Decisions: {len(data['root_replay'])}; reasons: {dict(collections.Counter(r['reason'] for r in data['root_replay']))}",
         '## Pre-settlement eligibility replay',f"Decisions: {len(data['eligibility_replay'])}; evaluated before settlement refresh, separately from executor authorization.",
