@@ -58,7 +58,7 @@ const sandbox = { require: (name) => deps[name] || require(name), module: { expo
     ? { inAmount: "100000000", outAmount: "20", priceImpactPct: "0" }
     : { swapTransaction: "AA==" } }),
   console: { log() {}, warn() {}, error() {} }, Buffer, setTimeout, clearTimeout };
-vm.runInNewContext(source + "\nassertRootBudget = async () => {}; getWallet = () => testWallet; getTokenDecimals = async () => 9; assertRangeDoesNotRequireBinArrayInitialization = async () => {};", Object.assign(sandbox, { testWallet: wallet }));
+vm.runInNewContext(source + "\nmodule.exports.sdkFindPool = findPoolForPosition; module.exports.sdkPositions = getPositions; assertRootBudget = async () => {}; getWallet = () => testWallet; getTokenDecimals = async () => 9; assertRangeDoesNotRequireBinArrayInitialization = async () => {};", Object.assign(sandbox, { testWallet: wallet }));
 const { closePosition, swapToken, confirmSignedTransaction, deployPosition, acquireDeployLock, reconcilePendingSwap, assertNoTokenExposure,
   positionIsEmpty, slippageBpsToPercent } = sandbox.module.exports;
 const marker = path.join(root, "memories/dlmm_pending_deploys", `${wallet.publicKey}.json`);
@@ -226,7 +226,17 @@ const clearMarker = () => fs.rmSync(marker, { force: true });
   let tokenAccounts = [];
   Connection.prototype.getParsedTokenAccountsByOwner = async () => ({ value: tokenAccounts });
   Connection.prototype.getFeeForMessage = async () => ({ value: fee });
-  deps["@meteora-ag/dlmm"].getAllLbPairPositionsByUser = async () => ({ pool: { lbPairPositionsData: [{}] } });
+  // Match the installed SDK contract: Map<string, PositionInfo>, nested fees.
+  const sdkPosition = { publicKey: key("live-position"), positionData: {
+    lowerBinId: -1, upperBinId: 1, feeX: key("11"), feeY: key("22") } };
+  deps["@meteora-ag/dlmm"].getAllLbPairPositionsByUser = async () => new Map([["pool", { lbPairPositionsData: [sdkPosition] }]]);
+  pool.tokenX = {}; pool.tokenY = {};
+  const listed = await sandbox.module.exports.sdkPositions();
+  assert.equal(listed.length, 1); assert.equal(listed[0].position, "live-position");
+  assert.equal(listed[0].feeX, "11"); assert.equal(listed[0].feeY, "22");
+  assert.equal(listed[0].tokenX, "TOKEN"); assert.equal(listed[0].in_range, true);
+  sandbox.fetch = async () => { throw new Error("Unexpected portfolio API fallback"); };
+  assert.equal((await sandbox.module.exports.sdkFindPool(new Connection(), wallet, "live-position")).positionData, sdkPosition);
   const account = (name, overrides = {}, accountOverrides = {}) => ({ pubkey: key(name), account: {
     owner: tokenProgram, lamports: 1488440, data: { parsed: { info: {
       owner: wallet.publicKey.toString(), tokenAmount: { amount: "0" }, state: "initialized",
