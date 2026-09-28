@@ -100,20 +100,26 @@ func (s *Seen) PoolCloseStats(ctx context.Context, pool string) (closes int, net
 	return closes, netPnlSOL, closes > 0
 }
 
-// CooldownRemaining reports how long a token symbol is still under the
-// monitor's re-entry cooldown (sol:dlmm:cooldown:<SYMBOL>, written by
-// dlmm_monitor.py on every close). Zero means not cooling or unknown: the
-// in-memory backend and Redis errors read as "no cooldown" (fail-open) —
-// the deploy-time pipeline check stays the enforcing layer.
-func (s *Seen) CooldownRemaining(ctx context.Context, symbol string) time.Duration {
-	if s.rdb == nil || symbol == "" {
+// CooldownRemaining checks the same symbol, mint and pool cooldowns as the
+// deploy pipeline before spending an AI request. Redis errors remain fail-open;
+// the deploy-time pipeline check is still the enforcing layer.
+func (s *Seen) CooldownRemaining(ctx context.Context, symbol, mint, pool string) time.Duration {
+	if s.rdb == nil {
 		return 0
 	}
-	d, err := s.rdb.TTL(ctx, "sol:dlmm:cooldown:"+strings.ToUpper(symbol)).Result()
-	if err != nil || d <= 0 {
-		return 0
+	var remaining time.Duration
+	for _, key := range []struct{ prefix, id string }{
+		{"", strings.ToUpper(symbol)}, {"mint:", mint}, {"pool:", pool},
+	} {
+		if key.id == "" {
+			continue
+		}
+		d, err := s.rdb.TTL(ctx, "sol:dlmm:cooldown:"+key.prefix+key.id).Result()
+		if err == nil && d > remaining {
+			remaining = d
+		}
 	}
-	return d
+	return remaining
 }
 
 // RobinhoodCooldown reports how long this pool (or its token) is still blocked

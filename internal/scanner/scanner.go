@@ -905,13 +905,9 @@ func (s *Scanner) pollMode(ctx context.Context, mp meteora.ModeParams) {
 		}
 		screened++
 
-		// Re-entry cooldown gate: dlmm_monitor.py sets a per-token cooldown on
-		// every close (1-2h base, escalating to 24h/72h on repeat losses).
-		// Until now this was only enforced at deploy time, so a batch full of
-		// cooling tokens wasted the whole signal and crowded out eligible
-		// pools. Checked BEFORE MarkIfNew so the pool re-signals as soon as
-		// its cooldown lapses instead of staying silenced for SEEN_TTL.
-		if cd := s.seen.CooldownRemaining(ctx, cand.BaseSymbol); cd > 0 {
+		// Check symbol, mint and pool cooldowns before AI dispatch and dedup.
+		// Rejected pools can return as soon as their existing cooldown expires.
+		if cd := s.seen.CooldownRemaining(ctx, cand.BaseSymbol, cand.BaseMint, cand.Pool); cd > 0 {
 			cooldownBlocked++
 			recordSolanaReject(mp.Mode, p, cand, "cooldown", cd.String(), nil)
 			log.Printf("scanner[%s]: %s (%s) in re-entry cooldown (%s left)",
