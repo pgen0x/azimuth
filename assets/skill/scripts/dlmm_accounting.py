@@ -66,6 +66,39 @@ def cleanup_owner(event, fact, chains, closes, coverage, inflows, unresolved_sin
     return c["root_chain_id"]
 
 
+def pooled_settlements(chains):
+    """Measure closed groups with cancelling inventory, never allocate root PnL."""
+    pending = {c["root_chain_id"]: c for c in chains if c["token_deltas_raw"]}
+    groups = []
+    while pending:
+        _, first = pending.popitem()
+        members = [first]
+        mints = set(first["token_deltas_raw"])
+        # A shared residual mint connects all owners, including incomplete ones.
+        # ponytail: scan owners; index by mint if journal growth makes this costly.
+        while True:
+            linked = [key for key, c in pending.items() if mints.intersection(c["token_deltas_raw"])]
+            if not linked:
+                break
+            for key in linked:
+                c = pending.pop(key)
+                members.append(c)
+                mints.update(c["token_deltas_raw"])
+        if len(members) < 2 or any(set(c["reasons"]) != {"token_inventory_requires_valuation"} for c in members):
+            continue
+        if any(sum(int(c["token_deltas_raw"].get(mint, 0)) for c in members) for mint in mints):
+            continue
+        groups.append({
+            "root_chain_ids": sorted(c["root_chain_id"] for c in members),
+            "first_activity": min(c["first_activity"] for c in members),
+            "last_activity": max(c["last_activity"] for c in members),
+            "settled_cash_pnl_sol": sum(c["wallet_delta_lamports"] for c in members) / 1e9,
+            "network_fee_sol": sum(c["network_fee_lamports"] for c in members) / 1e9,
+            "basis": "combined_wallet_cash_after_fees_and_rent; no_per_root_allocation; not_NAV",
+        })
+    return sorted(groups, key=lambda g: g["root_chain_ids"])
+
+
 def report(profile, as_of=None):
     replay = as_of is not None
     as_of = time.time() if as_of is None else as_of
@@ -219,6 +252,7 @@ def report(profile, as_of=None):
             "nav_snapshot": latest, "flow_adjusted_wealth_change_sol": change,
             "unvalued_external_token_inflows": unvalued_inflows,
             "note": "Wallet delta already includes network fees and net account rent movements; do not subtract fees again. LP PnL uses Meteora valuations. Neither is portfolio NAV. Rent, inventory drift and swap attribution require further reconciliation.",
+            "pooled_settlements": pooled_settlements(chains.values()),
             "chains": sorted(chains.values(), key=lambda c: c["root_chain_id"])}
 
 
@@ -278,6 +312,7 @@ def main():
         parser.error("--hours must be positive")
     result = report(args.profile)
     result["chains"] = [c for c in result["chains"] if c["last_activity"] >= time.time() - args.hours * 3600]
+    result["pooled_settlements"] = [g for g in result["pooled_settlements"] if g["last_activity"] >= time.time() - args.hours * 3600]
     print(json.dumps(result, indent=2))
 
 
