@@ -30,7 +30,9 @@ def probe(runtime, model, opener=None):
                 "name": "health_check", "description": "Read-only availability check",
                 "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
             }}],
-            "tool_choice": {"type": "function", "function": {"name": "health_check"}},
+            # One available tool: required preserves the tool-call check while
+            # supporting providers whose tool_choice accepts only a string.
+            "tool_choice": "required",
             "max_tokens": 64, "stream": False,
         }).encode(),
         headers={"Content-Type": "application/json",
