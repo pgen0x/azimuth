@@ -1649,7 +1649,7 @@ def main():
                 maybe_blacklist_rug(meta, guard_pnl_pct,
                                     rug_event=(cli.reason if "rug" in reason_lower else None),
                                     operator_confirmed=True)
-                print(f"📊 Daily PnL booked: {realized_sol:+.4f} SOL ({guard_pnl_pct:+.2f}%)")
+                print(f"📊 Daily pre-close LP mark booked (not settled cash): {realized_sol:+.4f} SOL ({guard_pnl_pct:+.2f}%)")
             # Auto-swap base token back to SOL
             base_mint = meta.get("base_mint")
             pool_addr = meta.get("pool")
@@ -3066,7 +3066,7 @@ Exit Reason | {close_reason}
 Metric | Value
 Entry Price | {entry_price:.8f}
 Exit Price | {active_price:.8f}
-Realized PnL | {pnl_pct:+.2f}% ({realized_sol:+.4f} SOL){swap_report}
+Pre-close LP mark | {pnl_pct:+.2f}% ({realized_sol:+.4f} SOL) — estimate before close/swap, not settled cash{swap_report}
 {tx_line}
 """
                 print(report)
