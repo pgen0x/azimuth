@@ -16,7 +16,11 @@ class ProbeTest(unittest.TestCase):
                 self.response = response
 
             def open(inner, req, timeout):
-                self.assertEqual(json.loads(req.data)["model"], "markt")
+                body = json.loads(req.data)
+                self.assertEqual(body["model"], "markt")
+                # CodeBuddy rejects object tool_choice before running inference.
+                self.assertEqual(body["tool_choice"], "required")
+                self.assertEqual([t["function"]["name"] for t in body["tools"]], ["health_check"])
                 self.assertEqual(req.full_url, "http://router.test/v1/chat/completions")
                 self.assertEqual(timeout, 15)
                 return io.BytesIO(json.dumps(inner.response).encode())
