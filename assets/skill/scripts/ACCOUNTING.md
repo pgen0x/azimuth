@@ -165,3 +165,14 @@ is zero: reserves became spendable SOL, while fees reduced wealth. No trading ro
 gets credited with this maintenance cash. Schema 6 refreshes previously unknown
 transactions with a new observation timestamp; historical evaluations retain the
 evidence available at their cutoff.
+
+## Pooled settlement reporting
+
+A full-wallet exit swap can sell residual tokens from several closed roots.
+`pooled_settlements` reports their combined cash only when every connected owner
+has complete entry/close and wallet coverage, no pending transactions or external
+inflow ambiguity, and the group's exact integer token deltas cancel for every mint.
+It includes all owners connected by residual mints; incomplete owners block the group.
+Members remain incomplete individually and cannot pass the root re-entry gate.
+Combined cash already includes fees and rent; it is not per-position PnL, win rate,
+IL or wallet NAV. Evaluation shows only groups whose entire lifetime fits its window.

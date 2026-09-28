@@ -129,3 +129,31 @@ with TemporaryDirectory() as root:
     ):
         test=copy.deepcopy(args);alter(test);assert cleanup_owner(*test) is None
 print("Exact cleanup settlement attribution preserves cash/fees and rejects ambiguous ownership or historical lookahead")
+
+# Pooled exit: an old fee balance is sold by a later position. Cash is measurable
+# jointly, but allocating it to the latest root would invent per-position PnL.
+from copy import deepcopy
+from dlmm_accounting import pooled_settlements, root_decision
+base = dict(first_activity=100, last_activity=200, network_fee_lamports=5,
+            reasons=["token_inventory_requires_valuation"], accounting_status="incomplete")
+a = dict(base, root_chain_id="old", token_deltas_raw={"TOKEN":"9007199254740993"}, wallet_delta_lamports=-200)
+b = dict(base, root_chain_id="new", token_deltas_raw={"TOKEN":"-9007199254740993"}, wallet_delta_lamports=180)
+original = deepcopy([a,b])
+group, = pooled_settlements([a,b])
+assert group["settled_cash_pnl_sol"] == -20/1e9  # costs not subtracted twice
+assert group["network_fee_sol"] == 10/1e9
+assert group["root_chain_ids"] == ["new","old"]
+assert [a,b] == original
+assert not root_decision(a,1)["allow"] and not root_decision(b,1)["allow"]
+assert pooled_settlements([a,dict(b,token_deltas_raw={"TOKEN":"-9007199254740992"})]) == []
+for reason in ["unresolved_transactions","open_or_unjournaled_positions","wallet_wide_coverage_not_verified","external_token_inflow_requires_attribution","entry_or_close_evidence_missing"]:
+    assert pooled_settlements([a,dict(b,reasons=b["reasons"]+[reason])]) == []
+# A third owner must not be omitted just because a subset balances.
+c = dict(base,root_chain_id="third",token_deltas_raw={"TOKEN":"1"},wallet_delta_lamports=1)
+assert pooled_settlements([a,b,c]) == []
+# All mints must cancel, including transitive ownership through another mint.
+b2=dict(b,token_deltas_raw={**b["token_deltas_raw"],"OTHER":"2"})
+c2=dict(c,token_deltas_raw={"OTHER":"-2"})
+assert len(pooled_settlements([a,b2,c2])) == 1
+assert pooled_settlements([a,b2,c2]) == pooled_settlements([c2,b2,a])
+print("Pooled cash conservation, complete ownership and unchanged root gate passed")
