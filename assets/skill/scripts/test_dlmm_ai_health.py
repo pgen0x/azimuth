@@ -22,7 +22,7 @@ class ProbeTest(unittest.TestCase):
                 self.assertEqual(body["tool_choice"], "required")
                 self.assertEqual([t["function"]["name"] for t in body["tools"]], ["health_check"])
                 self.assertEqual(req.full_url, "http://router.test/v1/chat/completions")
-                self.assertEqual(timeout, 15)
+                self.assertEqual(timeout, 60)
                 return io.BytesIO(json.dumps(inner.response).encode())
 
         self.assertTrue(probe(runtime, "markt", Opener(good)))

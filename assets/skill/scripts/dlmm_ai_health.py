@@ -39,7 +39,9 @@ def probe(runtime, model, opener=None):
                  "Authorization": "Bearer " + runtime["api_key"]},
     )
     opener = opener or urllib.request.build_opener(NoRedirect)
-    with opener.open(request, timeout=15) as response:
+    # The configured router chain took 44s to return a valid tool call in a
+    # live read-only probe. Allow that chain to finish before declaring it down.
+    with opener.open(request, timeout=60) as response:
         data = json.loads(response.read(1_000_000))
     if data.get("error"):
         return False
