@@ -54,6 +54,47 @@ async function heliusPrices(wallet, env=process.env) {
   return {marks:new Map(),status}; // Discard partial pages before trying another key.
 }
 
+// Recognize only the observed empty-account cleaning wrapper with fully
+// explained token closures and native balance changes. Extra effects fail closed.
+function rentMaintenance(tx, wallet) {
+  const wrapper='CLEANALo6FtS6quqTTEXDGFFTuSKMkeKGgcweeiPRJzK';
+  const compute='ComputeBudget111111111111111111111111111111';
+  const message=tx.transaction.message, meta=tx.meta;
+  const keys=message.accountKeys.map(k=>k.pubkey.toString());
+  if (meta.err || keys[0]!==wallet || message.accountKeys[0].signer!==true
+      || !Number.isSafeInteger(meta.fee) || meta.fee<0
+      || meta.preBalances.length!==keys.length || meta.postBalances.length!==keys.length
+      || [...meta.preBalances,...meta.postBalances].some(v=>!Number.isSafeInteger(v) || v<0)
+      || (meta.postTokenBalances || []).length) return null;
+  const outer=message.instructions;
+  if (!outer.length || !outer.every(i=>[wrapper,compute].includes(i.programId?.toString()))) return null;
+  const groups=meta.innerInstructions || [], wrappers=outer.filter(i=>i.programId?.toString()===wrapper);
+  if (!wrappers.length || groups.length!==wrappers.length || new Set(groups.map(g=>g.index)).size!==groups.length) return null;
+  const changes=keys.map(()=>0); changes[0]=-meta.fee;
+  const closed=new Set(); let released=0, serviceFee=0;
+  for (const group of groups) {
+    if (outer[group.index]?.programId?.toString()!==wrapper || group.instructions.length!==2) return null;
+    const [close,transfer]=group.instructions, a=close.parsed?.info, b=transfer.parsed?.info;
+    if (!TOKEN_PROGRAMS.includes(close.programId?.toString()) || close.parsed?.type!=='closeAccount'
+        || a?.owner!==wallet || a.destination!==wallet
+        || transfer.programId?.toString()!=='11111111111111111111111111111111'
+        || transfer.parsed?.type!=='transfer' || b?.source!==wallet || b.destination===wallet
+        || !Number.isSafeInteger(b.lamports) || b.lamports<0) return null;
+    const account=keys.indexOf(a.account), recipient=keys.indexOf(b.destination);
+    const token=(meta.preTokenBalances || []).find(t=>t.accountIndex===account);
+    if (account<=0 || recipient<0 || closed.has(account) || !token || token.owner!==wallet
+        || token.mint===SOL || token.uiTokenAmount?.amount!=='0'
+        || meta.preBalances[account]<=0 || meta.postBalances[account]!==0) return null;
+    closed.add(account);
+    const rent=meta.preBalances[account]; released+=rent; serviceFee+=b.lamports;
+    changes[account]-=rent; changes[0]+=rent-b.lamports; changes[recipient]+=b.lamports;
+  }
+  if (closed.size!==(meta.preTokenBalances || []).length
+      || !Number.isSafeInteger(released) || !Number.isSafeInteger(serviceFee)
+      || changes[0]<0 || changes.some((v,i)=>!Number.isSafeInteger(v) || meta.postBalances[i]-meta.preBalances[i]!==v)) return null;
+  return {released_lamports:released,service_fee_lamports:serviceFee};
+}
+
 function transactionFact(tx, wallet, signature, event) {
   const keys = tx.transaction.message.accountKeys.map(k => k.pubkey.toString());
   const index = keys.indexOf(wallet), meta = tx.meta;
@@ -106,14 +147,16 @@ function transactionFact(tx, wallet, signature, event) {
         || id==='ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL' && ['create','createIdempotent'].includes(type)
         || TOKEN_PROGRAMS.includes(id) && ['transfer','transferChecked','getAccountDataSize','initializeImmutableOwner','initializeAccount','initializeAccount2','initializeAccount3'].includes(type);
     });
-  return {schema_version:5,event_position:event?.position,signature, wallet, slot: tx.slot, block_time: tx.blockTime, observed_at: now(), failed: !!meta.err,
+  const maintenance=!event ? rentMaintenance(tx,wallet) : null;
+  return {schema_version:6,event_position:event?.position,signature, wallet, slot: tx.slot, block_time: tx.blockTime, observed_at: now(), failed: !!meta.err,
     wallet_delta_lamports: meta.postBalances[index]-meta.preBalances[index], fee_lamports: index === 0 ? meta.fee : 0,
     token_deltas_raw: Object.fromEntries(Object.entries(tokenDeltas).map(([m,a]) => [m,a.toString()])),
     token_pre_balances_raw: Object.fromEntries(Object.entries(tokenPre).map(([m,a]) => [m,a.toString()])),
     token_post_balances_raw: Object.fromEntries(Object.entries(tokenPost).map(([m,a]) => [m,a.toString()])),
-    external_flow_lamports: simpleTransfer ? external : null,
+    external_flow_lamports: simpleTransfer ? external : maintenance ? 0 : null,
+    rent_maintenance: maintenance,
     position_account_closed: !meta.err && !!event?.position && keys.includes(event.position) && meta.preBalances[keys.indexOf(event.position)]>0 && meta.postBalances[keys.indexOf(event.position)]===0,
-    classification: event ? 'recorded_bot' : simpleTransfer ? 'external_transfer' : passiveNFT ? 'passive_nft_outside_scope' : passiveToken ? 'external_token_inflow' : meta.err ? 'failed' : 'unclassified',
+    classification: event ? 'recorded_bot' : simpleTransfer ? 'external_transfer' : passiveNFT ? 'passive_nft_outside_scope' : passiveToken ? 'external_token_inflow' : maintenance ? 'rent_maintenance' : meta.err ? 'failed' : 'unclassified',
     refundable_rent_locked_lamports: rentLocked, nonrefundable_account_cost_lamports: permanentRent,
     basis: 'finalized_transaction_balances'};
 }
@@ -135,7 +178,7 @@ async function collect({dir, wallet, PublicKey, rpc, historyOnly=false}) {
     before = batch[batch.length-1].signature;
   }
   const currentFact=r=>{const f=cache.get(r.signature); return f?.wallet===wallet && f?.schema_version>=2
-    && (f.schema_version>=4 || f.classification!=='unclassified')
+    && (f.schema_version>=6 || f.classification!=='unclassified')
     && (!(events.get(r.signature)?.kind==='swap' && !events.get(r.signature)?.position) || f.token_pre_balances_raw!=null)
     && f.event_position===events.get(r.signature)?.position;};
   let fetched = 0;

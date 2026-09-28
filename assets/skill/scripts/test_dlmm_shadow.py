@@ -54,4 +54,12 @@ with tempfile.TemporaryDirectory() as directory:
  assert cash['accounting']['flow_adjusted_wealth_change_sol']==0
  assert assessment(dict(fact,slot=9))['wealth_change']['flow_adjusted_change_sol']==0.5
  assert assessment(dict(fact,slot=None))['wealth_change'] is None
+ # Reclaim transfers existing reserve into cash; only service/network fees
+ # change wealth. A positive cash receipt must not become a positive NAV return.
+ snapshots[0]['nav_sol']=1.000000200; snapshots[1]['nav_sol']=1.000000193
+ (memory/'dlmm_nav.jsonl').write_text(''.join(json.dumps(s)+'\n' for s in snapshots))
+ maintenance=assessment(dict(fact,classification='rent_maintenance',external_flow_lamports=0,
+                            wallet_delta_lamports=193,rent_maintenance={'released_lamports':200,'service_fee_lamports':2},fee_lamports=5))
+ assert abs(maintenance['wealth_change']['flow_adjusted_change_sol'] + 7e-9)<1e-15
+ assert abs(maintenance['accounting']['flow_adjusted_wealth_change_sol'] + 7e-9)<1e-15
 print('Evaluation excludes unvalued gifts and subtracts known external cash flows')
