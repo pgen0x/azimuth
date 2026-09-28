@@ -1052,7 +1052,8 @@ func (s *Scanner) pollMode(ctx context.Context, mp meteora.ModeParams) {
 		useDirect := s.dep.Enabled()
 		if useDirect && s.cfg.WebhookURL != "" && s.cfg.AIHealthCmd != "" {
 			args := strings.Fields(s.cfg.AIHealthCmd)
-			probeCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+			// Include Python/config startup above the probe's 60s HTTP deadline.
+			probeCtx, cancel := context.WithTimeout(ctx, 65*time.Second)
 			var err error
 			if len(args) == 0 {
 				err = fmt.Errorf("empty AI health command")
