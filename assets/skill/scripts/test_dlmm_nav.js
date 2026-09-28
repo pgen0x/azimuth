@@ -28,6 +28,37 @@ for(const alter of [
   t=>{t.meta.innerInstructions=[{instructions:[{programId:'unknown-hook'}]}]},
   t=>{t.meta.preTokenBalances=[{owner:wallet,mint:'sold',accountIndex:2,uiTokenAmount:{amount:'1'}}]},
 ]){const t=JSON.parse(JSON.stringify(gift));alter(t);assert.equal(transactionFact(t,wallet,'unknown').classification,'unclassified');}
+// Recorded wrapper transaction shape: return empty account rent, pay its
+// explicit service fee and network fee. This is internal capital, not income.
+const wrapper='CLEANALo6FtS6quqTTEXDGFFTuSKMkeKGgcweeiPRJzK';
+const cleaning={slot:200,blockTime:200,transaction:{message:{accountKeys:[
+ {pubkey:wallet,signer:true},{pubkey:'empty-account'},{pubkey:'service'}],
+ instructions:[{programId:wrapper}]}},meta:{err:null,fee:5,
+ preBalances:[1000,200,0],postBalances:[1193,0,2],
+ preTokenBalances:[{accountIndex:1,owner:wallet,mint:'empty-mint',uiTokenAmount:{amount:'0'}}],postTokenBalances:[],
+ innerInstructions:[{index:0,instructions:[
+ {programId:'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA',parsed:{type:'closeAccount',info:{account:'empty-account',owner:wallet,destination:wallet}}},
+ {programId:'11111111111111111111111111111111',parsed:{type:'transfer',info:{source:wallet,destination:'service',lamports:2}}}]}]}};
+const maintenance=transactionFact(cleaning,wallet,'rent');
+assert.equal(maintenance.classification,'rent_maintenance');
+assert.equal(maintenance.external_flow_lamports,0);
+assert.equal(maintenance.wallet_delta_lamports,193);
+assert.deepEqual(maintenance.rent_maintenance,{released_lamports:200,service_fee_lamports:2});
+for(const alter of [
+ t=>{t.meta.preTokenBalances[0].uiTokenAmount.amount='1'},
+ t=>{t.meta.preTokenBalances[0].mint='So11111111111111111111111111111111111111112'},
+ t=>{t.meta.preTokenBalances[0].owner='other'},
+ t=>{t.transaction.message.accountKeys[0].signer=false},
+ t=>{t.transaction.message.instructions[0].programId='unknown-wrapper'},
+ t=>{t.meta.innerInstructions[0].instructions[0].parsed.info.destination='service'},
+ t=>{t.meta.innerInstructions[0].instructions[0].parsed.info.owner='other'},
+ t=>{t.meta.innerInstructions[0].instructions[1].parsed.info.source='other'},
+ t=>{t.meta.innerInstructions[0].instructions.push({programId:'unknown-hook'})},
+ t=>{t.meta.innerInstructions[0].index=99},
+ t=>{t.meta.postBalances[0]--;t.meta.postBalances[2]++},
+ t=>{t.meta.postBalances[1]=1},
+ t=>{t.meta.postTokenBalances=t.meta.preTokenBalances},
+]){const t=JSON.parse(JSON.stringify(cleaning));alter(t);assert.equal(transactionFact(t,wallet,'unknown').classification,'unclassified');}
 const dir=fs.mkdtempSync(path.join(os.tmpdir(),'nav-check-'));
 let unknown=false, height=101, signatureStatus=null;
 const connection={
@@ -102,5 +133,12 @@ global.fetch=async url=>{if(url.includes('/quote?'))throw new Error('no route');
  assert.equal(preferred.tokens[0].basis,'spot_mark');
  assert.ok(Math.abs(preferred.tokens[0].mark_sol-0.00000000003)<1e-24);
  if(savedKey===undefined)delete process.env.HELIUS_API_KEY;else process.env.HELIUS_API_KEY=savedKey;
+ // Upgrade cached unknown facts once, using fresh on-chain observations.
+ fs.writeFileSync(path.join(dir,'dlmm_wallet_transactions.jsonl'),JSON.stringify({signature:'sig',wallet,schema_version:5,classification:'unclassified'})+'\n');
+ let refreshed=0;
+ connection.getParsedTransaction=async()=>{refreshed++;return {...cleaning,slot:100,blockTime:tx.blockTime}};
+ await collect({...args,historyOnly:true}); await collect({...args,historyOnly:true});
+ const upgraded=fs.readFileSync(path.join(dir,'dlmm_wallet_transactions.jsonl'),'utf8').trim().split('\n').map(JSON.parse).filter(f=>f.signature==='sig').at(-1);
+ assert.equal(upgraded.schema_version,6);assert.equal(upgraded.classification,'rent_maintenance');assert.equal(refreshed,1);
  console.log('NAV includes reserves once, classifies external flows, keeps failed fees and rejects unpriced assets');
 })().catch(e=>{console.error(e);process.exitCode=1}).finally(()=>fs.rmSync(dir,{recursive:true,force:true}));
