@@ -126,6 +126,23 @@ function transactionFact(tx, wallet, signature, event) {
       }
     }
   }
+  // Some programs initialize PDAs with transfer + allocate + assign instead
+  // of createAccount. Count only newly funded accounts with exact provenance.
+  if (!meta.err) for (const i of instructions) {
+    if (i.program !== 'system' || i.parsed?.type !== 'allocate') continue;
+    const account=i.parsed.info?.account, n=keys.indexOf(account);
+    if (instructions.filter(x=>x.program==='system' && x.parsed?.type==='allocate' && x.parsed.info?.account===account).length!==1) continue;
+    if (n<0 || meta.preBalances[n]!==0 || !Number.isSafeInteger(meta.postBalances[n]) || meta.postBalances[n]<=0) continue;
+    if (instructions.some(x=>x.program==='system' && ['createAccount','createAccountWithSeed'].includes(x.parsed?.type) && x.parsed.info?.newAccount===account)) continue;
+    const assignments=instructions.filter(x=>x.program==='system' && x.parsed?.type==='assign' && x.parsed.info?.account===account);
+    const transfers=instructions.filter(x=>x.program==='system' && x.parsed?.type==='transfer' && x.parsed.info?.destination===account);
+    if (assignments.length!==1 || !assignments[0].parsed.info.owner || transfers.length===0
+        || transfers.some(x=>x.parsed.info.source!==wallet || !Number.isSafeInteger(x.parsed.info.lamports) || x.parsed.info.lamports<=0)) continue;
+    const amount=transfers.reduce((sum,x)=>sum+x.parsed.info.lamports,0);
+    if (!Number.isSafeInteger(amount) || amount!==meta.postBalances[n]) continue;
+    if (tokenAccounts.has(account) || account===event?.position) rentLocked+=amount;
+    else permanentRent+=amount;
+  }
   // Passive NFT activity is outside the SOL/SPL/LP accounting scope.
   const passiveNFT = !event && !meta.err && tx.transaction.message.accountKeys[index].writable === false
     && tx.transaction.message.accountKeys[index].signer === false
@@ -148,7 +165,7 @@ function transactionFact(tx, wallet, signature, event) {
         || TOKEN_PROGRAMS.includes(id) && ['transfer','transferChecked','getAccountDataSize','initializeImmutableOwner','initializeAccount','initializeAccount2','initializeAccount3'].includes(type);
     });
   const maintenance=!event ? rentMaintenance(tx,wallet) : null;
-  return {schema_version:6,event_position:event?.position,signature, wallet, slot: tx.slot, block_time: tx.blockTime, observed_at: now(), failed: !!meta.err,
+  return {schema_version:7,event_position:event?.position,signature, wallet, slot: tx.slot, block_time: tx.blockTime, observed_at: now(), failed: !!meta.err,
     wallet_delta_lamports: meta.postBalances[index]-meta.preBalances[index], fee_lamports: index === 0 ? meta.fee : 0,
     token_deltas_raw: Object.fromEntries(Object.entries(tokenDeltas).map(([m,a]) => [m,a.toString()])),
     token_pre_balances_raw: Object.fromEntries(Object.entries(tokenPre).map(([m,a]) => [m,a.toString()])),
@@ -179,6 +196,7 @@ async function collect({dir, wallet, PublicKey, rpc, historyOnly=false}) {
   }
   const currentFact=r=>{const f=cache.get(r.signature); return f?.wallet===wallet && f?.schema_version>=2
     && (f.schema_version>=6 || f.classification!=='unclassified')
+    && (f.schema_version>=7 || f.classification!=='recorded_bot')
     && (!(events.get(r.signature)?.kind==='swap' && !events.get(r.signature)?.position) || f.token_pre_balances_raw!=null)
     && f.event_position===events.get(r.signature)?.position;};
   let fetched = 0;

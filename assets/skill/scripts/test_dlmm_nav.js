@@ -139,6 +139,25 @@ global.fetch=async url=>{if(url.includes('/quote?'))throw new Error('no route');
  connection.getParsedTransaction=async()=>{refreshed++;return {...cleaning,slot:100,blockTime:tx.blockTime}};
  await collect({...args,historyOnly:true}); await collect({...args,historyOnly:true});
  const upgraded=fs.readFileSync(path.join(dir,'dlmm_wallet_transactions.jsonl'),'utf8').trim().split('\n').map(JSON.parse).filter(f=>f.signature==='sig').at(-1);
- assert.equal(upgraded.schema_version,6);assert.equal(upgraded.classification,'rent_maintenance');assert.equal(refreshed,1);
+ assert.equal(upgraded.schema_version,7);assert.equal(upgraded.classification,'rent_maintenance');assert.equal(refreshed,1);
  console.log('NAV includes reserves once, classifies external flows, keeps failed fees and rejects unpriced assets');
 })().catch(e=>{console.error(e);process.exitCode=1}).finally(()=>fs.rmSync(dir,{recursive:true,force:true}));
+
+const allocated={...tx,transaction:{message:{...tx.transaction.message,instructions:[
+  ...tx.transaction.message.instructions,
+  {program:'system',parsed:{type:'allocate',info:{account:'outside',space:137}}},
+  {program:'system',parsed:{type:'assign',info:{account:'outside',owner:'poolProgram'}}}
+]}}};
+const allocationFact=transactionFact(allocated,wallet,'allocation',{position:'p'});
+assert.equal(allocationFact.nonrefundable_account_cost_lamports,100);
+assert.equal(allocationFact.wallet_delta_lamports,-105); // classification must not subtract twice
+assert.equal(transactionFact(allocated,wallet,'allocation',{position:'outside'}).refundable_rent_locked_lamports,100);
+for (const altered of [
+ {...allocated,transaction:{message:{...allocated.transaction.message,instructions:[...allocated.transaction.message.instructions,allocated.transaction.message.instructions[1]]}}},
+ {...allocated,meta:{...allocated.meta,err:{failed:true}}},
+ {...allocated,meta:{...allocated.meta,preBalances:[1000,1]}},
+ {...allocated,meta:{...allocated.meta,postBalances:[895,99]}},
+ {...allocated,transaction:{message:{...allocated.transaction.message,instructions:allocated.transaction.message.instructions.slice(0,2)}}},
+ {...allocated,transaction:{message:{...allocated.transaction.message,instructions:[{program:'system',parsed:{type:'transfer',info:{source:'other',destination:'outside',lamports:100}}},...allocated.transaction.message.instructions.slice(1)]}}}
+]) assert.equal(transactionFact(altered,wallet,'allocation',{position:'p'}).nonrefundable_account_cost_lamports,0);
+console.log('Allocated account funding classification passed');
