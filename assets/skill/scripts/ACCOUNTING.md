@@ -176,3 +176,13 @@ It includes all owners connected by residual mints; incomplete owners block the 
 Members remain incomplete individually and cannot pass the root re-entry gate.
 Combined cash already includes fees and rent; it is not per-position PnL, win rate,
 IL or wallet NAV. Evaluation shows only groups whose entire lifetime fits its window.
+
+Account funding also recognizes System transfer → allocate → assign sequences.
+The account must start unfunded, end with exactly the wallet's known funding,
+and have one allocation and assignment. Wallet-owned token/position accounts
+remain reserves; other program accounts are conservatively charged to the root
+execution-cost budget. This classification does not subtract cash twice or
+claim that a program-specific future refund is impossible. Old recorded facts
+refresh to schema 7 within the existing 60-transaction collection budget;
+coverage stays incomplete until that refresh finishes. Historical evidence is
+not backdated.
