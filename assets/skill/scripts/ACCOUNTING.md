@@ -118,6 +118,11 @@ budget. Rate-limit deferrals never become zero-valued assets.
 
 ## Helius supplementary valuation
 
+Disabled by default to avoid recurring Wallet API credit charges. Explicit
+`DLMM_HELIUS_WALLET_PRICES=true` enables these optional, undated estimates.
+With it disabled, existing fresh marks and bounded quotes are used; missing
+valuations remain unknown. Native/token balances still come from RPC.
+
 The collector reuses `HELIUS_API_KEY` or keys from HTTPS `*.helius-rpc.com`
 entries in `SOLANA_RPC_URLS`. Wallet API requests use an authentication header,
 follow pagination, and rotate keys after failures within a 12-second budget.
@@ -186,3 +191,5 @@ claim that a program-specific future refund is impossible. Old recorded facts
 refresh to schema 7 within the existing 60-transaction collection budget;
 coverage stays incomplete until that refresh finishes. Historical evidence is
 not backdated.
+
+Reconciliation writes the same enriched finalized transaction facts used by NAV collection, so a newly landed journaled transaction needs one `getTransaction` read across both paths. Existing legacy facts remain readable; missing and unfinalized evidence stays unresolved.

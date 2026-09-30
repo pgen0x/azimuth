@@ -113,13 +113,18 @@ global.fetch=async url=>{if(url.includes('/quote?'))throw new Error('no route');
  // Incomplete pagination cannot silently promote partial provider data.
  global.fetch=async(url)=>new URL(url).searchParams.get('page')==='1' ? {ok:true,json:async()=>({balances:[{mint:sol,decimals:9,pricePerToken:100}],pagination:{hasMore:true}})} : {ok:false,status:503};
  assert.equal((await heliusPrices(wallet,{HELIUS_API_KEY:'test-key-good'})).marks.size,0);
+ const savedWalletPrices=process.env.DLMM_HELIUS_WALLET_PRICES;
+ delete process.env.DLMM_HELIUS_WALLET_PRICES;
  const savedKey=process.env.HELIUS_API_KEY;process.env.HELIUS_API_KEY='test-key-good';
- let quotesWithHelius=0;
+ let quotesWithHelius=0, walletApiCalls=0;
  global.fetch=async(url)=>{
-   if(url.includes('api.helius.xyz'))return {ok:true,json:async()=>({balances:[{mint:sol,decimals:9,pricePerToken:100},...Array.from({length:12},(_,i)=>({mint:'unknown'+i,decimals:9,pricePerToken:2,balance:99999999,usdValue:99999999}))],pagination:{hasMore:false}})};
+   if(url.includes('api.helius.xyz')){walletApiCalls++;return {ok:true,json:async()=>({balances:[{mint:sol,decimals:9,pricePerToken:100},...Array.from({length:12},(_,i)=>({mint:'unknown'+i,decimals:9,pricePerToken:2,balance:99999999,usdValue:99999999}))],pagination:{hasMore:false}})};}
    if(url.includes('/quote?')){quotesWithHelius++;throw new Error('unexpected quote');}
    return{ok:true,json:async()=>({totalPositions:0,pools:[],hasNext:false})};
  };
+ await collect(args);
+ assert.equal(walletApiCalls,0); // Routine snapshots must not spend Wallet API credits.
+ process.env.DLMM_HELIUS_WALLET_PRICES="true"; quotesWithHelius=0;
  const enriched=await collect(args);
  assert.equal(quotesWithHelius,0);assert.equal(enriched.nav_sol,null);
  const enrichedSnapshot=JSON.parse(fs.readFileSync(path.join(dir,'dlmm_nav.jsonl'),'utf8').trim().split('\n').at(-1));
@@ -132,6 +137,7 @@ global.fetch=async url=>{if(url.includes('/quote?'))throw new Error('no route');
  const preferred=JSON.parse(fs.readFileSync(path.join(dir,'dlmm_nav.jsonl'),'utf8').trim().split('\n').at(-1));
  assert.equal(preferred.tokens[0].basis,'spot_mark');
  assert.ok(Math.abs(preferred.tokens[0].mark_sol-0.00000000003)<1e-24);
+ if(savedWalletPrices===undefined)delete process.env.DLMM_HELIUS_WALLET_PRICES;else process.env.DLMM_HELIUS_WALLET_PRICES=savedWalletPrices;
  if(savedKey===undefined)delete process.env.HELIUS_API_KEY;else process.env.HELIUS_API_KEY=savedKey;
  // Upgrade cached unknown facts once, using fresh on-chain observations.
  fs.writeFileSync(path.join(dir,'dlmm_wallet_transactions.jsonl'),JSON.stringify({signature:'sig',wallet,schema_version:5,classification:'unclassified'})+'\n');
