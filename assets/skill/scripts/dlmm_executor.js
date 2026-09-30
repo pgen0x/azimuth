@@ -856,6 +856,24 @@ async function getSplBalance(tokenMintStr) {
   });
 }
 
+// Preserve decimal input through scaling; binary multiplication can leave one
+// raw unit behind even when the caller supplies the entire token balance.
+function swapAmountRaw(amount, decimals) {
+  const text = String(amount).trim();
+  const match = text.length <= 128 && /^(\d+)(?:\.(\d*))?(?:[eE]([+-]?\d+))?$/.exec(text);
+  const exponent = match ? Number(match[3] || 0) : NaN;
+  if (!match || !Number.isInteger(decimals) || decimals < 0 || decimals > 255
+      || !Number.isInteger(exponent) || Math.abs(exponent) > 255) {
+    throw new Error("Invalid swap amount or token decimals");
+  }
+  const fraction = match[2] || "";
+  const digits = BigInt(match[1] + fraction);
+  const shift = decimals + exponent - fraction.length;
+  const raw = shift >= 0 ? digits * 10n ** BigInt(shift) : digits / 10n ** BigInt(-shift);
+  if (raw <= 0n || raw > 18446744073709551615n) throw new Error("Swap amount outside positive token u64 range");
+  return raw.toString();
+}
+
 async function swapToken(inputMintStr, outputMintStr, amountFloat, maxPriceImpactPct = 5, slippageBps = 100, minNetLamports = null) {
   const input_mint = normalizeMint(inputMintStr);
   const output_mint = normalizeMint(outputMintStr);
@@ -892,10 +910,10 @@ async function swapToken(inputMintStr, outputMintStr, amountFloat, maxPriceImpac
       // We'll perform a quick connection just to fetch decimals
       await runWithFailover(async (connection) => {
         const mintInfo = await connection.getParsedAccountInfo(new PublicKey(input_mint));
-        decimals = mintInfo.value?.data?.parsed?.info?.decimals ?? 9;
+        decimals = mintInfo.value?.data?.parsed?.info?.decimals;
       });
     }
-    const amountRaw = Math.floor(amountFloat * Math.pow(10, decimals)).toString();
+    const amountRaw = swapAmountRaw(amountFloat, decimals);
 
     // 2. Fetch quote — retry with escalating slippage on failure (thin pools reject tight slippage)
     const slippageLadder = [slippageBps, slippageBps * 3, slippageBps * 8];
@@ -1251,10 +1269,10 @@ async function main() {
     } else if (command === "swap") {
       const input = args[1];
       const output = args[2];
-      const amount = parseFloat(args[3]);
+      const amount = args[3];
       const maxImpact = args[4] != null ? parseFloat(args[4]) : 5;
       const slipBps = args[5] != null ? parseInt(args[5]) : 100;
-      if (!input || !output || isNaN(amount)) {
+      if (!input || !output || amount == null) {
         throw new Error("Usage: swap <input_mint> <output_mint> <amount> [max_price_impact_pct] [slippage_bps] [min_net_lamports]");
       }
       const minNetLamports = args[6] != null ? Number(args[6]) : null;
@@ -1270,5 +1288,5 @@ async function main() {
 }
 
 if (require.main === module) main();
-module.exports = { reclaimEmptyAccounts, assertRootBudget, reconcileAccounting, recordSubmission, closePosition, swapToken, confirmSignedTransaction, deployPosition, acquireDeployLock, acquireSwapLock, reconcilePendingSwap,
+module.exports = { swapAmountRaw, reclaimEmptyAccounts, assertRootBudget, reconcileAccounting, recordSubmission, closePosition, swapToken, confirmSignedTransaction, deployPosition, acquireDeployLock, acquireSwapLock, reconcilePendingSwap,
   assertNoTokenExposure, positionIsEmpty, positionAccountExists, slippageBpsToPercent };
