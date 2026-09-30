@@ -110,7 +110,7 @@ function transactionFact(tx, wallet, signature, event) {
   }
   const instructions = [...tx.transaction.message.instructions, ...(meta.innerInstructions || []).flatMap(i => i.instructions)];
   let external = 0, rentLocked = 0, permanentRent = 0;
-  const simpleTransfer = !event && !meta.err && instructions.every(i => i.program === 'system' && i.parsed?.type === 'transfer' || i.programId?.toString() === 'ComputeBudget111111111111111111111111111111');
+  let simpleTransfer = !event && !meta.err && instructions.every(i => i.program === 'system' && i.parsed?.type === 'transfer' || ['ComputeBudget111111111111111111111111111111','MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr'].includes(i.programId?.toString()));
   for (const i of instructions) {
     const info = i.parsed?.info || {};
     if (simpleTransfer && i.program === 'system') {
@@ -126,6 +126,9 @@ function transactionFact(tx, wallet, signature, event) {
       }
     }
   }
+  simpleTransfer = simpleTransfer && Number.isSafeInteger(external)
+    && external === meta.postBalances[index]-meta.preBalances[index]+(index===0 ? meta.fee : 0)
+    && Object.values(tokenDeltas).every(amount=>amount===0n);
   // Some programs initialize PDAs with transfer + allocate + assign instead
   // of createAccount. Count only newly funded accounts with exact provenance.
   if (!meta.err) for (const i of instructions) {
@@ -165,7 +168,7 @@ function transactionFact(tx, wallet, signature, event) {
         || TOKEN_PROGRAMS.includes(id) && ['transfer','transferChecked','getAccountDataSize','initializeImmutableOwner','initializeAccount','initializeAccount2','initializeAccount3'].includes(type);
     });
   const maintenance=!event ? rentMaintenance(tx,wallet) : null;
-  return {schema_version:7,event_position:event?.position,signature, wallet, slot: tx.slot, block_time: tx.blockTime, observed_at: now(), failed: !!meta.err,
+  return {schema_version:8,event_position:event?.position,signature, wallet, slot: tx.slot, block_time: tx.blockTime, observed_at: now(), failed: !!meta.err,
     wallet_delta_lamports: meta.postBalances[index]-meta.preBalances[index], fee_lamports: index === 0 ? meta.fee : 0,
     token_deltas_raw: Object.fromEntries(Object.entries(tokenDeltas).map(([m,a]) => [m,a.toString()])),
     token_pre_balances_raw: Object.fromEntries(Object.entries(tokenPre).map(([m,a]) => [m,a.toString()])),
@@ -195,7 +198,7 @@ async function collect({dir, wallet, PublicKey, rpc, historyOnly=false}) {
     before = batch[batch.length-1].signature;
   }
   const currentFact=r=>{const f=cache.get(r.signature); return f?.wallet===wallet && f?.schema_version>=2
-    && (f.schema_version>=6 || f.classification!=='unclassified')
+    && (f.schema_version>=8 || f.classification!=='unclassified')
     && (f.schema_version>=7 || f.classification!=='recorded_bot')
     && (!(events.get(r.signature)?.kind==='swap' && !events.get(r.signature)?.position) || f.token_pre_balances_raw!=null)
     && f.event_position===events.get(r.signature)?.position;};

@@ -5,6 +5,18 @@ const tx={slot:100,blockTime:Math.floor(Date.now()/1000),transaction:{message:{a
 const fact=transactionFact(tx,wallet,'sig');
 assert.equal(fact.wallet_delta_lamports,-105);assert.equal(fact.external_flow_lamports,-100);assert.equal(fact.fee_lamports,5);
 assert.equal(transactionFact(tx,wallet,'sig',{position:'position'}).external_flow_lamports,null);
+// Memo text never changes the economic classification of a proven SOL transfer.
+const memoTransfer={...tx,transaction:{message:{...tx.transaction.message,
+ instructions:[...tx.transaction.message.instructions,{programId:key('MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr'),parsed:'untrusted memo'}]}}};
+assert.equal(transactionFact(memoTransfer,wallet,'memo').external_flow_lamports,-100);
+assert.equal(transactionFact(memoTransfer,'outside','incoming').external_flow_lamports,100);
+const mismatch={...memoTransfer,meta:{...tx.meta,postBalances:[894,100]}};
+assert.equal(transactionFact(mismatch,wallet,'mismatch').classification,'unclassified');
+const custom={...memoTransfer,transaction:{message:{...memoTransfer.transaction.message,
+ instructions:[...memoTransfer.transaction.message.instructions,{programId:key('custom')} ]}}};
+assert.equal(transactionFact(custom,wallet,'custom').classification,'unclassified');
+assert.equal(transactionFact({...memoTransfer,meta:{...tx.meta,err:'failed'}},wallet,'failed-memo').external_flow_lamports,null);
+
 const closed={...tx,meta:{...tx.meta,preBalances:[1000,100],postBalances:[1095,0]}};
 assert.equal(transactionFact(closed,wallet,'closed',{position:'outside'}).position_account_closed,true);
 assert.equal(transactionFact(tx,wallet,'open',{position:'outside'}).position_account_closed,false);
@@ -140,12 +152,18 @@ global.fetch=async url=>{if(url.includes('/quote?'))throw new Error('no route');
  if(savedWalletPrices===undefined)delete process.env.DLMM_HELIUS_WALLET_PRICES;else process.env.DLMM_HELIUS_WALLET_PRICES=savedWalletPrices;
  if(savedKey===undefined)delete process.env.HELIUS_API_KEY;else process.env.HELIUS_API_KEY=savedKey;
  // Upgrade cached unknown facts once, using fresh on-chain observations.
- fs.writeFileSync(path.join(dir,'dlmm_wallet_transactions.jsonl'),JSON.stringify({signature:'sig',wallet,schema_version:5,classification:'unclassified'})+'\n');
+ fs.writeFileSync(path.join(dir,'dlmm_wallet_transactions.jsonl'),JSON.stringify({signature:'sig',wallet,schema_version:7,classification:'unclassified'})+'\n');
  let refreshed=0;
  connection.getParsedTransaction=async()=>{refreshed++;return {...cleaning,slot:100,blockTime:tx.blockTime}};
  await collect({...args,historyOnly:true}); await collect({...args,historyOnly:true});
  const upgraded=fs.readFileSync(path.join(dir,'dlmm_wallet_transactions.jsonl'),'utf8').trim().split('\n').map(JSON.parse).filter(f=>f.signature==='sig').at(-1);
- assert.equal(upgraded.schema_version,7);assert.equal(upgraded.classification,'rent_maintenance');assert.equal(refreshed,1);
+ assert.equal(upgraded.schema_version,8);assert.equal(upgraded.classification,'rent_maintenance');assert.equal(refreshed,1);
+ const recordedEvent={signature:'sig',wallet,position:'p'};
+ fs.writeFileSync(path.join(dir,'dlmm_transactions.jsonl'),JSON.stringify(recordedEvent)+'\n');
+ fs.writeFileSync(path.join(dir,'dlmm_wallet_transactions.jsonl'),JSON.stringify({...transactionFact(tx,wallet,'sig',recordedEvent),schema_version:7})+'\n');
+ await collect({...args,historyOnly:true});
+ assert.equal(refreshed,1); // No broad schema migration of already-recorded transactions.
+
  console.log('NAV includes reserves once, classifies external flows, keeps failed fees and rejects unpriced assets');
 })().catch(e=>{console.error(e);process.exitCode=1}).finally(()=>fs.rmSync(dir,{recursive:true,force:true}));
 

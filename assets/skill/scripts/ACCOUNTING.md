@@ -193,3 +193,8 @@ coverage stays incomplete until that refresh finishes. Historical evidence is
 not backdated.
 
 Reconciliation writes the same enriched finalized transaction facts used by NAV collection, so a newly landed journaled transaction needs one `getTransaction` read across both paths. Existing legacy facts remain readable; missing and unfinalized evidence stays unresolved.
+
+Native System transfers may include the standard Memo program. Classification
+requires the transfer sum to match the wallet's finalized native delta plus its
+fee, with no token delta. Memo content is ignored. Schema 8 refreshes only older
+unclassified facts; already recorded transactions at schema 7 stay cached.
