@@ -1076,8 +1076,8 @@ def position_gone_onchain(wallet_address, pos_addr, attempts=2, gap_s=6):
 
 # A position still holding this much quote after a close that reported success
 # did not actually close. Well under any real ticket (the smallest observed is
-# ~0.16 SOL) and under the auto-swap's own 0.01 SOL "too small to bother" floor,
-# so ordinary leftovers never trip it.
+# ~0.16 SOL). This is a position-close verification threshold, separate
+# from the wallet residual swap floor configured by --min-swap-sol.
 CLOSE_RESIDUAL_DUST_SOL = 0.005
 
 
@@ -1676,7 +1676,7 @@ def main():
                     token_balance = float(bal_data["balance"])
                     est_sol = token_balance * current_price
                     print(f"Base token balance: {token_balance} (~{est_sol:.4f} SOL)")
-                    if est_sol > 0.01 or is_dry:
+                    if est_sol >= cli.min_swap_sol or is_dry:
                         # Dump exits force-liquidate; normal exits use tight 5% guard. Was
                         # 50% until 2026-08-21 — CYBERCAT-SOL's RUG_M5_PCT exit journaled a
                         # -1.44% mark but the liquidation swap, unbounded up to 50% impact
@@ -1693,7 +1693,7 @@ def main():
                         else:
                             print(f"❌ Auto-swap failed: {swap_err or (swap_res.get('error') if swap_res else 'No response')}")
                     else:
-                        print(f"Base token SOL value too small ({est_sol:.4f} SOL), skipping swap")
+                        print(f"Base token SOL value below cleanup floor ({est_sol:.4f} < {cli.min_swap_sol} SOL), skipping swap")
                 else:
                     print("Base token balance is zero, skipping swap")
         else:
@@ -2896,7 +2896,7 @@ def main():
                         balance = float(bal_data.get("balance", 0))
                         est_sol = balance * active_price
                         print(f"Base token balance: {balance} (~{est_sol:.4f} SOL)")
-                        if est_sol > 0.01 or (close_res.get("dryRun") or close_res.get("dry_run") == True):
+                        if est_sol >= cli.min_swap_sol or (close_res.get("dryRun") or close_res.get("dry_run") == True):
                             # Dump exits MUST liquidate — holding a crashing token is worse than slippage.
                             # Normal/profit exits use a tight 5% guard to avoid bad fills on thin pools (token re-swept by --cleanup-tokens).
                             # Was 50% until 2026-08-21: CYBERCAT-SOL's RUG_M5_PCT exit journaled a
@@ -2921,7 +2921,7 @@ def main():
                                 swap_report = f"\n**Auto-Swap**: Failed to swap back to SOL: {swap_problem}"
                                 print(f"❌ Auto-swap failed: {swap_problem}")
                         else:
-                            print("Base token balance SOL value too small (<0.01 SOL), skipping swap")
+                            print(f"Base token SOL value below cleanup floor ({est_sol:.4f} < {cli.min_swap_sol} SOL), skipping swap")
                     else:
                         print("Base token balance is zero, skipping swap")
                         
