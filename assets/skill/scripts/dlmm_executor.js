@@ -856,9 +856,13 @@ async function getSplBalance(tokenMintStr) {
   });
 }
 
-async function swapToken(inputMintStr, outputMintStr, amountFloat, maxPriceImpactPct = 5, slippageBps = 100) {
+async function swapToken(inputMintStr, outputMintStr, amountFloat, maxPriceImpactPct = 5, slippageBps = 100, minNetLamports = null) {
   const input_mint = normalizeMint(inputMintStr);
   const output_mint = normalizeMint(outputMintStr);
+  if (minNetLamports !== null && (!Number.isSafeInteger(minNetLamports) || minNetLamports < 1
+      || output_mint !== "So11111111111111111111111111111111111111112" || input_mint === output_mint)) {
+    throw new Error("Net recovery requires token-to-SOL and a positive integer lamport floor");
+  }
 
   if (process.env.DRY_RUN === "true") {
     console.warn(`[DRY RUN] Would swap ${amountFloat} of ${input_mint} to ${output_mint}`);
@@ -966,6 +970,31 @@ async function swapToken(inputMintStr, outputMintStr, amountFloat, maxPriceImpac
     
     const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash("confirmed");
     transaction.message.recentBlockhash = blockhash;
+    // Optional residual recovery: simulate the exact unsigned transaction and
+    // reserve the entire quoted slippage allowance before authorizing a send.
+    if (minNetLamports !== null) {
+      const out = Number(quoteResponse.outAmount), minimum = Number(quoteResponse.otherAmountThreshold);
+      if (!Number.isSafeInteger(out) || !Number.isSafeInteger(minimum) || minimum <= 0 || minimum > out) {
+        return { success: false, aborted: true, reason: "net_recovery_invalid_quote" };
+      }
+      const before = await connection.getBalanceAndContext(wallet.publicKey, "confirmed");
+      const simulated = await connection.simulateTransaction(transaction, {
+        commitment: "confirmed", sigVerify: false, minContextSlot: before.context.slot,
+        accounts: { encoding: "base64", addresses: [wallet.publicKey.toString()] }
+      });
+      const after = await connection.getBalanceAndContext(wallet.publicKey,
+        { commitment: "confirmed", minContextSlot: simulated.context.slot });
+      const post = simulated.value.accounts?.[0]?.lamports;
+      if (simulated.value.err || !Number.isSafeInteger(post) || !Number.isSafeInteger(before.value)
+          || before.value !== after.value) {
+        return { success: false, aborted: true, reason: "net_recovery_unmeasured" };
+      }
+      const conservativeNet = post - before.value - (out - minimum);
+      if (conservativeNet < minNetLamports) {
+        return { success: false, aborted: true, reason: "net_recovery_below_floor",
+          conservativeNetLamports: conservativeNet, minNetLamports };
+      }
+    }
     transaction.sign([wallet]);
     
     // 5. Send and confirm
@@ -1226,9 +1255,10 @@ async function main() {
       const maxImpact = args[4] != null ? parseFloat(args[4]) : 5;
       const slipBps = args[5] != null ? parseInt(args[5]) : 100;
       if (!input || !output || isNaN(amount)) {
-        throw new Error("Usage: swap <input_mint> <output_mint> <amount> [max_price_impact_pct] [slippage_bps]");
+        throw new Error("Usage: swap <input_mint> <output_mint> <amount> [max_price_impact_pct] [slippage_bps] [min_net_lamports]");
       }
-      const res = await swapToken(input, output, amount, maxImpact, slipBps);
+      const minNetLamports = args[6] != null ? Number(args[6]) : null;
+      const res = await swapToken(input, output, amount, maxImpact, slipBps, minNetLamports);
       console.log(JSON.stringify(res));
     } else {
       throw new Error(`Unknown command: ${command}`);
