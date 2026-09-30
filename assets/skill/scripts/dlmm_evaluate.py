@@ -4,6 +4,7 @@ import argparse
 import collections
 import concurrent.futures
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -73,6 +74,15 @@ def evaluate(profile, start, end, rejects):
         result=bin_replay(entry,[s for s in samples if s['position']==entry['position'] and s['ts']<=end],cost)
         bins.append(dict(position=entry['position'],**result))
     snapshots=[s for s in rows(memory/'dlmm_nav.jsonl') if start<=s['ts']<=end]
+    cash_samples=sorted((s for s in snapshots if isinstance(s.get('native_sol'),(int,float))
+                         and math.isfinite(s['native_sol'])),key=lambda s:s['ts'])
+    native_cash=None
+    if len(cash_samples)>=2 and cash_samples[-1]['ts']>cash_samples[0]['ts']:
+        first,last=cash_samples[0],cash_samples[-1]
+        fields=('ts','native_sol','refundable_rent_sol','lp_mark_sol','spl_mark_sol','nav_sol')
+        native_cash=dict(start={k:first.get(k) for k in fields},end={k:last.get(k) for k in fields},
+                         change_sol=round(last['native_sol']-first['native_sol'],9),
+                         basis='observed_native_balance_change_not_trading_profit')
     valid=[s for s in snapshots if s.get('nav_sol') is not None]
     wealth=None
     unvalued_inflows=[]
@@ -88,10 +98,12 @@ def evaluate(profile, start, end, rejects):
         token_counts=dict(collections.Counter(t.get('basis','unknown') if t.get('mark_sol') is not None else 'unpriced' for t in last_nav.get('tokens',[]))))
     live=[r for r in rows(memory/'dlmm_root_decisions.jsonl') if start<=r['ts']<=end]
     return dict(start=start,end=end,generated_at=int(time.time()),close_count=len(closes),close_account_proofs=close_proofs,accounting=accounting,
-                wealth_change=wealth,unvalued_external_token_inflows=unvalued_inflows,price_coverage=price_coverage,nav_samples=len(snapshots),complete_nav_samples=len(valid),
+                wealth_change=wealth,native_cash_change=native_cash,unvalued_external_token_inflows=unvalued_inflows,price_coverage=price_coverage,nav_samples=len(snapshots),complete_nav_samples=len(valid),
                 root_replay=[replay_root_decision(r) for r in live],eligibility_replay=comparisons,root_live_decisions=live,
                 rejected_candidates=groups,bin_replay=bins,
-                limits=['Rejected-candidate rate is a price proxy above a fixed 1% hurdle, not realized LP profit.',
+                limits=['Native SOL changes include deployments, withdrawals, swaps, fees, rent and external transfers; they are not trading profit. Rent and incomplete token marks are shown separately, never treated as complete NAV.',
+                        'LP PnL is a position valuation before wallet settlement, not net wallet profit.',
+                        'Rejected-candidate rate is a price proxy above a fixed 1% hurdle, not realized LP profit.',
                         'Bin replay assumes infinitesimal fixed shares; no market-impact or hypothetical recenter execution.',
                         'Unavailable historical bin/settlement observations are unmeasured; never reconstructed using future information.'])
 
@@ -149,7 +161,9 @@ def main():
     (a.output/'evaluation.json').write_text(json.dumps(data,indent=2,allow_nan=False))
     lines=['# Azimuth Solana evaluation',f"Window UTC epoch: {a.start} – {a.end}",
         f"Closes: {data['close_count']}; account deletion proofs: {sum(bool(v) for v in data['close_account_proofs'].values())}; complete marked NAV samples: {data['complete_nav_samples']}/{data['nav_samples']}.",
-        '## LP comparison (full-life cohort)',json.dumps({k:{field:value for field,value in v.items() if field!="positions"} for k,v in data.get('lp_comparison',{}).items()}),'## Wallet wealth',json.dumps(data['wealth_change']) if data['wealth_change'] else 'Unmeasured: incomplete marks/history or external token inflows without transfer-time valuation.',
+        '## Native SOL cash (not trading profit)',json.dumps(data['native_cash_change']) if data['native_cash_change'] else 'Unmeasured: fewer than two distinct native balance snapshots in this window.',
+        'Cash uses the displayed snapshot times. Rent is recoverable reserve; token and LP marks are not necessarily executable proceeds. Complete wallet profit remains unmeasured when NAV is incomplete.',
+        '## LP comparison (full-life cohort; not net wallet profit)',json.dumps({k:{field:value for field,value in v.items() if field!="positions"} for k,v in data.get('lp_comparison',{}).items()}),'## Wallet wealth',json.dumps(data['wealth_change']) if data['wealth_change'] else 'Unmeasured: incomplete marks/history or external token inflows without transfer-time valuation.',
         'Unvalued external token inflows: '+json.dumps(data['unvalued_external_token_inflows']),
         '## Pooled settlement cash (full-life groups; no per-root allocation)',
         json.dumps([g for g in data['accounting'].get('pooled_settlements',[]) if a.start <= g['first_activity'] and g['last_activity'] <= a.end]),

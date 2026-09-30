@@ -46,6 +46,7 @@ with tempfile.TemporaryDirectory() as directory:
   (memory/'dlmm_wallet_transactions.jsonl').write_text(json.dumps(record)+'\n')
   return evaluate(profile,100,200,profile/'rejects.jsonl')
  result=assessment(fact)
+ assert result['native_cash_change'] is None
  assert result['wealth_change'] is None
  assert result['unvalued_external_token_inflows']==['gift']
  assert result['accounting']['flow_adjusted_wealth_change_sol'] is None
@@ -62,4 +63,17 @@ with tempfile.TemporaryDirectory() as directory:
                             wallet_delta_lamports=193,rent_maintenance={'released_lamports':200,'service_fee_lamports':2},fee_lamports=5))
  assert abs(maintenance['wealth_change']['flow_adjusted_change_sol'] + 7e-9)<1e-15
  assert abs(maintenance['accounting']['flow_adjusted_wealth_change_sol'] + 7e-9)<1e-15
+ # Cash remains measurable when token prices prevent complete NAV. A deployment
+ # moves cash into LP/rent; displaying its outflow must not invent a net loss.
+ snapshots=[dict(ts=100,end_slot=10,native_sol=0.5,nav_sol=None,lp_mark_sol=0,refundable_rent_sol=0.1),
+            dict(ts=200,end_slot=20,native_sol=0.35,nav_sol=None,lp_mark_sol=0.1,refundable_rent_sol=0.15)]
+ (memory/'dlmm_nav.jsonl').write_text(''.join(json.dumps(s)+'\n' for s in reversed(snapshots)))
+ result=assessment(fact)
+ assert result['wealth_change'] is None
+ assert result['native_cash_change']['change_sol']==-0.15
+ assert result['native_cash_change']['start']['ts']==100
+ assert result['native_cash_change']['end']['lp_mark_sol']==0.1
+ assert result['native_cash_change']['end']['refundable_rent_sol']==0.15
+ assert result['native_cash_change']['basis']=='observed_native_balance_change_not_trading_profit'
+ assert evaluate(profile,101,200,profile/'rejects.jsonl')['native_cash_change'] is None
 print('Evaluation excludes unvalued gifts and subtracts known external cash flows')
