@@ -91,6 +91,38 @@ const clearMarker = () => fs.rmSync(marker, { force: true });
   } finally {
     fs.rmSync = originalRm;
   }
+  // Residual recovery must cover costs and the full slippage allowance before
+  // sending. Existing pending-send tests above still exercise the normal path.
+  const oldFetch = sandbox.fetch;
+  let simulatedPost = 14600, simulationError = null, changedBalance = false, balanceReads = 0;
+  let minimumOutput = "4500";
+  sandbox.fetch = async (url) => ({ ok: true, json: async () => url.includes("/quote?")
+    ? { inAmount: "100000000", outAmount: "5000", otherAmountThreshold: minimumOutput, priceImpactPct: "0" }
+    : { swapTransaction: "AA==" } });
+  Connection.prototype.getParsedAccountInfo = async () => ({ value: { data: { parsed: { info: { decimals: 9 } } } } });
+  Connection.prototype.getBalanceAndContext = async () => ({ context: { slot: 10 }, value: (++balanceReads % 2 === 0 && changedBalance) ? 10001 : 10000 });
+  Connection.prototype.simulateTransaction = async (_, options) => {
+    assert.equal(options.sigVerify, false);
+    assert.equal(options.minContextSlot, 10);
+    return { context: { slot: 10 }, value: { err: simulationError, accounts: [{ lamports: simulatedPost }] } };
+  };
+  const recover = (floor=4000) => swapToken("TOKEN", "So11111111111111111111111111111111111111112", 0.1, 5, 100, floor);
+  const previousSends = sends;
+  assert.equal((await recover(4101)).reason, "net_recovery_below_floor");
+  simulatedPost = 9900;
+  assert.equal((await recover(1)).reason, "net_recovery_below_floor");
+  simulatedPost = 14600; simulationError = "failed";
+  assert.equal((await recover()).reason, "net_recovery_unmeasured");
+  simulationError = null; changedBalance = true;
+  assert.equal((await recover()).reason, "net_recovery_unmeasured");
+  changedBalance = false; minimumOutput = undefined;
+  assert.equal((await recover()).reason, "net_recovery_invalid_quote");
+  minimumOutput = "4500";
+  await assert.rejects(recover(NaN), /positive integer/);
+  assert.equal(sends, previousSends);
+  assert.equal((await recover(4100)).success, true);
+  assert.equal(sends, previousSends + 1);
+  sandbox.fetch = oldFetch;
   sends = 0;
   confirmTimeout = true;
   signatureStatus = { confirmationStatus: "confirmed", err: null };
