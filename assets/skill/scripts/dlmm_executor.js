@@ -1061,25 +1061,10 @@ async function reconcileAccounting() {
         { commitment: "finalized", maxSupportedTransactionVersion: 0 }));
       // A successful RPC returning null means missing evidence, not provider failure.
       if (!tx?.meta) { pending++; continue; }
-      const keys = tx.transaction.message.accountKeys.map(k => k.pubkey.toString());
-      const index = keys.indexOf(event.wallet);
-      if (index < 0) throw new Error("Wallet missing from transaction");
-      if (![tx.meta.preBalances[index], tx.meta.postBalances[index], tx.meta.fee].every(Number.isSafeInteger)) {
-        throw new Error("Unsafe native balance precision");
-      }
-      const tokens = {};
-      for (const [rows, sign] of [[tx.meta.preTokenBalances, -1n], [tx.meta.postTokenBalances, 1n]]) {
-        for (const row of rows || []) {
-          if (row.owner === event.wallet) tokens[row.mint] = (tokens[row.mint] || 0n) + sign * BigInt(row.uiTokenAmount.amount);
-        }
-      }
-      const fact = { signature: event.signature, wallet: event.wallet, slot: tx.slot,
-        block_time: tx.blockTime, observed_at: Math.floor(Date.now() / 1000), failed: !!tx.meta.err,
-        wallet_delta_lamports: tx.meta.postBalances[index] - tx.meta.preBalances[index],
-        fee_lamports: index === 0 ? tx.meta.fee : 0,
-        token_deltas_raw: Object.fromEntries(Object.entries(tokens).map(([mint, amount]) => [mint, amount.toString()])),
-        basis: "finalized_transaction_balances" };
-      fs.appendFileSync(path.join(dir, "dlmm_transaction_facts.jsonl"), JSON.stringify(fact) + "\n", { mode: 0o600 });
+      // Share finalized evidence with NAV collection instead of fetching it again.
+      const { transactionFact } = require("./dlmm_nav.js");
+      const fact = transactionFact(tx, event.wallet, event.signature, event);
+      fs.appendFileSync(path.join(dir, "dlmm_wallet_transactions.jsonl"), JSON.stringify(fact) + "\n", { mode: 0o600 });
       facts.set(event.signature, fact);
     } catch (err) {
       pending++;

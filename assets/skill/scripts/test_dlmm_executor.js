@@ -173,7 +173,7 @@ const clearMarker = () => fs.rmSync(marker, { force: true });
   await assert.rejects(deployPosition("pool", 0, -1, 20, 0), /Invalid deploy/);
   clearMarker(); height = 151; confirmationError = false;
   assert.equal((await deploy()).success, true); assert.equal(sends, 5); // expired reservation recovers
-  deps["./dlmm_nav.js"] = {collect: async () => ({})};
+  deps["./dlmm_nav.js"] = {...require("./dlmm_nav.js"), collect: async () => ({})};
   deps.child_process = {execFileSync: () => JSON.stringify({allow:false,reason:"incomplete_chain"})};
   await assert.rejects(sandbox.module.exports.assertRootBudget(), /ENTRY REFUSED: incomplete_chain/);
   deps.child_process.execFileSync = () => JSON.stringify({allow:true});
@@ -192,9 +192,10 @@ const clearMarker = () => fs.rmSync(marker, { force: true });
   } finally { fs.appendFileSync = append; }
   recordSubmission(wallet, "position-1", "deploy", "measured", 150);
   recordSubmission(wallet, "position-1", "deploy", "missing", 150);
-  Connection.prototype.getParsedTransaction = async signature => signature === "missing" ? null : ({
+  let measuredReads = 0;
+  Connection.prototype.getParsedTransaction = async signature => signature === "missing" ? null : (measuredReads++, {
     slot: 100, blockTime: 200,
-    transaction: {message: {accountKeys: [{pubkey: wallet.publicKey}]}},
+    transaction: {message: {accountKeys: [{pubkey: wallet.publicKey}], instructions: []}},
     meta: {err: null, fee: 5000, preBalances: [100000], postBalances: [70000],
       preTokenBalances: [], postTokenBalances: [{owner: wallet.publicKey.toString(), mint: "TOKEN",
         uiTokenAmount: {amount: "9007199254740993"}}]},
@@ -204,14 +205,24 @@ const clearMarker = () => fs.rmSync(marker, { force: true });
   assert.equal((await reconcileAccounting()).pending, 1);
   assert.equal((await reconcileAccounting()).pending, 1);
   assert.equal(warnings.some(message=>message.includes('[RPC WARN]')),false);
-  fs.writeFileSync(path.join(root,'memories/dlmm_wallet_transactions.jsonl'),JSON.stringify({signature:'missing',wallet:wallet.publicKey.toString(),landed:false,classification:'expired_unlanded'})+'\n');
+  fs.appendFileSync(path.join(root,'memories/dlmm_wallet_transactions.jsonl'),JSON.stringify({signature:'missing',wallet:wallet.publicKey.toString(),landed:false,classification:'expired_unlanded'})+'\n');
   const resolved=await reconcileAccounting();
   assert.equal(resolved.pending,0);assert.equal(resolved.expired_unlanded,1);assert.equal(resolved.reconciled,1);
-  const facts = fs.readFileSync(path.join(root, "memories/dlmm_transaction_facts.jsonl"), "utf8").trim().split("\n");
+  const facts = fs.readFileSync(path.join(root, "memories/dlmm_wallet_transactions.jsonl"), "utf8").trim().split("\n").filter(line => JSON.parse(line).signature === "measured");
   assert.equal(facts.length, 1); // refresh never counts the same signature twice
   assert.equal(JSON.parse(facts[0]).wallet_delta_lamports, -30000);
   assert.equal(JSON.parse(facts[0]).fee_lamports, 5000);
   assert.equal(JSON.parse(facts[0]).token_deltas_raw.TOKEN, "9007199254740993");
+  assert.equal(JSON.parse(facts[0]).schema_version, 7);
+  fs.writeFileSync(path.join(root, "memories/dlmm_nav.jsonl"), JSON.stringify({started_at: 100}) + "\n");
+  await require("./dlmm_nav.js").collect({dir: path.join(root, "memories"), wallet: wallet.publicKey.toString(),
+    PublicKey: function(v) { return key(v); }, historyOnly: true, rpc: fn => fn({
+      getBlockHeight: async () => 100, getSlot: async () => 100,
+      getSignaturesForAddress: async (_, opts) => opts.limit === 1 ? [{signature: "measured"}] :
+        [{signature: "measured", blockTime: 200}, {signature: "old", blockTime: 50}],
+      getParsedTransaction: Connection.prototype.getParsedTransaction,
+    })});
+  assert.equal(measuredReads, 1); // Reconciliation and NAV share one finalized RPC read.
   // Rent maintenance never burns/sells tokens, pays only this wallet, and does
   // not re-broadcast after an uncertain send (including across invocations).
   const { reclaimEmptyAccounts } = sandbox.module.exports;

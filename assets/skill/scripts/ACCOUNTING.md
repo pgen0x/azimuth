@@ -186,3 +186,5 @@ claim that a program-specific future refund is impossible. Old recorded facts
 refresh to schema 7 within the existing 60-transaction collection budget;
 coverage stays incomplete until that refresh finishes. Historical evidence is
 not backdated.
+
+Reconciliation writes the same enriched finalized transaction facts used by NAV collection, so a newly landed journaled transaction needs one `getTransaction` read across both paths. Existing legacy facts remain readable; missing and unfinalized evidence stays unresolved.
