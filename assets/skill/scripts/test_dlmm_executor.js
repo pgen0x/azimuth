@@ -213,7 +213,7 @@ const clearMarker = () => fs.rmSync(marker, { force: true });
   assert.equal(JSON.parse(facts[0]).wallet_delta_lamports, -30000);
   assert.equal(JSON.parse(facts[0]).fee_lamports, 5000);
   assert.equal(JSON.parse(facts[0]).token_deltas_raw.TOKEN, "9007199254740993");
-  assert.equal(JSON.parse(facts[0]).schema_version, 7);
+  assert.equal(JSON.parse(facts[0]).schema_version, 8);
   fs.writeFileSync(path.join(root, "memories/dlmm_nav.jsonl"), JSON.stringify({started_at: 100}) + "\n");
   await require("./dlmm_nav.js").collect({dir: path.join(root, "memories"), wallet: wallet.publicKey.toString(),
     PublicKey: function(v) { return key(v); }, historyOnly: true, rpc: fn => fn({
