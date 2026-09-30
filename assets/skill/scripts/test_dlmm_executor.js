@@ -59,7 +59,7 @@ const sandbox = { require: (name) => deps[name] || require(name), module: { expo
     : { swapTransaction: "AA==" } }),
   console: { log() {}, warn() {}, error() {} }, Buffer, setTimeout, clearTimeout };
 vm.runInNewContext(source + "\nmodule.exports.sdkFindPool = findPoolForPosition; module.exports.sdkPositions = getPositions; assertRootBudget = async () => {}; getWallet = () => testWallet; getTokenDecimals = async () => 9; assertRangeDoesNotRequireBinArrayInitialization = async () => {};", Object.assign(sandbox, { testWallet: wallet }));
-const { closePosition, swapToken, confirmSignedTransaction, deployPosition, acquireDeployLock, reconcilePendingSwap, assertNoTokenExposure,
+const { swapAmountRaw, closePosition, swapToken, confirmSignedTransaction, deployPosition, acquireDeployLock, reconcilePendingSwap, assertNoTokenExposure,
   positionIsEmpty, slippageBpsToPercent } = sandbox.module.exports;
 const marker = path.join(root, "memories/dlmm_pending_deploys", `${wallet.publicKey}.json`);
 const deploy = () => deployPosition("pool", 0, 0.1, 20, 0, "bid_ask", 1000);
@@ -107,6 +107,15 @@ const clearMarker = () => fs.rmSync(marker, { force: true });
     return { context: { slot: 10 }, value: { err: simulationError, accounts: [{ lamports: simulatedPost }] } };
   };
   const recover = (floor=4000) => swapToken("TOKEN", "So11111111111111111111111111111111111111112", 0.1, 5, 100, floor);
+  assert.equal(swapAmountRaw(66.324429, 6), "66324429");
+  assert.equal(swapAmountRaw("9007199254.740993", 6), "9007199254740993");
+  assert.equal(swapAmountRaw("1e-9", 9), "1");
+  assert.equal(swapAmountRaw("1.23456789", 6), "1234567"); // excess precision truncates, never overspends
+  assert.equal(swapAmountRaw("18446744073709551615", 0), "18446744073709551615");
+  for (const bad of [NaN, Infinity, -1, 0, "1bad", "1e999", "18446744073709551616", "0.0000000001"]) {
+    assert.throws(() => swapAmountRaw(bad, 9));
+  }
+  assert.throws(() => swapAmountRaw(1, undefined));
   const previousSends = sends;
   assert.equal((await recover(4101)).reason, "net_recovery_below_floor");
   simulatedPost = 9900;
