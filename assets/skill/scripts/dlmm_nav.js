@@ -257,7 +257,8 @@ async function collect({dir, wallet, PublicKey, rpc, historyOnly=false}) {
       }
     } catch { /* Fall back to bounded executable quotes; never invent missing prices. */ }
   }
-  const helius=await heliusPrices(wallet);
+  const helius=process.env.DLMM_HELIUS_WALLET_PRICES === "true"
+    ? await heliusPrices(wallet) : {marks:new Map(),status:"disabled"};
   const heliusMark=info=>helius.marks.get(SOL)?.decimals===9 && helius.marks.has(info.mint) && helius.marks.get(info.mint).decimals===info.tokenAmount.decimals;
   // Rotate the bounded quote budget: illiquid early accounts must not starve later ones.
   const cursorPath=path.join(dir,'dlmm_quote_cursor.json');

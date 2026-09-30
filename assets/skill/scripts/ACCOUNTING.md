@@ -118,6 +118,11 @@ budget. Rate-limit deferrals never become zero-valued assets.
 
 ## Helius supplementary valuation
 
+Disabled by default to avoid recurring Wallet API credit charges. Explicit
+`DLMM_HELIUS_WALLET_PRICES=true` enables these optional, undated estimates.
+With it disabled, existing fresh marks and bounded quotes are used; missing
+valuations remain unknown. Native/token balances still come from RPC.
+
 The collector reuses `HELIUS_API_KEY` or keys from HTTPS `*.helius-rpc.com`
 entries in `SOLANA_RPC_URLS`. Wallet API requests use an authentication header,
 follow pagination, and rotate keys after failures within a 12-second budget.
