@@ -11,7 +11,8 @@ const root = worker ? process.argv[3] : fs.mkdtempSync(path.join(os.tmpdir(), "d
 let reads = 0, sends = 0, builds = 0, minted = 0, height = 100, sendError = false, buildError = false;
 let lastSlippage = null, lastMaxRetries = null;
 let positions = [], confirmationError = false, signatureStatus = null;
-let confirmTimeout = false, accountExists = true;
+let confirmTimeout = false, accountExists = true, failNextSend = false;
+const closeBytes = [];
 const key = (value) => ({ toString: () => value });
 const wallet = { publicKey: key(`test-wallet-${worker ? "swap" : process.pid}`) };
 const transaction = () => ({ signature: Buffer.from([1]), sign() {}, serialize() { return Buffer.from(this.recentBlockhash); } });
@@ -36,7 +37,7 @@ class Connection {
     return { value: [signatureStatus] };
   }
   async getLatestBlockhash() { return { blockhash: "exact-blockhash", lastValidBlockHeight: 150 }; }
-  async sendRawTransaction(raw, options) { sends++; lastMaxRetries = options.maxRetries; assert.equal(raw.toString(), "exact-blockhash"); if (sendError) throw new Error("timeout after send"); return "sig"; }
+  async sendRawTransaction(raw, options) { sends++; closeBytes.push(raw.toString("hex")); if (failNextSend) { failNextSend = false; throw new Error("429 max usage reached"); } lastMaxRetries = options.maxRetries; assert.equal(raw.toString(), "exact-blockhash"); if (sendError) throw new Error("timeout after send"); return "sig"; }
   async confirmTransaction(strategy) { if (confirmTimeout) throw new Error("confirmation timeout"); assert.equal(strategy.blockhash, "exact-blockhash"); return { value: { err: confirmationError ? "chain error" : null } }; }
 }
 const rentInstructions = [];
@@ -143,11 +144,17 @@ const clearMarker = () => fs.rmSync(marker, { force: true });
   sendError = true;
   const beforeClose = sends;
   assert.equal((await closePosition("position")).pending, true);
-  assert.equal(sends, beforeClose + 1); // no second signed close on another RPC
+  assert.equal(sends, beforeClose + 2); // same signed close retried on both RPCs
+  assert.equal(closeBytes.at(-1), closeBytes.at(-2));
   accountExists = false;
   assert.equal((await closePosition("position")).reconciled, true);
-  assert.equal(sends, beforeClose + 2);
+  assert.equal(sends, beforeClose + 4);
   accountExists = true; sendError = false; sends = 0;
+  failNextSend = true;
+  assert.equal((await closePosition("position")).success, true);
+  assert.equal(sends, 2);
+  assert.equal(closeBytes.at(-1), closeBytes.at(-2));
+  sends = 0;
   assert.equal(slippageBpsToPercent(1000), 10);
   assert.equal(positionIsEmpty({ positionData: { liquidityShares: [{ isZero: () => true }] } }), true);
   assert.equal(positionIsEmpty({ positionData: { liquidityShares: [{ isZero: () => false }] } }), false);
