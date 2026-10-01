@@ -36,9 +36,15 @@ while true; do
     set +a
 
     "$PYTHON" "$SCRIPT_DIR/dlmm_monitor.py"
+    # Settlement must not stall risk checks for other open positions.
+    if [ -z "${settlement_pid:-}" ] || ! kill -0 "$settlement_pid" 2>/dev/null; then
+        "$PYTHON" "$SCRIPT_DIR/dlmm_monitor.py" --settle-pending &
+        settlement_pid=$!
+    fi
     i=$((i + 1))
-    if [ "$i" -ge "$SWEEP_EVERY" ]; then
-        "$PYTHON" "$SCRIPT_DIR/dlmm_monitor.py" --cleanup-tokens
+    if [ "$i" -ge "$SWEEP_EVERY" ] && { [ -z "${cleanup_pid:-}" ] || ! kill -0 "$cleanup_pid" 2>/dev/null; }; then
+        "$PYTHON" "$SCRIPT_DIR/dlmm_monitor.py" --cleanup-tokens &
+        cleanup_pid=$!
         i=0
     fi
     # Daily scoreboard — deterministic dlmm_stats.py card via `hermes send`
