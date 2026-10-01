@@ -63,7 +63,7 @@ async function runWithFailover(fn) {
   while (attempts < RPC_URLS.length) {
     const rpcUrl = RPC_URLS[currentRpcIndex];
     try {
-      const connection = new Connection(rpcUrl, "confirmed");
+      const connection = new Connection(rpcUrl, { commitment: "confirmed", disableRetryOnRateLimit: true });
       return await fn(connection);
     } catch (err) {
       console.warn(`[RPC WARN] Failed execution on RPC #${currentRpcIndex}: ${err.message}`);
@@ -639,13 +639,14 @@ async function closePosition(positionAddressStr) {
     return { success: true, dryRun: true, txHashes: ["DRY_RUN_TX_HASH"] };
   }
   let submittedSignature;
+  let submissionError;
   return await runWithFailover(async (connection) => {
     if (submittedSignature) {
       if (!await positionAccountExists(connection, positionAddressStr)) {
         return { success: true, txHashes: [submittedSignature], reconciled: true };
       }
       return { success: false, pending: true, txHash: submittedSignature,
-        error: "Close submission requires on-chain reconciliation; position still exists" };
+        error: `Close submission requires on-chain reconciliation; position still exists (${submissionError || "confirmation unknown"})` };
     }
     const wallet = getWallet();
 
@@ -684,8 +685,18 @@ async function closePosition(positionAddressStr) {
       submittedSignature = signature;
       console.warn(`[TX] ${JSON.stringify({stage: "close-send", signature: submittedSignature,
         position: positionAddressStr, blockhash, lastValidBlockHeight})}`);
-      const txHash = await connection.sendRawTransaction(raw, CONFIRM_OPTIONS);
-      await confirmSignedTransaction(connection, { signature: txHash, blockhash, lastValidBlockHeight });
+      // Retry the SAME signed bytes across RPCs: one signature cannot execute twice.
+      // A timeout is ambiguous; never build a replacement while it may still land.
+      const txHash = await runWithFailover(async (rpc) => {
+        try {
+          const hash = await rpc.sendRawTransaction(raw, CONFIRM_OPTIONS);
+          await confirmSignedTransaction(rpc, { signature: hash, blockhash, lastValidBlockHeight });
+          return hash;
+        } catch (err) {
+          submissionError = err.message;
+          throw err;
+        }
+      });
       submittedSignature = null;
       return txHash;
     };
