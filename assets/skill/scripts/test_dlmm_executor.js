@@ -58,7 +58,7 @@ const sandbox = { require: (name) => deps[name] || require(name), module: { expo
   fetch: async (url) => ({ ok: true, json: async () => url.includes("/quote?")
     ? { inAmount: "100000000", outAmount: "20", priceImpactPct: "0" }
     : { swapTransaction: "AA==" } }),
-  console: { log() {}, warn() {}, error() {} }, Buffer, setTimeout, clearTimeout };
+  console: { log() {}, warn() {}, error() {} }, Buffer, AbortSignal, setTimeout, clearTimeout };
 vm.runInNewContext(source + "\nmodule.exports.sdkFindPool = findPoolForPosition; module.exports.sdkPositions = getPositions; assertRootBudget = async () => {}; getWallet = () => testWallet; getTokenDecimals = async () => 9; assertRangeDoesNotRequireBinArrayInitialization = async () => {};", Object.assign(sandbox, { testWallet: wallet }));
 const { swapAmountRaw, closePosition, swapToken, confirmSignedTransaction, deployPosition, acquireDeployLock, reconcilePendingSwap, assertNoTokenExposure,
   positionIsEmpty, slippageBpsToPercent } = sandbox.module.exports;
@@ -67,6 +67,15 @@ const deploy = () => deployPosition("pool", 0, 0.1, 20, 0, "bid_ask", 1000);
 const clearMarker = () => fs.rmSync(marker, { force: true });
 
 (async () => {
+  if (worker && worker.startsWith("close-")) {
+    vm.runInNewContext("findPoolForPosition = async () => ({pool: testPool, positionData: {publicKey: testWallet.publicKey, positionData: {lowerBinId: 0, upperBinId: 1}}});", Object.assign(sandbox, {testPool: pool}));
+    pool.removeLiquidity = async () => { builds++; return transaction(); };
+    sendError = worker === "close-submit";
+    if (!sendError) Connection.prototype.sendRawTransaction = async () => { sends++; accountExists = false; return "signature"; };
+    const result = await closePosition("restart-position");
+    console.log(JSON.stringify({result,sends,builds}));
+    return;
+  }
   if (worker) {
     sendError = true;
     signatureStatus = worker === "confirmed" ? { confirmationStatus: "confirmed", err: null } : null;
@@ -80,6 +89,13 @@ const clearMarker = () => fs.rmSync(marker, { force: true });
     assert.equal(out.sends, count);
     assert.equal(mode === "confirmed" ? out.result.success : out.result.pending, true);
   }
+  const closeFirst = JSON.parse(execFileSync(process.execPath, [__filename, "close-submit", root], {encoding:"utf8"}));
+  assert.equal(closeFirst.result.pending, true);
+  assert.equal(closeFirst.builds, 1);
+  const closeRestart = JSON.parse(execFileSync(process.execPath, [__filename, "close-resume", root], {encoding:"utf8"}));
+  assert.equal(closeRestart.result.success, true);
+  assert.equal(closeRestart.builds, 0); // resumed the persisted bytes in a new process
+  assert.equal(closeRestart.sends, 1);
   // A local cleanup failure after confirmation must not send a second swap.
   const originalRm = fs.rmSync;
   fs.rmSync = (target, options) => {
@@ -141,20 +157,42 @@ const clearMarker = () => fs.rmSync(marker, { force: true });
   await assert.rejects(confirmSignedTransaction(new Connection(), { signature: "signature" }), /timeout/);
   confirmTimeout = false;
   vm.runInNewContext("findPoolForPosition = async () => ({pool: testPool, positionData: {publicKey: testWallet.publicKey, positionData: {lowerBinId: 0, upperBinId: 1}}});", Object.assign(sandbox, {testPool: pool}));
+  const originalConfirm = Connection.prototype.confirmTransaction;
+  const originalAbort = sandbox.AbortSignal;
+  let confirmationAttempts = 0;
+  sandbox.AbortSignal = { timeout: () => AbortSignal.timeout(5) };
+  Connection.prototype.confirmTransaction = async strategy => {
+    if (++confirmationAttempts === 1) return new Promise((_, reject) => strategy.abortSignal.addEventListener("abort", () => reject(new Error("timeout"))));
+    return { value: { err: null } };
+  };
+  const keepAlive = setTimeout(() => {}, 200);
+  assert.equal((await closePosition("deadline-position")).success, true);
+  clearTimeout(keepAlive);
+  assert.equal(confirmationAttempts, 2);
+  Connection.prototype.confirmTransaction = originalConfirm;
+  sandbox.AbortSignal = originalAbort;
   sendError = true;
   const beforeClose = sends;
   assert.equal((await closePosition("position")).pending, true);
+  const closeMarker = path.join(root, "memories/dlmm_pending_closes/position.json");
+  assert.ok(fs.existsSync(closeMarker)); // persisted before broadcast, survives process restart
   assert.equal(sends, beforeClose + 2); // same signed close retried on both RPCs
   assert.equal(closeBytes.at(-1), closeBytes.at(-2));
   accountExists = false;
   assert.equal((await closePosition("position")).reconciled, true);
-  assert.equal(sends, beforeClose + 4);
+  assert.equal(sends, beforeClose + 2); // restart reconciles disappearance without resending
   accountExists = true; sendError = false; sends = 0;
   failNextSend = true;
   assert.equal((await closePosition("position")).success, true);
   assert.equal(sends, 2);
   assert.equal(closeBytes.at(-1), closeBytes.at(-2));
   sends = 0;
+  const settlementDir = path.join(root, "memories/dlmm_settlements");
+  fs.mkdirSync(settlementDir, { recursive: true });
+  fs.writeFileSync(path.join(settlementDir, "position.json"), "{}");
+  await assert.rejects(deploy(), /awaiting verified SOL settlement/);
+  fs.rmSync(settlementDir, { recursive: true });
+  assert.equal(sends, 0);
   assert.equal(slippageBpsToPercent(1000), 10);
   assert.equal(positionIsEmpty({ positionData: { liquidityShares: [{ isZero: () => true }] } }), true);
   assert.equal(positionIsEmpty({ positionData: { liquidityShares: [{ isZero: () => false }] } }), false);

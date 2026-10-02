@@ -55,6 +55,34 @@ def main():
         close_result, _ = monitor.close_position("position", wallet_address="wallet")
     assert close_result["success"] is True
 
+    # A stale/empty portfolio response must never turn a failed close into success.
+    for live in (True, None, False):
+        with patch.object(monitor, "queue_settlement"), \
+             patch.object(monitor, "run_command_json", return_value=({"success": False}, "timeout")), \
+             patch.object(monitor, "position_live_onchain", return_value=live), \
+             patch.object(monitor, "position_gone_onchain", return_value=True) as indexer:
+            closed, _ = monitor.close_position("position", wallet_address="wallet")
+        assert closed["success"] is (live is False)
+        indexer.assert_not_called()
+
+    # A failed swap remains queued across worker runs and clears only after a zero balance read.
+    with tempfile.TemporaryDirectory() as tmp, patch.object(monitor, "SETTLEMENT_DIR", tmp), \
+         patch.object(monitor, "get_position_metadata", return_value={"base_mint": "TOKEN"}), \
+         patch.object(monitor, "get_wallet_address", return_value="wallet"), \
+         patch.object(monitor, "position_live_onchain", return_value=False), \
+         patch.object(monitor, "get_meteora_portfolio_positions", return_value=({}, None)):
+        monitor.queue_settlement("position")
+        path = Path(tmp) / "position.json"
+        with patch.object(monitor, "run_command_json", side_effect=[({"balance": 10}, None), ({"success": False}, "slippage")]):
+            monitor.settle_pending()
+        assert path.exists()
+        with patch.object(monitor, "run_command_json", side_effect=[({"balance": 10}, None), ({"success": True}, None), ({"balance": 0}, None)]):
+            monitor.settle_pending()
+        assert not path.exists()
+
+    out, error, code = monitor.run_command("sleep 5", timeout=0.02)
+    assert code == -1 and "process group terminated" in error
+
     pos = "2G6rKc9ssZZxVagZpfKKfph8UARmAbh9GjpV9R3uxGGe"
     commands = []
     with patch.object(monitor, "get_position_metadata", return_value={"pool": "pool"}), \

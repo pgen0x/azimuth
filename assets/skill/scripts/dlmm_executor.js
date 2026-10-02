@@ -63,7 +63,8 @@ async function runWithFailover(fn) {
   while (attempts < RPC_URLS.length) {
     const rpcUrl = RPC_URLS[currentRpcIndex];
     try {
-      const connection = new Connection(rpcUrl, { commitment: "confirmed", disableRetryOnRateLimit: true });
+      const connection = new Connection(rpcUrl, { commitment: "confirmed", disableRetryOnRateLimit: true,
+        fetch: (url, options) => fetch(url, { ...options, signal: AbortSignal.timeout(8000) }) });
       return await fn(connection);
     } catch (err) {
       console.warn(`[RPC WARN] Failed execution on RPC #${currentRpcIndex}: ${err.message}`);
@@ -114,7 +115,7 @@ async function confirmSignedTransaction(connection, strategy) {
   console.warn(`[TX] ${JSON.stringify({stage: "confirm", ...strategy})}`);
   let confirmation;
   try {
-    confirmation = await connection.confirmTransaction(strategy, "confirmed");
+    confirmation = await connection.confirmTransaction({ ...strategy, abortSignal: AbortSignal.timeout(8000) }, "confirmed");
   } catch (err) {
     const status = (await connection.getSignatureStatuses(
       [strategy.signature], { searchTransactionHistory: true }
@@ -434,6 +435,10 @@ async function deployPosition(poolAddressStr, amountX, amountY, binsBelow, binsA
   const wallet = getWallet();
   const dry = process.env.DRY_RUN === "true";
   await assertRootBudget();
+  const settlements = path.join(PROFILE_DIR, "memories", "dlmm_settlements");
+  if (!dry && fs.existsSync(settlements) && fs.readdirSync(settlements).some(f => f.endsWith(".json"))) {
+    throw new Error("ENTRY REFUSED: a previous exit is awaiting verified SOL settlement");
+  }
   const release = dry ? async () => {} : await acquireDeployLock(wallet.publicKey.toString());
   const pendingDir = path.join(PROFILE_DIR, "memories", "dlmm_pending_deploys");
   const pendingPath = path.join(pendingDir, `${wallet.publicKey}.json`);
@@ -562,7 +567,7 @@ async function findPoolForPosition(connection, wallet, positionAddressStr) {
   const apiUrl = `https://dlmm.datapi.meteora.ag/portfolio/open?user=${walletAddr}`;
   let poolAddressStr = null;
   try {
-    const res = await fetch(apiUrl);
+    const res = await fetch(apiUrl, { signal: AbortSignal.timeout(8000) });
     if (res.ok) {
       const data = await res.json();
       for (const poolData of (data.pools || [])) {
@@ -638,11 +643,46 @@ async function closePosition(positionAddressStr) {
     console.warn(JSON.stringify({ success: true, dryRun: true, txHashes: ["DRY_RUN_TX_HASH"] }));
     return { success: true, dryRun: true, txHashes: ["DRY_RUN_TX_HASH"] };
   }
+  new PublicKey(positionAddressStr);
+  const release = await acquireSwapLock(`close-${positionAddressStr}`);
+  try {
+    return await closePositionLocked(positionAddressStr);
+  } finally {
+    await release();
+  }
+}
+
+async function closePositionLocked(positionAddressStr) {
+  const pendingDir = path.join(PROFILE_DIR, "memories", "dlmm_pending_closes");
+  const pendingPath = path.join(pendingDir, `${positionAddressStr}.json`);
   let submittedSignature;
   let submissionError;
+  if (fs.existsSync(pendingPath)) {
+    const pending = JSON.parse(fs.readFileSync(pendingPath, "utf8"));
+    if (await runWithFailover(async c => !await positionAccountExists(c, positionAddressStr))) {
+      fs.rmSync(pendingPath, { force: true });
+      return { success: true, reconciled: true, txHashes: [pending.signature] };
+    }
+    // A restart must resume the old signature until chain failure or finalized expiry.
+    const status = await runWithFailover(c => reconcilePendingSwap(c, pendingPath, "Close"));
+    if (status?.pending) {
+      try {
+        await runWithFailover(async c => {
+          await c.sendRawTransaction(Buffer.from(pending.raw, "base64"), CONFIRM_OPTIONS);
+          await confirmSignedTransaction(c, pending);
+        });
+        fs.rmSync(pendingPath, { force: true });
+      } catch (err) {
+        return { ...status, error: `Close retry pending: ${err.message}` };
+      }
+    }
+    const gone = await runWithFailover(async c => !await positionAccountExists(c, positionAddressStr));
+    if (gone) return { success: true, reconciled: true, txHashes: [pending.signature] };
+  }
   return await runWithFailover(async (connection) => {
     if (submittedSignature) {
       if (!await positionAccountExists(connection, positionAddressStr)) {
+        fs.rmSync(pendingPath, { force: true });
         return { success: true, txHashes: [submittedSignature], reconciled: true };
       }
       return { success: false, pending: true, txHash: submittedSignature,
@@ -682,6 +722,11 @@ async function closePosition(positionAddressStr) {
       const raw = tx.serialize();
       const signature = bs58.encode(tx.signature);
       recordSubmission(wallet, positionAddressStr, "close", signature, lastValidBlockHeight);
+      fs.mkdirSync(pendingDir, { recursive: true, mode: 0o700 });
+      const tmp = `${pendingPath}.${process.pid}.tmp`;
+      fs.writeFileSync(tmp, JSON.stringify({ signature, blockhash, lastValidBlockHeight,
+        raw: raw.toString("base64") }), { mode: 0o600, flush: true });
+      fs.renameSync(tmp, pendingPath);
       submittedSignature = signature;
       console.warn(`[TX] ${JSON.stringify({stage: "close-send", signature: submittedSignature,
         position: positionAddressStr, blockhash, lastValidBlockHeight})}`);
@@ -697,6 +742,7 @@ async function closePosition(positionAddressStr) {
           throw err;
         }
       });
+      fs.rmSync(pendingPath, { force: true });
       submittedSignature = null;
       return txHash;
     };
@@ -926,13 +972,13 @@ async function swapToken(inputMintStr, outputMintStr, amountFloat, maxPriceImpac
     }
     const amountRaw = swapAmountRaw(amountFloat, decimals);
 
-    // 2. Fetch quote — retry with escalating slippage on failure (thin pools reject tight slippage)
-    const slippageLadder = [slippageBps, slippageBps * 3, slippageBps * 8];
+    // 2. Fetch a quote within the authorized slippage limit.
+    const slippageLadder = [slippageBps]; // Retry later with a fresh quote; never widen the authorized slippage.
     let lastErr = null;
     for (const bps of slippageLadder) {
       try {
         const quoteUrl = `https://api.jup.ag/swap/v1/quote?inputMint=${input_mint}&outputMint=${output_mint}&amount=${amountRaw}&slippageBps=${bps}`;
-        const quoteRes = await fetch(quoteUrl);
+        const quoteRes = await fetch(quoteUrl, { signal: AbortSignal.timeout(8000) });
         if (!quoteRes.ok) {
           lastErr = `Jupiter quote API error: ${quoteRes.status} ${await quoteRes.text()}`;
           continue;
@@ -981,6 +1027,7 @@ async function swapToken(inputMintStr, outputMintStr, amountFloat, maxPriceImpac
     // 3. Fetch swap transaction
     const swapRes = await fetch("https://api.jup.ag/swap/v1/swap", {
       method: "POST",
+      signal: AbortSignal.timeout(8000),
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         quoteResponse,

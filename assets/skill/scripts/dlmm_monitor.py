@@ -2,6 +2,7 @@
 import sys
 import json
 import time
+import signal
 import subprocess
 import os
 import re
@@ -1023,8 +1024,15 @@ def run_command(cmd, timeout=30):
     try:
         if cmd.startswith("redis-cli "):
             cmd = cmd.replace("redis-cli ", "redis-cli -e ", 1)
-        res = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout)
-        return res.stdout.strip(), res.stderr.strip(), res.returncode
+        with subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                              text=True, start_new_session=True) as proc:
+            try:
+                out, err = proc.communicate(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                os.killpg(proc.pid, signal.SIGKILL)
+                proc.communicate()
+                return "", f"Command timed out after {timeout}s; process group terminated", -1
+            return out.strip(), err.strip(), proc.returncode
     except Exception as e:
         return "", str(e), -1
 
@@ -1140,6 +1148,8 @@ def close_position(pos_addr, env_prefix="", wallet_address=None, is_dry_run=Fals
     every rule still armed. A reported success is accepted only after a targeted
     account read confirms that the position account is gone.
     """
+    if not is_dry_run:
+        queue_settlement(pos_addr)
     cmd = f"{env_prefix}DLMM_CLOSE_AUTH=1 node {EXECUTOR_PATH} close {pos_addr}"
     res, err = run_command_json(cmd, timeout=CLOSE_CMD_TIMEOUT)
     if is_dry_run:
@@ -1157,12 +1167,79 @@ def close_position(pos_addr, env_prefix="", wallet_address=None, is_dry_run=Fals
         return ({"success": False, "unsettled": True, "residualSol": residual,
                  "txHashes": res.get("txHashes") or [],
                  "error": f"close unverified — position account {state}"}, None)
-    if position_gone_onchain(wallet_address, pos_addr) is True:
+    if position_live_onchain(pos_addr) is False:
         detail = err or (res or {}).get("error") or "unknown error"
         print(f"⚠️ Close of {pos_addr} reported failure ({detail}) but the position "
               f"is GONE on-chain — treating as closed.")
         return {"success": True, "txHashes": [], "verifiedByChain": True}, None
     return res, err
+
+SETTLEMENT_DIR = os.path.join(PROFILE_DIR, "memories", "dlmm_settlements")
+
+def queue_settlement(position):
+    if os.path.basename(position) != position:
+        raise ValueError("Invalid settlement position")
+    meta = get_position_metadata(position) or {}
+    mint = meta.get("base_mint")
+    if not mint or mint == SOL_MINT or meta.get("strategy") == "single_sided_reseed":
+        return
+    try:
+        os.makedirs(SETTLEMENT_DIR, exist_ok=True)
+        path = os.path.join(SETTLEMENT_DIR, position + ".json")
+        if not os.path.exists(path):
+            with open(path + ".tmp", "w") as out:
+                json.dump({"position": position, "mint": mint, "last_attempt": 0}, out)
+                out.flush()
+                os.fsync(out.fileno())
+            os.replace(path + ".tmp", path)
+    except OSError as exc:
+        print(f"⚠️ Settlement recording failed for {position}: {exc}")
+
+def settle_pending():
+    """One targeted retry per tick. Markers survive restarts; close is not settlement."""
+    if not os.path.isdir(SETTLEMENT_DIR):
+        return
+    candidates = []
+    for name in os.listdir(SETTLEMENT_DIR):
+        if name.endswith(".json"):
+            path = os.path.join(SETTLEMENT_DIR, name)
+            try:
+                with open(path) as src:
+                    item = json.load(src)
+                candidates.append((item.get("last_attempt", 0), path, item))
+            except (OSError, ValueError) as exc:
+                print(f"⚠️ Invalid settlement marker {name}: {exc}")
+    for _, path, item in sorted(candidates):
+        pos, mint = item["position"], item["mint"]
+        if position_live_onchain(pos) is not False:
+            continue
+        # Do not sell inventory from a different open position in the same token.
+        positions, error = get_meteora_portfolio_positions(get_wallet_address())
+        if positions is None:
+            return
+        open_meta = [get_position_metadata(addr) for addr in positions]
+        if any(not meta or not meta.get("base_mint") for meta in open_meta):
+            return
+        if any(meta["base_mint"] == mint for meta in open_meta):
+            continue
+        item["last_attempt"] = time.time()
+        with open(path + ".tmp", "w") as out:
+            json.dump(item, out)
+        os.replace(path + ".tmp", path)
+        bal, err = run_command_json(f"node {EXECUTOR_PATH} spl-balance {shlex.quote(mint)}")
+        if not bal or "balance" not in bal:
+            return
+        if bal["balance"] > 0:
+            result, err = run_command_json(
+                f"DLMM_SETTLEMENT_POSITION={shlex.quote(pos)} node {EXECUTOR_PATH} swap {shlex.quote(mint)} SOL {shlex.quote(str(bal['balance']))} 15 300", timeout=90)
+            if not result or not result.get("success"):
+                print(f"⚠️ Settlement pending {pos}: {err or result}")
+                return
+            bal, err = run_command_json(f"node {EXECUTOR_PATH} spl-balance {shlex.quote(mint)}")
+        if bal and bal.get("balance") == 0:
+            os.unlink(path)
+            print(f"✅ SOL settlement verified: {pos}")
+        return
 
 def get_wallet_sol_balance():
     try:
@@ -1424,10 +1501,16 @@ def main():
     parser.add_argument("--reset-trailing", type=str, default=None, metavar="POSITION_ADDR", help="Reset peak_pnl and trailing_active after a standalone fee claim")
     parser.add_argument("--reason", type=str, default="AI decision", help="Reason string for close/hold (logged)")
     parser.add_argument("--force", action="store_true", help="Bypass the health GUARD on --override-close (close a healthy in-range high-fee position anyway)")
+    parser.add_argument("--settle-pending", action="store_true", help="Retry one recorded exit settlement")
     parser.add_argument("--cleanup-tokens", action="store_true", help="Swap all leftover SPL token balances back to SOL")
     parser.add_argument("--min-swap-sol", type=float, default=0.005, help="Minimum SOL value threshold to trigger cleanup swap (default: 0.005)")
     cli = parser.parse_args()
 
+    if cli.settle_pending:
+        if cli.dry_run or cli.report_only or cli.no_enforce or os.environ.get("DRY_RUN", "").lower() in ("true", "1"):
+            return
+        settle_pending()
+        return
     print("🔄 Starting DLMM Position Monitor")
     params = load_soul_dlmm_params()
     stop_loss_pct = params["STOP_LOSS_PCT"]
