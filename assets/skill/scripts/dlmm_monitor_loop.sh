@@ -17,11 +17,6 @@ export PATH="$HOME/.local/bin:$PATH"
 echo "Starting DLMM Position Monitor Loop (20s interval)..."
 
 cd "$SCRIPT_DIR" || exit 1
-# Sweep stranded tokens every SWEEP_EVERY iterations (30 × 20s ≈ 10min).
-# On-close auto-swap only fires once; if it aborts on the impact guard the token is
-# orphaned (no longer an active position), so this re-sweeps to liquidate it.
-SWEEP_EVERY=30
-i=0
 STATS_STAMP="/tmp/dlmm_stats_last_sent"
 while true; do
     # Re-source the profile .env EVERY tick, not once at startup. Sourcing it
@@ -40,12 +35,6 @@ while true; do
     if [ -z "${settlement_pid:-}" ] || ! kill -0 "$settlement_pid" 2>/dev/null; then
         "$PYTHON" "$SCRIPT_DIR/dlmm_monitor.py" --settle-pending &
         settlement_pid=$!
-    fi
-    i=$((i + 1))
-    if [ "$i" -ge "$SWEEP_EVERY" ] && { [ -z "${cleanup_pid:-}" ] || ! kill -0 "$cleanup_pid" 2>/dev/null; }; then
-        "$PYTHON" "$SCRIPT_DIR/dlmm_monitor.py" --cleanup-tokens &
-        cleanup_pid=$!
-        i=0
     fi
     # Daily scoreboard — deterministic dlmm_stats.py card via `hermes send`
     # (zero LLM). Hour + timezone are operator-set (profile .env): DLMM_TZ

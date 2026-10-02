@@ -17,29 +17,14 @@ from dlmm_realized import apply_realized
 
 
 def main():
-    # Exercise both actual close-path swap branches; no RPC or transaction runs.
+    # The risk/override paths must never execute a token swap. Only the explicit
+    # manual-cleanup branch may do so; pending settlement runs in its own worker.
     monitor = ast.parse(Path(__file__).with_name("dlmm_monitor.py").read_text())
-    swap_branches = [n for n in ast.walk(monitor) if isinstance(n, ast.If)
-                     and "est_sol >= cli.min_swap_sol" in ast.unparse(n.test)]
-    assert len(swap_branches) == 2
-    for branch in swap_branches:
-        for amount, floor, expected in [(0.0049, 0.005, 0), (0.005, 0.005, 1),
-                                        (0.006, 0.005, 1), (0.01, 0.005, 1),
-                                        (0.006, 0.008, 0)]:
-            calls = []
-            def run_swap(command, **kwargs):
-                calls.append(command)
-                return {"success": True, "txHash": "test"}, None
-            ns = dict(cli=argparse.Namespace(min_swap_sol=floor), est_sol=amount,
-                      is_dry=False, close_res={}, is_dump_close=True,
-                      token_balance=1, balance=1, env_prefix="", EXECUTOR_PATH="executor",
-                      base_mint="TOKEN", pos_addr="position", shlex=shlex,
-                      run_command_json=run_swap, print=lambda *args: None)
-            exec(compile(ast.Module(body=[branch], type_ignores=[]), "swap-branch", "exec"), ns)
-            assert len(calls) == expected
-            if calls:
-                assert "DLMM_SETTLEMENT_POSITION=position" in calls[0]
-                assert "swap TOKEN SOL 1 18 300" in calls[0]
+    main_fn = next(n for n in monitor.body if isinstance(n, ast.FunctionDef) and n.name == "main")
+    main_fn.body = [n for n in main_fn.body if not (isinstance(n, ast.If) and ast.unparse(n.test) == "cli.cleanup_tokens")]
+    for node in ast.walk(main_fn):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "run_command_json":
+            assert " swap " not in ast.unparse(node)
     # Same token, different fee tiers: pool economics choose the primary;
     # every mint's primary stays ahead of sibling fallbacks.
     pools = [

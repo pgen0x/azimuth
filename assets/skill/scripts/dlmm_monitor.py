@@ -1211,6 +1211,10 @@ def settle_pending():
                 print(f"⚠️ Invalid settlement marker {name}: {exc}")
     for _, path, item in sorted(candidates):
         pos, mint = item["position"], item["mint"]
+        # Keep unavailable/uneconomic inventory explicit and retry at a bounded
+        # cadence. It is neither settled nor valued at zero.
+        if item.get("state") == "deferred" and time.time() - item.get("last_attempt", 0) < 900:
+            continue
         if position_live_onchain(pos) is not False:
             continue
         # Do not sell inventory from a different open position in the same token.
@@ -1222,7 +1226,7 @@ def settle_pending():
             return
         if any(meta["base_mint"] == mint for meta in open_meta):
             continue
-        item["last_attempt"] = time.time()
+        item.update(last_attempt=time.time(), state="pending")
         with open(path + ".tmp", "w") as out:
             json.dump(item, out)
         os.replace(path + ".tmp", path)
@@ -1231,9 +1235,17 @@ def settle_pending():
             return
         if bal["balance"] > 0:
             result, err = run_command_json(
-                f"DLMM_SETTLEMENT_POSITION={shlex.quote(pos)} node {EXECUTOR_PATH} swap {shlex.quote(mint)} SOL {shlex.quote(str(bal['balance']))} 15 300", timeout=90)
+                f"DLMM_SETTLEMENT_POSITION={shlex.quote(pos)} node {EXECUTOR_PATH} swap {shlex.quote(mint)} SOL {shlex.quote(str(bal['balance']))} 15 300 1", timeout=90)
             if not result or not result.get("success"):
-                print(f"⚠️ Settlement pending {pos}: {err or result}")
+                reason = (result or {}).get("reason")
+                if reason in ("swap_no_route", "net_recovery_below_floor") and not result.get("pending"):
+                    item.update(state="deferred", reason=reason, remaining_balance=bal["balance"])
+                    with open(path + ".tmp", "w") as out:
+                        json.dump(item, out)
+                        out.flush()
+                        os.fsync(out.fileno())
+                    os.replace(path + ".tmp", path)
+                print(f"⚠️ Settlement {item['state']} {pos}: {err or result}")
                 return
             bal, err = run_command_json(f"node {EXECUTOR_PATH} spl-balance {shlex.quote(mint)}")
         if bal and bal.get("balance") == 0:
@@ -1579,9 +1591,8 @@ def main():
                 skipped += 1
                 continue
             print(f"  🔄 Swapping {balance:.4f} tokens back to SOL...")
-            # Cleanup sweeps leftover/stranded tokens — force liquidation at high impact tolerance (intent is "get them out").
-            # 90% cap (vs the 50% on-close guard) so thin/dumping pools actually clear instead of re-aborting forever.
-            swap_res, swap_err = run_command_json(f"node {EXECUTOR_PATH} swap {mint} SOL {balance} 90 300", timeout=90)
+            # Manual recovery uses the same impact and positive-net floor as settlement.
+            swap_res, swap_err = run_command_json(f"node {EXECUTOR_PATH} swap {mint} SOL {balance} 15 300 1", timeout=90)
             if swap_res and swap_res.get("success"):
                 print(f"  ✅ Swapped. Tx: {swap_res.get('txHash', '?')}")
                 swapped += 1
@@ -1733,52 +1744,9 @@ def main():
                                     rug_event=(cli.reason if "rug" in reason_lower else None),
                                     operator_confirmed=True)
                 print(f"📊 Daily pre-close LP mark booked (not settled cash): {realized_sol:+.4f} SOL ({guard_pnl_pct:+.2f}%)")
-            # Auto-swap base token back to SOL
-            base_mint = meta.get("base_mint")
-            pool_addr = meta.get("pool")
-            strategy = meta.get("strategy", "spot")
-            skip_swap = (strategy == "single_sided_reseed")
-            if base_mint and base_mint != SOL_MINT and not skip_swap:
-                force_pair = meta.get("pair", cli.override_close)
-                print(f"Checking {force_pair} base token balance for auto-swap...")
-                time.sleep(5)
-                current_price = float(meta.get("entry_price", 0))
-                ab_data, _ = run_command_json(f"node {EXECUTOR_PATH} active-bin {pool_addr}")
-                if ab_data and ab_data.get("price"):
-                    current_price = float(ab_data["price"])
-                # Harden dump detection: a token trading below entry is dumping regardless of the AI's reason wording.
-                # Force high-impact liquidation so a crashing token is never left in the wallet on a vaguely-worded close.
-                entry_px = float(meta.get("entry_price", 0) or 0)
-                if entry_px > 0 and current_price > 0:
-                    price_change_pct = (current_price - entry_px) / entry_px * 100
-                    if price_change_pct <= -5 and not is_dump_close:
-                        is_dump_close = True
-                        print(f"⚠️ Dump detected by price ({price_change_pct:+.1f}% vs entry) — forcing high-impact liquidation despite reason wording.")
-                bal_data, bal_err = run_command_json(f"{env_prefix}node {EXECUTOR_PATH} spl-balance {base_mint}")
-                if bal_data and float(bal_data.get("balance", 0)) > 0:
-                    token_balance = float(bal_data["balance"])
-                    est_sol = token_balance * current_price
-                    print(f"Base token balance: {token_balance} (~{est_sol:.4f} SOL)")
-                    if est_sol >= cli.min_swap_sol or is_dry:
-                        # Dump exits force-liquidate; normal exits use tight 5% guard. Was
-                        # 50% until 2026-08-21 — CYBERCAT-SOL's RUG_M5_PCT exit journaled a
-                        # -1.44% mark but the liquidation swap, unbounded up to 50% impact
-                        # into a still-crashing token, actually realized -43.5% of ticket
-                        # (-0.0652 SOL, see dlmm_monitor.py:~2480 for the automatic-path
-                        # twin of this constant). 18 still lets a genuine rug clear ahead
-                        # of a normal 15% guard, without accepting a near-total-loss fill.
-                        swap_max_impact = 18 if is_dump_close else 15
-                        swap_slip_bps = 300 if is_dump_close else 300
-                        print(f"Executing auto-swap back to SOL for {token_balance} tokens (max_impact {swap_max_impact}%)...")
-                        swap_res, swap_err = run_command_json(f"{env_prefix}DLMM_SETTLEMENT_POSITION={shlex.quote(pos_addr)} node {EXECUTOR_PATH} swap {base_mint} SOL {token_balance} {swap_max_impact} {swap_slip_bps}", timeout=90)
-                        if swap_res and swap_res.get("success"):
-                            print(f"✅ Auto-swapped back to SOL. Tx: {swap_res.get('txHash', 'DRY_RUN_SWAP_TX_HASH')}")
-                        else:
-                            print(f"❌ Auto-swap failed: {swap_err or (swap_res.get('error') if swap_res else 'No response')}")
-                    else:
-                        print(f"Base token SOL value below cleanup floor ({est_sol:.4f} < {cli.min_swap_sol} SOL), skipping swap")
-                else:
-                    print("Base token balance is zero, skipping swap")
+            # close_position persisted the settlement before closing the LP.
+            # The independent worker owns balance reads and swaps.
+            print("SOL settlement queued; the background worker verifies the result.")
         else:
             print(f"❌ Force-close failed: {close_err or close_res}")
         sys.exit(0)
@@ -2966,48 +2934,12 @@ def main():
                                         rug_event=(close_reason if "rug" in reason_lower else None),
                                         live_liquidity_usd=pool_liquidity_usd)
 
-                # Auto-swap base token back to SOL (unless skip_swap is active)
                 base_mint = meta.get("base_mint")
                 skip_swap = (strategy == "single_sided_reseed")
                 swap_report = ""
-                
                 if base_mint and base_mint != SOL_MINT and not skip_swap:
-                    print(f"Checking {pair} base token balance for auto-swap...")
-                    time.sleep(5)  # Wait for transactions to confirm on-chain
-                    bal_data, bal_err = run_command_json(f"{env_prefix}node {EXECUTOR_PATH} spl-balance {base_mint}")
-                    if bal_data and bal_data.get("balance", 0) > 0:
-                        balance = float(bal_data.get("balance", 0))
-                        est_sol = balance * active_price
-                        print(f"Base token balance: {balance} (~{est_sol:.4f} SOL)")
-                        if est_sol >= cli.min_swap_sol or (close_res.get("dryRun") or close_res.get("dry_run") == True):
-                            # Dump exits MUST liquidate — holding a crashing token is worse than slippage.
-                            # Normal/profit exits use a tight 5% guard to avoid bad fills on thin pools (token re-swept by --cleanup-tokens).
-                            # Was 50% until 2026-08-21: CYBERCAT-SOL's RUG_M5_PCT exit journaled a
-                            # -1.44% mark (read before this swap ran) but the swap itself, unbounded
-                            # up to 50% impact into a still-crashing token, realized -43.5% of ticket
-                            # (-0.0652 SOL). 18 still forces a genuine rug through ahead of the normal
-                            # 15% guard, without accepting a near-total-loss fill on the way out.
-                            swap_max_impact = 18 if is_dump_close else 15
-                            swap_slip_bps = 300 if is_dump_close else 300
-                            print(f"Executing auto-swap back to SOL for {balance} tokens (max_impact {swap_max_impact}%, {'dump' if is_dump_close else 'normal'} exit)...")
-                            swap_res, swap_err = run_command_json(f"{env_prefix}DLMM_SETTLEMENT_POSITION={shlex.quote(pos_addr)} node {EXECUTOR_PATH} swap {base_mint} SOL {balance} {swap_max_impact} {swap_slip_bps}", timeout=90)
-                            if swap_res and swap_res.get("success"):
-                                swap_tx = swap_res.get("txHash", "DRY_RUN_SWAP_TX_HASH")
-                                swap_report = f"\n**Auto-Swap**: Swapped {balance:.4f} base tokens back to SOL.\n**Swap TX**: https://solscan.io/tx/{swap_tx}"
-                                print(f"✅ Auto-swapped back to SOL successfully. Tx: {swap_tx}")
-                            elif swap_res and swap_res.get("pending"):
-                                swap_tx = swap_res.get("txHash", "unknown")
-                                swap_report = f"\n**Auto-Swap**: Submitted; confirmation is pending. No retry was sent.\n**Swap TX**: https://solscan.io/tx/{swap_tx}"
-                                print(f"⏳ Auto-swap submitted; confirmation pending. Tx: {swap_tx}")
-                            else:
-                                swap_problem = swap_err or (swap_res or {}).get("error") or "unknown error"
-                                swap_report = f"\n**Auto-Swap**: Failed to swap back to SOL: {swap_problem}"
-                                print(f"❌ Auto-swap failed: {swap_problem}")
-                        else:
-                            print(f"Base token SOL value below cleanup floor ({est_sol:.4f} < {cli.min_swap_sol} SOL), skipping swap")
-                    else:
-                        print("Base token balance is zero, skipping swap")
-                        
+                    swap_report = "\n**SOL settlement**: queued; not yet verified."
+                    print("SOL settlement queued; continuing position risk checks.")
                 elif skip_swap:
                     # In reseed strategy, redeploy token balance at new lower price bins
                     print(f"Strategy: single_sided_reseed. Bypassing auto-swap back to SOL and re-seeding position...")

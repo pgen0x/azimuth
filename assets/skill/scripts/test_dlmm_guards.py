@@ -79,6 +79,26 @@ def main():
         with patch.object(monitor, "run_command_json", side_effect=[({"balance": 10}, None), ({"success": True}, None), ({"balance": 0}, None)]):
             monitor.settle_pending()
         assert not path.exists()
+        # Route/fee failures remain inventory, with backoff and no global entry
+        # block. Unknown RPC failures must remain pending instead.
+        for reason in ("swap_no_route", "net_recovery_below_floor", "net_recovery_unmeasured"):
+            monitor.queue_settlement("position")
+            with patch.object(monitor, "run_command_json", side_effect=[({"balance": 0.000001}, None), ({"success": False, "reason": reason}, None)]) as run:
+                monitor.settle_pending()
+            assert run.call_args_list[1].args[0].endswith(" 15 300 1")
+            item = json.loads(path.read_text())
+            assert item["state"] == ("pending" if reason == "net_recovery_unmeasured" else "deferred")
+            if item["state"] == "deferred":
+                with patch.object(monitor, "run_command_json") as run:
+                    monitor.settle_pending()
+                    run.assert_not_called()
+                item["last_attempt"] = 0
+                path.write_text(json.dumps(item))
+                with patch.object(monitor, "run_command_json", return_value=({"balance": 0}, None)):
+                    monitor.settle_pending()
+                assert not path.exists()
+            else:
+                path.unlink()
 
     out, error, code = monitor.run_command("sleep 5", timeout=0.02)
     assert code == -1 and "process group terminated" in error

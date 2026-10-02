@@ -148,6 +148,10 @@ const clearMarker = () => fs.rmSync(marker, { force: true });
   assert.equal(sends, previousSends);
   assert.equal((await recover(4100)).success, true);
   assert.equal(sends, previousSends + 1);
+  sandbox.fetch = async () => ({ok:false,status:400,text:async()=>JSON.stringify({errorCode:"COULD_NOT_FIND_ANY_ROUTE"})});
+  assert.equal((await recover()).reason, "swap_no_route");
+  sandbox.fetch = async () => ({ok:false,status:429,text:async()=>JSON.stringify({errorCode:"COULD_NOT_FIND_ANY_ROUTE"})});
+  await assert.rejects(recover(), /quote/);
   sandbox.fetch = oldFetch;
   sends = 0;
   confirmTimeout = true;
@@ -190,6 +194,13 @@ const clearMarker = () => fs.rmSync(marker, { force: true });
   const settlementDir = path.join(root, "memories/dlmm_settlements");
   fs.mkdirSync(settlementDir, { recursive: true });
   fs.writeFileSync(path.join(settlementDir, "position.json"), "{}");
+  await assert.rejects(deploy(), /awaiting verified SOL settlement/);
+  for (const reason of ["swap_no_route", "net_recovery_below_floor"]) {
+    fs.writeFileSync(path.join(settlementDir, "position.json"), JSON.stringify({state:"deferred",reason}));
+    const unlock = await acquireDeployLock(wallet.publicKey.toString());
+    try { await assert.rejects(deploy(), /BUSY/); } finally { await unlock(); }
+  }
+  fs.writeFileSync(path.join(settlementDir, "position.json"), JSON.stringify({state:"deferred",reason:"unknown"}));
   await assert.rejects(deploy(), /awaiting verified SOL settlement/);
   fs.rmSync(settlementDir, { recursive: true });
   assert.equal(sends, 0);
