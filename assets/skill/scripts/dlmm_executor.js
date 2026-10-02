@@ -436,7 +436,13 @@ async function deployPosition(poolAddressStr, amountX, amountY, binsBelow, binsA
   const dry = process.env.DRY_RUN === "true";
   await assertRootBudget();
   const settlements = path.join(PROFILE_DIR, "memories", "dlmm_settlements");
-  if (!dry && fs.existsSync(settlements) && fs.readdirSync(settlements).some(f => f.endsWith(".json"))) {
+  if (!dry && fs.existsSync(settlements) && fs.readdirSync(settlements).some(f => {
+    if (!f.endsWith(".json")) return false;
+    try {
+      const item = JSON.parse(fs.readFileSync(path.join(settlements, f), "utf8"));
+      return item.state !== "deferred" || !["swap_no_route", "net_recovery_below_floor"].includes(item.reason);
+    } catch { return true; }
+  })) {
     throw new Error("ENTRY REFUSED: a previous exit is awaiting verified SOL settlement");
   }
   const release = dry ? async () => {} : await acquireDeployLock(wallet.publicKey.toString());
@@ -980,7 +986,13 @@ async function swapToken(inputMintStr, outputMintStr, amountFloat, maxPriceImpac
         const quoteUrl = `https://api.jup.ag/swap/v1/quote?inputMint=${input_mint}&outputMint=${output_mint}&amount=${amountRaw}&slippageBps=${bps}`;
         const quoteRes = await fetch(quoteUrl, { signal: AbortSignal.timeout(8000) });
         if (!quoteRes.ok) {
-          lastErr = `Jupiter quote API error: ${quoteRes.status} ${await quoteRes.text()}`;
+          const body = await quoteRes.text();
+          let code;
+          try { code = JSON.parse(body).errorCode; } catch { /* Non-JSON failures remain unknown. */ }
+          if (quoteRes.status === 400 && ["COULD_NOT_FIND_ANY_ROUTE", "NO_ROUTES_FOUND", "TOKEN_NOT_TRADABLE"].includes(code)) {
+            return { success: false, aborted: true, reason: "swap_no_route" };
+          }
+          lastErr = `Jupiter quote API error: ${quoteRes.status} ${body}`;
           continue;
         }
         const q = await quoteRes.json();
