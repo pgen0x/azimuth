@@ -1119,7 +1119,7 @@ def position_residual_sol(wallet_address, pos_addr, attempts=2, gap_s=6):
 
 def position_live_onchain(pos_addr):
     """True/False from a targeted position-account read, None on RPC failure."""
-    data, _err = run_command_json(f"node {EXECUTOR_PATH} position-exists {pos_addr}")
+    data, _err = run_command_json(f"node {EXECUTOR_PATH} position-exists {shlex.quote(pos_addr)}")
     if not isinstance(data, dict) or not isinstance(data.get("exists"), bool):
         return None
     return data["exists"]
@@ -1885,8 +1885,11 @@ def main():
             if now - deployed_at < 7200:
                 print(f"⏳ Position {pos_addr} ({pair}) not found on-chain yet — deployed {int((now - deployed_at) / 60)}m ago, within grace period. Skipping.")
                 continue
-            # Position confirmed absent from Portfolio API — closed outside the bot
-            print(f"⚠️ Position {pos_addr} ({pair}) confirmed absent from Meteora API. Cleaning up Redis state.")
+            # An indexer omission cannot prove closure, even for an old position.
+            if position_live_onchain(pos_addr) is not False:
+                print(f"⚠️ Retaining {pos_addr} ({pair}): RPC has not confirmed absence.")
+                continue
+            print(f"⚠️ Position {pos_addr} ({pair}) confirmed absent by RPC. Cleaning up Redis state.")
             run_command(f"redis-cli srem sol:dlmm:active_positions \"{pos_addr}\"")
             run_command(f"redis-cli del \"sol:dlmm:position:{pos_addr}\"")
             run_command(f"redis-cli del \"sol:dlmm:position:{pos_addr}:oor_since\"")
