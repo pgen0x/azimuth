@@ -5,6 +5,65 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.9.0](https://github.com/pgen0x/azimuth/compare/v2.8.0...v2.9.0) (2026-10-02)
+
+
+### Features
+
+* **solana:** add Helius supplementary NAV valuation ([497cd49](https://github.com/pgen0x/azimuth/commit/497cd491660681ae5da4b19bee527d3a5ceba737))
+* **solana:** add Helius supplementary NAV valuation ([d3a6001](https://github.com/pgen0x/azimuth/commit/d3a60013651be8ef1b93e06c03bf6628fffcfaed))
+* **solana:** reclaim empty SPL account rent with execution guards ([5d80b17](https://github.com/pgen0x/azimuth/commit/5d80b1725b5baefd3613a9fd144a604b41479181))
+* **solana:** safely reclaim empty classic token account rent ([5732dbf](https://github.com/pgen0x/azimuth/commit/5732dbf0b2004359d860a50df2eaa84cc010f889))
+
+
+### Bug Fixes
+
+* account for program funding via allocate and assign ([dfede39](https://github.com/pgen0x/azimuth/commit/dfede3976e42fffaf8746691249030e4b9788903))
+* account for program funding via allocate and assign ([92ec196](https://github.com/pgen0x/azimuth/commit/92ec1964cd6c2ed117e827c54f7e914a4978e473))
+* allow configured AI fallback chain to finish probing ([0621c86](https://github.com/pgen0x/azimuth/commit/0621c86660d280ee4e27c08d97ef72be89fb58c6))
+* allow configured AI fallback chain to finish probing ([17094e8](https://github.com/pgen0x/azimuth/commit/17094e8b1d4f52a3b17077ea44ecc148fcf02a03))
+* apply configured cleanup floor to both post-close swaps ([640d3bc](https://github.com/pgen0x/azimuth/commit/640d3bc9b00be1a0b988d510aeaa42709da41c40))
+* classify memo transfers without counting inflows as profit ([bce6491](https://github.com/pgen0x/azimuth/commit/bce64918b751c866def7a0f2d6241757380ed861))
+* durable exits and independent SOL settlement retries ([6726831](https://github.com/pgen0x/azimuth/commit/67268311ec515e16ae555859552db327d8f7fb29))
+* gate residual recovery on simulated net SOL proceeds ([#120](https://github.com/pgen0x/azimuth/issues/120)) ([96691db](https://github.com/pgen0x/azimuth/commit/96691dba5de819bd5636c1be97029b5f2bdb6e72))
+* isolate economic settlement retries from risk monitoring ([#124](https://github.com/pgen0x/azimuth/issues/124)) ([873513c](https://github.com/pgen0x/azimuth/commit/873513c4c623a65c9d79a5cc140e4348121e1d95))
+* label close-time LP marks as estimates ([cc30f53](https://github.com/pgen0x/azimuth/commit/cc30f530bc151a6ded2704ab9909464c1483dd4c))
+* label close-time LP marks as estimates ([e04d90d](https://github.com/pgen0x/azimuth/commit/e04d90de1cc8241159adcfd5cfb3e94f3322337d))
+* make costly undated Wallet API estimates opt-in ([bea9eaa](https://github.com/pgen0x/azimuth/commit/bea9eaa22b0662a18dea95240fa29ca91f1f9c7b))
+* persist exits and retry unsettled tokens without stalling risk checks ([b817872](https://github.com/pgen0x/azimuth/commit/b817872b6d76248b0dc622afe31e51066bb0c32e))
+* prefilter mint and pool cooldowns before AI dispatch ([4e6e2a1](https://github.com/pgen0x/azimuth/commit/4e6e2a17de768651aacb981aab334097b79efbbe))
+* prefilter mint and pool cooldowns before AI dispatch ([6c8a308](https://github.com/pgen0x/azimuth/commit/6c8a30814896e5018c42c5294f5c83cc423efaaf))
+* preserve exact decimal amounts in token swaps ([#121](https://github.com/pgen0x/azimuth/issues/121)) ([23f7be1](https://github.com/pgen0x/azimuth/commit/23f7be169c600764c6e814cd034f7782042cd1a2))
+* reconcile memo-bearing native transfers without broad cache refresh ([fd0e2c3](https://github.com/pgen0x/azimuth/commit/fd0e2c394280afdb672f58001a0c80f9dbe90f14))
+* reduce accounting RPC reads and disable automatic Wallet API spend ([5fa9d23](https://github.com/pgen0x/azimuth/commit/5fa9d237d3fad2076d216cb402fb78bb4194b79b))
+* report pooled settlement cash without inventing root allocation ([7333bcc](https://github.com/pgen0x/azimuth/commit/7333bcccdda718e3277ac8d6dd390cb9416f62b5))
+* report pooled settlement cash without inventing root allocation ([5eb2e05](https://github.com/pgen0x/azimuth/commit/5eb2e055d4f5b2189babd7cb7f943d16aec48ad8))
+* require RPC absence before pruning position tracking ([#125](https://github.com/pgen0x/azimuth/issues/125)) ([89520f0](https://github.com/pgen0x/azimuth/commit/89520f004ba29c6a377a96d2765e111f1046c163))
+* retry signed DLMM closes across RPC endpoints ([#122](https://github.com/pgen0x/azimuth/issues/122)) ([c8b93f0](https://github.com/pgen0x/azimuth/commit/c8b93f0f418c080774b66fca5f2cdfb7e63dda44))
+* reuse finalized transaction evidence across accounting collectors ([103c763](https://github.com/pgen0x/azimuth/commit/103c763dab6c9c1caa927f2f82f6951ccbc90677))
+* show native cash separately in evaluation reports ([#119](https://github.com/pgen0x/azimuth/issues/119)) ([92359a6](https://github.com/pgen0x/azimuth/commit/92359a6a8f87b3b32e8166f0774f94e2beb2901c))
+* **solana:** accept valid AI health tool arguments and classify failures ([138453b](https://github.com/pgen0x/azimuth/commit/138453b59915dde04457a71a929d81fa3b911df9))
+* **solana:** avoid provider rejection of AI probe tool choice ([240b280](https://github.com/pgen0x/azimuth/commit/240b280910fb4fbad56db6c654af78eb4fa817ba))
+* **solana:** classify fully reconciled rent maintenance ([69bad8c](https://github.com/pgen0x/azimuth/commit/69bad8c3c9de62dac49605029ad4ad503711c339))
+* **solana:** classify passive token inflows without counting gifts as profit ([f2403d5](https://github.com/pgen0x/azimuth/commit/f2403d5d4bf7198eebbc6838b752880be050cca1))
+* **solana:** exclude unvalued token gifts from evaluation profit ([233e374](https://github.com/pgen0x/azimuth/commit/233e374f7c26d5c7df7a0f2fe4bf8dab7622cd1e))
+* **solana:** guard evaluation profit against unvalued token gifts ([85be9f0](https://github.com/pgen0x/azimuth/commit/85be9f09fcbbf893d449e940be0d688718a5c6a2))
+* **solana:** isolate passive token inflows from bot accounting ([f284846](https://github.com/pgen0x/azimuth/commit/f28484630f043ff18c0f833b818cbf9be4b32209))
+* **solana:** pace NAV quotes and stop on rate limits ([0129715](https://github.com/pgen0x/azimuth/commit/01297153b6babac2c5310c0f4b46c1a2b0ffa1c6))
+* **solana:** pace NAV quotes and stop on rate limits ([14ea4af](https://github.com/pgen0x/azimuth/commit/14ea4af75b36ca93fd39094e07ed837f9806f6e3))
+* **solana:** prefer Hermes AI with deterministic availability fallback ([485809c](https://github.com/pgen0x/azimuth/commit/485809caedaba9bf8b453c552fb8b8a99d3ef125))
+* **solana:** prefer Hermes AI with pre-dispatch deterministic fallback ([9abdf82](https://github.com/pgen0x/azimuth/commit/9abdf820f209ab8b3e1ecdf698f4f5eaff306f23))
+* **solana:** read Meteora position maps and nested fees ([d483af2](https://github.com/pgen0x/azimuth/commit/d483af25a594d7e3c5e61455386842ca233d232a))
+* **solana:** read Meteora position maps in every executor path ([732b598](https://github.com/pgen0x/azimuth/commit/732b5986d376ec6338d37603520ed4eadca06aa9))
+* **solana:** reconcile evaluation blockers and replay actual root decisions ([21a0317](https://github.com/pgen0x/azimuth/commit/21a0317d9ed351368dec2153486e9fc3c3d6755d))
+* **solana:** reconcile evaluation blockers and root decision evidence ([c45d035](https://github.com/pgen0x/azimuth/commit/c45d035fe513ea6c39af30d06f79465918ee08e8))
+* **solana:** reconcile proven cleanup settlements with closed roots ([5dfec86](https://github.com/pgen0x/azimuth/commit/5dfec86057c59ec18ea30f6ce9f7e52e4b0cdbfb))
+* **solana:** reconcile proven cleanup swaps with closed roots ([a7a8541](https://github.com/pgen0x/azimuth/commit/a7a85419612215e852a0ad7431db42691b9dd94d))
+* **solana:** reconcile proven external rent maintenance ([8a6c402](https://github.com/pgen0x/azimuth/commit/8a6c4022ce2365c1af2d82ccf3b4ec0b381c9290))
+* **solana:** stop false AI availability failures ([d130903](https://github.com/pgen0x/azimuth/commit/d130903f0dcbec0d8f374aeed5d94aca90d05336))
+* **solana:** use compatible required tool choice for AI probe ([3715450](https://github.com/pgen0x/azimuth/commit/3715450fefdada9937050b74513ca392eea9f6bc))
+* use configured cleanup floor for post-close residual swaps ([0df26f2](https://github.com/pgen0x/azimuth/commit/0df26f2481524d49b3f10ca35e95cb940d5b8c03))
+
 ## [2.8.0](https://github.com/pgen0x/azimuth/compare/v2.7.6...v2.8.0) (2026-09-25)
 
 
