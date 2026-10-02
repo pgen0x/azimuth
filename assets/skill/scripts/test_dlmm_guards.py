@@ -1,4 +1,5 @@
 """Offline replay: python3 assets/skill/scripts/test_dlmm_guards.py."""
+import ast
 import contextlib
 import io
 import json
@@ -8,6 +9,7 @@ import textwrap
 from types import SimpleNamespace
 from unittest.mock import patch
 import dlmm_monitor as monitor
+import dlmm_pipeline as pipeline
 
 
 def main():
@@ -99,6 +101,44 @@ def main():
                 assert not path.exists()
             else:
                 path.unlink()
+
+    # Empty indexer results never authorize deletion of a live/unknown position,
+    # including orphan metadata and its risk-state keys.
+    class EmptyPortfolio:
+        def read(self): return b'{"pools": []}'
+        def __enter__(self): return self
+        def __exit__(self, *args): return False
+    with tempfile.TemporaryDirectory() as tmp:
+        Path(tmp, ".env").write_text("SOLANA_PUBLIC_KEY=wallet\n")
+        for live in (True, None, False):
+            commands = []
+            def redis(cmd):
+                commands.append(cmd)
+                if "smembers" in cmd: return "active", "", 0
+                if " keys " in cmd: return "sol:dlmm:position:orphan\nsol:dlmm:position:orphan:oor_since\nsol:dlmm:position:orphan:ai_hold_until", "", 0
+                if " get " in cmd: return '{"deployed_at": 1}', "", 0
+                return "", "", 0
+            with patch.object(pipeline, "PROFILE_DIR", tmp), patch.object(pipeline, "run_command", side_effect=redis), \
+                 patch.object(pipeline.urllib.request, "urlopen", return_value=EmptyPortfolio()), \
+                 patch.object(pipeline, "position_live_onchain", return_value=live) as chain:
+                pipeline.reconcile_redis_vs_meteora()
+            writes = [c for c in commands if " srem " in c or " del " in c]
+            assert bool(writes) is (live is False)
+            assert chain.call_count == 2  # one read per position, shared with risk keys
+
+    # Run the actual monitor missing-position branch with the same three RPC verdicts.
+    tree = ast.parse(Path(monitor.__file__).read_text())
+    branch = next(n for n in ast.walk(tree) if isinstance(n, ast.If)
+                  and ast.unparse(n.test) == "not bp and (not is_dry_run_stored)")
+    wrapper = ast.Module(body=[ast.For(target=ast.Name(id="tick",ctx=ast.Store()),
+        iter=ast.List(elts=[ast.Constant(1)],ctx=ast.Load()),body=[branch],orelse=[])],type_ignores=[])
+    for live in (True, None, False):
+        commands=[]
+        ns=dict(bp=None,is_dry_run_stored=False,api_available=True,meta={"deployed_at":1},
+                now=10000,pos_addr="position",pair="TOKEN-SOL",position_live_onchain=lambda _:live,
+                run_command=commands.append,print=lambda *args:None)
+        exec(compile(ast.fix_missing_locations(wrapper),"monitor-prune","exec"),ns)
+        assert bool(commands) is (live is False)
 
     out, error, code = monitor.run_command("sleep 5", timeout=0.02)
     assert code == -1 and "process group terminated" in error

@@ -12,6 +12,7 @@ import math
 import shlex
 from local_indicators import check_local_indicators
 from tz_util import local_time_str
+from dlmm_monitor import position_live_onchain
 
 # Configuration
 MIN_TVL_USD = 10000
@@ -376,7 +377,7 @@ def get_active_positions_count_for_mode(mode):
 
 
 def reconcile_redis_vs_meteora():
-    """Prune active_positions set and orphan keys against Meteora API truth. Grace: skip positions deployed <2h ago."""
+    """Prune only after RPC proves absence; API omissions are merely candidates."""
     try:
         env_path = os.path.join(PROFILE_DIR, ".env")
         wallet = None
@@ -399,6 +400,11 @@ def reconcile_redis_vs_meteora():
         out, _, _ = run_command("redis-cli smembers sol:dlmm:active_positions")
         active_set = set(a.strip() for a in out.strip().split('\n') if a.strip()) if out and out != "(empty set)" else set()
         now = int(time.time())
+        absence = {}
+        def confirmed_absent(addr):
+            if addr not in absence:
+                absence[addr] = position_live_onchain(addr) is False
+            return absence[addr]
 
         # Remove from active set any position not on-chain (with grace period)
         for addr in active_set - on_chain:
@@ -412,7 +418,10 @@ def reconcile_redis_vs_meteora():
             if now - deployed_at < 7200:
                 print(f"[reconcile] {addr[:20]}... not on-chain but deployed <2h ago — skipping")
                 continue
-            print(f"[reconcile] Removing orphan from active set: {addr[:20]}...")
+            if not confirmed_absent(addr):
+                print(f"[reconcile] Retaining {addr[:20]}: RPC has not confirmed absence")
+                continue
+            print(f"[reconcile] Removing RPC-confirmed absent position: {addr[:20]}...")
             run_command(f"redis-cli srem sol:dlmm:active_positions \"{addr}\"")
             for suffix in ("", ":oor_since", ":indicator_blocked_since", ":ai_hold_until"):
                 run_command(f"redis-cli del \"sol:dlmm:position:{addr}{suffix}\"")
@@ -432,7 +441,7 @@ def reconcile_redis_vs_meteora():
                 addr = key.replace("sol:dlmm:position:", "")
                 if any(addr.endswith(s) for s in meta_suffixes):
                     base_addr = addr.rsplit(":", 1)[0]
-                    if base_addr not in on_chain and base_addr not in active_set:
+                    if base_addr not in on_chain and base_addr not in active_set and confirmed_absent(base_addr):
                         run_command(f"redis-cli del \"{key}\"")
                 else:
                     if addr not in on_chain and addr not in active_set:
@@ -443,7 +452,7 @@ def reconcile_redis_vs_meteora():
                                 deployed_at = json.loads(meta_raw).get("deployed_at", 0)
                             except Exception:
                                 pass
-                        if now - deployed_at >= 7200:
+                        if now - deployed_at >= 7200 and confirmed_absent(addr):
                             run_command(f"redis-cli del \"{key}\"")
     except Exception as e:
         print(f"[reconcile] Warning: {e}")
