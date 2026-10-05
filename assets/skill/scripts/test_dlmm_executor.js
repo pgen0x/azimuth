@@ -289,9 +289,9 @@ const clearMarker = () => fs.rmSync(marker, { force: true });
   positions = []; clearMarker();
   sendError = true;
   const uncertain = await deploy();
-  assert.equal(uncertain.pending, true); assert.equal(sends, 2); // no second RPC mint
+  assert.equal(uncertain.pending, true); assert.equal(sends, 3); // same bytes via both RPCs, no second mint
   height = 100;
-  assert.equal((await deploy()).pending, true); assert.equal(sends, 2);
+  assert.equal((await deploy()).pending, true); assert.equal(sends, 3);
   clearMarker(); sendError = false;
   const beforeReserve = sends;
   const entriesBeforeReserve=fs.readdirSync(path.join(root,"memories/dlmm_entries")).length;
@@ -308,29 +308,40 @@ const clearMarker = () => fs.rmSync(marker, { force: true });
   reserveChanged=false;reservePost=300000000;
   clearMarker(); sendError = false; buildError = true;
   await assert.rejects(deploy(), /RPC endpoints failed/);
-  assert.equal(sends, 2); assert.ok(!fs.existsSync(marker));
+  assert.equal(sends, 3); assert.ok(!fs.existsSync(marker));
   buildError = false;
   const wide = await deployPosition("pool", 0, 0.1, 80, 0, "bid_ask", 1000);
-  assert.equal(wide.pending, true); assert.equal(sends, 3); // partial mint never re-minted/closed blindly
+  assert.equal(wide.pending, true); assert.equal(sends, 4); // partial mint never re-minted/closed blindly
   clearMarker(); confirmationError = true;
-  assert.equal((await deploy()).success, false); assert.equal(sends, 4);
+  assert.equal((await deploy()).success, false); assert.equal(sends, 6);
   clearMarker();
   fs.writeFileSync(marker, "broken");
-  await assert.rejects(deploy(), /RPC endpoints failed/); assert.equal(sends, 4);
+  await assert.rejects(deploy(), /RPC endpoints failed/); assert.equal(sends, 6);
   await assert.rejects(deployPosition("pool", 0, -1, 20, 0), /Invalid deploy/);
   clearMarker(); height = 151; confirmationError = false;
   reservePost=200000000; // exact reserve boundary remains permitted
-  assert.equal((await deploy()).success, true); assert.equal(sends, 5); // expired reservation recovers
+  assert.equal((await deploy()).success, true); assert.equal(sends, 7); // expired reservation recovers
   clearMarker();reservePost=300000000;
   const oldCreates=pool.createExtendedEmptyPosition;
   pool.createExtendedEmptyPosition=async()=>[transaction(),transaction()];
   let reserveSteps=0;
   Connection.prototype.simulateTransaction=async()=>({context:{slot:10},value:{err:null,accounts:[{lamports:++reserveSteps===1?300000000:199999999}]}});
   const partialReserve=await deployPosition("pool",0,0.1,80,0,"bid_ask",1000);
-  assert.equal(partialReserve.pending,true);assert.equal(sends,6);
+  assert.equal(partialReserve.pending,true);assert.equal(sends,8);
   assert.match(partialReserve.error,/native reserve/);
   pool.createExtendedEmptyPosition=oldCreates;
   Connection.prototype.simulateTransaction=defaultSimulation;
+  clearMarker();
+  const beforeRetry = { sends, builds, bytes: closeBytes.length };
+  failNextSend = true;
+  const recoveredDeploy = await deploy();
+  assert.equal(recoveredDeploy.success, true);
+  assert.equal(sends-beforeRetry.sends, 2);
+  assert.equal(builds-beforeRetry.builds, 1);
+  assert.equal(new Set(closeBytes.slice(beforeRetry.bytes)).size, 1);
+  const deployMarker = JSON.parse(fs.readFileSync(marker));
+  assert.equal(deployMarker.position, recoveredDeploy.position);
+  assert.equal(deployMarker.signature, recoveredDeploy.txHashes[0]);
   clearMarker();
   deps["./dlmm_nav.js"] = {...require("./dlmm_nav.js"), collect: async () => ({})};
   deps.child_process = {execFileSync: () => JSON.stringify({allow:false,reason:"incomplete_chain"})};
