@@ -1231,6 +1231,9 @@ def settle_pending():
             return
         if any(meta["base_mint"] == mint for meta in open_meta):
             continue
+        # Start with a tighter fill bound; retries retain the existing 3% ceiling.
+        # The executor reconciles any pending signature before another send.
+        slippage_bps = 100 if not item.get("last_attempt", 0) else 300
         item.update(last_attempt=time.time(), state="pending")
         with open(path + ".tmp", "w") as out:
             json.dump(item, out)
@@ -1240,7 +1243,7 @@ def settle_pending():
             return
         if bal["balance"] > 0:
             result, err = run_command_json(
-                f"DLMM_SETTLEMENT_POSITION={shlex.quote(pos)} node {EXECUTOR_PATH} swap {shlex.quote(mint)} SOL {shlex.quote(str(bal['balance']))} 15 300 1", timeout=90)
+                f"DLMM_SETTLEMENT_POSITION={shlex.quote(pos)} node {EXECUTOR_PATH} swap {shlex.quote(mint)} SOL {shlex.quote(str(bal['balance']))} 15 {slippage_bps} 1", timeout=90)
             if not result or not result.get("success"):
                 reason = (result or {}).get("reason")
                 if reason in ("swap_no_route", "net_recovery_below_floor") and not result.get("pending"):

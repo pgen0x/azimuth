@@ -163,13 +163,15 @@ def main():
          patch.object(monitor, "run_command", return_value=("1", "", 0)) as capacity:
         monitor.queue_settlement("position")
         path = Path(tmp) / "position.json"
-        with patch.object(monitor, "run_command_json", side_effect=[({"balance": 10}, None), ({"success": False}, "slippage")]):
+        with patch.object(monitor, "run_command_json", side_effect=[({"balance": 10}, None), ({"success": False}, "slippage")]) as first:
             monitor.settle_pending()
+        assert first.call_args_list[1].args[0].endswith(" 15 100 1")
         assert path.exists()
         capacity.assert_not_called()
         # Even a successful swap cannot resume scanning while balance is unknown.
-        with patch.object(monitor, "run_command_json", side_effect=[({"balance": 10}, None), ({"success": True}, None), (None, "RPC unavailable")]):
+        with patch.object(monitor, "run_command_json", side_effect=[({"balance": 10}, None), ({"success": True}, None), (None, "RPC unavailable")]) as retry:
             monitor.settle_pending()
+        assert retry.call_args_list[1].args[0].endswith(" 15 300 1")
         assert path.exists()
         capacity.assert_not_called()
         with patch.object(monitor, "run_command_json", side_effect=[({"balance": 10}, None), ({"success": True}, None), ({"balance": 0}, None)]):
@@ -183,7 +185,7 @@ def main():
             monitor.queue_settlement("position")
             with patch.object(monitor, "run_command_json", side_effect=[({"balance": 0.000001}, None), ({"success": False, "reason": reason}, None)]) as run:
                 monitor.settle_pending()
-            assert run.call_args_list[1].args[0].endswith(" 15 300 1")
+            assert run.call_args_list[1].args[0].endswith(" 15 100 1")
             capacity.assert_not_called()
             item = json.loads(path.read_text())
             assert item["state"] == ("pending" if reason == "net_recovery_unmeasured" else "deferred")
