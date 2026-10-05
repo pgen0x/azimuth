@@ -165,6 +165,16 @@ for bad in [dict(quote, out_amount="NaN"), dict(quote, minimum_out_amount="1001"
     assert swap_execution([dict(event, swap_quote=bad)], {"ok":fact}, 100, 200)['attempts'][0]['status'] == 'unmeasured'
 improved = swap_execution([event], {"ok":dict(fact, wallet_delta_lamports=805)}, 100, 200)
 assert improved['attempts'][0]['shortfall_lamports'] == -10
+expired = dict(observed_at=110, landed=False, classification='expired_unlanded',
+               basis='finalized_wallet_history_and_expiry')
+result = swap_execution([event], {'ok':expired}, 100, 200)
+assert result['by_slippage_bps']['100']['expired_unlanded'] == 1
+assert result['by_slippage_bps']['100']['pending'] == 0
+assert 'actual_gross_lamports' not in result['attempts'][0]
+assert 'network_fee_lamports' not in result['attempts'][0]
+for unproven in [dict(expired, observed_at=201), dict(expired, basis='unknown'),
+                 dict(expired, classification='unknown')]:
+    assert swap_execution([event], {'ok':unproven}, 100, 200)['attempts'][0]['status'] == 'pending'
 print("Swap quote/fill evaluation preserves rent, failed fees, cutoff and unknown evidence")
 
 # Sell-quote observations must not promote missing costs or malformed inventory

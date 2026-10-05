@@ -107,8 +107,15 @@ def swap_execution(events, facts, start, end):
         if type(bps) is int and 0 < bps <= 10000:
             item['slippage_bps'] = bps
         fact = facts.get(signature)
-        if not fact or fact.get('observed_at', end+1) > end or fact.get('landed') is False:
+        if not fact or fact.get('observed_at', end+1) > end:
             item.update(status='pending', reason='no_finalized_fact_at_cutoff')
+            continue
+        if fact.get('landed') is False:
+            if (fact.get('classification') == 'expired_unlanded'
+                    and fact.get('basis') == 'finalized_wallet_history_and_expiry'):
+                item.update(status='expired_unlanded', reason='finalized_history_proves_expiry')
+            else:
+                item.update(status='pending', reason='no_finalized_fact_at_cutoff')
             continue
         fee = fact.get('fee_lamports')
         if type(fee) is int and fee >= 0:
@@ -144,7 +151,7 @@ def swap_execution(events, facts, start, end):
     groups = {}
     for item in results.values():
         group = groups.setdefault(str(item.get('slippage_bps', 'unknown')),
-                                  dict(attempts=0, measured=0, failed=0, pending=0, unmeasured=0,
+                                  dict(attempts=0, measured=0, failed=0, pending=0, unmeasured=0, expired_unlanded=0,
                                        known_network_fee_lamports=0, measured_shortfall_lamports=0))
         group['attempts'] += 1
         group[item['status']] += 1
