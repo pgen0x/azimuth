@@ -1503,6 +1503,10 @@ def protect_tight_exit(reason, mode, pnl_pct, change_h1, emergency=False):
     elif pnl_pct <= DOWNTREND_PNL_ONLY_TIGHT_PCT:
         reason = (f"Downtrend dump, unconfirmed (PnL {pnl_pct:.2f}% <= "
                   f"{DOWNTREND_PNL_ONLY_TIGHT_PCT}%, no 1h confirmation) — risk floor")
+    # The turnover age limit bounds capital occupancy; a price indicator or AI
+    # hold must not extend that existing limit after the stale-ticket rule fires.
+    if mode == "turnover" and reason and reason.lower().startswith("stale ticket re-pin"):
+        return reason, True
     protected = bool(reason and any(label in reason.lower() for label in (
         "trailing take-profit", "downtrend dump", "fast-out dump exit", "peak-giveback stop")))
     return reason, protected

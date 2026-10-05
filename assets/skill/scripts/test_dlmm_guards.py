@@ -60,6 +60,14 @@ def main():
     assert sum(isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
                and n.func.id == "defer_capacity_signals" for n in ast.walk(tree_pipeline)) == 4
 
+    stale = "Stale ticket re-pin (60m in range, peak +0.63% never armed)"
+    assert monitor.protect_tight_exit(stale, "turnover", -0.03, None) == (stale, True)
+    assert monitor.protect_tight_exit(stale, "turnover", 0.5, None) == (stale, True)
+    assert monitor.protect_tight_exit(stale, "multiday", 0.5, None) == (stale, False)
+    # A stronger drawdown rule still takes precedence over the age reason.
+    reason, protected = monitor.protect_tight_exit(stale, "turnover", -3, None)
+    assert protected and "downtrend dump" in reason.lower()
+
     meta={}
     state=dict(updated_at=1000,unclaimed_fees_sol=0.001,balances_sol=0.1)
     assert monitor.observe_root_fee_pace(meta,state,1000)
