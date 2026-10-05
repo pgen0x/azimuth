@@ -37,6 +37,25 @@ def main():
         ns["reason_lower"] = reason.lower()
         assert not eval(compile(ast.Expression(churn), "exit-policy", "eval"), ns)
 
+    cli = SimpleNamespace(mode="turnover", from_batch=json.dumps([{"pool": "A"*32}]), from_signal=None)
+    with patch.object(pipeline, "run_command", return_value=("1", "", 0)) as command:
+        pipeline.defer_capacity_signals(cli)
+        assert "turnover:" + "A"*32 in command.call_args.args[0]
+        assert "EXPIRE" in command.call_args.args[0] and "300" in command.call_args.args[0]
+    cli.from_batch = None
+    cli.from_signal = json.dumps({"pool": "B"*32})
+    with patch.object(pipeline, "run_command", return_value=("1", "", 0)) as command:
+        pipeline.defer_capacity_signals(cli)
+        assert "turnover:" + "B"*32 in command.call_args.args[0]
+    for payload in (None, "bad-json", "[]", '{"pool":"bad"}', '{"pool":"$(id)"}'):
+        cli.from_signal = payload
+        with patch.object(pipeline, "run_command") as command:
+            pipeline.defer_capacity_signals(cli)
+            command.assert_not_called()
+    tree_pipeline = ast.parse(Path(pipeline.__file__).read_text())
+    assert sum(isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+               and n.func.id == "defer_capacity_signals" for n in ast.walk(tree_pipeline)) == 4
+
     meta={}
     state=dict(updated_at=1000,unclaimed_fees_sol=0.001,balances_sol=0.1)
     assert monitor.observe_root_fee_pace(meta,state,1000)

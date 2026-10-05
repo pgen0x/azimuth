@@ -1076,6 +1076,30 @@ def select_batch_strategy(c, mode):
     return "sol_bidask"
 
 
+def defer_capacity_signals(cli):
+    """Let Redis-backed signals retry within five minutes after a wallet-only skip."""
+    if cli.mode not in ("casual", "multiday", "turnover", "pulse"):
+        return
+    try:
+        records = json.loads(cli.from_batch) if cli.from_batch else [json.loads(cli.from_signal)]
+    except (TypeError, ValueError):
+        return
+    if not isinstance(records, list):
+        return
+    prefix = os.environ.get("REDIS_SEEN_KEY", "dlmm:signal:seen_pools")
+    keys = sorted({f"{prefix}:{cli.mode}:{r['pool']}" for r in records
+                   if isinstance(r, dict) and isinstance(r.get("pool"), str)
+                   and re.fullmatch(r"[1-9A-HJ-NP-Za-km-z]{32,44}", r["pool"])})
+    if not keys:
+        return
+    # Shorten only existing dedup markers, never cooldowns or a shorter retry.
+    script = "for _,k in ipairs(KEYS) do if redis.call('TTL',k)>300 then redis.call('EXPIRE',k,300) end end return 1"
+    _, err, code = run_command("redis-cli -e EVAL " + shlex.quote(script) + " "
+                               + str(len(keys)) + " " + " ".join(map(shlex.quote, keys)))
+    if code:
+        print(f"Warning: capacity retry scheduling failed: {err}")
+
+
 def main():
     import argparse
     parser = argparse.ArgumentParser()
@@ -1118,6 +1142,7 @@ def main():
         active_count = get_active_positions_count_for_mode(mode)
         if active_count >= max_positions:
             print(f"Aborting: Max {mode} positions reached ({active_count}/{max_positions})")
+            defer_capacity_signals(cli)
             sys.exit(0)
     else:
         active_count = get_active_positions_count_for_mode(mode)
@@ -1127,6 +1152,7 @@ def main():
     # Hard gate: abort entire pipeline (including analyze-only) if wallet too thin to deploy anything useful
     if sol_balance < 0.25 and os.environ.get("DRY_RUN") != "true":
         print(f"[SKIP] Wallet {sol_balance:.3f} SOL < 0.25 SOL minimum — aborting pipeline (no SOL to deploy)")
+        defer_capacity_signals(cli)
         sys.exit(0)
     deploy_sol = compute_deploy_amount(sol_balance)
     # The turnover half-size cap (2026-07-15) was removed 2026-07-28. It was sized
@@ -1137,10 +1163,12 @@ def main():
     # the third turnover ticket under the 0.10 SOL floor and starves the mode out.
     if (deploy_sol <= 0 or deploy_sol < 0.10) and not cli.analyze_only:
         print(f"Aborting: deploy amount {deploy_sol:.3f} SOL below 0.10 SOL minimum (wallet {sol_balance:.3f} SOL)")
+        defer_capacity_signals(cli)
         sys.exit(0)
     min_required = deploy_sol + 0.2 + 0.05
     if sol_balance < min_required and not cli.analyze_only:
         print(f"Aborting: Insufficient SOL balance ({sol_balance:.3f} SOL < {min_required:.3f} SOL required)")
+        defer_capacity_signals(cli)
         sys.exit(0)
 
     # 2. Fetch candidates
