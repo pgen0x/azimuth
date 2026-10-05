@@ -67,6 +67,7 @@ async function runWithFailover(fn) {
         fetch: (url, options) => fetch(url, { ...options, signal: AbortSignal.timeout(8000) }) });
       return await fn(connection);
     } catch (err) {
+      if (err.message?.startsWith("ENTRY REFUSED:")) throw err;
       console.warn(`[RPC WARN] Failed execution on RPC #${currentRpcIndex}: ${err.message}`);
       currentRpcIndex = (currentRpcIndex + 1) % RPC_URLS.length;
       attempts++;
@@ -429,6 +430,21 @@ async function assertRootBudget() {
   if (!decision.allow) throw new Error(`ENTRY REFUSED: ${decision.reason}`);
 }
 
+// Guard native cash after the exact transaction, including rent and network fees.
+async function assertNativeReserve(connection, wallet, transaction) {
+  const before = await connection.getBalanceAndContext(wallet.publicKey, "confirmed");
+  const simulated = await connection.simulateTransaction(transaction, {
+    commitment: "confirmed", sigVerify: false, minContextSlot: before.context.slot,
+    accounts: { encoding: "base64", addresses: [wallet.publicKey.toString()] }
+  });
+  const after = await connection.getBalanceAndContext(wallet.publicKey,
+    { commitment: "confirmed", minContextSlot: simulated.context.slot });
+  const post = simulated.value.accounts?.[0]?.lamports;
+  if (simulated.value.err || !Number.isSafeInteger(post) || !Number.isSafeInteger(before.value)
+      || before.value !== after.value) throw new Error("ENTRY REFUSED: native reserve simulation unmeasured");
+  if (post < 200000000) throw new Error("ENTRY REFUSED: rent/fees would breach 0.2 SOL native reserve");
+}
+
 async function deployPosition(poolAddressStr, amountX, amountY, binsBelow, binsAbove, strategyTypeStr = "spot", slippageBps = 1000) {
   if (![amountX, amountY].every((n) => Number.isFinite(n) && n >= 0)
       || amountX + amountY <= 0
@@ -493,7 +509,7 @@ async function deployPosition(poolAddressStr, amountX, amountY, binsBelow, binsA
         try { bin_snapshot = await binSnapshot(pool, minBinId, maxBinId); }
         catch { console.warn("[SHADOW] Entry bin snapshot unavailable"); }
 
-        fs.writeFileSync(path.join(entryDir, `${newPosition.publicKey}.json`), JSON.stringify({
+        const persistEntry = () => fs.writeFileSync(path.join(entryDir, `${newPosition.publicKey}.json`), JSON.stringify({
           ...context, bin_snapshot, root_chain_id: context.root_chain_id || context.recenter_of || newPosition.publicKey.toString(),
           pool: poolAddressStr, position: newPosition.publicKey.toString(),
           entry_bin: activeBin.binId, entry_price: pool.fromPricePerLamport(Number(activeBin.price)),
@@ -506,6 +522,8 @@ async function deployPosition(poolAddressStr, amountX, amountY, binsBelow, binsA
           tx.recentBlockhash = blockhash;
           tx.lastValidBlockHeight = lastValidBlockHeight;
           tx.feePayer = wallet.publicKey;
+          await assertNativeReserve(connection, wallet, new VersionedTransaction(tx.compileMessage()));
+          if (!submitted) persistEntry();
           tx.sign(...signers);
           const raw = tx.serialize();
           const signature = bs58.encode(tx.signature);
@@ -549,7 +567,7 @@ async function deployPosition(poolAddressStr, amountX, amountY, binsBelow, binsA
         // never blocked; this briefly delays only the next wallet deployment.
         return { success: true, position: newPosition.publicKey.toString(), txHash: txHashes[0], txHashes };
       } catch (err) {
-        if (err.message.startsWith("ENTRY REFUSED:")) return { success: false, error: err.message };
+        if (!submitted && err.message.startsWith("ENTRY REFUSED:")) return { success: false, error: err.message };
         if (!submitted) throw err; // Read/build failure: another RPC is safe.
         // Sending then timing out does NOT mean failure. Never RPC-failover
         // into a second mint or clean up possibly funded liquidity blindly.
@@ -1087,6 +1105,9 @@ async function swapToken(inputMintStr, outputMintStr, amountFloat, maxPriceImpac
         return { success: false, aborted: true, reason: "net_recovery_below_floor",
           conservativeNetLamports: conservativeNet, minNetLamports };
       }
+    }
+    if (input_mint === "So11111111111111111111111111111111111111112") {
+      await assertNativeReserve(connection, wallet, transaction);
     }
     transaction.sign([wallet]);
     

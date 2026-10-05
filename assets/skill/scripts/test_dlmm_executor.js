@@ -15,7 +15,7 @@ let confirmTimeout = false, accountExists = true, failNextSend = false;
 const closeBytes = [];
 const key = (value) => ({ toString: () => value });
 const wallet = { publicKey: key(`test-wallet-${worker ? "swap" : process.pid}`) };
-const transaction = () => ({ signature: Buffer.from([1]), sign() {}, serialize() { return Buffer.from(this.recentBlockhash); } });
+const transaction = () => ({ signature: Buffer.from([1]), sign() {}, compileMessage() { return {}; }, serialize() { return Buffer.from(this.recentBlockhash); } });
 const pool = {
   pubkey: key("pool"), lbPair: { tokenXMint: key("TOKEN"), tokenYMint: key("So11111111111111111111111111111111111111112"), binStep: 100 },
   program: { account: {
@@ -29,7 +29,10 @@ const pool = {
   createExtendedEmptyPosition: async () => [transaction()],
   addLiquidityByStrategyChunkable: async () => { throw new Error("wide add failed"); },
 };
+let reservePost = 300000000, reserveError = null, reserveChanged = false, reserveReads = 0;
 class Connection {
+  async getBalanceAndContext() { return {context:{slot:10},value:300000000+(++reserveReads%2===0 && reserveChanged ? 1 : 0)}; }
+  async simulateTransaction() { return {context:{slot:10},value:{err:reserveError,accounts:[{lamports:reservePost}]}}; }
   async getAccountInfo() { return accountExists ? {} : null; }
   async getBlockHeight() { return height; }
   async getSignatureStatuses(signatures, options) {
@@ -47,7 +50,7 @@ class RentTransaction {
   compileMessage() { return {}; }
 }
 const deps = {
-  "@solana/web3.js": { Transaction: RentTransaction, Connection, Keypair: { generate: () => ({ publicKey: key(`position-${++minted}`) }) }, PublicKey: function (v) { return key(v); }, VersionedTransaction: { deserialize: () => ({ message: {}, signatures: [Buffer.from([1])], sign() {}, serialize() { return Buffer.from(this.message.recentBlockhash); } }) } },
+  "@solana/web3.js": { Transaction: RentTransaction, Connection, Keypair: { generate: () => ({ publicKey: key(`position-${++minted}`) }) }, PublicKey: function (v) { return key(v); }, VersionedTransaction: class { constructor(message) { this.message=message; } static deserialize = () => ({ message: {}, signatures: [Buffer.from([1])], sign() {}, serialize() { return Buffer.from(this.message.recentBlockhash); } }) } },
   "@meteora-ag/dlmm": { create: async () => pool, StrategyType: { Spot: 0, Curve: 1, BidAsk: 2 }, positionOwnerFilter: () => ({}) },
   "bn.js": function (value) { this.value = value; }, "bs58": { encode: () => "signature" },
   "dotenv": { config() {}, parse: () => ({}) },
@@ -84,6 +87,10 @@ const clearMarker = () => fs.rmSync(marker, { force: true });
     console.log(JSON.stringify({ result, sends }));
     return;
   }
+  reservePost=199999999;
+  await assert.rejects(swapToken("So11111111111111111111111111111111111111112","TOKEN",0.1),/native reserve/);
+  assert.equal(sends,0);
+  reservePost=300000000;
   for (const [mode, count] of [["submit", 1], ["pending", 0], ["unavailable", 0], ["confirmed", 0]]) {
     const out = JSON.parse(execFileSync(process.execPath, [__filename, mode, root], { encoding: "utf8" }));
     assert.equal(out.sends, count);
@@ -110,6 +117,8 @@ const clearMarker = () => fs.rmSync(marker, { force: true });
   }
   // Residual recovery must cover costs and the full slippage allowance before
   // sending. Existing pending-send tests above still exercise the normal path.
+  const defaultBalance = Connection.prototype.getBalanceAndContext;
+  const defaultSimulation = Connection.prototype.simulateTransaction;
   const oldFetch = sandbox.fetch;
   let simulatedPost = 14600, simulationError = null, changedBalance = false, balanceReads = 0;
   let minimumOutput = "4500";
@@ -153,6 +162,8 @@ const clearMarker = () => fs.rmSync(marker, { force: true });
   sandbox.fetch = async () => ({ok:false,status:429,text:async()=>JSON.stringify({errorCode:"COULD_NOT_FIND_ANY_ROUTE"})});
   await assert.rejects(recover(), /quote/);
   sandbox.fetch = oldFetch;
+  Connection.prototype.getBalanceAndContext = defaultBalance;
+  Connection.prototype.simulateTransaction = defaultSimulation;
   sends = 0;
   confirmTimeout = true;
   signatureStatus = { confirmationStatus: "confirmed", err: null };
@@ -256,6 +267,20 @@ const clearMarker = () => fs.rmSync(marker, { force: true });
   assert.equal(uncertain.pending, true); assert.equal(sends, 2); // no second RPC mint
   height = 100;
   assert.equal((await deploy()).pending, true); assert.equal(sends, 2);
+  clearMarker(); sendError = false;
+  const beforeReserve = sends;
+  const entriesBeforeReserve=fs.readdirSync(path.join(root,"memories/dlmm_entries")).length;
+  for (const post of [163759911,199999999,undefined]) {
+    reservePost=post;
+    assert.match((await deploy()).error,/native reserve/);
+    assert.equal(sends,beforeReserve);
+    assert.equal(fs.readdirSync(path.join(root,"memories/dlmm_entries")).length,entriesBeforeReserve);
+  }
+  reservePost=200000000; reserveError="failed";
+  assert.match((await deploy()).error,/unmeasured/);
+  reserveError=null;reserveChanged=true;
+  assert.match((await deploy()).error,/unmeasured/);
+  reserveChanged=false;reservePost=300000000;
   clearMarker(); sendError = false; buildError = true;
   await assert.rejects(deploy(), /RPC endpoints failed/);
   assert.equal(sends, 2); assert.ok(!fs.existsSync(marker));
@@ -269,7 +294,19 @@ const clearMarker = () => fs.rmSync(marker, { force: true });
   await assert.rejects(deploy(), /RPC endpoints failed/); assert.equal(sends, 4);
   await assert.rejects(deployPosition("pool", 0, -1, 20, 0), /Invalid deploy/);
   clearMarker(); height = 151; confirmationError = false;
+  reservePost=200000000; // exact reserve boundary remains permitted
   assert.equal((await deploy()).success, true); assert.equal(sends, 5); // expired reservation recovers
+  clearMarker();reservePost=300000000;
+  const oldCreates=pool.createExtendedEmptyPosition;
+  pool.createExtendedEmptyPosition=async()=>[transaction(),transaction()];
+  let reserveSteps=0;
+  Connection.prototype.simulateTransaction=async()=>({context:{slot:10},value:{err:null,accounts:[{lamports:++reserveSteps===1?300000000:199999999}]}});
+  const partialReserve=await deployPosition("pool",0,0.1,80,0,"bid_ask",1000);
+  assert.equal(partialReserve.pending,true);assert.equal(sends,6);
+  assert.match(partialReserve.error,/native reserve/);
+  pool.createExtendedEmptyPosition=oldCreates;
+  Connection.prototype.simulateTransaction=defaultSimulation;
+  clearMarker();
   deps["./dlmm_nav.js"] = {...require("./dlmm_nav.js"), collect: async () => ({})};
   deps.child_process = {execFileSync: () => JSON.stringify({allow:false,reason:"incomplete_chain"})};
   await assert.rejects(sandbox.module.exports.assertRootBudget(), /ENTRY REFUSED: incomplete_chain/);

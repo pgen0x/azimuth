@@ -17,6 +17,11 @@ from dlmm_realized import apply_realized
 
 
 def main():
+    assert pipeline.compute_deploy_amount(0.30718357) == 0
+    assert pipeline.compute_deploy_amount(0.349) == 0
+    assert pipeline.compute_deploy_amount(0.35) == 0.1
+    assert pipeline.compute_deploy_amount(0.461554584) == 0.12
+
     # The risk/override paths must never execute a token swap. Only the explicit
     # manual-cleanup branch may do so; pending settlement runs in its own worker.
     monitor = ast.parse(Path(__file__).with_name("dlmm_monitor.py").read_text())
