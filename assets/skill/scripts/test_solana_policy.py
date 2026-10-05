@@ -167,16 +167,46 @@ def main():
     # belong in a window card, and pulse must appear in the mode breakdown.
     with patch.object(stats, "load_closes", return_value=[{
         "mode": "pulse", "pnl_sol": 0.2, "pnl_basis": "realized", "age_min": 10,
-    }]), patch.object(stats, "load_realized", return_value={
+    }, {"mode": "pulse", "pnl_sol": 9, "pnl_basis": "pre_swap_mark", "age_min": 5}]), patch.object(stats, "load_realized", return_value={
         "recent": {"closed_at": 90_000, "realized_sol": 0.2, "fee_sol": 0.3, "deposit_sol": 1},
         "old": {"closed_at": 1, "realized_sol": 99, "fee_sol": 100, "deposit_sol": 1000},
         "future": {"closed_at": 200_000, "realized_sol": 99},
     }), patch.object(stats.time, "time", return_value=100_000), \
             patch.object(stats, "redis_keys", return_value=[]), \
-            patch.object(stats, "redis_scard", return_value=0):
+            patch.object(stats, "redis_scard", return_value=0), \
+            patch.object(stats, "accounting_report", return_value={"rent_refund_groups": [
+                {"first_activity": 20_000, "last_activity": 90_000,
+                 "root_chain_ids": ["one", "two", "three"], "cash_with_matched_refunds_sol": -0.003},
+                {"first_activity": 30_000, "last_activity": 95_000,
+                 "root_chain_ids": ["four"], "cash_with_matched_refunds_sol": 0.001},
+                {"first_activity": 1, "last_activity": 90_000,
+                 "root_chain_ids": ["carry-in"], "cash_with_matched_refunds_sol": 99},
+                {"first_activity": 90_000, "last_activity": 100_001,
+                 "root_chain_ids": ["future"], "cash_with_matched_refunds_sol": 99},
+            ]}) as accounting:
         card = stats.build_card(24)
+        accounting.assert_called_once_with(stats.PROFILE_DIR, 100_000)
+        assert "-0.002000000 SOL · 4 roots" in card
+        assert "Reconciled LP closes | 1 (1W/0L" in card  # LP positive can coexist with negative cash.
+        assert "Closes / unreconciled | 2 / 1" in card
+        assert "Reconciled journal LP PnL | +0.2000 SOL" in card
+        assert "+9.2000" not in card
+        with patch.object(stats, "load_closes", return_value=[{"pnl_sol": 9, "pnl_basis": "pre_swap_mark"}]):
+            assert "Reconciled journal LP PnL | Unmeasured" in stats.build_card(24)
+        assert "do not add" in card and "Not wallet-wide profit or win rate" in card
+        accounting.return_value = {"rent_refund_groups": []}
+        unknown = stats.build_card(24)
+        assert "Unmeasured: no complete matched groups" in unknown
+        assert "+0.000000000 SOL" not in unknown
+        accounting.return_value = {"rent_refund_groups": [
+            {"first_activity": 20_000, "last_activity": 90_000,
+             "root_chain_ids": ["zero"], "cash_with_matched_refunds_sol": 0},
+        ]}
+        assert "+0.000000000 SOL · 1 roots" in stats.build_card(24)
+        accounting.side_effect = OSError("unreadable facts")
+        assert "Wallet cash / NAV | Unavailable" in stats.build_card(24)
     assert "+0.2000 / +0.3000 / -0.1000 SOL" in card
-    assert "1.00 SOL across 1 cached closes" in card and "| pulse | 1 closes" in card
+    assert "1.00 SOL across 1 cached closes" in card and "| pulse | 1 reconciled LP closes" in card
     print("Solana policy and journal regression checks passed")
 
 
