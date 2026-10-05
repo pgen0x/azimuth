@@ -72,11 +72,22 @@ const clearMarker = () => fs.rmSync(marker, { force: true });
 (async () => {
   if (worker && worker.startsWith("close-")) {
     vm.runInNewContext("findPoolForPosition = async () => ({pool: testPool, positionData: {publicKey: testWallet.publicKey, positionData: {lowerBinId: 0, upperBinId: 1}}});", Object.assign(sandbox, {testPool: pool}));
-    pool.removeLiquidity = async () => { builds++; return transaction(); };
+    let claimBuilds = 0;
+    pool.claimSwapFee = async () => { claimBuilds++; return []; };
+    pool.removeLiquidity = async (args) => {
+      assert.equal(args.shouldClaimAndClose, true);
+      builds++;
+      if (worker === "close-empty") throw new Error("no liquidity");
+      return transaction();
+    };
+    if (worker === "close-empty") {
+      vm.runInNewContext("findPoolForPosition = async () => ({pool: testPool, positionData: {publicKey: testWallet.publicKey, positionData: {lowerBinId: 0, upperBinId: 1, liquidityShares: [{isZero: () => true}]}}});", sandbox);
+      pool.closePositionIfEmpty = async () => transaction();
+    }
     sendError = worker === "close-submit";
     if (!sendError) Connection.prototype.sendRawTransaction = async () => { sends++; accountExists = false; return "signature"; };
     const result = await closePosition("restart-position");
-    console.log(JSON.stringify({result,sends,builds}));
+    console.log(JSON.stringify({result,sends,builds,claimBuilds}));
     return;
   }
   if (worker) {
@@ -99,10 +110,15 @@ const clearMarker = () => fs.rmSync(marker, { force: true });
   const closeFirst = JSON.parse(execFileSync(process.execPath, [__filename, "close-submit", root], {encoding:"utf8"}));
   assert.equal(closeFirst.result.pending, true);
   assert.equal(closeFirst.builds, 1);
+  assert.equal(closeFirst.claimBuilds, 0); // combined SDK close already claims fees
   const closeRestart = JSON.parse(execFileSync(process.execPath, [__filename, "close-resume", root], {encoding:"utf8"}));
   assert.equal(closeRestart.result.success, true);
   assert.equal(closeRestart.builds, 0); // resumed the persisted bytes in a new process
   assert.equal(closeRestart.sends, 1);
+  const emptyClose = JSON.parse(execFileSync(process.execPath, [__filename, "close-empty", root], {encoding:"utf8"}));
+  assert.equal(emptyClose.result.success, true);
+  assert.equal(emptyClose.claimBuilds, 1); // preserve fees when combined close cannot be built
+
   // A local cleanup failure after confirmation must not send a second swap.
   const originalRm = fs.rmSync;
   fs.rmSync = (target, options) => {
