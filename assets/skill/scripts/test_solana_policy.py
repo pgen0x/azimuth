@@ -8,6 +8,7 @@ import io
 import json
 import os
 import signal
+import sqlite3
 import subprocess
 import sys
 import time
@@ -24,6 +25,20 @@ from dlmm_realized import apply_realized
 
 
 def main():
+    from dlmm_evaluate import delivery_outcomes
+    with tempfile.TemporaryDirectory() as directory:
+        profile=Path(directory);db=sqlite3.connect(profile/"state.db")
+        db.execute("CREATE TABLE sessions (id TEXT,source TEXT,chat_id TEXT,started_at REAL,ended_at REAL)")
+        db.execute("INSERT INTO sessions VALUES ('session','webhook','webhook:dlmm-signal:delivery',101,120)");db.commit();db.close()
+        journal=profile/"deliveries.jsonl"
+        journal.write_text('\n'.join(json.dumps(r) for r in [
+            {"delivery_id":"delivery","stage":"prepared","observed_at":100},
+            {"delivery_id":"delivery","stage":"accepted","observed_at":102}])+"\n")
+        before=delivery_outcomes(profile,journal,90,110)["deliveries"][0]
+        assert before["session_state"]=="not_ended_at_cutoff" and before["transport"]=="accepted"
+        after=delivery_outcomes(profile,journal,90,130)["deliveries"][0]
+        assert after["session_state"]=="ended_execution_unverified" and not after["execution_verified"]
+        assert delivery_outcomes(profile,journal,90,101)["deliveries"][0]["transport"]=="unconfirmed"
     # A profitable pre-swap mark is not a measured learner outcome. Missing
     # SOL must never fall back to percentages; real zero remains a valid loss.
     for row in [

@@ -303,3 +303,18 @@ Ranking prefers verified cash, with the existing conservative mark loss penalty
 when cash is unavailable. The separate pool percentage-loss safety gate continues
 to use the existing marked history and its unchanged threshold. This cache is
 advisory selection evidence, not portfolio NAV or a new risk-limit authority.
+
+
+### Hermes delivery evidence
+
+Solana webhook requests receive a random `X-Request-ID`, supported by Hermes as
+its delivery ID. The scanner persists the signal before sending, then records
+acceptance/rejection/uncertainty in
+`~/.local/state/azimuth/solana_deliveries.jsonl` (override `SOLANA_DELIVERY_PATH`).
+No webhook URL, credential, or response body is stored. Receipt IDs must match.
+
+The evaluator joins delivery IDs to the profile's read-only Hermes session DB,
+respecting its evaluation cutoff. HTTP acceptance and session end are lifecycle
+evidence only; neither proves a completed AI pick or finalized trade. Missing
+or ambiguous evidence remains explicit. This journal does not replay requests
+or relax the scanner's accepted/ambiguous-delivery deduplication protection.
