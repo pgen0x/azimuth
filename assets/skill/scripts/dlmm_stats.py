@@ -102,21 +102,17 @@ def build_card(hours):
     api_fee = sum(f(r.get("fee_sol")) for r in flows)
     api_dep = sum(f(r.get("deposit_sol")) for r in flows)
 
-    # Say which basis the number is on: "chain" once every close in the window
-    # has been reconciled to on-chain flows, otherwise how many are still marks.
-    on_chain = sum(1 for c in closes if c.get("pnl_basis") == "realized")
-    basis_label = ("chain" if closes and on_chain == len(closes)
-                   else f"{on_chain}/{len(closes)} chain" if closes else "journal")
-
-    wins = [c for c in closes if f(c.get("pnl_sol")) > 0]
-    losses = [c for c in closes if f(c.get("pnl_sol")) <= 0]
-    realized = sum(f(c.get("pnl_sol")) for c in closes)
+    # Unreconciled exit marks are observations, not settled LP outcomes.
+    reconciled = [c for c in closes if c.get("pnl_basis") == "realized"]
+    wins = [c for c in reconciled if f(c.get("pnl_sol")) > 0]
+    losses = [c for c in reconciled if f(c.get("pnl_sol")) <= 0]
+    realized = sum(f(c.get("pnl_sol")) for c in reconciled)
     holds = [f(c.get("age_min")) for c in closes if c.get("age_min") is not None]
     avg_hold = sum(holds) / len(holds) if holds else None
-    win_rate = 100.0 * len(wins) / len(closes) if closes else 0.0
+    win_rate = 100.0 * len(wins) / len(reconciled) if reconciled else 0.0
 
     by_mode = {}
-    for c in closes:
+    for c in reconciled:
         m = c.get("mode") or "unknown"
         d = by_mode.setdefault(m, {"n": 0, "w": 0, "pnl": 0.0, "holds": []})
         d["n"] += 1
@@ -143,9 +139,12 @@ def build_card(hours):
         f"📊 DLMM Scoreboard — last {hours}h · {ts_str}",
         "| Metric | Value |",
         "|--------|-------|",
-        f"| Closes | {len(closes)} ({len(wins)}W/{len(losses)}L · {win_rate:.0f}% win) |",
+        f"| Closes / unreconciled | {len(closes)} / {len(closes) - len(reconciled)} (unreconciled excluded from PnL/win rate) |",
+        (f"| Reconciled LP closes | {len(reconciled)} ({len(wins)}W/{len(losses)}L · {win_rate:.0f}% win) |"
+         if reconciled else "| Reconciled LP closes | Unmeasured |"),
         f"| Avg hold | {fmt_hold(avg_hold)} |",
-        f"| Journal LP PnL ({basis_label}) | {realized:+.4f} SOL |",
+        (f"| Reconciled journal LP PnL | {realized:+.4f} SOL |"
+         if reconciled else "| Reconciled journal LP PnL | Unmeasured |"),
     ]
     if flows:
         lines += [
@@ -156,14 +155,24 @@ def build_card(hours):
     else:
         lines.append("| Cached LP flows | n/a (run dlmm_realized.py to reconcile this window) |")
     try:
-        accounting = accounting_report(PROFILE_DIR)
+        accounting = accounting_report(PROFILE_DIR, now)
+        groups = [g for g in accounting.get("rent_refund_groups", [])
+                  if cutoff <= g["first_activity"] <= g["last_activity"] <= now]
+        if groups:
+            # Groups are disjoint in accounting; count each shared refund once.
+            cash = sum(g["cash_with_matched_refunds_sol"] for g in groups)
+            roots = {root for g in groups for root in g["root_chain_ids"]}
+            lines.append(f"| Settled root cash + matched refunds (subset) | {cash:+.9f} SOL · {len(roots)} roots |")
+        else:
+            lines.append("| Settled root cash + matched refunds (subset) | Unmeasured: no complete matched groups in window |")
+        lines.append("| Cash basis | Whole root lifetimes inside window; includes network/cleanup fees; excludes open, carry-in and unmatched roots. Overlaps LP PnL; do not add. Not wallet-wide profit or win rate. |")
         nav = accounting.get("nav_sol")
         change = accounting.get("flow_adjusted_wealth_change_sol")
         lines.append(f"| Marked wallet NAV | {nav:.6f} SOL |" if nav is not None else "| Marked wallet NAV | Unmeasured: missing/stale asset marks |")
         lines.append(f"| Wealth change since first valid NAV mark (external flows removed) | {change:+.6f} SOL |" if change is not None else "| Flow-adjusted wealth change | Unmeasured: wallet coverage/classification incomplete |")
         lines.append("| NAV basis | Native SOL + SPL liquidation quotes + LP marks + refundable rent; not a realized return |")
     except Exception:
-        lines.append("| Wallet NAV | Unavailable: accounting evidence could not be read |")
+        lines.append("| Wallet cash / NAV | Unavailable: accounting evidence could not be read |")
     lines.append(f"| Open positions | {open_positions} |")
 
     for m in ("turnover", "pulse", "casual", "multiday", "unknown"):
@@ -171,7 +180,7 @@ def build_card(hours):
         if not d:
             continue
         mh = sum(d["holds"]) / len(d["holds"]) if d["holds"] else None
-        lines.append(f"| {m} | {d['n']} closes · {d['w']}W · {d['pnl']:+.4f} SOL · hold {fmt_hold(mh)} |")
+        lines.append(f"| {m} | {d['n']} reconciled LP closes · {d['w']}W · {d['pnl']:+.4f} SOL · hold {fmt_hold(mh)} |")
 
     if chains:
         lines.append("")
