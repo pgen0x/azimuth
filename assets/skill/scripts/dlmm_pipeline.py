@@ -621,27 +621,26 @@ def get_price_impact_sol_to_token(base_mint, sol_amount):
         return None
 
 def fetch_live_fee_tvl(pool_address, timeframe="24h"):
-    """Re-query Meteora for this pool's CURRENT fee/TVL ratio (percent) at deploy time.
-    Apples-to-apples with the screened Meteora value. Returns None on failure.
-    dlmm.datapi returns fee_tvl_ratio as a {timeframe: float} dict."""
+    """Re-read the scanner's pool and timeframe; incomparable data is unavailable."""
     if not pool_address:
         return None
-    url = f"https://dlmm.datapi.meteora.ag/pools?query={urllib.parse.quote(pool_address)}&sort_by=tvl:desc"
+    query = urllib.parse.urlencode({"page_size": 1, "timeframe": timeframe,
+                                    "filter_by": "pool_address=" + pool_address})
+    url = "https://pool-discovery-api.datapi.meteora.ag/pools?" + query
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
         with urllib.request.urlopen(req, timeout=10) as resp:
             data = json.loads(resp.read().decode())
-        pools = data.get("data", [])
-        if not pools:
+        pool = next((p for p in data.get("data", []) if p.get("pool_address") == pool_address), None)
+        if pool is None:
             return None
-        ratio = pools[0].get("fee_tvl_ratio")
+        ratio = pool.get("fee_tvl_ratio")
         if isinstance(ratio, dict):
-            # Prefer requested timeframe, fall back to longer windows.
-            for tf in (timeframe, "24h", "12h", "1h"):
-                if ratio.get(tf) is not None:
-                    return float(ratio[tf])
+            ratio = ratio.get(timeframe)
+        if ratio is None or isinstance(ratio, bool):
             return None
-        return float(ratio) if ratio is not None else None
+        value = float(ratio)
+        return value if math.isfinite(value) and value >= 0 else None
     except Exception as e:
         print(f"Warning: live fee/TVL fetch failed for {pool_address[:8]}: {e}")
         return None
@@ -1803,7 +1802,7 @@ def main():
             print(f"Warning: pre-deploy momentum check failed ({e}) — proceeding with deploy")
 
         # C. Fee/TVL freshness: re-query Meteora for the pool's LIVE fee/TVL and
-        # abort if it dropped >50% since screening. Apples-to-apples (both Meteora 24h),
+        # abort if it dropped >50% since screening. Apples-to-apples (same discovery timeframe),
         # replacing the old DexScreener volume proxy that systematically false-aborted.
         screened_fee_tvl = winner["fee_tvl_ratio"]
         live_fee_tvl = fetch_live_fee_tvl(winner["pool"], timeframe)
