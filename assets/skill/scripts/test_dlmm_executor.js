@@ -323,16 +323,17 @@ const clearMarker = () => fs.rmSync(marker, { force: true });
   // Rent maintenance never burns/sells tokens, pays only this wallet, and does
   // not re-broadcast after an uncertain send (including across invocations).
   const { reclaimEmptyAccounts } = sandbox.module.exports;
-  const tokenProgram = key("classic-token");
+  const tokenProgram = key("classic-token"), token2022 = key("token2022");
   let fee = 5000;
-  deps["@solana/spl-token"] = { TOKEN_PROGRAM_ID: tokenProgram,
-    createCloseAccountInstruction: (account, destination, authority) => {
+  deps["@solana/spl-token"] = { TOKEN_PROGRAM_ID: tokenProgram, TOKEN_2022_PROGRAM_ID: token2022,
+    createCloseAccountInstruction: (account, destination, authority, signers, program) => {
       assert.equal(destination, wallet.publicKey); assert.equal(authority, wallet.publicKey);
+      assert.equal(program.toString(), account.toString() === "safe-2022" ? "token2022" : "classic-token");
       return account.toString();
     } };
   // Transaction was destructured when the executor loaded; use its injected class.
   let tokenAccounts = [];
-  Connection.prototype.getParsedTokenAccountsByOwner = async () => ({ value: tokenAccounts });
+  Connection.prototype.getParsedTokenAccountsByOwner = async (_, {programId}) => ({ value: tokenAccounts.filter(a=>a.account.owner.toString()===programId.toString()) });
   Connection.prototype.getFeeForMessage = async () => ({ value: fee });
   // Match the installed SDK contract: Map<string, PositionInfo>, nested fees.
   const sdkPosition = { publicKey: key("live-position"), positionData: {
@@ -353,11 +354,15 @@ const clearMarker = () => fs.rmSync(marker, { force: true });
     account("active", {mint: "TOKEN"}), account("wrapped", {mint: "So11111111111111111111111111111111111111112"}),
     account("foreign", {owner: "other"}), account("authority", {closeAuthority: "other"}),
     account("frozen", {state: "frozen"}), account("native", {isNative: true}),
-    account("delegate", {delegate: "someone"}), account("2022", {}, {owner: key("token2022")})];
+    account("delegate", {delegate: "someone"}), account("2022", {}, {owner: token2022}),
+    account("safe-2022", {extensions:[{extension:"immutableOwner"}]}, {owner:token2022}),
+    account("withheld-2022", {extensions:[{extension:"immutableOwner"},{extension:"transferFeeAmount",state:{withheldAmount:"1"}}]}, {owner:token2022}),
+    account("active-2022", {mint:"TOKEN",extensions:[{extension:"immutableOwner"}]}, {owner:token2022}),
+    account("unknown-2022", {extensions:[{extension:"unknown"}]}, {owner:token2022})];
   fs.rmSync(path.dirname(marker), {recursive: true, force: true});
   fs.rmSync(path.join(root, "memories/dlmm_pending_swaps"), {recursive: true, force: true});
   const beforeRent = sends;
-  assert.equal((await reclaimEmptyAccounts()).eligible, 1); assert.equal(sends, beforeRent);
+  assert.equal((await reclaimEmptyAccounts()).eligible, 2); assert.equal(sends, beforeRent);
   fee = null;
   await assert.rejects(reclaimEmptyAccounts(true), /unknown or uneconomic/); assert.equal(sends, beforeRent);
   fee = 5000;
@@ -373,8 +378,8 @@ const clearMarker = () => fs.rmSync(marker, { force: true });
   finally { await releaseRentLock(); }
   env.DLMM_ENTRY_ID = "must-not-attribute-rent-to-entry";
   const reclaimed = await reclaimEmptyAccounts(true);
-  assert.equal(reclaimed.recovered_lamports_before_fee, 1488440); assert.equal(sends, beforeRent + 1);
-  assert.deepEqual(rentInstructions, ["eligible", "eligible"]); // fee rejection builds but never sends
+  assert.equal(reclaimed.recovered_lamports_before_fee, 2976880); assert.equal(sends, beforeRent + 1);
+  assert.deepEqual(rentInstructions, ["eligible", "safe-2022", "eligible", "safe-2022"]); // fee rejection builds but never sends
   const rentEvent = JSON.parse(fs.readFileSync(journal, "utf8").trim().split("\n").at(-1));
   assert.equal(rentEvent.kind, "rent_reclaim"); assert.equal(rentEvent.entry_id, null); assert.equal(rentEvent.root_chain_id, null);
   signatureStatus = null; sendError = true; confirmTimeout = true; height = 100;

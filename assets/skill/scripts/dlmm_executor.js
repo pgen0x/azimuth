@@ -306,7 +306,7 @@ async function reconcilePendingSwap(connection, pendingPath, label = "Swap") {
 // Manual maintenance only. Token-2022/extensions and wrapped SOL are deliberately
 // excluded. The SPL program also rejects closure if tokens arrive after this read.
 async function reclaimEmptyAccounts(execute = false) {
-  const { TOKEN_PROGRAM_ID, createCloseAccountInstruction } = require("@solana/spl-token");
+  const { TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID, createCloseAccountInstruction } = require("@solana/spl-token");
   const wallet = getWallet(), owner = wallet.publicKey.toString();
   const releaseEntry = await acquireDeployLock(owner);
   let releaseSwap;
@@ -335,12 +335,17 @@ async function reclaimEmptyAccounts(execute = false) {
         excluded.add(pool.lbPair.tokenXMint.toString());
         excluded.add(pool.lbPair.tokenYMint.toString());
       }
-      const response = await connection.getParsedTokenAccountsByOwner(wallet.publicKey,
-        { programId: TOKEN_PROGRAM_ID }, "finalized");
-      const accounts = response.value.filter(({ account }) => {
+      const candidates = [];
+      for (const programId of [TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID]) {
+        const response = await connection.getParsedTokenAccountsByOwner(wallet.publicKey, { programId }, "finalized");
+        candidates.push(...response.value.filter(a => a.account.owner.toString() === programId.toString()));
+      }
+      const accounts = candidates.filter(({ account }) => {
         const info = account.data?.parsed?.info;
-        return account.owner.toString() === TOKEN_PROGRAM_ID.toString()
-          && info?.owner === owner && (info.closeAuthority || owner) === owner
+        const extensions = info?.extensions;
+        const supported = account.owner.toString() === TOKEN_PROGRAM_ID.toString()
+          || Array.isArray(extensions) && extensions.length === 1 && extensions[0].extension === "immutableOwner";
+        return supported && info?.owner === owner && (info.closeAuthority || owner) === owner
           && info.tokenAmount?.amount === "0" && info.state === "initialized"
           && info.isNative === false && !info.delegate && !excluded.has(info.mint)
           && Number.isSafeInteger(account.lamports) && account.lamports > 0;
@@ -353,12 +358,12 @@ async function reclaimEmptyAccounts(execute = false) {
     const accounts = state.accounts.slice(0, 8);
     const result = { success: true, dry_run: !execute || process.env.DRY_RUN === "true",
       eligible: state.accounts.length, accounts: accounts.map(a => ({ account: a.pubkey.toString(),
-        mint: a.account.data.parsed.info.mint, rent_lamports: a.account.lamports })),
+        mint: a.account.data.parsed.info.mint, program: a.account.owner.toString(), rent_lamports: a.account.lamports })),
       recovered_lamports_before_fee: accounts.reduce((sum, a) => sum + a.account.lamports, 0) };
     if (result.dry_run || !accounts.length) return result;
     const connection = state.connection;
     const tx = new Transaction();
-    for (const a of accounts) tx.add(createCloseAccountInstruction(a.pubkey, wallet.publicKey, wallet.publicKey));
+    for (const a of accounts) tx.add(createCloseAccountInstruction(a.pubkey, wallet.publicKey, wallet.publicKey, [], a.account.owner));
     const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash("confirmed");
     tx.recentBlockhash = blockhash;
     tx.feePayer = wallet.publicKey;
