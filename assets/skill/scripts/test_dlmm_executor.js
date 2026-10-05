@@ -40,7 +40,16 @@ class Connection {
     return { value: [signatureStatus] };
   }
   async getLatestBlockhash() { return { blockhash: "exact-blockhash", lastValidBlockHeight: 150 }; }
-  async sendRawTransaction(raw, options) { sends++; closeBytes.push(raw.toString("hex")); if (failNextSend) { failNextSend = false; throw new Error("429 max usage reached"); } lastMaxRetries = options.maxRetries; assert.equal(raw.toString(), "exact-blockhash"); if (sendError) throw new Error("timeout after send"); return "sig"; }
+  async sendRawTransaction(raw, options) {
+    const event=JSON.parse(fs.readFileSync(path.join(root,"memories/dlmm_transactions.jsonl"),"utf8").trim().split("\n").at(-1));
+    if (event.kind === "swap") {
+      assert.equal(event.swap_quote.in_amount,"100000000");
+      assert.equal(typeof event.swap_quote.out_amount,"string");
+      assert.equal(typeof event.swap_quote.observed_at,"number");
+      assert.equal(event.swap_quote.unrelatedDebug,undefined);
+    }
+    sends++; closeBytes.push(raw.toString("hex")); if (failNextSend) { failNextSend = false; throw new Error("429 max usage reached"); } lastMaxRetries = options.maxRetries; assert.equal(raw.toString(), "exact-blockhash"); if (sendError) throw new Error("timeout after send"); return "sig";
+  }
   async confirmTransaction(strategy) { if (confirmTimeout) throw new Error("confirmation timeout"); assert.equal(strategy.blockhash, "exact-blockhash"); return { value: { err: confirmationError ? "chain error" : null } }; }
 }
 const rentInstructions = [];
@@ -67,7 +76,8 @@ const sandbox = { require: (name) => deps[name] || require(name), module: { expo
       assert.equal(request.dynamicSlippage, undefined); // retain the quoted slippage limit
     }
     return { ok: true, json: async () => url.includes("/quote?")
-      ? { inAmount: "100000000", outAmount: "20", priceImpactPct: "0" }
+      ? { inAmount: "100000000", outAmount: "20", otherAmountThreshold: "19", contextSlot: 10,
+          priceImpactPct: "0", unrelatedDebug: "must-not-persist" }
       : { swapTransaction: "AA==" } };
   },
   console: { log() {}, warn() {}, error() {} }, Buffer, AbortSignal, setTimeout, clearTimeout };
@@ -140,6 +150,14 @@ const clearMarker = () => fs.rmSync(marker, { force: true });
   } finally {
     fs.rmSync = originalRm;
   }
+  const quoteEvent=JSON.parse(fs.readFileSync(path.join(root,"memories/dlmm_transactions.jsonl"),"utf8").trim().split("\n").at(-1));
+  assert.equal(quoteEvent.kind,"swap");
+  assert.equal(quoteEvent.swap_quote.out_amount,"20");
+  assert.equal(quoteEvent.swap_quote.minimum_out_amount,"19");
+  assert.equal(quoteEvent.swap_quote.context_slot,10);
+  assert.equal(quoteEvent.swap_quote.input_mint,"So11111111111111111111111111111111111111112");
+  assert.equal(quoteEvent.swap_quote.output_mint,"TOKEN");
+  assert.equal(quoteEvent.swap_quote.unrelatedDebug,undefined);
   // Residual recovery must cover costs and the full slippage allowance before
   // sending. Existing pending-send tests above still exercise the normal path.
   const defaultBalance = Connection.prototype.getBalanceAndContext;
