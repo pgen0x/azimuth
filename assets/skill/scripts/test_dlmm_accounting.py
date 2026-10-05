@@ -157,3 +157,63 @@ c2=dict(c,token_deltas_raw={"OTHER":"-2"})
 assert len(pooled_settlements([a,b2,c2])) == 1
 assert pooled_settlements([a,b2,c2]) == pooled_settlements([c2,b2,a])
 print("Pooled cash conservation, complete ownership and unchanged root gate passed")
+
+# Shared refunds form disjoint cash groups; evidence cannot rewrite root gates.
+from dlmm_accounting import rent_refund_groups
+item_a=dict(account="ata-a",mint="A",lamports=100)
+item_b=dict(account="ata-b",mint="B",lamports=100)
+item_c=dict(account="ata-c",mint="C",lamports=100)
+fund_a=dict(signature="fund-a",wallet="wallet",slot=10,failed=False,
+            token_rent_evidence=dict(funded=[item_a,item_c]))
+fund_b=dict(signature="fund-b",wallet="wallet",slot=11,failed=False,
+            token_rent_evidence=dict(funded=[item_b]))
+refund_a=dict(signature="refund-a",wallet="wallet",slot=40,block_time=200,failed=False,
+              fee_lamports=5,wallet_delta_lamports=195,token_rent_evidence=dict(refunded=[item_a,item_b]))
+refund_b=dict(signature="refund-b",wallet="wallet",slot=50,block_time=210,failed=False,
+              fee_lamports=5,wallet_delta_lamports=95,token_rent_evidence=dict(refunded=[item_c]))
+facts={r["signature"]:r for r in [fund_a,fund_b,refund_a,refund_b]}
+chains=[dict(root_chain_id="a",positions=["a"],recorded_signatures=["fund-a"],
+             accounting_status="settled_cash",first_activity=100,last_activity=180,
+             wallet_delta_lamports=-1000,network_fee_lamports=5),
+        dict(root_chain_id="b",positions=["b"],recorded_signatures=["fund-b"],
+             accounting_status="settled_cash",first_activity=100,last_activity=180,
+             wallet_delta_lamports=500,network_fee_lamports=5),
+        dict(root_chain_id="unattributed",positions=[],recorded_signatures=["refund-a","refund-b"])]
+histories=[dict(version=1,wallet="wallet",complete=True,observed_at=220,**item,
+                refund_signature=refund,funding_signature=fund,history_signatures=[fund])
+           for item,refund,fund in [(item_a,"refund-a","fund-a"),(item_b,"refund-a","fund-b"),(item_c,"refund-b","fund-a")]]
+original=deepcopy([chains,facts,histories])
+group,=rent_refund_groups(chains,facts,histories,220)
+assert group["root_chain_ids"]==["a","b"]
+assert group["refund_signatures"]==["refund-a","refund-b"]
+assert group["cash_with_matched_refunds_sol"]==-210/1e9
+assert group["network_fee_sol"]==20/1e9  # two root fees, two refund fees; no duplication
+assert group["last_activity"]==210
+assert [chains,facts,histories]==original
+assert rent_refund_groups(chains,facts,histories,219)==[]  # no future evidence
+for alter in (
+    lambda a:a[0][0].update(accounting_status="incomplete"),
+    lambda a:a[0][0].update(last_activity=300),
+    lambda a:a[1]["fund-a"].update(wallet="other"),
+    lambda a:a[1]["fund-a"].update(failed=True),
+    lambda a:a[1]["fund-a"].update(token_rent_evidence=dict(funded=[])),
+    lambda a:[r.update(version=99) for r in a[2]],
+    lambda a:[r.update(history_signatures=r["history_signatures"]*2) for r in a[2]],
+    lambda a:[r.update(history_signatures=["unknown"]+r["history_signatures"]) for r in a[2]],
+):
+    args=deepcopy(original);alter(args);assert rent_refund_groups(*args,220)==[]
+# Same account used by another root is ambiguous even with complete history.
+args=deepcopy(original)
+args[2][0]["history_signatures"].insert(0,"fund-b")
+remaining,=rent_refund_groups(*args,220)
+assert remaining["refund_signatures"]==["refund-b"] and remaining["root_chain_ids"]==["a"]
+# A refund already included in root cash must never be added again.
+args=deepcopy(original);args[0][0]["recorded_signatures"].append("refund-b")
+remaining,=rent_refund_groups(*args,220)
+assert remaining["refund_signatures"]==["refund-a"]
+print("Rent refund group conservation, shared fees, ambiguous roots and observation-time guards passed")
+
+# Refund between root legs remains measurable after the whole chain settles.
+args=deepcopy(original);args[0][0]["last_activity"]=215
+between,=rent_refund_groups(*args,220)
+assert between["last_activity"]==215 and between["cash_with_matched_refunds_sol"]==-210/1e9

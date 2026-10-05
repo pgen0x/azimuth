@@ -94,3 +94,16 @@ assert cash['settled_cash_sol'] == -0.000865793 and cash['cash_positive_roots'] 
 assert cash['roots'][0]['lp_pnl_sol'] > 0
 assert root_cash_cohort({'chains': [incomplete]}, 100, 200)['settled_cash_sol'] is None
 print('Root cash cohort excludes carry-in, future and unattributed cash; incomplete is not zero')
+
+# Refund-adjusted groups must fit the entire evaluation window.
+from unittest.mock import patch
+import dlmm_evaluate as evaluation_module
+with tempfile.TemporaryDirectory() as root:
+    profile=Path(root)
+    inside=dict(first_activity=100,last_activity=200,root_chain_ids=["inside"])
+    carry=dict(first_activity=99,last_activity=200,root_chain_ids=["carry"])
+    late=dict(first_activity=100,last_activity=201,root_chain_ids=["late"])
+    with patch.object(evaluation_module,"report",return_value=dict(chains=[],rent_refund_groups=[inside,carry,late])):
+        result=evaluation_module.evaluate(profile,100,200,profile/"rejects.jsonl")
+    assert result["rent_refund_groups"]==[inside]
+print("Refund groups exclude carry-in roots and refunds after the evaluation window")
