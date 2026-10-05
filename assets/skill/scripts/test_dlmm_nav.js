@@ -252,3 +252,35 @@ for (const altered of [
  {...allocated,transaction:{message:{...allocated.transaction.message,instructions:[{program:'system',parsed:{type:'transfer',info:{source:'other',destination:'outside',lamports:100}}},...allocated.transaction.message.instructions.slice(1)]}}}
 ]) assert.equal(transactionFact(altered,wallet,'allocation',{position:'p'}).nonrefundable_account_cost_lamports,0);
 console.log('Allocated account funding classification passed');
+
+(async()=>{
+  const {collectRentHistory}=require('./dlmm_nav');
+  const rentDir=fs.mkdtempSync(path.join(require('os').tmpdir(),'rent-history-'));
+  try {
+    const item={account:'ata',mint:'mint',lamports:1513840};
+    const funding={signature:'fund',wallet,slot:10,failed:false,token_rent_evidence:{funded:[item]}};
+    const middle={signature:'swap',wallet,slot:20,failed:false};
+    const refund={signature:'refund',wallet,slot:30,failed:false,token_rent_evidence:{refunded:[item]}};
+    const cache=new Map([funding,middle,refund].map(f=>[f.signature,f]));
+    let calls=0, history=[{signature:'swap',slot:20,err:null},{signature:'fund',slot:10,err:null}];
+    const args={dir:rentDir,wallet,PublicKey:class {constructor(value){this.value=value}},cache,
+      rpc:async fn=>fn({getSignaturesForAddress:async(key,options,commitment)=>{
+        calls++;assert.equal(key.value,'ata');assert.deepEqual(options,{before:'refund',limit:100});
+        assert.equal(commitment,'finalized');return history;
+      }})};
+    const latest=()=>JSON.parse(fs.readFileSync(path.join(rentDir,'dlmm_rent_history.jsonl'),'utf8').trim().split('\n').at(-1));
+    cache.delete('swap');await collectRentHistory(args);
+    assert.equal(latest().complete,false);assert.equal(calls,1);
+    cache.set('swap',middle);history=[{signature:'unknown',slot:20,err:null}];
+    await collectRentHistory(args);assert.equal(latest().reason,'funding_not_in_bounded_history');
+    history=[{signature:'swap',slot:20,err:{error:true}},{signature:'fund',slot:10,err:null}];
+    await collectRentHistory(args);assert.equal(latest().complete,false);
+    history=[{signature:'swap',slot:20,err:null},{signature:'fund',slot:10,err:null}];
+    await collectRentHistory(args);assert.equal(latest().complete,true);
+    assert.deepEqual(latest().history_signatures,['swap','fund']);
+    assert.equal(latest().funding_signature,'fund');
+    const done=calls;await collectRentHistory(args);assert.equal(calls,done);
+    assert.equal(cache.get('refund').wallet_delta_lamports,undefined); // evidence cannot allocate cash
+    console.log('Bounded rent account history, retry, cache completeness and no cash mutation passed');
+  } finally {fs.rmSync(rentDir,{recursive:true,force:true});}
+})().catch(e=>{console.error(e);process.exitCode=1});

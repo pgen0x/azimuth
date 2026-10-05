@@ -225,3 +225,18 @@ Missing or malformed API economics remain unmeasured and retryable; measured
 zero PnL and zero fees remain valid. Existing historical zero records cannot
 be distinguished from older defaulted zeros without fetching source evidence.
 These LP valuations still exclude wallet transaction costs and later rent refunds.
+
+### Bounded rent account history
+
+When wallet coverage is complete and classified, the collector records at most
+one account-history lookup per cycle in `dlmm_rent_history.jsonl`. Candidates
+require existing finalized funding and pure-close refund evidence for the same
+account, mint and rent amount. The bounded history must reach a funding signature,
+and every intervening signature must match a cached wallet fact and failure status.
+Completed evidence is cached; incomplete attempts rotate for retry. RPC failover
+can retry the single logical lookup. No bulk transaction migration is triggered.
+
+This proves the recorded history interval, not unique root ownership. Future
+attribution must check every referenced signature against roots, preserve
+observation times, and count shared refund transaction fees only once. Existing
+cash reports and root re-entry gates are unchanged.
