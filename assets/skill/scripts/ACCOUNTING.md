@@ -271,6 +271,13 @@ rent/fee movements. A wallet native delta alone is not gross swap output. Old
 transactions lacking a saved quote remain unmeasured for quote-to-fill slippage;
 do not reconstruct their historical quotes from current market prices.
 
+Evaluation reports group signed attempts by authorized slippage. SOL output is
+measured as finalized native delta plus network fees plus funded token rent minus
+refunded token rent. Failed transaction fees, pending facts and unmeasured rows
+remain explicit. Negative shortfall means the fill improved on the quote. These
+groups are execution evidence, not trading profit or causal savings; failures
+before a signed submission are outside their attempt counts.
+
 ### Mode-specific bin replay horizons
 
 Bin shadow collection uses the existing mode horizons: pulse 30 minutes,
