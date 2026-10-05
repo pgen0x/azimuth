@@ -625,8 +625,18 @@ async function findPoolForPosition(connection, wallet, positionAddressStr) {
 }
 
 function positionIsEmpty(position) {
-  const shares = position?.positionData?.liquidityShares;
-  return Array.isArray(shares) ? shares.every((share) => share.isZero()) : null;
+  const data = position?.positionData;
+  const shares = data?.liquidityShares;
+  if (Array.isArray(shares) && shares.length) return shares.every((share) => share.isZero());
+  // Current SDK exposes per-bin positionLiquidity strings, not liquidityShares.
+  const bins = data?.positionBinData;
+  if (!Array.isArray(bins) || !bins.length ||
+      bins.some(bin => typeof bin.positionLiquidity !== "string" || !/^\d+$/.test(bin.positionLiquidity))) return null;
+  if (bins.some(bin => BigInt(bin.positionLiquidity) > 0n)) return false;
+  if (!Number.isSafeInteger(data.lowerBinId) || !Number.isSafeInteger(data.upperBinId) ||
+      bins.length !== data.upperBinId - data.lowerBinId + 1 ||
+      bins.some((bin, i) => bin.binId !== data.lowerBinId + i)) return null;
+  return true;
 }
 
 async function positionAccountExists(connection, positionAddressStr) {
@@ -669,7 +679,7 @@ async function claimFees(positionAddressStr) {
   });
 }
 
-async function closePosition(positionAddressStr) {
+async function closePosition(positionAddressStr, emptyOnly = false) {
   if (process.env.DRY_RUN === "true" && (positionAddressStr.includes("DRY_RUN") || positionAddressStr.length < 32)) {
     console.warn(JSON.stringify({ success: true, dryRun: true, txHashes: ["DRY_RUN_TX_HASH"] }));
     return { success: true, dryRun: true, txHashes: ["DRY_RUN_TX_HASH"] };
@@ -677,19 +687,21 @@ async function closePosition(positionAddressStr) {
   new PublicKey(positionAddressStr);
   const release = await acquireSwapLock(`close-${positionAddressStr}`);
   try {
-    return await closePositionLocked(positionAddressStr);
+    return await closePositionLocked(positionAddressStr, emptyOnly);
   } finally {
     await release();
   }
 }
 
-async function closePositionLocked(positionAddressStr) {
+async function closePositionLocked(positionAddressStr, emptyOnly = false) {
   const pendingDir = path.join(PROFILE_DIR, "memories", "dlmm_pending_closes");
   const pendingPath = path.join(pendingDir, `${positionAddressStr}.json`);
   let submittedSignature;
   let submissionError;
   if (fs.existsSync(pendingPath)) {
     const pending = JSON.parse(fs.readFileSync(pendingPath, "utf8"));
+    if (emptyOnly && !pending.emptyOnly) return { success: false, pending: true,
+      error: "Existing withdrawal requires normal close reconciliation" };
     if (await runWithFailover(async c => !await positionAccountExists(c, positionAddressStr))) {
       fs.rmSync(pendingPath, { force: true });
       return { success: true, reconciled: true, txHashes: [pending.signature] };
@@ -726,6 +738,10 @@ async function closePositionLocked(positionAddressStr) {
       throw new Error(`Position ${positionAddressStr} not found for user ${wallet.publicKey.toString()}`);
     }
     const { pool, positionData, poolAddressStr } = foundPos;
+    if (emptyOnly && positionIsEmpty(positionData) !== true) {
+      return { success: false, funded: positionIsEmpty(positionData) === false,
+        error: "Empty-only close refused: liquidity is funded or unknown" };
+    }
 
     if (process.env.DRY_RUN === "true") {
       console.log(`[DRY RUN] Would close position ${positionAddressStr}`);
@@ -742,7 +758,7 @@ async function closePositionLocked(positionAddressStr) {
       recordSubmission(wallet, positionAddressStr, "close", signature, lastValidBlockHeight);
       fs.mkdirSync(pendingDir, { recursive: true, mode: 0o700 });
       const tmp = `${pendingPath}.${process.pid}.tmp`;
-      fs.writeFileSync(tmp, JSON.stringify({ signature, blockhash, lastValidBlockHeight,
+      fs.writeFileSync(tmp, JSON.stringify({ signature, blockhash, lastValidBlockHeight, emptyOnly,
         raw: raw.toString("base64") }), { mode: 0o600, flush: true });
       fs.renameSync(tmp, pendingPath);
       submittedSignature = signature;
@@ -764,6 +780,15 @@ async function closePositionLocked(positionAddressStr) {
       submittedSignature = null;
       return txHash;
     };
+
+    // The program checks emptiness atomically. Never withdraw liquidity on this path,
+    // even if a deposit lands after the SDK read above.
+    if (emptyOnly) {
+      const txs = await pool.closePositionIfEmpty({ owner: wallet.publicKey, position: positionData });
+      const txHashes = [];
+      for (const tx of Array.isArray(txs) ? txs : [txs]) txHashes.push(await sendClose(tx));
+      return { success: true, txHashes };
+    }
 
     // The SDK claims fees in the same transaction before closing the position.
     const lowerBin = positionData.positionData.lowerBinId;
@@ -1334,7 +1359,7 @@ async function main() {
         }));
         process.exit(3);
       }
-      const res = await closePosition(position);
+      const res = await closePosition(position, args.includes("--empty-only"));
       console.log(JSON.stringify(res));
     } else if (command === "position-exists") {
       const position = args[1];

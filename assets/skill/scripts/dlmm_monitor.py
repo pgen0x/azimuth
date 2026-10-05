@@ -1128,7 +1128,7 @@ def position_live_onchain(pos_addr):
     return data["exists"]
 
 
-def close_position(pos_addr, env_prefix="", wallet_address=None, is_dry_run=False):
+def close_position(pos_addr, env_prefix="", wallet_address=None, is_dry_run=False, empty_only=False):
     """Execute a close, reconciling BOTH verdicts against the chain.
 
     Same (result, error) shape as run_command_json. A close the subprocess gave
@@ -1151,11 +1151,13 @@ def close_position(pos_addr, env_prefix="", wallet_address=None, is_dry_run=Fals
     every rule still armed. A reported success is accepted only after a targeted
     account read confirms that the position account is gone.
     """
-    if not is_dry_run:
+    if not is_dry_run and not empty_only:
         queue_settlement(pos_addr)
     cmd = f"{env_prefix}DLMM_CLOSE_AUTH=1 node {EXECUTOR_PATH} close {pos_addr}"
+    if empty_only:
+        cmd += " --empty-only"
     res, err = run_command_json(cmd, timeout=CLOSE_CMD_TIMEOUT)
-    if is_dry_run:
+    if is_dry_run or (empty_only and res and res.get("funded")):
         return res, err
     if res and res.get("success"):
         live = position_live_onchain(pos_addr)
@@ -1821,56 +1823,58 @@ def main():
                     print(f"🧟 [report-only] Untracked EMPTY position {oc_addr} (pool {oc_pool}) — would close to reclaim rent.")
                     continue
                 print(f"🧟 Untracked EMPTY position {oc_addr} (pool {oc_pool}) — closing to reclaim rent.")
-                close_res, close_err = close_position(oc_addr, "", wallet_address)
+                close_res, close_err = close_position(oc_addr, "", wallet_address, empty_only=True)
                 if close_res and close_res.get("success"):
                     print(f"✅ Reclaimed empty position {oc_addr}.")
-                else:
-                    print(f"⚠️ Failed to close empty position {oc_addr}: {close_err or (close_res and close_res.get('error'))}")
-            else:
-                # Funded but untracked — adopt into Redis so the main loop manages it.
-                if cli.report_only:
-                    print(f"➕ [report-only] Untracked FUNDED position {oc_addr} ({bal_sol:.4f} SOL) — would adopt.")
                     continue
-                # Recover what we knew about this position before it was orphaned.
-                # Adopting it blank leaves it managed by the DEFAULT rails rather
-                # than its own — which is half of what made STACY-SOL expensive.
-                prov = recover_position_metadata(oc_addr, oc_pool)
-                adopt_deployed_at = prov.get("deployed_at")
-                print(f"➕ Adopting untracked FUNDED position {oc_addr} (pool {oc_pool}, {bal_sol:.4f} SOL) into Redis"
-                      + (f" as {prov['pair']}"
-                         + (f" ({prov['mode']})" if prov.get("mode") else "")
-                         if prov.get("pair") else " (provenance unknown)") + ".")
-                run_command(f"redis-cli sadd sol:dlmm:active_positions \"{oc_addr}\"")
-                adopt_meta = {
-                    "pool": oc_pool,
-                    "pair": prov.get("pair") or oc_pool,
-                    "base_mint": prov.get("base_mint") or "",
-                    "base_symbol": prov.get("base_symbol") or "",
-                    "entry_price": oc_bp.get("pool_price", 0.0), "entry_bin": 0,
-                    "bin_step": oc_bp.get("bin_step") or prov.get("bin_step") or 0,
-                    "bins_below": 0, "bins_above": 0, "size_sol": bal_sol,
-                    # The real mint time when the journal could name it; otherwise
-                    # now, which is a placeholder for "unknown" and is flagged as
-                    # such by adopted_age_known below — never read it as an age.
-                    "deployed_at": adopt_deployed_at or now,
-                    "tx_hash": "ADOPTED",
-                    "strategy": prov.get("strategy") or "spot",
-                    "amount_x": 0, "amount_y": 0, "adopted": True,
-                    "adopted_age_known": bool(adopt_deployed_at),
-                }
-                for key in ("entry_price", "entry_bin", "bins_below", "bins_above",
-                            "size_sol", "amount_x", "amount_y", "sol_is_x", "signal",
-                            "root_chain_id", "parent_position"):
-                    if prov.get(key) is not None:
-                        adopt_meta[key] = prov[key]
-                # Only ever set a mode we actually recovered. An absent mode makes
-                # the consumers fall back to `multiday`, and the re-center path
-                # below refuses to act on that guess.
-                if prov.get("mode"):
-                    adopt_meta["mode"] = prov["mode"]
-                if prov.get("recenter_of"):
-                    adopt_meta["recenter_of"] = prov["recenter_of"]
-                run_command("redis-cli set \"sol:dlmm:position:%s\" '%s'" % (oc_addr, json.dumps(adopt_meta)))
+                if not (close_res and close_res.get("funded")):
+                    print(f"⚠️ Empty-only reclaim deferred for {oc_addr}: {close_err or (close_res and close_res.get('error'))}")
+                    continue
+                print(f"➕ RPC proves {oc_addr} is funded despite the API zero; adopting it.")
+            # Funded but untracked — adopt into Redis so the main loop manages it.
+            if cli.report_only:
+                print(f"➕ [report-only] Untracked FUNDED position {oc_addr} ({bal_sol:.4f} SOL) — would adopt.")
+                continue
+            # Recover what we knew about this position before it was orphaned.
+            # Adopting it blank leaves it managed by the DEFAULT rails rather
+            # than its own — which is half of what made STACY-SOL expensive.
+            prov = recover_position_metadata(oc_addr, oc_pool)
+            adopt_deployed_at = prov.get("deployed_at")
+            print(f"➕ Adopting untracked FUNDED position {oc_addr} (pool {oc_pool}, {bal_sol:.4f} SOL) into Redis"
+                  + (f" as {prov['pair']}"
+                     + (f" ({prov['mode']})" if prov.get("mode") else "")
+                     if prov.get("pair") else " (provenance unknown)") + ".")
+            run_command(f"redis-cli sadd sol:dlmm:active_positions \"{oc_addr}\"")
+            adopt_meta = {
+                "pool": oc_pool,
+                "pair": prov.get("pair") or oc_pool,
+                "base_mint": prov.get("base_mint") or "",
+                "base_symbol": prov.get("base_symbol") or "",
+                "entry_price": oc_bp.get("pool_price", 0.0), "entry_bin": 0,
+                "bin_step": oc_bp.get("bin_step") or prov.get("bin_step") or 0,
+                "bins_below": 0, "bins_above": 0, "size_sol": bal_sol,
+                # The real mint time when the journal could name it; otherwise
+                # now, which is a placeholder for "unknown" and is flagged as
+                # such by adopted_age_known below — never read it as an age.
+                "deployed_at": adopt_deployed_at or now,
+                "tx_hash": "ADOPTED",
+                "strategy": prov.get("strategy") or "spot",
+                "amount_x": 0, "amount_y": 0, "adopted": True,
+                "adopted_age_known": bool(adopt_deployed_at),
+            }
+            for key in ("entry_price", "entry_bin", "bins_below", "bins_above",
+                        "size_sol", "amount_x", "amount_y", "sol_is_x", "signal",
+                        "root_chain_id", "parent_position"):
+                if prov.get(key) is not None:
+                    adopt_meta[key] = prov[key]
+            # Only ever set a mode we actually recovered. An absent mode makes
+            # the consumers fall back to `multiday`, and the re-center path
+            # below refuses to act on that guess.
+            if prov.get("mode"):
+                adopt_meta["mode"] = prov["mode"]
+            if prov.get("recenter_of"):
+                adopt_meta["recenter_of"] = prov["recenter_of"]
+            run_command("redis-cli set \"sol:dlmm:position:%s\" '%s'" % (oc_addr, json.dumps(adopt_meta)))
         # Refresh active set after adoption so the main loop manages newly-adopted entries.
         active_positions = get_active_positions()
 
