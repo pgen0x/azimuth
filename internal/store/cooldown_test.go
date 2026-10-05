@@ -47,3 +47,24 @@ func TestSolanaCooldownScopes(t *testing.T) {
 		t.Fatalf("memory backend unexpectedly blocks: %v", got)
 	}
 }
+
+func TestCapacityPauseScopesAndExpiry(t *testing.T) {
+	client := redis.NewClient(&redis.Options{Addr: "unused:0"})
+	defer client.Close()
+	hook := cooldownHook{"sol:dlmm:capacity:turnover": time.Minute}
+	client.AddHook(hook)
+	seen := &Seen{rdb: client}
+	ctx := context.Background()
+	if seen.CapacityRemaining(ctx, "turnover") != time.Minute || seen.CapacityRemaining(ctx, "pulse") != 0 {
+		t.Fatal("mode capacity must not block other modes")
+	}
+	hook["sol:dlmm:capacity:wallet"] = 2 * time.Minute
+	if seen.CapacityRemaining(ctx, "pulse") != 2*time.Minute {
+		t.Fatal("wallet capacity must cover all Solana modes")
+	}
+	hook["sol:dlmm:capacity:wallet"] = -2 * time.Second
+	hook["sol:dlmm:capacity:turnover"] = 6 * time.Minute
+	if seen.CapacityRemaining(ctx, "turnover") != 0 || (&Seen{}).CapacityRemaining(ctx, "pulse") != 0 {
+		t.Fatal("missing, invalid or unavailable capacity hints must not block")
+	}
+}

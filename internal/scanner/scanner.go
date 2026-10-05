@@ -879,6 +879,10 @@ func (s *Scanner) directDeploy(ctx context.Context, mode string, batch []*meteor
 }
 
 func (s *Scanner) pollMode(ctx context.Context, mp meteora.ModeParams) {
+	if wait := s.seen.CapacityRemaining(ctx, mp.Mode); wait > 0 {
+		log.Printf("scanner[%s]: recent capacity refusal; defer entry scan/AI for %s", mp.Mode, wait.Round(time.Second))
+		return
+	}
 	pools, err := meteora.FetchTopPools(s.cfg.DiscoverURL, mp)
 	if err != nil {
 		log.Printf("scanner[%s]: fetch error: %v", mp.Mode, err)

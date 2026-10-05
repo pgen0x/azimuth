@@ -41,6 +41,10 @@ def main():
     with patch.object(pipeline, "run_command", return_value=("1", "", 0)) as command:
         pipeline.defer_capacity_signals(cli)
         assert "turnover:" + "A"*32 in command.call_args.args[0]
+        assert "sol:dlmm:capacity:wallet" in command.call_args.args[0]
+        pipeline.defer_capacity_signals(cli, wallet=False)
+        assert "sol:dlmm:capacity:turnover" in command.call_args.args[0]
+        assert "sol:dlmm:capacity:wallet" not in command.call_args.args[0]
         assert "EXPIRE" in command.call_args.args[0] and "300" in command.call_args.args[0]
     cli.from_batch = None
     cli.from_signal = json.dumps({"pool": "B"*32})

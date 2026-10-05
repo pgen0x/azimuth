@@ -1076,7 +1076,7 @@ def select_batch_strategy(c, mode):
     return "sol_bidask"
 
 
-def defer_capacity_signals(cli):
+def defer_capacity_signals(cli, wallet=True):
     """Let Redis-backed signals retry within five minutes after a wallet-only skip."""
     if cli.mode not in ("casual", "multiday", "turnover", "pulse"):
         return
@@ -1093,7 +1093,10 @@ def defer_capacity_signals(cli):
     if not keys:
         return
     # Shorten only existing dedup markers, never cooldowns or a shorter retry.
-    script = "for _,k in ipairs(KEYS) do if redis.call('TTL',k)>300 then redis.call('EXPIRE',k,300) end end return 1"
+    keys.append("sol:dlmm:capacity:" + ("wallet" if wallet else cli.mode))
+    script = ("for i=1,#KEYS-1 do local k=KEYS[i]; if redis.call('TTL',k)>300 then "
+              "redis.call('EXPIRE',k,300) end end; "
+              "redis.call('SET',KEYS[#KEYS],1,'EX',300); return 1")
     _, err, code = run_command("redis-cli -e EVAL " + shlex.quote(script) + " "
                                + str(len(keys)) + " " + " ".join(map(shlex.quote, keys)))
     if code:
@@ -1142,7 +1145,7 @@ def main():
         active_count = get_active_positions_count_for_mode(mode)
         if active_count >= max_positions:
             print(f"Aborting: Max {mode} positions reached ({active_count}/{max_positions})")
-            defer_capacity_signals(cli)
+            defer_capacity_signals(cli, wallet=False)
             sys.exit(0)
     else:
         active_count = get_active_positions_count_for_mode(mode)
