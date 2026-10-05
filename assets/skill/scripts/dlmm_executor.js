@@ -1066,7 +1066,8 @@ async function swapToken(inputMintStr, outputMintStr, amountFloat, maxPriceImpac
       body: JSON.stringify({
         quoteResponse,
         userPublicKey: wallet.publicKey.toString(),
-        wrapAndUnwrapSol: true
+        wrapAndUnwrapSol: true,
+        dynamicComputeUnitLimit: true
       })
     });
     if (!swapRes.ok) {

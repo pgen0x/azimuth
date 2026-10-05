@@ -58,9 +58,18 @@ const deps = {
 const env = { SOLANA_RPC_URLS: "fake-rpc-1,fake-rpc-2", DLMM_ENTRY_CONTEXT: JSON.stringify({ mode: "turnover", recenter_of: "root", pair: "TEST-SOL" }) };
 const sandbox = { require: (name) => deps[name] || require(name), module: { exports: {} },
   process: { argv: ["node", path.join(root, "skills/solana-dlmm/scripts/dlmm_executor.js")], env },
-  fetch: async (url) => ({ ok: true, json: async () => url.includes("/quote?")
-    ? { inAmount: "100000000", outAmount: "20", priceImpactPct: "0" }
-    : { swapTransaction: "AA==" } }),
+  fetch: async (url, options) => {
+    if (url.endsWith("/swap")) {
+      const request = JSON.parse(options.body);
+      assert.equal(request.dynamicComputeUnitLimit, true);
+      assert.equal(request.wrapAndUnwrapSol, true);
+      assert.equal(request.quoteResponse.inAmount, "100000000");
+      assert.equal(request.dynamicSlippage, undefined); // retain the quoted slippage limit
+    }
+    return { ok: true, json: async () => url.includes("/quote?")
+      ? { inAmount: "100000000", outAmount: "20", priceImpactPct: "0" }
+      : { swapTransaction: "AA==" } };
+  },
   console: { log() {}, warn() {}, error() {} }, Buffer, AbortSignal, setTimeout, clearTimeout };
 vm.runInNewContext(source + "\nmodule.exports.sdkFindPool = findPoolForPosition; module.exports.sdkPositions = getPositions; assertRootBudget = async () => {}; getWallet = () => testWallet; getTokenDecimals = async () => 9; assertRangeDoesNotRequireBinArrayInitialization = async () => {};", Object.assign(sandbox, { testWallet: wallet }));
 const { swapAmountRaw, closePosition, swapToken, confirmSignedTransaction, deployPosition, acquireDeployLock, reconcilePendingSwap, assertNoTokenExposure,
