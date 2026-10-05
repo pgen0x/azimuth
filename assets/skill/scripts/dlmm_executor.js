@@ -730,19 +730,6 @@ async function closePositionLocked(positionAddressStr) {
       return { success: true, dryRun: true };
     }
 
-    // Step 1: Claim any swap fees first to clear state
-    try {
-      const claimTxs = await pool.claimSwapFee({
-        owner: wallet.publicKey,
-        position: positionData
-      });
-      for (const tx of claimTxs) {
-        await recordedClaim(connection, tx, wallet, positionAddressStr);
-      }
-    } catch (err) {
-      console.warn(`[DLMM] Fee claim during close warning: ${err.message}`);
-    }
-
     const sendClose = async (tx) => {
       const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash("confirmed");
       tx.recentBlockhash = blockhash;
@@ -776,7 +763,7 @@ async function closePositionLocked(positionAddressStr) {
       return txHash;
     };
 
-    // Step 2: Remove all liquidity and close position
+    // The SDK claims fees in the same transaction before closing the position.
     const lowerBin = positionData.positionData.lowerBinId;
     const upperBin = positionData.positionData.upperBinId;
     
@@ -800,6 +787,18 @@ async function closePositionLocked(positionAddressStr) {
       // the SDK snapshot positively proves every liquidity share is zero.
       if (submittedSignature || positionIsEmpty(positionData) !== true) throw rmErr;
       console.warn(`[DLMM] removeLiquidity failed (${rmErr.message}); attempting closePositionIfEmpty for empty position ${positionAddressStr}`);
+      // Empty-position recovery has no combined withdrawal transaction; claim first.
+      try {
+        const claimTxs = await pool.claimSwapFee({
+          owner: wallet.publicKey,
+          position: positionData
+        });
+        for (const tx of claimTxs) {
+          await recordedClaim(connection, tx, wallet, positionAddressStr);
+        }
+      } catch (err) {
+        console.warn(`[DLMM] Fee claim during close warning: ${err.message}`);
+      }
       const emptyTx = await pool.closePositionIfEmpty({ owner: wallet.publicKey, position: positionData });
       for (const tx of Array.isArray(emptyTx) ? emptyTx : [emptyTx]) {
         txHashes.push(await sendClose(tx));
