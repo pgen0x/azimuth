@@ -158,3 +158,20 @@ so one funded identity serves both venues). `DRY_RUN=true` skips all sends.
 | `sol:dlmm:history:pool:<POOL>` | 30d | Last 10 close outcomes per pool (`ts`, `pnl_pct`, `pnl_sol`, `mode`, `reason`) — pipeline's "past losses" skip gate |
 | `sol:dlmm:loss_streak:<SYMBOL>` | 7d | Consecutive-loss counter per token, escalates the symbol cooldown |
 | `sol:dlmm:signal_weights` | permanent | Learned signal weights (JSON), written by `dlmm_weights.py`, read by the deploy agent |
+
+### Empty token account rent recovery
+
+`node <profile>/skills/solana-dlmm/scripts/dlmm_executor.js reclaim-empty-accounts`
+previews eligible accounts; `--execute` returns their rent to the wallet. The
+executor checks zero token balances, excludes active position mints and wSOL,
+respects pending transaction expiry and shared execution locks, and requires
+refunds to exceed the transaction fee. Each invocation closes at most eight
+accounts. Rent returned is capital recovery, not trading income.
+
+The optional `assets/systemd/azimuth-sol-rent.{service,timer}` user units run this
+maintenance every 30 minutes, separately from the position monitor. They target
+the `solanza` profile; adjust the service path for another profile. Install the
+units in `~/.config/systemd/user/`, run `systemctl --user daemon-reload`, then
+`systemctl --user enable --now azimuth-sol-rent.timer`. A pending-trade safety
+refusal leaves that invocation unsuccessful; the timer waits until its next
+interval. It never immediately restarts or blindly resends an uncertain transaction.

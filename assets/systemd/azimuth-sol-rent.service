@@ -1,0 +1,9 @@
+[Unit]
+Description=Azimuth conservative empty token account rent recovery
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/node %h/.hermes/profiles/solanza/skills/solana-dlmm/scripts/dlmm_executor.js reclaim-empty-accounts --execute
+TimeoutStartSec=120
+UMask=0077
+# No immediate retries: ambiguous sends are reconciled by the executor next run.

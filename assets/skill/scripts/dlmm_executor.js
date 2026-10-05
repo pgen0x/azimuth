@@ -355,8 +355,8 @@ async function reclaimEmptyAccounts(execute = false) {
       return { connection, accounts };
     });
     if (state.pending) return state.pending;
-    // ponytail: eight accounts per manual call keeps legacy transactions small;
-    // rerun after confirmation for more, rather than introducing a background job.
+    // ponytail: eight accounts per invocation keeps legacy transactions small;
+    // the maintenance timer handles remaining accounts on its next interval.
     const accounts = state.accounts.slice(0, 8);
     const result = { success: true, dry_run: !execute || process.env.DRY_RUN === "true",
       eligible: state.accounts.length, accounts: accounts.map(a => ({ account: a.pubkey.toString(),
