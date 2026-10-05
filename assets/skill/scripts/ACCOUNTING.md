@@ -256,3 +256,17 @@ both. Individual root cash, re-entry decisions and per-root win rates are
 unchanged. Groups are not full NAV or proof all historical refunds are measured.
 Evaluation includes only groups whose whole activity lies within its window;
 history evidence observed later cannot alter earlier reports or decisions.
+
+### Swap quote evidence
+
+New swap submission rows include `swap_quote`: quote receipt time, input/output
+mints, raw input/output amounts, minimum output, authorized slippage, provider
+context slot and price-impact estimate. Only these selected fields are copied;
+quotes are not realized proceeds. The journal is written and flushed before
+broadcast, including sends whose outcome is uncertain. Existing exit behavior
+on journal write failure remains unchanged and logs incomplete coverage.
+
+Compare quotes with finalized token movements and separately identified native
+rent/fee movements. A wallet native delta alone is not gross swap output. Old
+transactions lacking a saved quote remain unmeasured for quote-to-fill slippage;
+do not reconstruct their historical quotes from current market prices.

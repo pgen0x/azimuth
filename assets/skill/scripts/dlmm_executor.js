@@ -77,7 +77,7 @@ async function runWithFailover(fn) {
 }
 
 // Durable accounting evidence is written before broadcast, including uncertain sends.
-function recordSubmission(wallet, position, kind, signature, lastValidBlockHeight) {
+function recordSubmission(wallet, position, kind, signature, lastValidBlockHeight, swapQuote = null) {
   try {
     let context = {};
     if (position) {
@@ -91,7 +91,8 @@ function recordSubmission(wallet, position, kind, signature, lastValidBlockHeigh
       ts: Math.floor(Date.now() / 1000), wallet: wallet.publicKey.toString(),
       position: position || null, root_chain_id: context.root_chain_id || context.recenter_of || position || null,
       entry_id: kind === "rent_reclaim" ? null : context.entry_id || process.env.DLMM_ENTRY_ID || null, kind, signature, lastValidBlockHeight,
-    }) + "\n", { mode: 0o600, flush: kind === "rent_reclaim" });
+      ...(kind === "swap" && swapQuote ? { swap_quote: swapQuote } : {}),
+    }) + "\n", { mode: 0o600, flush: kind === "rent_reclaim" || kind === "swap" });
   } catch (err) {
     if (kind === "deploy" || kind === "rent_reclaim") throw err;
     // Accounting storage must not prevent an exit or liquidation.
@@ -988,7 +989,7 @@ async function swapToken(inputMintStr, outputMintStr, amountFloat, maxPriceImpac
     }
 
     // Fetch quote outside runWithFailover as it's a HTTP call to Jupiter, then execute/send via standard RPC rotation
-    let quoteResponse;
+    let quoteResponse, quoteObservedAt;
     try {
     // 1. Get input decimals
     let decimals = 9;
@@ -1024,6 +1025,7 @@ async function swapToken(inputMintStr, outputMintStr, amountFloat, maxPriceImpac
           continue;
         }
         quoteResponse = q;
+        quoteObservedAt = Math.floor(Date.now() / 1000);
         if (bps !== slippageBps) {
           console.warn(`[DLMM] Swap quote required elevated slippage ${bps}bps (thin liquidity)`);
         }
@@ -1122,7 +1124,14 @@ async function swapToken(inputMintStr, outputMintStr, amountFloat, maxPriceImpac
       inputAmount: quoteResponse.inAmount, outputAmount: quoteResponse.outAmount }), { mode: 0o600 });
     fs.renameSync(markerTmp, pendingPath);
     let txid;
-    recordSubmission(wallet, process.env.DLMM_SETTLEMENT_POSITION, "swap", signedTxid, lastValidBlockHeight);
+    recordSubmission(wallet, process.env.DLMM_SETTLEMENT_POSITION, "swap", signedTxid, lastValidBlockHeight, {
+      observed_at: quoteObservedAt, input_mint, output_mint,
+      in_amount: quoteResponse.inAmount, out_amount: quoteResponse.outAmount,
+      minimum_out_amount: quoteResponse.otherAmountThreshold ?? null,
+      authorized_slippage_bps: slippageBps, context_slot: quoteResponse.contextSlot ?? null,
+      price_impact_pct: quoteResponse.priceImpactPct ?? null,
+      basis: "provider_quote_before_broadcast; raw_token_units; not_realized_proceeds",
+    });
     submittedSignature = signedTxid;
     try {
       txid = await connection.sendRawTransaction(rawTransaction, {
