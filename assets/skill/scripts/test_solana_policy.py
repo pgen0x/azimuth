@@ -130,6 +130,7 @@ def main():
     subscription = json.loads((Path(__file__).resolve().parents[2] /
                                "hermes/webhook_subscriptions.json").read_text())
     prompt = subscription['dlmm-signal']['prompt']
+    assert '{payload_json}' in prompt and '__raw__' not in prompt
     assert 'set `workdir` to `__PROFILE__`' in prompt
     assert 'redis-cli --no-raw get sol:dlmm:signal_weights' in prompt
     counts = [line.split(' | ', 1)[1] for line in prompt.splitlines()

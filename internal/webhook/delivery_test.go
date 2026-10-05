@@ -99,3 +99,28 @@ func TestTransportFailureRetainsDeliveryEvidence(t *testing.T) {
 		t.Fatal("transport retried or uncertainty lost")
 	}
 }
+
+func TestCompleteCandidatePayload(t *testing.T) {
+	t.Setenv("SOLANA_DELIVERY_PATH", filepath.Join(t.TempDir(), "delivery.jsonl"))
+	payload := []map[string]string{{"pool": "first", "data": strings.Repeat("x", 5000)}, {"pool": "last", "data": "complete"}}
+	want, _ := json.Marshal(payload)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var sig Signal
+		if err := json.NewDecoder(r.Body).Decode(&sig); err != nil {
+			t.Fatal(err)
+		}
+		if sig.PayloadJSON != string(want) {
+			t.Error("candidate JSON missing or truncated")
+		}
+		original, _ := json.Marshal(sig.Payload)
+		if string(original) != sig.PayloadJSON {
+			t.Error("structured and prompt candidates differ")
+		}
+		w.WriteHeader(202)
+		json.NewEncoder(w).Encode(map[string]string{"status": "accepted", "delivery_id": r.Header.Get("X-Request-ID")})
+	}))
+	defer server.Close()
+	if err := New(server.URL, "secret").Send("meteora_pool_discovery", payload, 100); err != nil {
+		t.Fatal(err)
+	}
+}

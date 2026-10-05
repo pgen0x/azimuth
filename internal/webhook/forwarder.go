@@ -30,16 +30,25 @@ func New(url, secret string) *Forwarder {
 // Signal is the webhook envelope Hermes receives. `source` lets the agent's
 // subscription prompt distinguish this feed from other webhooks.
 type Signal struct {
-	Type      string      `json:"type"`
-	Timestamp int64       `json:"timestamp"`
-	Source    string      `json:"source"`
-	Payload   interface{} `json:"payload"`
+	Type        string      `json:"type"`
+	Timestamp   int64       `json:"timestamp"`
+	Source      string      `json:"source"`
+	Payload     interface{} `json:"payload"`
+	PayloadJSON string      `json:"payload_json,omitempty"`
 }
 
 // Send delivers one signal envelope. `nowUnix` is passed in so the caller
 // controls the timestamp (keeps this package free of hidden clock reads).
 func (f *Forwarder) Send(source string, payload interface{}, nowUnix int64) error {
 	sig := Signal{Type: "alert", Timestamp: nowUnix, Source: source, Payload: payload}
+	// Hermes truncates object/raw placeholders, but preserves string fields.
+	if source == "meteora_pool_discovery" {
+		complete, err := json.Marshal(payload)
+		if err != nil {
+			return err
+		}
+		sig.PayloadJSON = string(complete)
+	}
 	body, err := json.Marshal(sig)
 	if err != nil {
 		return err
