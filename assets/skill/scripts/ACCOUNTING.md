@@ -160,14 +160,14 @@ root cash accounting is not retroactively credited with these wallet-level funds
 
 The observed CLEANAL wrapper is classified as `rent_maintenance` only when every
 inner operation is an empty non-native SPL account close to the signing wallet
-followed by its explicit service-fee transfer. All token accounts must disappear,
+followed by one or two explicit service-fee transfers. All token accounts must disappear,
 all pre-balances must be zero tokens and owned by the wallet, and every native
 balance change must match those instructions plus the network fee. Unknown
 wrappers, extra instructions or unexplained balance changes remain unclassified.
 
 Facts expose recovered rent and the wrapper service fee separately. External flow
 is zero: reserves became spendable SOL, while fees reduced wealth. No trading root
-gets credited with this maintenance cash. Schema 6 refreshes previously unknown
+gets credited with this maintenance cash. Schema 9 refreshes previously unknown
 transactions with a new observation timestamp; historical evaluations retain the
 evidence available at their cutoff.
 

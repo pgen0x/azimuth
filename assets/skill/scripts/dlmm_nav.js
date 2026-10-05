@@ -73,21 +73,25 @@ function rentMaintenance(tx, wallet) {
   const changes=keys.map(()=>0); changes[0]=-meta.fee;
   const closed=new Set(); let released=0, serviceFee=0;
   for (const group of groups) {
-    if (outer[group.index]?.programId?.toString()!==wrapper || group.instructions.length!==2) return null;
-    const [close,transfer]=group.instructions, a=close.parsed?.info, b=transfer.parsed?.info;
+    if (outer[group.index]?.programId?.toString()!==wrapper || ![2,3].includes(group.instructions.length)) return null;
+    const [close,...transfers]=group.instructions, a=close.parsed?.info;
     if (!TOKEN_PROGRAMS.includes(close.programId?.toString()) || close.parsed?.type!=='closeAccount'
-        || a?.owner!==wallet || a.destination!==wallet
-        || transfer.programId?.toString()!=='11111111111111111111111111111111'
-        || transfer.parsed?.type!=='transfer' || b?.source!==wallet || b.destination===wallet
-        || !Number.isSafeInteger(b.lamports) || b.lamports<0) return null;
-    const account=keys.indexOf(a.account), recipient=keys.indexOf(b.destination);
+        || a?.owner!==wallet || a.destination!==wallet) return null;
+    const account=keys.indexOf(a.account);
     const token=(meta.preTokenBalances || []).find(t=>t.accountIndex===account);
-    if (account<=0 || recipient<0 || closed.has(account) || !token || token.owner!==wallet
+    if (account<=0 || closed.has(account) || !token || token.owner!==wallet
         || token.mint===SOL || token.uiTokenAmount?.amount!=='0'
         || meta.preBalances[account]<=0 || meta.postBalances[account]!==0) return null;
     closed.add(account);
-    const rent=meta.preBalances[account]; released+=rent; serviceFee+=b.lamports;
-    changes[account]-=rent; changes[0]+=rent-b.lamports; changes[recipient]+=b.lamports;
+    const rent=meta.preBalances[account]; released+=rent;
+    changes[account]-=rent; changes[0]+=rent;
+    for (const transfer of transfers) {
+      const b=transfer.parsed?.info, recipient=keys.indexOf(b?.destination);
+      if (transfer.programId?.toString()!=='11111111111111111111111111111111'
+          || transfer.parsed?.type!=='transfer' || b?.source!==wallet || recipient<=0
+          || !Number.isSafeInteger(b.lamports) || b.lamports<0) return null;
+      serviceFee+=b.lamports; changes[0]-=b.lamports; changes[recipient]+=b.lamports;
+    }
   }
   if (closed.size!==(meta.preTokenBalances || []).length
       || !Number.isSafeInteger(released) || !Number.isSafeInteger(serviceFee)
@@ -168,7 +172,7 @@ function transactionFact(tx, wallet, signature, event) {
         || TOKEN_PROGRAMS.includes(id) && ['transfer','transferChecked','getAccountDataSize','initializeImmutableOwner','initializeAccount','initializeAccount2','initializeAccount3'].includes(type);
     });
   const maintenance=!event ? rentMaintenance(tx,wallet) : null;
-  return {schema_version:8,event_position:event?.position,signature, wallet, slot: tx.slot, block_time: tx.blockTime, observed_at: now(), failed: !!meta.err,
+  return {schema_version:9,event_position:event?.position,signature, wallet, slot: tx.slot, block_time: tx.blockTime, observed_at: now(), failed: !!meta.err,
     wallet_delta_lamports: meta.postBalances[index]-meta.preBalances[index], fee_lamports: index === 0 ? meta.fee : 0,
     token_deltas_raw: Object.fromEntries(Object.entries(tokenDeltas).map(([m,a]) => [m,a.toString()])),
     token_pre_balances_raw: Object.fromEntries(Object.entries(tokenPre).map(([m,a]) => [m,a.toString()])),
@@ -198,7 +202,7 @@ async function collect({dir, wallet, PublicKey, rpc, historyOnly=false}) {
     before = batch[batch.length-1].signature;
   }
   const currentFact=r=>{const f=cache.get(r.signature); return f?.wallet===wallet && f?.schema_version>=2
-    && (f.schema_version>=8 || f.classification!=='unclassified')
+    && (f.schema_version>=9 || f.classification!=='unclassified')
     && (f.schema_version>=7 || f.classification!=='recorded_bot')
     && (!(events.get(r.signature)?.kind==='swap' && !events.get(r.signature)?.position) || f.token_pre_balances_raw!=null)
     && f.event_position===events.get(r.signature)?.position;};
