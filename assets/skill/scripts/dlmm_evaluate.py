@@ -228,6 +228,8 @@ def evaluate(profile, start, end, rejects):
     live=[r for r in rows(memory/'dlmm_root_decisions.jsonl') if start<=r['ts']<=end]
     return dict(start=start,end=end,generated_at=int(time.time()),close_count=len(closes),close_account_proofs=close_proofs,accounting=accounting,
                 swap_execution=swap_execution(events,facts,start,end),
+                liquidation_observations=[r for r in rows(memory/'dlmm_liquidation_quotes.jsonl')
+                                          if start <= r.get('observed_at', end+1) <= end],
                 root_cash_cohort=root_cash_cohort(accounting,start,end),
                 rent_refund_groups=[g for g in accounting.get('rent_refund_groups', [])
                                     if start <= g['first_activity'] <= g['last_activity'] <= end],
@@ -314,6 +316,9 @@ def main():
         '## Root-chain replay',f"Decisions: {len(data['root_replay'])}; reasons: {dict(collections.Counter(r['reason'] for r in data['root_replay']))}",
         '## Pre-settlement eligibility replay',f"Decisions: {len(data['eligibility_replay'])}; evaluated before settlement refresh, separately from executor authorization.",
         '## Rejected candidates','```json',json.dumps(data['rejected_candidates'],indent=2),'```',
+        '## Indexed inventory and exit quotes',
+        str(dict(collections.Counter(r['status'] for r in data['liquidation_observations']))),
+        'Per-position observations are in evaluation JSON. Quote-based asset change excludes network fees and rent; it is not net cash or a guaranteed exit price.',
         '## Bin replay',str(dict(collections.Counter(r['status'] for r in data['bin_replay']))),
         f"Modeled full horizons: {sum(r.get('horizon_complete') is True for r in data['bin_replay'])}; partial horizons: {sum(r['status']=='modeled' and r.get('horizon_complete') is False for r in data['bin_replay'])}.",
         '## Runtime',json.dumps(data['runtime']), '## Limits',*['- '+s for s in data['limits']],
