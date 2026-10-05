@@ -99,6 +99,76 @@ def pooled_settlements(chains):
     return sorted(groups, key=lambda g: g["root_chain_ids"])
 
 
+def rent_refund_groups(chains, facts, histories, as_of):
+    """Combine settled roots and uniquely owned refunds, charging shared fees once."""
+    by_root = {c["root_chain_id"]: c for c in chains}
+    owners = {}
+    for c in chains:
+        for signature in c["recorded_signatures"]:
+            owners.setdefault(signature, set()).add(c["root_chain_id"])
+    evidence = {(r.get("refund_signature"), r.get("account")): r for r in histories
+                if r.get("observed_at", float("inf")) <= as_of}
+    groups = []
+    for signature, refund in facts.items():
+        items = refund.get("token_rent_evidence", {}).get("refunded", [])
+        if (not items or refund.get("failed") or refund.get("landed") is False
+                or owners.get(signature) != {"unattributed"}
+                or not isinstance(refund.get("block_time"), (int, float))
+                or refund["block_time"] > as_of
+                or len({i["account"] for i in items}) != len(items)
+                or sum(i["lamports"] for i in items)-refund["fee_lamports"] != refund["wallet_delta_lamports"]):
+            continue
+        roots = set()
+        for item in items:
+            proof = evidence.get((signature, item["account"]), {})
+            history = proof.get("history_signatures", [])
+            funding = facts.get(proof.get("funding_signature"), {})
+            if (proof.get("complete") is not True or proof.get("version") != 1
+                    or proof.get("wallet") != refund.get("wallet")
+                    or any(proof.get(k) != item[k] for k in ("account", "mint", "lamports"))
+                    or not history or history[-1] != proof.get("funding_signature")
+                    or signature in history or len(set(history)) != len(history)
+                    or funding.get("wallet") != refund.get("wallet") or funding.get("failed")
+                    or item not in funding.get("token_rent_evidence", {}).get("funded", [])):
+                break
+            root_owners = set()
+            for s in history:
+                f = facts.get(s, {})
+                if (len(owners.get(s, set())) != 1 or f.get("wallet") != refund.get("wallet")
+                        or f.get("landed") is False or not isinstance(f.get("slot"), int)
+                        or not funding.get("slot", float("inf")) <= f["slot"] <= refund.get("slot", -1)):
+                    break
+                root_owners.update(owners[s])
+            else:
+                if len(root_owners) == 1 and "unattributed" not in root_owners:
+                    root = next(iter(root_owners))
+                    c = by_root[root]
+                    if (c["accounting_status"] == "settled_cash" and c["positions"]
+                            and c["last_activity"] <= as_of):
+                        roots.add(root)
+                        continue
+            break
+        else:
+            # Connected refunds share roots; include each root's cash only once.
+            group = dict(roots=roots, refunds={signature})
+            linked = [g for g in groups if g["roots"] & roots]
+            for g in linked:
+                group["roots"].update(g["roots"])
+                group["refunds"].update(g["refunds"])
+                groups.remove(g)
+            groups.append(group)
+    return [dict(root_chain_ids=sorted(g["roots"]), refund_signatures=sorted(g["refunds"]),
+                 first_activity=min(by_root[r]["first_activity"] for r in g["roots"]),
+                 last_activity=max([facts[s]["block_time"] for s in g["refunds"]]
+                                   + [by_root[r]["last_activity"] for r in g["roots"]]),
+                 cash_with_matched_refunds_sol=(sum(by_root[r]["wallet_delta_lamports"] for r in g["roots"])
+                     + sum(facts[s]["wallet_delta_lamports"] for s in g["refunds"]))/1e9,
+                 network_fee_sol=(sum(by_root[r]["network_fee_lamports"] for r in g["roots"])
+                     + sum(facts[s]["fee_lamports"] for s in g["refunds"]))/1e9,
+                 basis="root_cash_plus_matched_refunds; shared_fees_once; overlaps_root_cash; not_NAV_or_per_root_win_rate")
+            for g in groups]
+
+
 def report(profile, as_of=None):
     replay = as_of is not None
     as_of = time.time() if as_of is None else as_of
@@ -253,6 +323,8 @@ def report(profile, as_of=None):
             "unvalued_external_token_inflows": unvalued_inflows,
             "note": "Wallet delta already includes network fees and net account rent movements; do not subtract fees again. LP PnL uses Meteora valuations. Neither is portfolio NAV. Rent, inventory drift and swap attribution require further reconciliation.",
             "pooled_settlements": pooled_settlements(chains.values()),
+            "rent_refund_groups": rent_refund_groups(list(chains.values()), facts,
+                rows(memories / "dlmm_rent_history.jsonl"), as_of),
             "chains": sorted(chains.values(), key=lambda c: c["root_chain_id"])}
 
 

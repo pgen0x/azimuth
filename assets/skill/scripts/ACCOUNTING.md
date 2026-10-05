@@ -240,3 +240,19 @@ This proves the recorded history interval, not unique root ownership. Future
 attribution must check every referenced signature against roots, preserve
 observation times, and count shared refund transaction fees only once. Existing
 cash reports and root re-entry gates are unchanged.
+
+### Cash groups including matched rent refunds
+
+`rent_refund_groups` combines settled root cash with wallet-level pure-close
+refunds only when every refunded account has observed history evidence and all
+its referenced signatures belong to one root. Every account in a shared refund
+must match; unknown, cross-root or incomplete ownership leaves the refund out.
+Roots connected by shared refunds form one group. Root cash and each refund
+transaction (including its fee) appear once within that group. Refunds between
+root legs are included only after the entire root is settled.
+
+These are alternative, overlapping views of the root cash subtotal: never sum
+both. Individual root cash, re-entry decisions and per-root win rates are
+unchanged. Groups are not full NAV or proof all historical refunds are measured.
+Evaluation includes only groups whose whole activity lies within its window;
+history evidence observed later cannot alter earlier reports or decisions.

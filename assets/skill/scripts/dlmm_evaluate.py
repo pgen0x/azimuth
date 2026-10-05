@@ -115,6 +115,8 @@ def evaluate(profile, start, end, rejects):
     live=[r for r in rows(memory/'dlmm_root_decisions.jsonl') if start<=r['ts']<=end]
     return dict(start=start,end=end,generated_at=int(time.time()),close_count=len(closes),close_account_proofs=close_proofs,accounting=accounting,
                 root_cash_cohort=root_cash_cohort(accounting,start,end),
+                rent_refund_groups=[g for g in accounting.get('rent_refund_groups', [])
+                                    if start <= g['first_activity'] <= g['last_activity'] <= end],
                 wealth_change=wealth,native_cash_change=native_cash,unvalued_external_token_inflows=unvalued_inflows,price_coverage=price_coverage,nav_samples=len(snapshots),complete_nav_samples=len(valid),
                 root_replay=[replay_root_decision(r) for r in live],eligibility_replay=comparisons,root_live_decisions=live,
                 rejected_candidates=groups,bin_replay=bins,
@@ -187,6 +189,9 @@ def main():
         'Cash includes network fees and rent paid by recorded root transactions. Recoverable rent remains an asset; later wallet-level rent refunds are not credited to these roots. Cash-positive roots are not a trading win rate. Incomplete roots are excluded from the cash subtotal, not counted as zero.',
         '## Pooled settlement cash (full-life groups; no per-root allocation)',
         json.dumps([g for g in data['accounting'].get('pooled_settlements',[]) if a.start <= g['first_activity'] and g['last_activity'] <= a.end]),
+        '## Cash including matched rent refunds (full-life groups)',
+        json.dumps(data['rent_refund_groups']),
+        'These groups overlap the root cash above: do not add the subtotals together. Each shared reclaim fee is included once. Unmatched refunds remain unattributed; this is not portfolio NAV or a per-root win rate.',
         '## Latest token valuation coverage',json.dumps(data['price_coverage']),
         '## Root-chain replay',f"Decisions: {len(data['root_replay'])}; reasons: {dict(collections.Counter(r['reason'] for r in data['root_replay']))}",
         '## Pre-settlement eligibility replay',f"Decisions: {len(data['eligibility_replay'])}; evaluated before settlement refresh, separately from executor authorization.",
