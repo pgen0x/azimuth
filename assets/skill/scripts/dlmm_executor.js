@@ -1235,12 +1235,11 @@ async function reconcileAccounting() {
   for (const event of events) {
     if (facts.has(event.signature)) continue;
     try {
-      const tx = await runWithFailover(connection => connection.getParsedTransaction(event.signature,
-        { commitment: "finalized", maxSupportedTransactionVersion: 0 }));
+      const { parsedAccountingTransaction, transactionFact } = require("./dlmm_nav.js");
+      const tx = await runWithFailover(connection => parsedAccountingTransaction(connection, event.signature));
       // A successful RPC returning null means missing evidence, not provider failure.
       if (!tx?.meta) { pending++; continue; }
       // Share finalized evidence with NAV collection instead of fetching it again.
-      const { transactionFact } = require("./dlmm_nav.js");
       const fact = transactionFact(tx, event.wallet, event.signature, event);
       fs.appendFileSync(path.join(dir, "dlmm_wallet_transactions.jsonl"), JSON.stringify(fact) + "\n", { mode: 0o600 });
       facts.set(event.signature, fact);

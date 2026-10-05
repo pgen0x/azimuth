@@ -1,5 +1,5 @@
 const assert=require('node:assert/strict'), fs=require('node:fs'), os=require('node:os'), path=require('node:path');
-const {collect,transactionFact,heliusPrices}=require('./dlmm_nav.js');
+const {collect,transactionFact,heliusPrices,parsedAccountingTransaction}=require('./dlmm_nav.js');
 const wallet='wallet',key=s=>({toString:()=>s});
 const tx={slot:100,blockTime:Math.floor(Date.now()/1000),transaction:{message:{accountKeys:[{pubkey:key(wallet)},{pubkey:key('outside')}],instructions:[{program:'system',parsed:{type:'transfer',info:{source:wallet,destination:'outside',lamports:100}}}]}},meta:{err:null,fee:5,preBalances:[1000,0],postBalances:[895,100],preTokenBalances:[],postTokenBalances:[]}};
 const fact=transactionFact(tx,wallet,'sig');
@@ -148,6 +148,31 @@ const connection={
 };
 global.fetch=async url=>{if(url.includes('/quote?'))throw new Error('no route');return{ok:true,json:async()=>({totalPositions:0,pools:[],hasNext:false})}};
 (async()=>{
+ const payer='11111111111111111111111111111111', receiver='So11111111111111111111111111111111111111112';
+ const v1={version:1,slot:100,blockTime:100,transaction:{signatures:['v1sig'],message:{
+   accountKeys:[{pubkey:payer,signer:true,writable:true},{pubkey:receiver,signer:false,writable:true}],
+   instructions:[{program:'system',programId:payer,parsed:{type:'transfer',info:{source:payer,destination:receiver,lamports:1}}}]}},
+   meta:{err:null,fee:5,preBalances:[100,0],postBalances:[94,1],preTokenBalances:[],postTokenBalances:[],innerInstructions:[]}};
+ let reply={result:v1}, rawCalls=0;
+ const v1rpc={getParsedTransaction:async()=>{throw Object.assign(new Error('Transaction version (1) is not supported'),{code:-32015});},
+   _rpcRequest:async(method,params)=>{rawCalls++;assert.equal(method,'getTransaction');assert.equal(params[1].maxSupportedTransactionVersion,1);assert.equal(params[1].commitment,'finalized');return reply;}};
+ const parsed=await parsedAccountingTransaction(v1rpc,'v1sig');
+ assert.equal(transactionFact(parsed,receiver,'v1sig').external_flow_lamports,1);
+ assert.equal(transactionFact(parsed,receiver,'v1sig').fee_lamports,0);
+ for(const mutate of [t=>t.version=2,t=>t.transaction.signatures[0]='wrong',t=>t.meta.preBalances.pop(),
+   t=>t.meta.postBalances[1]=Number.MAX_SAFE_INTEGER+1,t=>delete t.meta.preTokenBalances,
+   t=>t.meta.preTokenBalances.push({accountIndex:99}),t=>t.meta.innerInstructions=[{index:4,instructions:[]}],
+   t=>delete t.transaction.message.instructions[0].programId]) {
+   reply={result:JSON.parse(JSON.stringify(v1))};mutate(reply.result);
+   await assert.rejects(parsedAccountingTransaction(v1rpc,'v1sig'),/Invalid version 1/);
+ }
+ reply={result:null};assert.equal(await parsedAccountingTransaction(v1rpc,'v1sig'),null);
+ reply={error:{code:-32000}};await assert.rejects(parsedAccountingTransaction(v1rpc,'v1sig'),/RPC error/);
+ const before=rawCalls;
+ assert.equal(await parsedAccountingTransaction({...v1rpc,getParsedTransaction:async()=>tx},'sig'),tx);
+ await assert.rejects(parsedAccountingTransaction({...v1rpc,getParsedTransaction:async()=>{throw new Error('timeout');}},'sig'),/timeout/);
+ assert.equal(rawCalls,before);
+
  const args={dir,wallet,PublicKey:function(s){return key(s)},rpc:fn=>fn(connection)};
  const r=await collect(args);assert.equal(r.nav_sol,2.00203928);assert.equal(r.wallet_history_complete,true);
  unknown=true;const missing=await collect(args);assert.equal(missing.nav_sol,null);assert.equal(missing.issues[0],'unpriced_token:unknown');

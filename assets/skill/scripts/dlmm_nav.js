@@ -209,6 +209,39 @@ function tokenRentEvidence(tx, wallet) {
   return evidence;
 }
 
+// web3.js 1.x rejects version 1 in its response schema. Keep its normal reader
+// for legacy/v0; use the same RPC transport only for an explicit v1 refusal.
+async function parsedAccountingTransaction(connection, signature) {
+  try {
+    return await connection.getParsedTransaction(signature,{commitment:'finalized',maxSupportedTransactionVersion:0});
+  } catch (err) {
+    if (err.code !== -32015 || !/Transaction version \(1\)/.test(err.message)) throw err;
+  }
+  const response = await connection._rpcRequest('getTransaction', [signature,
+    {encoding:'jsonParsed',commitment:'finalized',maxSupportedTransactionVersion:1}]);
+  if (response.error) throw new Error('Version 1 accounting RPC error');
+  const tx = response.result;
+  if (tx === null) return null;
+  const message=tx?.transaction?.message, meta=tx?.meta, keys=message?.accountKeys;
+  const address=s=>typeof s==='string' && /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(s);
+  const instruction=i=>i && address(i.programId) &&
+    (i.parsed && typeof i.parsed==='object' || Array.isArray(i.accounts) && i.accounts.every(address) && typeof i.data==='string');
+  if (tx?.version!==1 || tx.transaction?.signatures?.[0]!==signature ||
+      !Number.isSafeInteger(tx.slot) || tx.slot<0 || !(tx.blockTime===null || Number.isSafeInteger(tx.blockTime)) ||
+      !Array.isArray(keys) || !keys.length || keys.some(k=>!address(k.pubkey)||typeof k.signer!=='boolean'||typeof k.writable!=='boolean') ||
+      new Set(keys.map(k=>k.pubkey)).size!==keys.length || !meta || !Object.hasOwn(meta,'err') ||
+      !Number.isSafeInteger(meta.fee) || meta.fee<0 ||
+      ![meta.preBalances,meta.postBalances].every(a=>Array.isArray(a)&&a.length===keys.length&&a.every(n=>Number.isSafeInteger(n)&&n>=0)) ||
+      !Array.isArray(message.instructions) || !message.instructions.every(instruction) ||
+      !(meta.innerInstructions===null || Array.isArray(meta.innerInstructions)&&meta.innerInstructions.every(g=>Number.isSafeInteger(g.index)&&g.index>=0&&g.index<message.instructions.length&&Array.isArray(g.instructions)&&g.instructions.every(instruction))) ||
+      ![meta.preTokenBalances,meta.postTokenBalances].every(a=>Array.isArray(a)&&a.every(t=>
+        Number.isSafeInteger(t.accountIndex)&&t.accountIndex>=0&&t.accountIndex<keys.length&&address(t.mint)&&address(t.owner)&&
+        typeof t.uiTokenAmount?.amount==='string'&&/^\d+$/.test(t.uiTokenAmount.amount)))) {
+    throw new Error('Invalid version 1 accounting transaction');
+  }
+  return tx;
+}
+
 function transactionFact(tx, wallet, signature, event) {
   const keys = tx.transaction.message.accountKeys.map(k => k.pubkey.toString());
   const index = keys.indexOf(wallet), meta = tx.meta;
@@ -371,7 +404,7 @@ async function collect({dir, wallet, PublicKey, rpc, historyOnly=false}) {
     if (currentFact(r)) continue;
     if (fetched++ >= 60) break; // Each invocation resumes from the durable cache.
     try {
-      const tx = await rpc(c => c.getParsedTransaction(r.signature,{commitment:'finalized',maxSupportedTransactionVersion:0}));
+      const tx = await rpc(c => parsedAccountingTransaction(c,r.signature));
       if (!tx?.meta) continue; // Successful null response: await indexing, not RPC failover.
       const fact = transactionFact(tx,wallet,r.signature,events.get(r.signature));
       append(cachePath,fact); cache.set(r.signature,fact);
@@ -504,4 +537,4 @@ async function collect({dir, wallet, PublicKey, rpc, historyOnly=false}) {
   append(path.join(dir,'dlmm_nav.jsonl'),snapshot);
   return {nav_sol:snapshot.nav_sol,issues,missing_transactions:missing,wallet_history_complete:snapshot.wallet_history_complete};
 }
-module.exports={collect,transactionFact,heliusPrices,collectRentHistory};
+module.exports={collect,transactionFact,heliusPrices,collectRentHistory,parsedAccountingTransaction};
