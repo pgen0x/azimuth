@@ -17,6 +17,24 @@ from dlmm_realized import apply_realized
 
 
 def main():
+    # Pulse freshness must compare the same five-minute window as screening.
+    for ratio, address, expected in [
+        (0.05, "pool", 0.05), ({"5m": 0.05, "24h": 100}, "pool", 0.05),
+        ({"24h": 100}, "pool", None), (0, "pool", 0),
+        (float("nan"), "pool", None), (-1, "pool", None),
+        (True, "pool", None), (0.05, "different-pool", None), (None, "pool", None),
+    ]:
+        payload = json.dumps({"data": [{"pool_address": address, "fee_tvl_ratio": ratio}]}).encode()
+        with patch.object(pipeline.urllib.request, "urlopen", return_value=io.BytesIO(payload)) as fetch:
+            assert pipeline.fetch_live_fee_tvl("pool", "5m") == expected
+            query = pipeline.urllib.parse.parse_qs(pipeline.urllib.parse.urlparse(fetch.call_args.args[0].full_url).query)
+            assert query["timeframe"] == ["5m"] and query["filter_by"] == ["pool_address=pool"]
+    payload = json.dumps({"data": [{"pool_address": "pool", "fee_tvl_ratio": 0.05}]}).encode()
+    with patch.dict(pipeline.os.environ, {"DRY_RUN": "false"}), \
+         patch.object(pipeline.urllib.request, "urlopen", return_value=io.BytesIO(payload)), \
+         patch.object(pipeline, "get_momentum", return_value=(0, 0, 0, 0)):
+        assert "dropped 75.0%" in pipeline.predeploy_live_gate_reject(
+            {"pool": "pool", "name": "test", "base_mint": "mint", "fee_tvl_ratio": 0.2}, 0.1, "5m")
     assert pipeline.compute_deploy_amount(0.30718357) == 0
     assert pipeline.compute_deploy_amount(0.349) == 0
     assert pipeline.compute_deploy_amount(0.35) == 0.1
