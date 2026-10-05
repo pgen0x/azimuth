@@ -460,6 +460,10 @@ def reconcile_redis_vs_meteora():
 
 def compute_deploy_amount(wallet_sol):
     reserve = 0.2
+    # Existing 0.05 SOL transaction allowance covers typical position/ATA rent.
+    # The executor verifies the exact post-transaction reserve before signing.
+    if wallet_sol < reserve + 0.05 + 0.1:
+        return 0.0
     pct = 0.45
     floor = 0.3
     ceil = 5.0
@@ -1135,7 +1139,7 @@ def main():
     if (deploy_sol <= 0 or deploy_sol < 0.10) and not cli.analyze_only:
         print(f"Aborting: deploy amount {deploy_sol:.3f} SOL below 0.10 SOL minimum (wallet {sol_balance:.3f} SOL)")
         sys.exit(0)
-    min_required = deploy_sol + 0.05
+    min_required = deploy_sol + 0.2 + 0.05
     if sol_balance < min_required and not cli.analyze_only:
         print(f"Aborting: Insufficient SOL balance ({sol_balance:.3f} SOL < {min_required:.3f} SOL required)")
         sys.exit(0)
