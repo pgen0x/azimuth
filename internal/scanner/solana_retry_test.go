@@ -24,6 +24,7 @@ type solanaTransport func(*http.Request) (*http.Response, error)
 func (f solanaTransport) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
 func TestMomentumRecoveryRetriesAlongsideDeliveredPool(t *testing.T) {
+	t.Setenv("SOLANA_DELIVERY_PATH", filepath.Join(t.TempDir(), "deliveries.jsonl"))
 	// The stable pool must retain its delivery TTL while the rejected pool
 	// recovers on the next poll, even though the first batch was not empty.
 	pools := []meteora.Pool{}
@@ -107,6 +108,7 @@ func TestAIPrimaryFallbackBeforeDispatch(t *testing.T) {
 }
 
 func testEntryRouting(t *testing.T, healthCmd string, status int, wantWebhook, wantDirect bool) {
+	t.Setenv("SOLANA_DELIVERY_PATH", filepath.Join(t.TempDir(), "deliveries.jsonl"))
 	t.Helper()
 	pool := meteora.Pool{PoolAddress: "directPoolAddress", Name: "DIRECT-SOL", TVL: 20_000, ActiveTVL: 20_000,
 		Volatility: 2, TokenX: meteora.Token{Address: "direct", Symbol: "DIRECT"},

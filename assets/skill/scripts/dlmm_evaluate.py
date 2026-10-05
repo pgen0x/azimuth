@@ -9,10 +9,60 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import sqlite3
 import time
 from dlmm_accounting import report, root_decision, rows, unvalued_token_inflows
 from dlmm_shadow import bin_replay, HORIZONS
 from dlmm_realized import fetch_pools, fetch_closed_positions
+
+
+
+def delivery_outcomes(profile, path, start, end):
+    """Correlate observed deliveries with Hermes sessions; never authorize retries."""
+    prepared = {}
+    states = {}
+    for row in rows(path):
+        observed = row.get("observed_at", 0)
+        if not start <= observed <= end:
+            continue
+        ident = row.get("delivery_id")
+        if not ident:
+            continue
+        if row.get("stage") == "prepared":
+            prepared[ident] = row
+        else:
+            states[ident] = row.get("stage")
+    result = []
+    database = profile / "state.db"
+    try:
+        conn = sqlite3.connect(database.resolve().as_uri() + "?mode=ro", uri=True)
+        conn.row_factory = sqlite3.Row
+    except sqlite3.Error:
+        conn = None
+    try:
+        for ident, row in prepared.items():
+            item = {"delivery_id": ident, "prepared_at": row["observed_at"],
+                    "transport": states.get(ident, "unconfirmed"), "session_state": "unobserved",
+                    "execution_verified": False}
+            if conn is not None:
+                try:
+                    sessions = conn.execute("SELECT id,started_at,ended_at FROM sessions WHERE source='webhook' AND chat_id=? AND started_at<=?",
+                                            ("webhook:dlmm-signal:" + ident, end)).fetchall()
+                    if len(sessions) == 1:
+                        session = sessions[0]
+                        item["session_id"] = session["id"]
+                        item["session_state"] = "ended_execution_unverified" if session["ended_at"] is not None and session["ended_at"] <= end else "not_ended_at_cutoff"
+                    elif len(sessions) > 1:
+                        item["session_state"] = "ambiguous"
+                except sqlite3.Error:
+                    item["session_state"] = "database_unavailable"
+            else:
+                item["session_state"] = "database_unavailable"
+            result.append(item)
+    finally:
+        if conn is not None:
+            conn.close()
+    return {"deliveries": result, "basis": "webhook_acceptance_and_session_lifecycle_only; not_AI_pick_success_or_trade_proof; no_retry_authorization"}
 
 
 def replay_root_decision(decision):
@@ -174,12 +224,14 @@ def main():
     raw=subprocess.run(['journalctl','--user','-u','azimuth.service','-u','azimuth-sol-monitor.service','--since','@'+str(a.start),'--until','@'+str(a.end),'--no-pager'],capture_output=True,text=True,timeout=60)
     logs=re.sub(r'https?://[^\s\"\']+','[URL REDACTED]',raw.stdout)
     (a.output/'runtime.log').write_text(logs)
+    data['delivery_tracking']=delivery_outcomes(a.profile, Path(os.environ.get('SOLANA_DELIVERY_PATH', str(Path.home()/'.local/state/azimuth/solana_deliveries.jsonl'))), a.start, a.end)
     data['runtime']={'journal_ok':raw.returncode==0,'expired_mentions':logs.lower().count('expired'),
         'rpc_warning_mentions':logs.count('[RPC WARN]'),'root_refusals':logs.count('ENTRY REFUSED:'),
         'note':'Counts are log mentions, not unique transactions or proof of provider outage.'}
     (a.output/'evaluation.json').write_text(json.dumps(data,indent=2,allow_nan=False))
     lines=['# Azimuth Solana evaluation',f"Window UTC epoch: {a.start} – {a.end}",
         f"Closes: {data['close_count']}; account deletion proofs: {sum(bool(v) for v in data['close_account_proofs'].values())}; complete marked NAV samples: {data['complete_nav_samples']}/{data['nav_samples']}.",
+        '## AI delivery tracking (not execution proof)',json.dumps(data['delivery_tracking']),
         '## Native SOL cash (not trading profit)',json.dumps(data['native_cash_change']) if data['native_cash_change'] else 'Unmeasured: fewer than two distinct native balance snapshots in this window.',
         'Cash uses the displayed snapshot times. Rent is recoverable reserve; token and LP marks are not necessarily executable proceeds. Complete wallet profit remains unmeasured when NAV is incomplete.',
         '## LP comparison (full-life cohort; not net wallet profit)',json.dumps({k:{field:value for field,value in v.items() if field!="positions"} for k,v in data.get('lp_comparison',{}).items()}),'## Wallet wealth',json.dumps(data['wealth_change']) if data['wealth_change'] else 'Unmeasured: incomplete marks/history or external token inflows without transfer-time valuation.',

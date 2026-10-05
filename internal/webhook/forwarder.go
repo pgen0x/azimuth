@@ -3,6 +3,7 @@ package webhook
 import (
 	"bytes"
 	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -55,11 +56,43 @@ func (f *Forwarder) Send(source string, payload interface{}, nowUnix int64) erro
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Webhook-Signature", sum)
 
+	deliveryID := ""
+	if source == "meteora_pool_discovery" {
+		id := make([]byte, 16)
+		if _, err := rand.Read(id); err != nil {
+			return err
+		}
+		deliveryID = hex.EncodeToString(id)
+		// Hermes accepts this ID and uses it in the persisted session chat_id.
+		req.Header.Set("X-Request-ID", deliveryID)
+		if err := recordDelivery(map[string]any{"delivery_id": deliveryID, "stage": "prepared", "signal": sig}); err != nil {
+			return fmt.Errorf("persist webhook delivery before send: %w", err)
+		}
+	}
 	resp, err := f.client.Do(req)
 	if err != nil {
+		if deliveryID != "" {
+			logDeliveryResult(deliveryID, "transport_unconfirmed", 0)
+		}
 		return err
 	}
 	defer resp.Body.Close()
+	if deliveryID != "" {
+		stage := "http_unconfirmed"
+		if resp.StatusCode >= 400 {
+			stage = "http_rejected"
+		} else {
+			var receipt struct {
+				Status     string `json:"status"`
+				DeliveryID string `json:"delivery_id"`
+			}
+			if json.NewDecoder(io.LimitReader(resp.Body, 4096)).Decode(&receipt) == nil && receipt.DeliveryID == deliveryID &&
+				(receipt.Status == "accepted" || receipt.Status == "duplicate") {
+				stage = "accepted" // Acceptance only, never agent/deployment completion.
+			}
+		}
+		logDeliveryResult(deliveryID, stage, resp.StatusCode)
+	}
 	if resp.StatusCode >= 400 {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 300))
 		return fmt.Errorf("webhook %d: %s", resp.StatusCode, string(b))
