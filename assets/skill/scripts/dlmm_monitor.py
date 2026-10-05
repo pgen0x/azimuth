@@ -1250,6 +1250,11 @@ def settle_pending():
             bal, err = run_command_json(f"node {EXECUTOR_PATH} spl-balance {shlex.quote(mint)}")
         if bal and bal.get("balance") == 0:
             os.unlink(path)
+            # Settlement invalidates the earlier wallet-capacity refusal. The
+            # pipeline still checks live balance/reserve before any new entry.
+            _, err, code = run_command("redis-cli DEL sol:dlmm:capacity:wallet", timeout=2)
+            if code:
+                print(f"Warning: capacity resume failed; existing TTL will expire: {err}")
             print(f"✅ SOL settlement verified: {pos}")
         return
 
