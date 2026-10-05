@@ -67,7 +67,7 @@ async function runWithFailover(fn) {
         fetch: (url, options) => fetch(url, { ...options, signal: AbortSignal.timeout(8000) }) });
       return await fn(connection);
     } catch (err) {
-      if (err.message?.startsWith("ENTRY REFUSED:")) throw err;
+      if (err.message?.startsWith("ENTRY REFUSED:") || err.message?.startsWith("Rent reclaim refused:")) throw err;
       console.warn(`[RPC WARN] Failed execution on RPC #${currentRpcIndex}: ${err.message}`);
       currentRpcIndex = (currentRpcIndex + 1) % RPC_URLS.length;
       attempts++;
