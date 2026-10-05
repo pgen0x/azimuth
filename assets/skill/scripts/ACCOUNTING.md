@@ -325,3 +325,23 @@ respecting its evaluation cutoff. HTTP acceptance and session end are lifecycle
 evidence only; neither proves a completed AI pick or finalized trade. Missing
 or ambiguous evidence remains explicit. This journal does not replay requests
 or relax the scanner's accepted/ambiguous-delivery deduplication protection.
+
+### Forward liquidation observations
+
+The existing shadow job samples at most one recent, unclosed position per cycle
+in `dlmm_liquidation_quotes.jsonl`. It performs one Meteora position HTTP read
+and, if token inventory is nonzero, one Jupiter quote read; no Helius calls,
+retries or transactions. Attempts are spaced at least 240 seconds per position
+and rotate oldest observations first. Existing mode horizons bound collection.
+
+Initial support covers SOL as token Y, recorded mint decimals, and positions
+with no previous withdrawals, fee claims or outstanding rewards. Inventory
+older than 180 seconds, missing fields, invalid quantities or mismatched quotes
+remain unmeasured. Zero token inventory needs no quote. The report preserves
+observation times and includes only samples observed within its time window.
+
+`quoted_assets_change_before_network_fees_sol` replaces the token inventory mark
+with quoted SOL proceeds, including the provider's route costs. It excludes
+network fees and rent and is **not net cash**. Inventory and quote are different
+observations; withdrawing liquidity can change the eventual route and price.
+These observations do not change exit rules, selection, learning or risk limits.

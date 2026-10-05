@@ -166,3 +166,67 @@ for bad in [dict(quote, out_amount="NaN"), dict(quote, minimum_out_amount="1001"
 improved = swap_execution([event], {"ok":dict(fact, wallet_delta_lamports=805)}, 100, 200)
 assert improved['attempts'][0]['shortfall_lamports'] == -10
 print("Swap quote/fill evaluation preserves rent, failed fees, cutoff and unknown evidence")
+
+# Sell-quote observations must not promote missing costs or malformed inventory
+# to net profit; HTTP work stays bounded even when data is unavailable.
+from copy import deepcopy
+from dlmm_shadow import liquidation_observation, collect_liquidation
+sol = 'So11111111111111111111111111111111111111112'
+liquid_entry = dict(position='p', pool='pool', base_mint='TOKEN', mode='turnover',
+                   bin_snapshot=dict(ts=9900, sol_is_x=False, decimals_x=6))
+inventory = dict(balanceTokenX=dict(amount='10'), unclaimedFeeTokenX=dict(amount='0'),
+                 balanceTokenY=dict(amount='0.09'), unclaimedFeeTokenY=dict(amount='0.001'),
+                 unclaimedRewardTokenX=dict(amount='0'), unclaimedRewardTokenY=dict(amount='0'))
+position = dict(positionAddress='p', isClosed=False, updatedAt=9990, pnlSol='0.002',
+                allTimeDeposits=dict(total=dict(sol='0.1')),
+                allTimeWithdrawals=dict(total=dict(sol='0')),
+                allTimeFees=dict(total=dict(sol='0')), unrealizedPnl=inventory)
+api = dict(tokenX='TOKEN', tokenY=sol, positions=[position])
+quote = dict(inputMint='TOKEN', outputMint=sol, inAmount='10000000', outAmount='8000000',
+             otherAmountThreshold='7920000', swapMode='ExactIn', slippageBps=100)
+with patch.object(shadow_module.time, 'time', return_value=10000):
+    from unittest.mock import Mock
+    fetch = Mock(side_effect=[api, quote])
+    observed = liquidation_observation(liquid_entry, 'wallet', fetch)
+    assert observed['lp_mark_pnl_sol'] > 0
+    assert observed['quoted_assets_change_before_network_fees_sol'] == -0.001
+    assert observed['minimum_quoted_assets_change_before_network_fees_sol'] == -0.00108
+    assert fetch.call_count == 2 and 'not_net_cash' in observed['basis']
+    zero = deepcopy(api); zero['positions'][0]['unrealizedPnl']['balanceTokenX']['amount'] = '0'
+    fetch = Mock(return_value=zero)
+    assert liquidation_observation(liquid_entry, 'wallet', fetch)['quote'] is None
+    assert fetch.call_count == 1
+    for field, value in [('updatedAt', 9819), ('updatedAt', 10006), ('isClosed', True), ('pnlSol', 'NaN')]:
+        bad = deepcopy(api); bad['positions'][0][field] = value
+        fetch = Mock(return_value=bad)
+        try: liquidation_observation(liquid_entry, 'wallet', fetch)
+        except (ValueError, ArithmeticError): pass
+        else: raise AssertionError(field)
+        assert fetch.call_count == 1
+    for key in ['balanceTokenX', 'unclaimedFeeTokenY', 'unclaimedRewardTokenX']:
+        bad = deepcopy(api); bad['positions'][0]['unrealizedPnl'][key]['amount'] = '-1'
+        try: liquidation_observation(liquid_entry, 'wallet', Mock(return_value=bad))
+        except ValueError: pass
+        else: raise AssertionError(key)
+    for key, value in [('inputMint', 'OTHER'), ('inAmount', '9'), ('outAmount', 'NaN'),
+                       ('otherAmountThreshold', '8000001'), ('slippageBps', True), ('swapMode', 'ExactOut')]:
+        try: liquidation_observation(liquid_entry, 'wallet', Mock(side_effect=[api, dict(quote, **{key:value})]))
+        except ValueError: pass
+        else: raise AssertionError(key)
+with tempfile.TemporaryDirectory() as directory:
+    profile = Path(directory); memory = profile/'memories'; (memory/'dlmm_entries').mkdir(parents=True)
+    for ident in ['p', 'q', 'closed']:
+        (memory/'dlmm_entries'/f'{ident}.json').write_text(json.dumps(dict(liquid_entry, position=ident)))
+    (memory/'dlmm_transactions.jsonl').write_text(''.join(json.dumps(dict(kind='deploy', position=i, wallet='wallet', signature=i, ts=9900))+'\n' for i in ['p','q','closed']))
+    (memory/'dlmm_closes.jsonl').write_text(json.dumps(dict(position='closed'))+'\n')
+    with patch.object(shadow_module.time, 'time', return_value=10000), \
+         patch.object(shadow_module, 'liquidation_observation', side_effect=TimeoutError) as observe:
+        assert collect_liquidation(profile) == 1 and observe.call_count == 1
+        assert collect_liquidation(profile) == 1 and observe.call_count == 2
+        assert collect_liquidation(profile) == 0 and observe.call_count == 2
+    samples = shadow_module.rows(memory/'dlmm_liquidation_quotes.jsonl')
+    assert {x['position'] for x in samples} == {'p', 'q'}
+    assert all(x['status']=='unmeasured' for x in samples)
+    assert len(evaluate(profile, 9999, 10000, profile/'rejects.jsonl')['liquidation_observations']) == 2
+    assert not evaluate(profile, 9999, 9999, profile/'rejects.jsonl')['liquidation_observations']
+print('Liquidation quotes preserve inventory, cost limits, unknown evidence and bounded collection')

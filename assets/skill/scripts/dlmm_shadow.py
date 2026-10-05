@@ -110,6 +110,112 @@ def bin_replay(entry, samples, cost_sol=None):
             'basis':'infinitesimal_fixed_shares; fixed_mode_horizon_with_600s_terminal_grace; sampled_OOR; observed_costs_only; no_slippage_or_recenter_counterfactual', 'schemes':results}
 
 
+def liquidation_observation(entry, wallet, fetch):
+    """Indexed inventory plus a sell quote; excludes network fees and rent."""
+    sol = 'So11111111111111111111111111111111111111112'
+    initial = entry['bin_snapshot']
+    decimals = initial['decimals_x']
+    if initial['sol_is_x'] is not False or type(decimals) is not int or not 0 <= decimals <= 18:
+        raise ValueError('unsupported_token_orientation_or_decimals')
+
+    def number(value):
+        n = Decimal(str(value))
+        if not n.is_finite() or not math.isfinite(float(n)):
+            raise ValueError('invalid_amount')
+        return n
+
+    query = urllib.parse.urlencode(dict(user=wallet, status='open', pageSize=100, page=1))
+    data = fetch('https://dlmm.datapi.meteora.ag/positions/'
+                 + urllib.parse.quote(entry['pool'], safe='') + '/pnl?' + query)
+    if data['tokenX'] != entry['base_mint'] or data['tokenY'] != sol:
+        raise ValueError('mint_mismatch')
+    position = next(p for p in data['positions'] if p['positionAddress'] == entry['position'])
+    updated = number(position['updatedAt'])
+    if position['isClosed'] is not False or not -5 <= time.time() - float(updated) <= 180:
+        raise ValueError('closed_or_stale_position')
+    deposit = number(position['allTimeDeposits']['total']['sol'])
+    if (deposit <= 0 or number(position['allTimeWithdrawals']['total']['sol']) != 0
+            or number(position['allTimeFees']['total']['sol']) != 0):
+        raise ValueError('unsupported_prior_position_flows')
+    inventory = position['unrealizedPnl']
+    for side in ('X', 'Y'):
+        if number(inventory['unclaimedRewardToken' + side]['amount']) != 0:
+            raise ValueError('unvalued_rewards')
+    amounts = [number(inventory[k]['amount']) for k in
+               ('balanceTokenX', 'unclaimedFeeTokenX', 'balanceTokenY', 'unclaimedFeeTokenY')]
+    if any(n < 0 for n in amounts):
+        raise ValueError('negative_inventory')
+    raw = int((amounts[0] + amounts[1]) * 10**decimals)
+    if not 0 <= raw < 2**64:
+        raise ValueError('invalid_token_quantity')
+    native = amounts[2] + amounts[3]
+    mark = number(position['pnlSol'])
+    quote = None
+    out = minimum = 0
+    if raw:
+        query = urllib.parse.urlencode(dict(inputMint=entry['base_mint'], outputMint=sol,
+                                           amount=raw, slippageBps=100))
+        quote = fetch('https://api.jup.ag/swap/v1/quote?' + query)
+        values = [quote[k] for k in ('inAmount', 'outAmount', 'otherAmountThreshold')]
+        if (not all(isinstance(v, str) and v.isascii() and v.isdigit() for v in values)
+                or quote['inputMint'] != entry['base_mint'] or quote['outputMint'] != sol
+                or quote['swapMode'] != 'ExactIn' or type(quote['slippageBps']) is not int
+                or quote['slippageBps'] != 100):
+            raise ValueError('invalid_quote')
+        incoming, out, minimum = map(int, values)
+        if incoming != raw or not 0 < minimum <= out < 2**64:
+            raise ValueError('quote_amount_mismatch')
+    observed = time.time()
+    if not -5 <= observed - float(updated) <= 180:
+        raise ValueError('inventory_expired_during_quote')
+    return dict(status='measured', position_updated_at=float(updated), observed_at=observed,
+                deposit_sol=float(deposit), lp_mark_pnl_sol=float(mark),
+                native_lp_assets_including_fees_sol=float(native), token_sell_raw=str(raw),
+                quote=quote,
+                quoted_assets_change_before_network_fees_sol=float(native + Decimal(out)/10**9 - deposit),
+                minimum_quoted_assets_change_before_network_fees_sol=float(native + Decimal(minimum)/10**9 - deposit),
+                basis='indexed_inventory_plus_sell_quote_before_network_fees_not_net_cash',
+                limitation='Inventory and quote differ in time; withdrawal can change liquidity. '
+                           'Excludes network fees, rent, prior flows and rewards; quote is not an executed exit.')
+
+
+def collect_liquidation(profile):
+    """At most one position and two public HTTP reads per scheduled cycle."""
+    memory = profile / 'memories'
+    file = memory / 'dlmm_liquidation_quotes.jsonl'
+    latest = {r['position']: r['observed_at'] for r in rows(file)}
+    closed = {r['position'] for r in rows(memory / 'dlmm_closes.jsonl')
+              if r.get('position') and not r.get('dry_run')}
+    wallets = {r['position']: r['wallet'] for r in rows(memory / 'dlmm_transactions.jsonl')
+               if r.get('kind') == 'deploy' and r.get('position') and r.get('wallet')}
+
+    def fetch(url):
+        request = urllib.request.Request(url, headers={'User-Agent': 'dlmm-lp/1.0'})
+        with urllib.request.urlopen(request, timeout=10) as response:
+            return json.load(response)
+
+    for entry_file in sorted((memory / 'dlmm_entries').glob('*.json'),
+                             key=lambda p: latest.get(p.stem, 0)):
+        entry = json.loads(entry_file.read_text())
+        position = entry['position']
+        initial = entry.get('bin_snapshot')
+        if not initial or position in closed or position not in wallets:
+            continue
+        if not initial['ts'] <= time.time() <= initial['ts'] + HORIZONS.get(entry.get('mode'), 86400) + 600:
+            continue
+        if time.time() - latest.get(position, 0) < 240:
+            continue
+        sample = dict(position=position, pool=entry['pool'], observed_at=time.time())
+        try:
+            sample.update(liquidation_observation(entry, wallets[position], fetch))
+        except Exception as error:
+            # HTTP errors can contain URLs; persist only their type, never credentials.
+            sample.update(status='unmeasured', reason=type(error).__name__, observed_at=time.time())
+        append(file, sample)
+        return 1
+    return 0
+
+
 def collect(profile, reject_file):
     memory=profile/'memories'; executor=profile/'skills/solana-dlmm/scripts/dlmm_executor.js'
     rejected={}
@@ -152,7 +258,8 @@ def collect(profile, reject_file):
             sample=json.loads(output);sample['position']=position
             append(memory/'dlmm_bin_samples.jsonl',sample)
         except Exception: pass
-    return {'rejects_total':len(rejected),'outcomes_attempted':processed,'bin_snapshots_attempted':count}
+    return {'rejects_total':len(rejected),'outcomes_attempted':processed,'bin_snapshots_attempted':count,
+            'liquidation_observations_attempted':collect_liquidation(profile)}
 
 
 def main():
