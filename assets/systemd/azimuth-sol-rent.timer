@@ -1,0 +1,11 @@
+[Unit]
+Description=Recover Azimuth empty token account rent every thirty minutes
+
+[Timer]
+OnStartupSec=10min
+OnUnitInactiveSec=30min
+AccuracySec=1min
+Unit=azimuth-sol-rent.service
+
+[Install]
+WantedBy=timers.target
