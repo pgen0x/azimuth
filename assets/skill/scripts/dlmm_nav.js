@@ -127,7 +127,7 @@ function pumpMaintenance(tx, wallet) {
       || (i.parsed?.type || null)!==shape[n][1] || i.stackHeight!==shape[n][2])) return null;
   // The finalized Pump instructions enforce their PDA constraints; bind the
   // same accumulator/vault/user account across every decoded instruction here.
-  const [,accumulator,,,vault,account,,authority]=ins[5].accounts || [];
+  const [,accumulator,,,vault,account,,authority]=ins[5].accounts?.map(String) || [];
   if ([accumulator,vault,account,authority].some(a=>typeof a!=='string')
       || new Set([wallet,accumulator,vault,account,authority]).size!==5) return null;
   const accounts=(i,want)=>JSON.stringify(i.accounts?.map(String))===JSON.stringify(want);
@@ -237,7 +237,7 @@ function transactionFact(tx, wallet, signature, event) {
         || TOKEN_PROGRAMS.includes(id) && ['transfer','transferChecked','getAccountDataSize','initializeImmutableOwner','initializeAccount','initializeAccount2','initializeAccount3'].includes(type);
     });
   const maintenance=!event ? (rentMaintenance(tx,wallet) || pumpMaintenance(tx,wallet)) : null;
-  return {schema_version:10,event_position:event?.position,signature, wallet, slot: tx.slot, block_time: tx.blockTime, observed_at: now(), failed: !!meta.err,
+  return {schema_version:11,event_position:event?.position,signature, wallet, slot: tx.slot, block_time: tx.blockTime, observed_at: now(), failed: !!meta.err,
     wallet_delta_lamports: meta.postBalances[index]-meta.preBalances[index], fee_lamports: index === 0 ? meta.fee : 0,
     token_deltas_raw: Object.fromEntries(Object.entries(tokenDeltas).map(([m,a]) => [m,a.toString()])),
     token_pre_balances_raw: Object.fromEntries(Object.entries(tokenPre).map(([m,a]) => [m,a.toString()])),
@@ -267,7 +267,7 @@ async function collect({dir, wallet, PublicKey, rpc, historyOnly=false}) {
     before = batch[batch.length-1].signature;
   }
   const currentFact=r=>{const f=cache.get(r.signature); return f?.wallet===wallet && f?.schema_version>=2
-    && (f.schema_version>=10 || f.classification!=='unclassified')
+    && (f.schema_version>=11 || f.classification!=='unclassified')
     && (f.schema_version>=7 || f.classification!=='recorded_bot')
     && (!(events.get(r.signature)?.kind==='swap' && !events.get(r.signature)?.position) || f.token_pre_balances_raw!=null)
     && f.event_position===events.get(r.signature)?.position;};

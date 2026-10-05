@@ -89,6 +89,18 @@ assert.equal(pumpFact.classification,'rent_maintenance');
 assert.equal(pumpFact.external_flow_lamports,0);
 assert.deepEqual(pumpFact.rent_maintenance,{released_lamports:1346200,service_fee_lamports:27526,cashback_lamports:120535});
 assert.equal(pumpFact.wallet_delta_lamports,1428913);
+// web3 getParsedTransaction returns PublicKey objects for unparsed accounts.
+const sdkPump=JSON.parse(JSON.stringify(pumpCleaning));
+for(const group of sdkPump.meta.innerInstructions) for(const i of group.instructions) {
+  if(i.accounts)i.accounts=i.accounts.map(value=>({toString:()=>value}));
+  const id=i.programId;i.programId={toString:()=>id};
+}
+for(const i of sdkPump.transaction.message.instructions) {
+  const id=i.programId;i.programId={toString:()=>id};
+}
+for(const k of sdkPump.transaction.message.accountKeys) {const value=k.pubkey;k.pubkey={toString:()=>value};}
+assert.deepEqual(transactionFact(sdkPump,pumpWallet,'sdk-pump').rent_maintenance,pumpFact.rent_maintenance);
+
 for(const alter of [
  t=>{t.meta.innerInstructions[0].instructions[5].data='unknown'},
  t=>{t.meta.innerInstructions[0].instructions[9].accounts[0]='other'},
@@ -182,12 +194,12 @@ global.fetch=async url=>{if(url.includes('/quote?'))throw new Error('no route');
  if(savedWalletPrices===undefined)delete process.env.DLMM_HELIUS_WALLET_PRICES;else process.env.DLMM_HELIUS_WALLET_PRICES=savedWalletPrices;
  if(savedKey===undefined)delete process.env.HELIUS_API_KEY;else process.env.HELIUS_API_KEY=savedKey;
  // Upgrade cached unknown facts once, using fresh on-chain observations.
- fs.writeFileSync(path.join(dir,'dlmm_wallet_transactions.jsonl'),JSON.stringify({signature:'sig',wallet,schema_version:9,classification:'unclassified'})+'\n');
+ fs.writeFileSync(path.join(dir,'dlmm_wallet_transactions.jsonl'),JSON.stringify({signature:'sig',wallet,schema_version:10,classification:'unclassified'})+'\n');
  let refreshed=0;
  connection.getParsedTransaction=async()=>{refreshed++;return {...cleaning,slot:100,blockTime:tx.blockTime}};
  await collect({...args,historyOnly:true}); await collect({...args,historyOnly:true});
  const upgraded=fs.readFileSync(path.join(dir,'dlmm_wallet_transactions.jsonl'),'utf8').trim().split('\n').map(JSON.parse).filter(f=>f.signature==='sig').at(-1);
- assert.equal(upgraded.schema_version,10);assert.equal(upgraded.classification,'rent_maintenance');assert.equal(refreshed,1);
+ assert.equal(upgraded.schema_version,11);assert.equal(upgraded.classification,'rent_maintenance');assert.equal(refreshed,1);
  const recordedEvent={signature:'sig',wallet,position:'p'};
  fs.writeFileSync(path.join(dir,'dlmm_transactions.jsonl'),JSON.stringify(recordedEvent)+'\n');
  fs.writeFileSync(path.join(dir,'dlmm_wallet_transactions.jsonl'),JSON.stringify({...transactionFact(tx,wallet,'sig',recordedEvent),schema_version:7})+'\n');
