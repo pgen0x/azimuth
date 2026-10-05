@@ -295,6 +295,55 @@ function transactionFact(tx, wallet, signature, event) {
     refundable_rent_locked_lamports: rentLocked, nonrefundable_account_cost_lamports: permanentRent,
     basis: 'finalized_transaction_balances'};
 }
+async function collectRentHistory({dir, wallet, PublicKey, rpc, cache}) {
+  const file=path.join(dir,'dlmm_rent_history.jsonl');
+  const previous=new Map(read(file).map(r=>[`${r.refund_signature}:${r.account}`,r]));
+  const candidates=[];
+  for (const refund of cache.values()) {
+    if (refund.wallet!==wallet || refund.failed || refund.landed===false) continue;
+    for (const item of refund.token_rent_evidence?.refunded || []) {
+      const prior=previous.get(`${refund.signature}:${item.account}`);
+      if (prior?.complete) continue;
+      const funded=[...cache.values()].filter(f=>f.wallet===wallet && !f.failed && f.landed!==false
+        && Number.isSafeInteger(f.slot) && f.slot<refund.slot
+        && f.token_rent_evidence?.funded?.some(a=>a.account===item.account
+          && a.mint===item.mint && a.lamports===item.lamports));
+      if (!funded.length) continue; // No historical refetch or invented origin.
+      candidates.push({refund,item,funded,attempted_at:prior?.observed_at || 0});
+    }
+  }
+  // One account-history request per collector cycle; oldest attempt first so
+  // one unresolved account cannot starve newer refunds. No transaction fetches.
+  candidates.sort((a,b)=>a.attempted_at-b.attempted_at);
+  if (!candidates.length) return;
+  const {refund,item,funded}=candidates[0];
+  const result={version:1,wallet,account:item.account,mint:item.mint,lamports:item.lamports,
+    refund_signature:refund.signature,complete:false,history_signatures:[],
+    basis:'finalized_account_signature_history; root_ownership_not_yet_attributed'};
+  try {
+    const history=await rpc(c=>c.getSignaturesForAddress(new PublicKey(item.account),
+      {before:refund.signature,limit:100},'finalized'));
+    const index=history.findIndex(h=>funded.some(f=>f.signature===h.signature));
+    if (index<0) result.reason='funding_not_in_bounded_history';
+    else {
+      const interval=history.slice(0,index+1);
+      const origin=funded.find(f=>f.signature===interval[index].signature);
+      if (interval.some(h=>!Number.isSafeInteger(h.slot) || h.slot<origin.slot || h.slot>refund.slot
+          || !cache.has(h.signature) || cache.get(h.signature).wallet!==wallet
+          || cache.get(h.signature).slot!==h.slot || cache.get(h.signature).landed===false
+          || !!cache.get(h.signature).failed!==!!h.err)
+          || new Set(interval.map(h=>h.signature)).size!==interval.length) {
+        result.reason='account_history_facts_incomplete';
+      } else {
+        result.complete=true;
+        result.funding_signature=origin.signature;
+        result.history_signatures=interval.map(h=>h.signature);
+      }
+    }
+  } catch { result.reason='account_history_unavailable'; }
+  result.observed_at=now();
+  append(file,result);
+}
 async function collect({dir, wallet, PublicKey, rpc, historyOnly=false}) {
   fs.mkdirSync(dir, {recursive:true, mode:0o700});
   const publicKey = new PublicKey(wallet);
@@ -355,6 +404,9 @@ async function collect({dir, wallet, PublicKey, rpc, historyOnly=false}) {
     }
   }
   append(path.join(dir,'dlmm_wallet_coverage.jsonl'),coverage);
+  if (coverage.wallet_history_complete && !coverage.unclassified_transactions.length) {
+    await collectRentHistory({dir,wallet,PublicKey,rpc,cache});
+  }
   if (historyOnly) return coverage;
   const started = now(), issues = [], tokens = [], positions = [];
   const slot = await rpc(c => c.getSlot('finalized'));
@@ -452,4 +504,4 @@ async function collect({dir, wallet, PublicKey, rpc, historyOnly=false}) {
   append(path.join(dir,'dlmm_nav.jsonl'),snapshot);
   return {nav_sol:snapshot.nav_sol,issues,missing_transactions:missing,wallet_history_complete:snapshot.wallet_history_complete};
 }
-module.exports={collect,transactionFact,heliusPrices};
+module.exports={collect,transactionFact,heliusPrices,collectRentHistory};
