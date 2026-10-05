@@ -1481,6 +1481,13 @@ def render_status_report(report_rows, sol_price_usd, trailing_trigger_pct, min_f
 
 # local indicators are imported and check_local_indicators is used directly below.
 
+def adverse_exit(reason):
+    """A positive mark cannot turn a defensive exit into a quick re-entry."""
+    return any(label in reason.lower() for label in (
+        "stop-loss", "stop_loss", "downtrend", "rug", "dump",
+        "sell pressure", "momentum", "giveback"))
+
+
 def protect_tight_exit(reason, mode, pnl_pct, change_h1, emergency=False):
     """Risk floors outrank profit reasons; tight stops cannot be vetoed by holds."""
     if mode not in ("turnover", "pulse"):
@@ -1731,7 +1738,7 @@ def main():
                 else:
                     run_command(f"redis-cli del \"sol:dlmm:loss_streak:{base_symbol_cd}\"")  # reset streak on profit
                     # Match the auto-close path: profitable exit shortens to 15m.
-                    if realized_sol > 0 and not any(kw in reason_lower for kw in ("stop-loss", "stop_loss", "downtrend")):
+                    if realized_sol > 0 and not adverse_exit(reason_lower):
                         run_command(f"redis-cli expire \"{cooldown_key}\" 900")
                         if mint_cd_key:
                             run_command(f"redis-cli expire \"{mint_cd_key}\" 900")
@@ -2808,9 +2815,8 @@ def main():
                     # while the monitor re-pinned into it. Raising the yield bar
                     # (MIN_FEE_TVL_24H_TIGHT_LIMIT) only frees the slot if the
                     # slot is actually released.
-                    and not any(kw in reason_lower for kw in (
-                        "stop-loss", "stop_loss", "downtrend", "rug",
-                        "low yield", "fee pace death"))
+                    and not adverse_exit(reason_lower)
+                    and not any(kw in reason_lower for kw in ("low yield", "fee pace death"))
                     and rebalance_budget_ok
                 )
                 is_oor_rebalance = (not adopted_unknown_mode) and (is_turnover_churn or (
@@ -2882,24 +2888,11 @@ def main():
                                     f"\"{strike_why[:120]}\" ex {strike_cd_secs}")
                         print(f"⛔ Turnover pool cooled {strike_cd_secs // 3600}h — {strike_why}")
                     cooldown_secs = 7200 if is_dump_close else 3600  # 2h dump, 1h other
-                    # Profitable exit: 15m across all modes (2026-07-15, was 30m
-                    # casual-only). A pool that just paid is proven; a long block only
-                    # forfeits re-entry while it's still hot — journal shows after-WIN
-                    # same-day re-entries net positive. Deliberately overrides the
-                    # dump-class 2h too: trailing-TP and fast-out reasons contain
-                    # "trailing"/"dump" so winners were getting the LONGEST cooldown.
-                    # Real loss events (stop-loss / downtrend) stay excluded, and the
-                    # pipeline's entry momentum gates still reject a re-signal if the
-                    # token is dumping when the cooldown clears.
-                    # "rug" excluded too (2026-08-28): RUG_M5_PCT fires off a 5m price
-                    # candle the mark snapshot hasn't caught up to yet — the same lag
-                    # documented above for OOR — so a rug-velocity emergency exit can
-                    # read realized_sol > 0 on a pool that is still actively crashing.
-                    # BANDOS-SOL: a RUG dump close marked +0.010 SOL at 00:34:59, got the
-                    # 15m win cooldown instead of 2h, and a fresh entry 15m later into the
-                    # same still-falling pool booked a real -0.0506 SOL / -12.09% on-chain.
+                    # Ordinary profitable exits may cool for only 15m. Defensive
+                    # exits keep their full cooldown even when the LP mark is positive:
+                    # OP and Instinct fast-out dumps otherwise qualified for re-entry.
                     if (realized_sol > 0
-                            and not any(kw in reason_lower for kw in ("stop-loss", "stop_loss", "downtrend", "rug"))):
+                            and not adverse_exit(reason_lower)):
                         cooldown_secs = 900
                     if realized_sol < 0:
                         # Track repeat losses within a 7-day window and escalate cooldown duration
