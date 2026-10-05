@@ -71,6 +71,17 @@ for(const alter of [
  t=>{t.meta.postBalances[1]=1},
  t=>{t.meta.postTokenBalances=t.meta.preTokenBalances},
 ]){const t=JSON.parse(JSON.stringify(cleaning));alter(t);assert.equal(transactionFact(t,wallet,'unknown').classification,'unclassified');}
+// The observed wrapper now splits its fee into two native transfers.
+const splitFee=JSON.parse(JSON.stringify(cleaning));
+splitFee.meta.innerInstructions[0].instructions.push(JSON.parse(JSON.stringify(splitFee.meta.innerInstructions[0].instructions[1])));
+splitFee.meta.postBalances[0]-=2;splitFee.meta.postBalances[2]+=2;
+assert.deepEqual(transactionFact(splitFee,wallet,'split').rent_maintenance,{released_lamports:200,service_fee_lamports:4});
+for(const alter of [
+ t=>{t.meta.innerInstructions[0].instructions[2].parsed.info.source='other'},
+ t=>{t.meta.innerInstructions[0].instructions[2].parsed.info.lamports=-1},
+ t=>{t.meta.innerInstructions[0].instructions[2].programId='unknown'},
+ t=>{t.meta.postBalances[0]++},
+]){const t=JSON.parse(JSON.stringify(splitFee));alter(t);assert.equal(transactionFact(t,wallet,'bad-split').classification,'unclassified');}
 const dir=fs.mkdtempSync(path.join(os.tmpdir(),'nav-check-'));
 let unknown=false, height=101, signatureStatus=null;
 const connection={
@@ -152,12 +163,12 @@ global.fetch=async url=>{if(url.includes('/quote?'))throw new Error('no route');
  if(savedWalletPrices===undefined)delete process.env.DLMM_HELIUS_WALLET_PRICES;else process.env.DLMM_HELIUS_WALLET_PRICES=savedWalletPrices;
  if(savedKey===undefined)delete process.env.HELIUS_API_KEY;else process.env.HELIUS_API_KEY=savedKey;
  // Upgrade cached unknown facts once, using fresh on-chain observations.
- fs.writeFileSync(path.join(dir,'dlmm_wallet_transactions.jsonl'),JSON.stringify({signature:'sig',wallet,schema_version:7,classification:'unclassified'})+'\n');
+ fs.writeFileSync(path.join(dir,'dlmm_wallet_transactions.jsonl'),JSON.stringify({signature:'sig',wallet,schema_version:8,classification:'unclassified'})+'\n');
  let refreshed=0;
  connection.getParsedTransaction=async()=>{refreshed++;return {...cleaning,slot:100,blockTime:tx.blockTime}};
  await collect({...args,historyOnly:true}); await collect({...args,historyOnly:true});
  const upgraded=fs.readFileSync(path.join(dir,'dlmm_wallet_transactions.jsonl'),'utf8').trim().split('\n').map(JSON.parse).filter(f=>f.signature==='sig').at(-1);
- assert.equal(upgraded.schema_version,8);assert.equal(upgraded.classification,'rent_maintenance');assert.equal(refreshed,1);
+ assert.equal(upgraded.schema_version,9);assert.equal(upgraded.classification,'rent_maintenance');assert.equal(refreshed,1);
  const recordedEvent={signature:'sig',wallet,position:'p'};
  fs.writeFileSync(path.join(dir,'dlmm_transactions.jsonl'),JSON.stringify(recordedEvent)+'\n');
  fs.writeFileSync(path.join(dir,'dlmm_wallet_transactions.jsonl'),JSON.stringify({...transactionFact(tx,wallet,'sig',recordedEvent),schema_version:7})+'\n');
