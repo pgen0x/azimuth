@@ -13,10 +13,35 @@ from unittest.mock import patch
 
 import dlmm_pipeline as pipeline
 import dlmm_stats as stats
+import dlmm_realized as realized_module
 from dlmm_realized import apply_realized
 
 
 def main():
+    # Missing/invalid API economics must be retried, while measured zero is valid.
+    with tempfile.TemporaryDirectory() as directory:
+        target = str(Path(directory) / "realized.jsonl")
+        position = dict(positionAddress="p", closedAt=200, createdAt=100, isClosed=True,
+                        pnlSol="0", pnlSolPctChange="0", allTimeDeposits={"total": {"sol": "0.1"}},
+                        allTimeWithdrawals={"total": {"sol": "0.1"}}, allTimeFees={"total": {"sol": "0"}})
+        with patch.object(realized_module, "REALIZED_PATH", target), \
+             patch.object(realized_module, "load_realized", side_effect=lambda: {} if not Path(target).exists()
+                          else {r["position"]: r for r in map(json.loads, Path(target).read_text().splitlines())}), \
+             patch.object(realized_module.time, "time", return_value=300), \
+             patch.object(realized_module, "fetch_pools", return_value=[dict(poolAddress="pool", lastClosedAt=200)]):
+            invalid = [dict(position, pnlSol=v) for v in [None, "bad", "NaN", "Infinity", True]]
+            invalid += [dict(position, pnlSolPctChange=None), dict(position, allTimeFees=None),
+                        dict(position, allTimeWithdrawals={}), dict(position, isClosed=False),
+                        dict(position, allTimeDeposits={"total": {"sol": "0"}})]
+            for row in invalid:
+                with patch.object(realized_module, "fetch_closed_positions", return_value=[row]):
+                    assert realized_module.backfill("wallet", 1, quiet=True) == 0
+            with patch.object(realized_module, "fetch_closed_positions", return_value=[position]):
+                assert realized_module.backfill("wallet", 1, quiet=True) == 1
+                assert realized_module.backfill("wallet", 1, quiet=True) == 0
+            saved = json.loads(Path(target).read_text())
+            assert saved["realized_sol"] == 0 and saved["fee_sol"] == 0
+
     # Pulse freshness must compare the same five-minute window as screening.
     for ratio, address, expected in [
         (0.05, "pool", 0.05), ({"5m": 0.05, "24h": 100}, "pool", 0.05),

@@ -216,3 +216,12 @@ unclassified facts; already recorded transactions at schema 7 stay cached.
 ### Token-account rent evidence
 
 New finalized facts include additive `token_rent_evidence` (version 1): exact wallet-funded token-account creations and fully reconciled pure empty-account refunds, keyed by account address and mint. Wrapped SOL, failed transactions, ambiguous funding and combined/custom closes are excluded. Empty lists mean no supported evidence was identified, not proof that no rent moved. Existing schema-11 facts remain cached; a missing field is historical evidence not yet measured, and does not trigger migration. These records do not allocate shared fees, change root cash, or authorize re-entry.
+
+### Closed-position LP value validation
+
+Realized backfill caches only explicitly closed positions with finite PnL and
+percentage values, a positive deposit, and nonnegative withdrawal/fee values.
+Missing or malformed API economics remain unmeasured and retryable; measured
+zero PnL and zero fees remain valid. Existing historical zero records cannot
+be distinguished from older defaulted zeros without fetching source evidence.
+These LP valuations still exclude wallet transaction costs and later rent refunds.

@@ -28,6 +28,7 @@ Usage:
 """
 import argparse
 import json
+import math
 import os
 import time
 import urllib.request
@@ -71,9 +72,12 @@ def _get(url, tries=3):
 
 
 def _f(value, default=0.0):
+    if isinstance(value, bool):
+        return default
     try:
-        return float(value)
-    except (TypeError, ValueError):
+        number = float(value)
+        return number if math.isfinite(number) else default
+    except (TypeError, ValueError, OverflowError):
         return default
 
 
@@ -176,9 +180,16 @@ def backfill(wallet, days, quiet=False):
                 pos_addr = pos.get("positionAddress")
                 if closed_at < cutoff or not pos_addr or pos_addr in known:
                     continue
-                dep = _f(pos.get("allTimeDeposits", {}).get("total", {}).get("sol"))
-                wdr = _f(pos.get("allTimeWithdrawals", {}).get("total", {}).get("sol"))
-                fee = _f(pos.get("allTimeFees", {}).get("total", {}).get("sol"))
+                try:
+                    dep, wdr, fee = [_f(pos[key]["total"]["sol"], None) for key in
+                                     ("allTimeDeposits", "allTimeWithdrawals", "allTimeFees")]
+                except (KeyError, TypeError):
+                    continue  # Partial indexing remains retryable, never a cached zero.
+                pnl = _f(pos.get("pnlSol"), None)
+                pct = _f(pos.get("pnlSolPctChange"), None)
+                if (None in (dep, wdr, fee, pnl, pct) or dep <= 0 or wdr < 0 or fee < 0
+                        or pos.get("isClosed") is not True):
+                    continue
                 rec = {
                     "position": pos_addr,
                     "pool": addr,
@@ -190,8 +201,8 @@ def backfill(wallet, days, quiet=False):
                     "fee_sol": round(fee, 9),
                     # The API's own figure; equals withdrawal + fees - deposit, so no
                     # price opinion of ours can enter it.
-                    "realized_sol": round(_f(pos.get("pnlSol")), 9),
-                    "realized_pct": round(_f(pos.get("pnlSolPctChange")), 4),
+                    "realized_sol": round(pnl, 9),
+                    "realized_pct": round(pct, 4),
                     "source": "meteora_datapi_flows",
                     "fetched_at": int(time.time()),
                 }
