@@ -453,6 +453,29 @@ const clearMarker = () => fs.rmSync(marker, { force: true });
   fs.rmSync(path.dirname(marker), {recursive: true, force: true});
   fs.rmSync(path.join(root, "memories/dlmm_pending_swaps"), {recursive: true, force: true});
   const beforeRent = sends;
+  const originalHeight = Connection.prototype.getBlockHeight;
+  let rentHeightReads = 0;
+  Connection.prototype.getBlockHeight = async () => { rentHeightReads++; return height; };
+  for (const pendingDir of ["dlmm_pending_deploys", "dlmm_pending_swaps"]) {
+    const pendingFile = path.join(root, "memories", pendingDir, "guard-test.json");
+    fs.mkdirSync(path.dirname(pendingFile), {recursive: true});
+    for (const lastValidBlockHeight of [height, null]) {
+      fs.writeFileSync(pendingFile, JSON.stringify({lastValidBlockHeight}));
+      rentHeightReads = 0;
+      await assert.rejects(reclaimEmptyAccounts(true), /Rent reclaim refused: wait for pending trading blockhash expiry/);
+      assert.equal(rentHeightReads, 1); // Policy refusal must not query every RPC.
+      assert.equal(sends, beforeRent);
+    }
+    fs.rmSync(pendingFile);
+  }
+  rentHeightReads = 0;
+  Connection.prototype.getBlockHeight = async () => {
+    if (++rentHeightReads === 1) throw new Error("RPC timeout");
+    return height;
+  };
+  assert.equal((await reclaimEmptyAccounts()).eligible, 2);
+  assert.equal(rentHeightReads, 2); // Actual provider failures still fail over.
+  Connection.prototype.getBlockHeight = originalHeight;
   assert.equal((await reclaimEmptyAccounts()).eligible, 2); assert.equal(sends, beforeRent);
   fee = null;
   await assert.rejects(reclaimEmptyAccounts(true), /unknown or uneconomic/); assert.equal(sends, beforeRent);
