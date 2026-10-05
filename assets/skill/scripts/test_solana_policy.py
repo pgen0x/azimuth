@@ -23,6 +23,20 @@ from dlmm_realized import apply_realized
 
 
 def main():
+    # Proved cash can disagree with the mark; legacy/unresolved marks retain
+    # the existing conservative ranking penalty without being called cash.
+    with patch.object(pipeline, "load_signal_weights", return_value={}):
+        for fields, expected in [
+            ({"prior_pnl_basis":"matched_refund_cash", "prior_net_pnl_sol":-.02, "prior_mark_pnl_sol":.01}, "prior_cash_loss-20"),
+            ({"prior_pnl_basis":"pre_swap_mark_only", "prior_mark_pnl_sol":-.01}, "prior_mark_loss-20"),
+            ({"prior_net_pnl_sol":-.01}, "prior_mark_loss-20"),
+            ({"prior_pnl_basis":"matched_refund_cash", "prior_net_pnl_sol":0, "prior_mark_pnl_sol":-.01}, None),
+            ({"prior_pnl_basis":"pre_swap_mark_only"}, None),
+        ]:
+            candidate = {"name":"P", "score":100, **fields}
+            pipeline.apply_batch_conviction([candidate])
+            losses = [n for n in candidate["_conviction_notes"] if n.startswith("prior_")]
+            assert losses == ([expected] if expected else []), losses
     # Exercise the real shell loop: slow reconciliation must not stall risk
     # checks or launch a duplicate report worker on every tick.
     with tempfile.TemporaryDirectory() as directory:

@@ -1003,9 +1003,11 @@ func (s *Scanner) pollMode(ctx context.Context, mp meteora.ModeParams) {
 		// the agent weighs a mixed history when picking (the pipeline's
 		// deterministic ">=2 closes net negative" skip still applies at
 		// deploy time — this is the advisory layer on top).
-		if n, pnl, ok := s.seen.PoolCloseStats(ctx, cand.Pool); ok {
-			cand.PriorCloses = &n
-			cand.PriorNetPnlSOL = &pnl
+		if history := s.seen.PoolCloseHistory(ctx, cand.Pool); history != nil {
+			cand.PriorCloses = &history.Closes
+			cand.PriorMarkPnlSOL = history.Mark
+			cand.PriorNetPnlSOL = history.Net
+			cand.PriorPnlBasis = history.Basis
 		}
 
 		batch = append(batch, cand)

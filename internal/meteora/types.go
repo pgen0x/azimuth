@@ -137,8 +137,10 @@ type Candidate struct {
 	// whose history nets negative; these fields let the agent ALSO weigh a
 	// mixed record when picking between candidates. Absent = no history
 	// (or in-memory dedup backend without Redis).
-	PriorCloses    *int     `json:"prior_closes,omitempty"`
-	PriorNetPnlSOL *float64 `json:"prior_net_pnl_sol,omitempty"`
+	PriorCloses     *int     `json:"prior_closes,omitempty"`
+	PriorNetPnlSOL  *float64 `json:"prior_net_pnl_sol,omitempty"`
+	PriorMarkPnlSOL *float64 `json:"prior_mark_pnl_sol,omitempty"`
+	PriorPnlBasis   string   `json:"prior_pnl_basis,omitempty"`
 
 	// GMGN holder-quality enrichment (gmgn.go). Advisory only — absent means
 	// the fetch failed, the gate is disabled, or the field was omitted

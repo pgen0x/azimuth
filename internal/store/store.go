@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"encoding/json"
+	"math"
 	"os"
 	"strconv"
 	"strings"
@@ -75,29 +76,66 @@ func (s *Seen) MarkIfNewTTL(ctx context.Context, id string, ttl time.Duration) (
 	return true, nil
 }
 
-// PoolCloseStats summarizes a pool's close journal written by dlmm_monitor.py
-// (sol:dlmm:history:pool:<pool> — last 10 closes, 30d TTL). Returns ok=false
-// when there is no history, no Redis backend, or the read fails: absent data
-// must read as "unknown", never as "clean record" (fail-open convention).
-func (s *Seen) PoolCloseStats(ctx context.Context, pool string) (closes int, netPnlSOL float64, ok bool) {
+// PoolHistory keeps the journal mark separate from fully matched wallet cash.
+type PoolHistory struct {
+	Closes     int      `json:"prior_closes"`
+	Mark       *float64 `json:"prior_mark_pnl_sol"`
+	Net        *float64 `json:"prior_net_pnl_sol"`
+	LastClose  int64    `json:"last_close_ts"`
+	ObservedAt float64  `json:"observed_at"`
+	Basis      string   `json:"prior_pnl_basis"`
+}
+
+func (s *Seen) PoolCloseHistory(ctx context.Context, pool string) *PoolHistory {
 	if s.rdb == nil {
-		return 0, 0, false
+		return nil
 	}
 	entries, err := s.rdb.LRange(ctx, "sol:dlmm:history:pool:"+pool, 0, 9).Result()
-	if err != nil || len(entries) == 0 {
-		return 0, 0, false
+	if err != nil {
+		return nil
 	}
+	now := time.Now().Unix()
+	h := &PoolHistory{Basis: "pre_swap_mark_only"}
+	total, complete := 0.0, true
 	for _, e := range entries {
 		var rec struct {
-			PnlSOL float64 `json:"pnl_sol"`
+			TS  int64    `json:"ts"`
+			Pnl *float64 `json:"pnl_sol"`
 		}
-		if json.Unmarshal([]byte(e), &rec) != nil {
+		if json.Unmarshal([]byte(e), &rec) != nil || rec.TS > now || rec.TS < now-30*86400 {
 			continue
 		}
-		closes++
-		netPnlSOL += rec.PnlSOL
+		h.Closes++
+		if rec.TS > h.LastClose {
+			h.LastClose = rec.TS
+		}
+		if rec.Pnl == nil || math.IsNaN(*rec.Pnl) || math.IsInf(*rec.Pnl, 0) {
+			complete = false
+		} else {
+			total += *rec.Pnl
+		}
 	}
-	return closes, netPnlSOL, closes > 0
+	if h.Closes == 0 {
+		return nil
+	}
+	if complete {
+		h.Mark = &total
+	}
+	raw, err := s.rdb.Get(ctx, "sol:dlmm:cash_history").Result()
+	if err != nil {
+		return h
+	}
+	var cached map[string]PoolHistory
+	if json.Unmarshal([]byte(raw), &cached) != nil {
+		return h
+	}
+	cash, ok := cached[pool]
+	if ok && cash.Basis == "matched_refund_cash" && cash.Net != nil &&
+		cash.LastClose == h.LastClose && cash.Closes == h.Closes &&
+		cash.ObservedAt <= float64(now)+1 && cash.ObservedAt >= float64(now-900) {
+		h.Net, h.Basis = cash.Net, cash.Basis
+	}
+	return h
 }
 
 // CooldownRemaining checks the same symbol, mint and pool cooldowns as the

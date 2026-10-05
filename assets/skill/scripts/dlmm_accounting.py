@@ -413,12 +413,23 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--profile", type=Path, default=PROFILE_DIR)
     parser.add_argument("--refresh", action="store_true")
+    parser.add_argument("--sync-pool-memory", action="store_true", help="Publish local reconciled pool history to Redis; no RPC")
     parser.add_argument("--hours", type=int, default=24, help="Select chains active in this window; include all their recorded legs")
     parser.add_argument("--check-root")
     parser.add_argument("--opportunity", type=float)
     parser.add_argument("--floor", type=float, default=-0.015)
     parser.add_argument("--strike-cap", type=int, default=3)
     args = parser.parse_args()
+    if args.sync_pool_memory:
+        now = time.time()
+        summary = pool_cash_history(rows(args.profile / "memories/dlmm_closes.jsonl"), report(args.profile), now)
+        response = subprocess.run(["redis-cli", "--raw", "-x", "eval", "return redis.call('SET', KEYS[1], ARGV[1], 'EX', 900)", "1", "sol:dlmm:cash_history"],
+                                  input=json.dumps(summary, allow_nan=False), text=True,
+                                  capture_output=True, timeout=10, check=True)
+        if response.stdout.strip() != "OK":
+            raise RuntimeError("Pool cash history Redis write failed")
+        print(json.dumps({"pools": len(summary), "observed_at": now}))
+        return
     if args.check_root:
         print(json.dumps(check_root(args.profile, args.check_root, args.opportunity, args.floor, args.strike_cap)))
         return

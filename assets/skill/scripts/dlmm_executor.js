@@ -1246,6 +1246,11 @@ async function main() {
       const { collect } = require("./dlmm_nav.js");
       const wallet = process.env.SOLANA_PUBLIC_KEY || getWallet().publicKey.toString();
       const nav = await collect({dir: path.join(PROFILE_DIR, "memories"), wallet, PublicKey, rpc: runWithFailover});
+      // Advisory local cache only; publication failure must not hide collected facts.
+      try {
+        require("child_process").execFileSync("python3", [path.join(SCRIPT_DIR, "dlmm_accounting.py"),
+          "--profile", PROFILE_DIR, "--sync-pool-memory"], {encoding:"utf8", timeout:20000});
+      } catch (_) { console.warn("[ACCOUNTING] Pool cash history publication failed; cached evidence will expire"); }
       console.log(JSON.stringify({recorded, nav}));
     } else if (command === "bin-snapshot") {
       const lower = Number(args[2]), upper = Number(args[3]);
