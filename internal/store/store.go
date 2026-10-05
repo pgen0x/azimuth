@@ -122,6 +122,23 @@ func (s *Seen) CooldownRemaining(ctx context.Context, symbol, mint, pool string)
 	return remaining
 }
 
+// CapacityRemaining reuses a recent pipeline refusal to avoid dispatching AI
+// while entry capacity is unavailable. The pipeline owns the five-minute TTL;
+// missing/error states proceed to normal entry checks and never authorize a trade.
+func (s *Seen) CapacityRemaining(ctx context.Context, mode string) time.Duration {
+	if s.rdb == nil {
+		return 0
+	}
+	var remaining time.Duration
+	for _, scope := range []string{"wallet", mode} {
+		d, err := s.rdb.TTL(ctx, "sol:dlmm:capacity:"+scope).Result()
+		if err == nil && d > remaining && d <= 5*time.Minute {
+			remaining = d
+		}
+	}
+	return remaining
+}
+
 // RobinhoodCooldown reports how long this pool (or its token) is still blocked
 // from re-entry, and why. Zero duration means clear.
 //
