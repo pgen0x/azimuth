@@ -74,6 +74,24 @@ def main():
             os.killpg(process.pid, signal.SIGKILL)
             process.wait()
 
+    # The real webhook count expressions must treat an empty wallet as a
+    # successful zero, including when a model combines steps using &&.
+    subscription = json.loads((Path(__file__).resolve().parents[2] /
+                               "hermes/webhook_subscriptions.json").read_text())
+    prompt = subscription['dlmm-signal']['prompt']
+    assert 'set `workdir` to `__PROFILE__`' in prompt
+    assert 'redis-cli --no-raw get sol:dlmm:signal_weights' in prompt
+    counts = [line.split(' | ', 1)[1] for line in prompt.splitlines()
+              if line.startswith('for a in $(redis-cli smembers')]
+    assert len(counts) == 2
+    for expression in counts:
+        expression = expression.replace('MODE', 'turnover').replace('POOL', 'ABC')
+        for payload, expected in [('', '0'), ('{"mode":"pulse","pool":"DEF"}\n', '0'),
+                                  ('{"mode":"turnover","pool":"ABC"}\n', '1')]:
+            result = subprocess.run(['bash', '-o', 'pipefail', '-c', expression],
+                                    input=payload, text=True, capture_output=True)
+            assert result.returncode == 0 and result.stdout.strip() == expected, result
+
     # Missing/invalid API economics must be retried, while measured zero is valid.
     with tempfile.TemporaryDirectory() as directory:
         target = str(Path(directory) / "realized.jsonl")
