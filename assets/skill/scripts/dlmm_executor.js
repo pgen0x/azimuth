@@ -535,11 +535,12 @@ async function deployPosition(poolAddressStr, amountX, amountY, binsBelow, binsA
           submitted = true;
           txHashes.push(signature);
           console.warn(`[TX] ${JSON.stringify({stage: "send", signature, blockhash, lastValidBlockHeight})}`);
-          const hash = await connection.sendRawTransaction(raw, {
-            preflightCommitment: "confirmed", maxRetries: RPC_SEND_MAX_RETRIES
+          // Retry the same signed transaction, never the position builder.
+          return await runWithFailover(async (rpc) => {
+            const hash = await rpc.sendRawTransaction(raw, CONFIRM_OPTIONS);
+            await confirmSignedTransaction(rpc, { signature: hash, blockhash, lastValidBlockHeight });
+            return hash;
           });
-          await confirmSignedTransaction(connection, { signature: hash, blockhash, lastValidBlockHeight });
-          return hash;
         };
         if (binsBelow + binsAbove > 69) {
           const creates = await pool.createExtendedEmptyPosition(minBinId, maxBinId,
