@@ -135,3 +135,34 @@ with tempfile.TemporaryDirectory() as directory:
         result=shadow_module.collect(profile,profile/"rejects.jsonl")
         assert result["bin_snapshots_attempted"]==1 and fetch.call_args.args[0][3]=="long"
 print("Mode-bounded bin collection and explicit partial-horizon replay passed")
+
+# Execution comparisons undo locked/refunded rent and fees exactly once; they
+# must not silently classify missing, failed or late evidence as zero slippage.
+from dlmm_evaluate import swap_execution
+quote = dict(input_mint="TOKEN", output_mint="So11111111111111111111111111111111111111112",
+             in_amount="10", out_amount="1000", minimum_out_amount="990",
+             authorized_slippage_bps=100, observed_at=100)
+event = dict(kind="swap", signature="ok", position="position", ts=101, swap_quote=quote)
+fact = dict(observed_at=110, failed=False, basis="finalized_transaction_balances",
+            wallet_delta_lamports=795, fee_lamports=5, token_deltas_raw={"TOKEN":"-10"},
+            token_rent_evidence=dict(version=1, funded=[dict(lamports=300)], refunded=[dict(lamports=100)]))
+failed = dict(event, signature="failed", swap_quote=dict(quote, authorized_slippage_bps=300))
+missing = dict(event, signature="missing")
+late = dict(event, signature="late")
+result = swap_execution([event, event, failed, missing, late, dict(event, ts=201)],
+                        {"ok":fact, "failed":dict(fact, failed=True), "late":dict(fact, observed_at=201)}, 100, 200)
+assert len(result['attempts']) == 4
+assert result['attempts'][0]['actual_gross_lamports'] == 1000
+assert result['by_slippage_bps']['100']['pending'] == 2
+assert result['by_slippage_bps']['300']['failed'] == 1
+assert result['by_slippage_bps']['300']['known_network_fee_lamports'] == 5
+assert result['by_slippage_bps']['100']['measured_shortfall_lamports'] == 0
+for bad in [dict(fact, token_rent_evidence={}), dict(fact, token_deltas_raw={"TOKEN":"-9"}),
+            dict(fact, fee_lamports=float('nan')), dict(fact, wallet_delta_lamports=True)]:
+    assert swap_execution([event], {"ok":bad}, 100, 200)['attempts'][0]['status'] == 'unmeasured'
+for bad in [dict(quote, out_amount="NaN"), dict(quote, minimum_out_amount="1001"),
+            dict(quote, observed_at=102), dict(quote, output_mint="OTHER")]:
+    assert swap_execution([dict(event, swap_quote=bad)], {"ok":fact}, 100, 200)['attempts'][0]['status'] == 'unmeasured'
+improved = swap_execution([event], {"ok":dict(fact, wallet_delta_lamports=805)}, 100, 200)
+assert improved['attempts'][0]['shortfall_lamports'] == -10
+print("Swap quote/fill evaluation preserves rent, failed fees, cutoff and unknown evidence")

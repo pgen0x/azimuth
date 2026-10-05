@@ -92,6 +92,69 @@ def root_cash_cohort(accounting, start, end):
                             reasons=c['reasons']) for c in cohort])
 
 
+def swap_execution(events, facts, start, end):
+    """Compare recorded SOL exit quotes with finalized cash, undoing fees/rent."""
+    results = {}
+    for event in events:
+        if event.get('kind') != 'swap' or not start <= event.get('ts', 0) <= end:
+            continue
+        signature = event['signature']
+        item = dict(signature=signature, position=event.get('position'),
+                    ts=event['ts'], status='unmeasured', reason='quote_or_fact_incomplete')
+        results[signature] = item  # A repeated journal line is not another attempt.
+        quote = event.get('swap_quote') or {}
+        bps = quote.get('authorized_slippage_bps')
+        if type(bps) is int and 0 < bps <= 10000:
+            item['slippage_bps'] = bps
+        fact = facts.get(signature)
+        if not fact or fact.get('observed_at', end+1) > end or fact.get('landed') is False:
+            item.update(status='pending', reason='no_finalized_fact_at_cutoff')
+            continue
+        fee = fact.get('fee_lamports')
+        if type(fee) is int and fee >= 0:
+            item['network_fee_lamports'] = fee
+        if fact.get('failed') is True:
+            item.update(status='failed', reason='finalized_transaction_failed')
+            continue
+        rent = fact.get('token_rent_evidence') or {}
+        amounts = [quote.get(k) for k in ('in_amount', 'out_amount', 'minimum_out_amount')]
+        delta = fact.get('wallet_delta_lamports')
+        if (fact.get('failed') is not False or fact.get('basis') != 'finalized_transaction_balances'
+                or quote.get('output_mint') != 'So11111111111111111111111111111111111111112'
+                or not all(isinstance(v, str) and v.isascii() and v.isdigit() and int(v) > 0 for v in amounts)
+                or not isinstance(quote.get('observed_at'), (int, float))
+                or not 0 < quote['observed_at'] <= event['ts']
+                or type(delta) is not int or type(fee) is not int or fee < 0
+                or rent.get('version') != 1 or 'slippage_bps' not in item):
+            continue
+        incoming, quoted, minimum = map(int, amounts)
+        if minimum > quoted or fact.get('token_deltas_raw', {}).get(quote.get('input_mint')) != str(-incoming):
+            continue
+        funded, refunded = rent.get('funded'), rent.get('refunded')
+        if (not isinstance(funded, list) or not isinstance(refunded, list)
+                or any(not isinstance(r, dict) or type(r.get('lamports')) is not int
+                       or r['lamports'] < 0 for r in funded + refunded)):
+            continue
+        gross = delta + fee + sum(r['lamports'] for r in funded) - sum(r['lamports'] for r in refunded)
+        if gross < 0:
+            continue
+        item.update(status='measured', reason=None, quote_out_lamports=quoted,
+                    minimum_out_lamports=minimum, actual_gross_lamports=gross,
+                    shortfall_lamports=quoted-gross, below_quote_minimum=gross < minimum)
+    groups = {}
+    for item in results.values():
+        group = groups.setdefault(str(item.get('slippage_bps', 'unknown')),
+                                  dict(attempts=0, measured=0, failed=0, pending=0, unmeasured=0,
+                                       known_network_fee_lamports=0, measured_shortfall_lamports=0))
+        group['attempts'] += 1
+        group[item['status']] += 1
+        group['known_network_fee_lamports'] += item.get('network_fee_lamports', 0)
+        group['measured_shortfall_lamports'] += item.get('shortfall_lamports', 0)
+    return dict(attempts=list(results.values()), by_slippage_bps=groups,
+                basis='finalized_native_delta_plus_fee_plus_funded_minus_refunded_token_rent',
+                limitation='Quote shortfall is not trading PnL or causal savings. Signed attempts only; pre-broadcast failures are not counted. Missing facts remain explicit; groups may contain different pools and market conditions.')
+
+
 def evaluate(profile, start, end, rejects):
     memory=profile/'memories'
     accounting=report(profile, end)
@@ -164,6 +227,7 @@ def evaluate(profile, start, end, rejects):
         token_counts=dict(collections.Counter(t.get('basis','unknown') if t.get('mark_sol') is not None else 'unpriced' for t in last_nav.get('tokens',[]))))
     live=[r for r in rows(memory/'dlmm_root_decisions.jsonl') if start<=r['ts']<=end]
     return dict(start=start,end=end,generated_at=int(time.time()),close_count=len(closes),close_account_proofs=close_proofs,accounting=accounting,
+                swap_execution=swap_execution(events,facts,start,end),
                 root_cash_cohort=root_cash_cohort(accounting,start,end),
                 rent_refund_groups=[g for g in accounting.get('rent_refund_groups', [])
                                     if start <= g['first_activity'] <= g['last_activity'] <= end],
@@ -244,6 +308,8 @@ def main():
         '## Cash including matched rent refunds (full-life groups)',
         json.dumps(data['rent_refund_groups']),
         'These groups overlap the root cash above: do not add the subtotals together. Each shared reclaim fee is included once. Unmatched refunds remain unattributed; this is not portfolio NAV or a per-root win rate.',
+        '## Swap execution by authorized slippage',json.dumps(data['swap_execution']['by_slippage_bps']),
+        data['swap_execution']['limitation'],
         '## Latest token valuation coverage',json.dumps(data['price_coverage']),
         '## Root-chain replay',f"Decisions: {len(data['root_replay'])}; reasons: {dict(collections.Counter(r['reason'] for r in data['root_replay']))}",
         '## Pre-settlement eligibility replay',f"Decisions: {len(data['eligibility_replay'])}; evaluated before settlement refresh, separately from executor authorization.",
