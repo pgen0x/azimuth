@@ -107,3 +107,31 @@ with tempfile.TemporaryDirectory() as root:
         result=evaluation_module.evaluate(profile,100,200,profile/"rejects.jsonl")
     assert result["rent_refund_groups"]==[inside]
 print("Refund groups exclude carry-in roots and refunds after the evaluation window")
+
+# Fixed mode horizons use the first terminal observation, not later outcomes.
+import dlmm_shadow as shadow_module
+pulse_entry=dict(entry,mode="pulse")
+terminal=dict(end,ts=1801)
+later=dict(end,ts=2001,price=999)
+horizon=bin_replay(pulse_entry,[end,terminal,later])
+assert horizon["horizon_complete"] and horizon["observed_until_ts"]==1801
+assert horizon["schemes"]==bin_replay(pulse_entry,[end,terminal])["schemes"]
+assert not bin_replay(pulse_entry,[end])["horizon_complete"]
+assert bin_replay(pulse_entry,[dict(end,ts=2402)])["status"]=="unmeasured"
+with tempfile.TemporaryDirectory() as directory:
+    profile=Path(directory);memory=profile/"memories";(memory/"dlmm_entries").mkdir(parents=True)
+    # At t=10000, pulse is inside terminal grace; turnover is expired, while
+    # multiday still needs observations. No RPC/subprocess for expired entries.
+    for pos,mode,started in [("pulse","pulse",8100),("expired","turnover",5000),("long","multiday",5000)]:
+        e=dict(entry,position=pos,pool=pos,mode=mode,bin_snapshot=dict(entry["bin_snapshot"],ts=started))
+        (memory/"dlmm_entries"/(pos+".json")).write_text(json.dumps(e))
+    with patch.object(shadow_module.time,"time",return_value=10000), \
+         patch.object(shadow_module.subprocess,"check_output",return_value=json.dumps(dict(end,ts=10000)).encode()) as fetch:
+        result=shadow_module.collect(profile,profile/"rejects.jsonl")
+        assert result["bin_snapshots_attempted"]==2
+        assert {call.args[0][3] for call in fetch.call_args_list}=={"pulse","long"}
+    with patch.object(shadow_module.time,"time",return_value=10300), \
+         patch.object(shadow_module.subprocess,"check_output",return_value=json.dumps(dict(end,ts=10300)).encode()) as fetch:
+        result=shadow_module.collect(profile,profile/"rejects.jsonl")
+        assert result["bin_snapshots_attempted"]==1 and fetch.call_args.args[0][3]=="long"
+print("Mode-bounded bin collection and explicit partial-horizon replay passed")

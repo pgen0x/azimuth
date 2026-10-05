@@ -50,9 +50,14 @@ def bin_replay(entry, samples, cost_sol=None):
     initial = entry.get('bin_snapshot')
     if not initial or not samples:
         return {'status': 'unmeasured', 'reason': 'missing_entry_or_followup_bins'}
-    ordered = sorted([s for s in samples if s['ts'] > initial['ts']], key=lambda s: s['ts'])
+    target = initial['ts'] + HORIZONS.get(entry.get('mode'), 86400)
+    ordered = sorted([s for s in samples if initial['ts'] < s['ts'] <= target+600], key=lambda s: s['ts'])
     if not ordered:
-        return {'status': 'pending'}
+        return {'status': 'unmeasured' if any(s['ts'] > target+600 for s in samples) else 'pending',
+                'reason': 'no_followup_within_mode_horizon', 'horizon_target_ts': target}
+    terminal = next((i for i,s in enumerate(ordered) if s['ts'] >= target), None)
+    if terminal is not None:
+        ordered = ordered[:terminal+1]  # First terminal observation, never a later favorable sample.
     start = {b['id']: b for b in initial['bins']}
     if not start or any(int(b['supply']) <= 0 for b in start.values()):
         return {'status': 'unmeasured', 'reason': 'empty_bin_counterfactual_requires_market_impact_model'}
@@ -100,7 +105,9 @@ def bin_replay(entry, samples, cost_sol=None):
             il_vs_hodl_sol=float(principal-hodl),active_bin_utilization=float(utilization/elapsed),
             oor_samples=oor,observed_samples=len(ordered),gross_pnl_sol=float(gross),
             net_after_observed_cost_sol=float(gross)-cost_sol if cost_sol is not None else None)
-    return {'status':'modeled', 'basis':'infinitesimal_fixed_shares; sampled_OOR; observed_costs_only; no_slippage_or_recenter_counterfactual', 'schemes':results}
+    return {'status':'modeled', 'horizon_target_ts':target, 'observed_until_ts':ordered[-1]['ts'],
+            'horizon_complete':ordered[-1]['ts'] >= target,
+            'basis':'infinitesimal_fixed_shares; fixed_mode_horizon_with_600s_terminal_grace; sampled_OOR; observed_costs_only; no_slippage_or_recenter_counterfactual', 'schemes':results}
 
 
 def collect(profile, reject_file):
@@ -132,8 +139,10 @@ def collect(profile, reject_file):
     count=0
     for file in sorted((memory/'dlmm_entries').glob('*.json'),key=lambda p:latest.get(p.stem,0)):
         entry=json.loads(file.read_text()); initial=entry.get('bin_snapshot')
-        if not initial or time.time()-initial['ts']>86400: continue
+        if not initial: continue
         position=entry['position']
+        target=initial['ts']+HORIZONS.get(entry.get('mode'),86400)
+        if time.time()>target+600 or latest.get(position,0)>=target: continue
         if time.time()-latest.get(position,0)<240: continue
         if count>=12: break
         count+=1
