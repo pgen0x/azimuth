@@ -217,3 +217,28 @@ print("Rent refund group conservation, shared fees, ambiguous roots and observat
 args=deepcopy(original);args[0][0]["last_activity"]=215
 between,=rent_refund_groups(*args,220)
 assert between["last_activity"]==215 and between["cash_with_matched_refunds_sol"]==-210/1e9
+
+
+# Advisory pool memory must not promote marks, partial roots or shared cross-pool
+# refunds into realized net results. Shared fees count once for same-pool roots.
+from dlmm_accounting import pool_cash_history
+closes = [dict(position="a",pool="P",ts=100,pnl_sol=.01),
+          dict(position="b",pool="P",ts=110,pnl_sol=.02)]
+ledger = {"chains":[dict(root_chain_id=r,positions=[r],accounting_status="settled_cash") for r in ["a","b"]],
+          "rent_refund_groups":[dict(root_chain_ids=["a","b"],cash_with_matched_refunds_sol=-.003)]}
+summary = pool_cash_history(closes,ledger,120)["P"]
+assert summary["prior_mark_pnl_sol"] == .03 and summary["prior_net_pnl_sol"] == -.003
+assert summary["prior_cash_roots"] == 2 and summary["prior_closes"] == 2
+split = deepcopy(closes);split[1]["pool"]="Q"
+assert all(r["prior_net_pnl_sol"] is None for r in pool_cash_history(split,ledger,120).values())
+partial = deepcopy(ledger);partial["chains"][0]["positions"].append("missing-root-leg")
+assert pool_cash_history(closes,partial,120)["P"]["prior_net_pnl_sol"] is None
+partial = deepcopy(ledger);partial["chains"][0]["accounting_status"]="incomplete"
+assert pool_cash_history(closes,partial,120)["P"]["prior_net_pnl_sol"] is None
+assert pool_cash_history(closes,ledger,105)["P"]["prior_net_pnl_sol"] is None
+assert pool_cash_history(closes,ledger,120+31*86400) == {}
+zero=deepcopy(ledger);zero["rent_refund_groups"][0]["cash_with_matched_refunds_sol"]=0
+assert pool_cash_history(closes,zero,120)["P"]["prior_net_pnl_sol"] == 0
+bad=deepcopy(closes);bad[0]["pnl_sol"]=None
+assert pool_cash_history(bad,ledger,120)["P"]["prior_mark_pnl_sol"] is None
+print("Pool cash history separates marks, unknown cash, whole roots and shared fees")
