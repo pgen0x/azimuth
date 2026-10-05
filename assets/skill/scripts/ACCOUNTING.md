@@ -270,3 +270,17 @@ Compare quotes with finalized token movements and separately identified native
 rent/fee movements. A wallet native delta alone is not gross swap output. Old
 transactions lacking a saved quote remain unmeasured for quote-to-fill slippage;
 do not reconstruct their historical quotes from current market prices.
+
+### Mode-specific bin replay horizons
+
+Bin shadow collection uses the existing mode horizons: pulse 30 minutes,
+turnover 1 hour, casual 4 hours, multiday/unknown 24 hours. It permits a terminal
+observation up to ten minutes late, then stops requests for that entry. A stored
+terminal observation also stops further collection for that entry.
+
+Replay uses the first observation at/after the target within that grace window;
+it cannot select a more favorable later outcome. `horizon_complete` distinguishes
+full horizons from partial models, and `observed_until_ts` states the actual end.
+The evaluation summarizes these counts. Past snapshots remain available, but new
+extended holding-period bin studies beyond these horizons would require explicit
+collection changes. Trading monitors and actual position exits are independent.

@@ -197,6 +197,7 @@ def main():
         '## Pre-settlement eligibility replay',f"Decisions: {len(data['eligibility_replay'])}; evaluated before settlement refresh, separately from executor authorization.",
         '## Rejected candidates','```json',json.dumps(data['rejected_candidates'],indent=2),'```',
         '## Bin replay',str(dict(collections.Counter(r['status'] for r in data['bin_replay']))),
+        f"Modeled full horizons: {sum(r.get('horizon_complete') is True for r in data['bin_replay'])}; partial horizons: {sum(r['status']=='modeled' and r.get('horizon_complete') is False for r in data['bin_replay'])}.",
         '## Runtime',json.dumps(data['runtime']), '## Limits',*['- '+s for s in data['limits']],
         'Full evidence: evaluation.json and runtime.log. No trading parameters were changed by this evaluation.']
     (a.output/'report.md').write_text('\n\n'.join(lines)+'\n')
