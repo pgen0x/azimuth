@@ -89,6 +89,16 @@ const deploy = () => deployPosition("pool", 0, 0.1, 20, 0, "bid_ask", 1000);
 const clearMarker = () => fs.rmSync(marker, { force: true });
 
 (async () => {
+  if (worker && worker.startsWith("reclaim-")) {
+    const shares = worker === "reclaim-unknown" ? undefined : [{binId:0,positionLiquidity:worker === "reclaim-funded" ? "100000000000000000000000000" : "0"}];
+    vm.runInNewContext("findPoolForPosition = async () => ({pool: testPool, positionData: {publicKey: testWallet.publicKey, positionData: {lowerBinId:0,upperBinId:0,positionBinData: testShares}}});", Object.assign(sandbox, {testPool:pool,testShares:shares}));
+    pool.removeLiquidity = async () => { throw new Error("Empty reclaim must never withdraw"); };
+    pool.closePositionIfEmpty = async () => { builds++; return transaction(); };
+    Connection.prototype.sendRawTransaction = async () => { sends++; accountExists = worker === "reclaim-race"; return "signature"; };
+    const result = await closePosition("reclaim-position", true);
+    console.log(JSON.stringify({result,sends,builds,accountExists}));
+    return;
+  }
   if (worker && worker.startsWith("close-")) {
     vm.runInNewContext("findPoolForPosition = async () => ({pool: testPool, positionData: {publicKey: testWallet.publicKey, positionData: {lowerBinId: 0, upperBinId: 1}}});", Object.assign(sandbox, {testPool: pool}));
     let claimBuilds = 0;
@@ -116,6 +126,16 @@ const clearMarker = () => fs.rmSync(marker, { force: true });
     const result = await swapToken("So11111111111111111111111111111111111111112", "TOKEN", 0.1);
     console.log(JSON.stringify({ result, sends }));
     return;
+  }
+  for (const state of ["funded", "unknown", "empty", "race"]) {
+    const out = JSON.parse(execFileSync(process.execPath,[__filename,"reclaim-"+state,root],{encoding:"utf8"}));
+    if (["funded","unknown"].includes(state)) {
+      assert.equal(out.result.success,false); assert.equal(out.sends,0); assert.equal(out.builds,0);
+      assert.equal(out.result.funded,state === "funded");
+    } else {
+      assert.equal(out.sends,1); assert.equal(out.builds,1);
+      assert.equal(out.accountExists,state === "race"); // monitor must verify disappearance
+    }
   }
   reservePost=199999999;
   await assert.rejects(swapToken("So11111111111111111111111111111111111111112","TOKEN",0.1),/native reserve/);

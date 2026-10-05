@@ -13,8 +13,40 @@ import dlmm_pipeline as pipeline
 
 
 def main():
+    # API zero must not authorize withdrawal; funded refusals stay managed without
+    # creating a false exit settlement. An atomic no-op is not a verified close.
+    for result, live in [({"success":False,"funded":True}, True), ({"success":True,"txHashes":["sig"]}, True)]:
+        with patch.object(monitor, "run_command_json", return_value=(result,None)) as cmd, \
+             patch.object(monitor, "queue_settlement") as queue, \
+             patch.object(monitor, "position_live_onchain", return_value=live), \
+             patch.object(monitor, "position_residual_sol", return_value=0.12):
+            res, err = monitor.close_position("position", empty_only=True)
+            assert not res["success"]
+            assert "--empty-only" in cmd.call_args.args[0]
+            queue.assert_not_called()
+
     # Replay production eligibility and both profitable-exit cooldown shortcuts.
     tree = ast.parse(Path(monitor.__file__).read_text())
+    reconciliation = next(n for n in ast.walk(tree) if isinstance(n, ast.If)
+                          and ast.unparse(n.test) == "api_available and blockchain_positions")
+    for verdict, adopted in [({"success":False,"funded":True}, True),
+                             ({"success":False,"funded":False}, False),
+                             ({"success":True}, False)]:
+        writes = []
+        def reclaim(*args, **kwargs):
+            assert kwargs.get("empty_only") is True
+            return verdict, None
+        scope = dict(api_available=True, blockchain_positions={"pos":{"balances_sol":0,"pool":"pool"}},
+                     active_positions=[], get_position_metadata=lambda _:None,
+                     cli=SimpleNamespace(report_only=False), wallet_address="wallet", now=100,
+                     close_position=reclaim, recover_position_metadata=lambda *a:{"mode":"turnover","size_sol":0.12,"deployed_at":90},
+                     run_command=lambda cmd:writes.append(cmd), get_active_positions=lambda:[], json=json)
+        exec(compile(ast.Module(body=[reconciliation], type_ignores=[]), "orphan-replay", "exec"),scope)
+        assert bool(writes) is adopted
+        if adopted:
+            assert scope["adopt_meta"]["size_sol"] == 0.12
+            assert scope["adopt_meta"]["mode"] == "turnover"
+
     churn = next(n.value for n in ast.walk(tree) if isinstance(n, ast.Assign)
                  and any(isinstance(t, ast.Name) and t.id == "is_turnover_churn" for t in n.targets))
     shortcuts = [n.test for n in ast.walk(tree) if isinstance(n, ast.If)
