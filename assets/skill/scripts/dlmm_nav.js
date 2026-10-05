@@ -164,6 +164,51 @@ function pumpMaintenance(tx, wallet) {
   return {released_lamports:rent,service_fee_lamports:fees,cashback_lamports:cashback};
 }
 
+// Account-level evidence for later rent attribution. Missing historical fields
+// mean unmeasured; this additive field must not trigger a bulk cache migration.
+function tokenRentEvidence(tx, wallet) {
+  const meta=tx.meta, message=tx.transaction.message;
+  const keys=message.accountKeys.map(k=>k.pubkey.toString());
+  const evidence={version:1,funded:[],refunded:[]};
+  if (meta.err) return evidence;
+  const instructions=[...message.instructions,...(meta.innerInstructions || []).flatMap(g=>g.instructions)];
+  for (const token of meta.postTokenBalances || []) {
+    const n=token.accountIndex, account=keys[n];
+    if (!account || token.owner!==wallet || token.mint===SOL || meta.preBalances[n]!==0
+        || !Number.isSafeInteger(meta.postBalances[n]) || meta.postBalances[n]<=0) continue;
+    const creates=instructions.filter(i=>i.program==='system'
+      && ['createAccount','createAccountWithSeed'].includes(i.parsed?.type)
+      && i.parsed.info?.newAccount===account);
+    if (creates.length!==1 || creates[0].parsed.info.source!==wallet
+        || !TOKEN_PROGRAMS.includes(creates[0].parsed.info.owner)
+        || creates[0].parsed.info.lamports!==meta.postBalances[n]) continue;
+    evidence.funded.push({account,mint:token.mint,lamports:meta.postBalances[n]});
+  }
+  // Accept refunds only for pure empty-token-account closes with every native
+  // balance change explained. Combined swaps/LP closes stay unmeasured here.
+  if (keys[0]!==wallet || message.accountKeys[0].signer!==true
+      || !Number.isSafeInteger(meta.fee) || meta.fee<0
+      || meta.preBalances.length!==keys.length || meta.postBalances.length!==keys.length
+      || [...meta.preBalances,...meta.postBalances].some(n=>!Number.isSafeInteger(n)||n<0)
+      || (meta.postTokenBalances || []).length) return evidence;
+  const changes=keys.map(()=>0), refunds=[], closed=new Set(); changes[0]=-meta.fee;
+  for (const i of instructions) {
+    if (i.programId?.toString()==='ComputeBudget111111111111111111111111111111') continue;
+    const info=i.parsed?.info, n=keys.indexOf(info?.account);
+    const token=(meta.preTokenBalances || []).find(t=>t.accountIndex===n);
+    if (!TOKEN_PROGRAMS.includes(i.programId?.toString()) || i.parsed?.type!=='closeAccount'
+        || info?.destination!==wallet || info.owner!==wallet || n<=0 || closed.has(n)
+        || !token || token.owner!==wallet || token.mint===SOL || token.uiTokenAmount?.amount!=='0'
+        || meta.preBalances[n]<=0 || meta.postBalances[n]!==0) return evidence;
+    closed.add(n);
+    const lamports=meta.preBalances[n]; changes[n]-=lamports; changes[0]+=lamports;
+    refunds.push({account:keys[n],mint:token.mint,lamports});
+  }
+  if (refunds.length && closed.size===(meta.preTokenBalances || []).length
+      && changes.every((n,i)=>Number.isSafeInteger(n)&&meta.postBalances[i]-meta.preBalances[i]===n)) evidence.refunded=refunds;
+  return evidence;
+}
+
 function transactionFact(tx, wallet, signature, event) {
   const keys = tx.transaction.message.accountKeys.map(k => k.pubkey.toString());
   const index = keys.indexOf(wallet), meta = tx.meta;
@@ -244,6 +289,7 @@ function transactionFact(tx, wallet, signature, event) {
     token_post_balances_raw: Object.fromEntries(Object.entries(tokenPost).map(([m,a]) => [m,a.toString()])),
     external_flow_lamports: simpleTransfer ? external : maintenance ? 0 : null,
     rent_maintenance: maintenance,
+    token_rent_evidence: tokenRentEvidence(tx,wallet),
     position_account_closed: !meta.err && !!event?.position && keys.includes(event.position) && meta.preBalances[keys.indexOf(event.position)]>0 && meta.postBalances[keys.indexOf(event.position)]===0,
     classification: event ? 'recorded_bot' : simpleTransfer ? 'external_transfer' : passiveNFT ? 'passive_nft_outside_scope' : passiveToken ? 'external_token_inflow' : maintenance ? 'rent_maintenance' : meta.err ? 'failed' : 'unclassified',
     refundable_rent_locked_lamports: rentLocked, nonrefundable_account_cost_lamports: permanentRent,

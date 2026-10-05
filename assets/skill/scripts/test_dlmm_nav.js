@@ -17,6 +17,31 @@ const custom={...memoTransfer,transaction:{message:{...memoTransfer.transaction.
 assert.equal(transactionFact(custom,wallet,'custom').classification,'unclassified');
 assert.equal(transactionFact({...memoTransfer,meta:{...tx.meta,err:'failed'}},wallet,'failed-memo').external_flow_lamports,null);
 
+// Exact token-account funding and pure reclaim proof, without treating rent as income.
+const rentToken='TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb';
+const fundedToken={slot:100,blockTime:100,transaction:{message:{accountKeys:[{pubkey:wallet,signer:true},{pubkey:'ata'}],
+ instructions:[{program:'system',parsed:{type:'createAccount',info:{source:wallet,newAccount:'ata',owner:rentToken,lamports:200}}}]}},
+ meta:{err:null,fee:5,preBalances:[1000,0],postBalances:[795,200],preTokenBalances:[],
+ postTokenBalances:[{accountIndex:1,owner:wallet,mint:'mint',uiTokenAmount:{amount:'10'}}]}};
+assert.deepEqual(transactionFact(fundedToken,wallet,'fund').token_rent_evidence,
+ {version:1,funded:[{account:'ata',mint:'mint',lamports:200}],refunded:[]});
+for(const alter of [t=>{t.meta.err='failed'},t=>{t.transaction.message.instructions[0].parsed.info.source='other'},
+ t=>{t.meta.postBalances[1]=201},t=>{t.meta.postTokenBalances[0].mint='So11111111111111111111111111111111111111112'}]){
+ const t=JSON.parse(JSON.stringify(fundedToken));alter(t);assert.deepEqual(transactionFact(t,wallet,'unproved').token_rent_evidence.funded,[]);
+}
+const reclaimedToken=JSON.parse(JSON.stringify(fundedToken));
+reclaimedToken.transaction.message.instructions=[{programId:rentToken,parsed:{type:'closeAccount',info:{account:'ata',owner:wallet,destination:wallet}}}];
+Object.assign(reclaimedToken.meta,{preBalances:[1000,200],postBalances:[1195,0],preTokenBalances:[{accountIndex:1,owner:wallet,mint:'mint',uiTokenAmount:{amount:'0'}}],postTokenBalances:[]});
+assert.deepEqual(transactionFact(reclaimedToken,wallet,'refund').token_rent_evidence,
+ {version:1,funded:[],refunded:[{account:'ata',mint:'mint',lamports:200}]});
+for(const alter of [t=>{t.meta.err='failed'},t=>{t.meta.postBalances[0]--},
+ t=>{t.meta.preTokenBalances[0].uiTokenAmount.amount='1'},
+ t=>{t.transaction.message.instructions[0].parsed.info.destination='other'},
+ t=>{t.transaction.message.instructions.push({programId:'unknown'})},
+ t=>{t.transaction.message.instructions.push(t.transaction.message.instructions[0])}]){
+ const t=JSON.parse(JSON.stringify(reclaimedToken));alter(t);assert.deepEqual(transactionFact(t,wallet,'unproved').token_rent_evidence.refunded,[]);
+}
+
 const closed={...tx,meta:{...tx.meta,preBalances:[1000,100],postBalances:[1095,0]}};
 assert.equal(transactionFact(closed,wallet,'closed',{position:'outside'}).position_account_closed,true);
 assert.equal(transactionFact(tx,wallet,'open',{position:'outside'}).position_account_closed,false);
