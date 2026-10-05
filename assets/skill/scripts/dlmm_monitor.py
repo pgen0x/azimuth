@@ -1753,8 +1753,7 @@ def main():
 
     active_positions = get_active_positions()
     if not active_positions:
-        print("No active DLMM positions found in Redis.")
-        sys.exit(0)
+        print("No tracked DLMM positions; checking on-chain positions for recovery.")
         
     # Get current positions from Meteora Portfolio API (reliable vs SDK which requires fully-initialized bin arrays)
     blockchain_positions = {}
@@ -1789,7 +1788,11 @@ def main():
     if api_available and blockchain_positions:
         tracked = set(active_positions)
         for oc_addr, oc_bp in blockchain_positions.items():
-            if oc_addr in tracked:
+            existing_meta = get_position_metadata(oc_addr)
+            if existing_meta:
+                if oc_addr not in tracked and not cli.report_only:
+                    # Preserve trailing peaks and entry provenance when only set membership was lost.
+                    run_command(f'redis-cli sadd sol:dlmm:active_positions "{oc_addr}"')
                 continue
             bal_sol = oc_bp.get("balances_sol", 0.0)
             oc_pool = oc_bp.get("pool", "")

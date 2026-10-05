@@ -140,6 +140,35 @@ def main():
         exec(compile(ast.fix_missing_locations(wrapper),"monitor-prune","exec"),ns)
         assert bool(commands) is (live is False)
 
+    # Execute startup through reconciliation: an empty active set must still discover
+    # funded positions, and a lost set member must not reset existing trailing state.
+    main_node = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "main")
+    start = next(i for i,n in enumerate(main_node.body) if isinstance(n, ast.Assign)
+                 and ast.unparse(n) == "active_positions = get_active_positions()")
+    end = next(i for i,n in enumerate(main_node.body[start:], start) if isinstance(n, ast.For)
+               and ast.unparse(n.target) == "pos_addr")
+    recovery = ast.Module(body=main_node.body[start:end], type_ignores=[])
+    for initial in ([], ["position"]):
+        for existing in (None, {"peak_pnl": 20, "deployed_at": 1}):
+            for report_only in (False, True):
+                commands=[]
+                ns=dict(get_active_positions=lambda:initial,
+                    get_position_metadata=lambda _:existing,
+                    get_wallet_address=lambda:"wallet",
+                    get_meteora_portfolio_positions=lambda _:({"position": {
+                        "pool":"pool", "balances_sol":0.11}}, None),
+                    recover_position_metadata=lambda *_:{"pair":"TOKEN-SOL", "mode":"turnover",
+                        "deployed_at":1,"size_sol":0.1,"entry_price":2},
+                    run_command=commands.append, cli=SimpleNamespace(report_only=report_only),
+                    print=lambda *a:None, time=SimpleNamespace(time=lambda:10000), json=json)
+                exec(compile(recovery,"monitor-recovery","exec"),ns)
+                sets=[c for c in commands if " set " in c]
+                adds=[c for c in commands if " sadd " in c]
+                assert bool(sets) is (not report_only and existing is None)
+                assert bool(adds) is (not report_only and (not initial or existing is None))
+                if sets:
+                    assert '"deployed_at": 1' in sets[0] and '"size_sol": 0.1' in sets[0]
+
     out, error, code = monitor.run_command("sleep 5", timeout=0.02)
     assert code == -1 and "process group terminated" in error
 
