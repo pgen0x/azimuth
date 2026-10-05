@@ -6,6 +6,11 @@ import contextlib
 import importlib.util
 import io
 import json
+import os
+import signal
+import subprocess
+import sys
+import time
 from pathlib import Path
 import tempfile
 import textwrap
@@ -18,6 +23,57 @@ from dlmm_realized import apply_realized
 
 
 def main():
+    # Exercise the real shell loop: slow reconciliation must not stall risk
+    # checks or launch a duplicate report worker on every tick.
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        scripts = root / "profile/skills/solana-dlmm/scripts"
+        scripts.mkdir(parents=True)
+        (root / "profile/.env").write_text("DLMM_STATS_HOUR=09\n")
+        source = Path(__file__).with_name("dlmm_monitor_loop.sh").read_text()
+        loop = scripts / "loop.sh"
+        loop.write_text(source.replace('STATS_STAMP="/tmp/dlmm_stats_last_sent"',
+                                       f'STATS_STAMP="{root}/stamp"'))
+        binaries = root / "bin"
+        binaries.mkdir()
+        log = root / "calls"
+        commands = {
+            "python3": f"#!{sys.executable}\n" + textwrap.dedent("""\
+                import os, sys, time
+                name = os.path.basename(sys.argv[1])
+                kind = name + (' settlement' if '--settle-pending' in sys.argv else '')
+                with open(os.environ['AZIMUTH_TEST_LOG'], 'a') as out:
+                    print(kind, file=out)
+                if name == 'dlmm_realized.py':
+                    time.sleep(10)
+                """),
+            "sleep": "#!/bin/sh\nexec /bin/sleep 0.03\n",
+            "date": "#!/bin/sh\ncase \"$*\" in *%H*) echo 09;; *) echo 2099-01-01;; esac\n",
+        }
+        for name, content in commands.items():
+            command = binaries / name
+            command.write_text(content)
+            command.chmod(0o755)
+        env = {**os.environ, "PATH": str(binaries) + ":" + os.environ['PATH'],
+               "AZIMUTH_TEST_LOG": str(log)}
+        process = subprocess.Popen(['bash', str(loop)], env=env,
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                   start_new_session=True)
+        try:
+            deadline = time.monotonic() + 3
+            calls = []
+            while time.monotonic() < deadline:
+                calls = log.read_text().splitlines() if log.exists() else []
+                if calls.count('dlmm_monitor.py') >= 3 and 'dlmm_realized.py' in calls:
+                    break
+                time.sleep(0.02)
+            assert calls.count('dlmm_monitor.py') >= 3, calls
+            assert calls.count('dlmm_realized.py') == 1, calls
+            assert 'dlmm_stats.py' not in calls, calls
+        finally:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.wait()
+
     # Missing/invalid API economics must be retried, while measured zero is valid.
     with tempfile.TemporaryDirectory() as directory:
         target = str(Path(directory) / "realized.jsonl")
