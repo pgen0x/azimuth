@@ -171,6 +171,20 @@ gets credited with this maintenance cash. Schema 9 refreshes previously unknown
 transactions with a new observation timestamp; historical evaluations retain the
 evidence available at their cutoff.
 
+### Pump cashback and accumulator maintenance
+
+The observed wrapper is recognized only for the complete finalized sequence of
+WSOL account creation, Pump cashback claim, WSOL close, accumulator close and
+explicit service fees. Program IDs, instruction discriminators and shared account
+bindings must match; all native and token balance changes must reconcile exactly.
+The fixture is a finalized transaction; instruction layouts come from the
+[official Pump AMM IDL](https://github.com/pump-fun/pump-public-docs/blob/main/idl/pump_amm.json).
+
+`rent_maintenance.cashback_lamports` is wallet-level protocol income, separate from
+`released_lamports` (returned reserve) and `service_fee_lamports`. External funding
+is zero; no Azimuth root receives this income. Schema 10 refreshes older unknown
+facts with the current observation time. Historical cutoff reports stay unchanged.
+
 ## Pooled settlement reporting
 
 A full-wallet exit swap can sell residual tokens from several closed roots.

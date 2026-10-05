@@ -99,6 +99,71 @@ function rentMaintenance(tx, wallet) {
   return {released_lamports:released,service_fee_lamports:serviceFee};
 }
 
+// Observed Pump cashback + accumulator close. Exact instruction shape and all
+// balance deltas must agree; rewards stay wallet-level, never LP-root profit.
+// Discriminators/accounts: pump-fun/pump-public-docs idl/pump_amm.json.
+function pumpMaintenance(tx, wallet) {
+  const wrapper='68kTkdQsd9WhXgsg5X9untjvpSinwAMrJgYHXG9NRQmD';
+  const pump='pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA';
+  const system='11111111111111111111111111111111', token=TOKEN_PROGRAMS[0];
+  const ata='ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL';
+  const m=tx.meta, msg=tx.transaction.message, outer=msg.instructions;
+  if (!outer.some(i=>i.programId?.toString()===wrapper)) return null;
+  const keys=msg.accountKeys.map(k=>k.pubkey.toString()), groups=m.innerInstructions || [];
+  if (m.err || keys[0]!==wallet || msg.accountKeys[0].signer!==true
+      || !Number.isSafeInteger(m.fee) || m.fee<0
+      || m.preBalances.length!==keys.length || m.postBalances.length!==keys.length
+      || [...m.preBalances,...m.postBalances].some(v=>!Number.isSafeInteger(v) || v<0)
+      || (m.preTokenBalances || []).length!==1 || (m.postTokenBalances || []).length!==1
+      || groups.length!==1 || outer.filter(i=>i.programId?.toString()===wrapper).length!==1
+      || !outer.every(i=>[wrapper,'ComputeBudget111111111111111111111111111111'].includes(i.programId?.toString()))
+      || outer[groups[0].index]?.programId?.toString()!==wrapper) return null;
+  const ins=groups[0].instructions;
+  const shape=[[ata,'create',2],[token,'getAccountDataSize',3],[system,'createAccount',3],
+    [token,'initializeImmutableOwner',3],[token,'initializeAccount3',3],
+    [pump,null,2],[token,'transferChecked',3],[pump,null,3],[token,'closeAccount',2],
+    [pump,null,2],[pump,null,3],[system,'transfer',2],[system,'transfer',2]];
+  if (ins.length!==shape.length || ins.some((i,n)=>i.programId?.toString()!==shape[n][0]
+      || (i.parsed?.type || null)!==shape[n][1] || i.stackHeight!==shape[n][2])) return null;
+  // The finalized Pump instructions enforce their PDA constraints; bind the
+  // same accumulator/vault/user account across every decoded instruction here.
+  const [,accumulator,,,vault,account,,authority]=ins[5].accounts || [];
+  if ([accumulator,vault,account,authority].some(a=>typeof a!=='string')
+      || new Set([wallet,accumulator,vault,account,authority]).size!==5) return null;
+  const accounts=(i,want)=>JSON.stringify(i.accounts?.map(String))===JSON.stringify(want);
+  if (ins[5].data!=='7E9g4XZrCjE' || !accounts(ins[5],[wallet,accumulator,SOL,token,vault,account,system,authority,pump])
+      || ins[9].data!=='ihFZiQrP7CM' || !accounts(ins[9],[wallet,accumulator,authority,pump])
+      || !accounts(ins[7],[authority]) || !accounts(ins[10],[authority])) return null;
+  const info=n=>ins[n].parsed.info, create=info(2), credit=info(6), close=info(8);
+  if (info(0).account!==account || info(0).wallet!==wallet || info(0).source!==wallet
+      || info(0).mint!==SOL || info(0).tokenProgram!==token || info(0).systemProgram!==system
+      || info(1).mint!==SOL || create.newAccount!==account || create.source!==wallet
+      || create.owner!==token || create.space!==165 || !Number.isSafeInteger(create.lamports) || create.lamports<=0
+      || info(3).account!==account || info(4).account!==account || info(4).owner!==wallet || info(4).mint!==SOL
+      || credit.authority!==accumulator || credit.source!==vault || credit.destination!==account || credit.mint!==SOL
+      || credit.tokenAmount?.decimals!==9 || !/^\d+$/.test(credit.tokenAmount?.amount || '')
+      || close.account!==account || close.owner!==wallet || close.destination!==wallet) return null;
+  const ai=keys.indexOf(accumulator), vi=keys.indexOf(vault), ti=keys.indexOf(account);
+  const cashback=Number(credit.tokenAmount.amount);
+  if (ai<=0 || vi<=0 || ti<=0 || m.preBalances[ai]<=0 || m.postBalances[ai]!==0
+      || m.preBalances[ti]!==0 || m.postBalances[ti]!==0 || !Number.isSafeInteger(cashback) || cashback<=0) return null;
+  const pre=m.preTokenBalances[0], post=m.postTokenBalances[0];
+  if ([pre,post].some(t=>t.accountIndex!==vi || t.owner!==accumulator || t.mint!==SOL
+      || t.programId!==token || t.uiTokenAmount?.decimals!==9
+      || !/^\d+$/.test(t.uiTokenAmount?.amount || ''))
+      || BigInt(pre.uiTokenAmount.amount)-BigInt(post.uiTokenAmount.amount)!==BigInt(cashback)) return null;
+  const rent=m.preBalances[ai], changes=keys.map(()=>0);
+  changes[0]=rent+cashback-m.fee; changes[ai]=-rent; changes[vi]=-cashback;
+  let fees=0;
+  for (const n of [11,12]) {
+    const b=info(n), recipient=keys.indexOf(b.destination);
+    if (b.source!==wallet || recipient<=0 || !Number.isSafeInteger(b.lamports) || b.lamports<0) return null;
+    fees+=b.lamports;changes[0]-=b.lamports;changes[recipient]+=b.lamports;
+  }
+  if (!Number.isSafeInteger(fees) || changes.some((v,i)=>!Number.isSafeInteger(v) || m.postBalances[i]-m.preBalances[i]!==v)) return null;
+  return {released_lamports:rent,service_fee_lamports:fees,cashback_lamports:cashback};
+}
+
 function transactionFact(tx, wallet, signature, event) {
   const keys = tx.transaction.message.accountKeys.map(k => k.pubkey.toString());
   const index = keys.indexOf(wallet), meta = tx.meta;
@@ -171,8 +236,8 @@ function transactionFact(tx, wallet, signature, event) {
         || id==='ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL' && ['create','createIdempotent'].includes(type)
         || TOKEN_PROGRAMS.includes(id) && ['transfer','transferChecked','getAccountDataSize','initializeImmutableOwner','initializeAccount','initializeAccount2','initializeAccount3'].includes(type);
     });
-  const maintenance=!event ? rentMaintenance(tx,wallet) : null;
-  return {schema_version:9,event_position:event?.position,signature, wallet, slot: tx.slot, block_time: tx.blockTime, observed_at: now(), failed: !!meta.err,
+  const maintenance=!event ? (rentMaintenance(tx,wallet) || pumpMaintenance(tx,wallet)) : null;
+  return {schema_version:10,event_position:event?.position,signature, wallet, slot: tx.slot, block_time: tx.blockTime, observed_at: now(), failed: !!meta.err,
     wallet_delta_lamports: meta.postBalances[index]-meta.preBalances[index], fee_lamports: index === 0 ? meta.fee : 0,
     token_deltas_raw: Object.fromEntries(Object.entries(tokenDeltas).map(([m,a]) => [m,a.toString()])),
     token_pre_balances_raw: Object.fromEntries(Object.entries(tokenPre).map(([m,a]) => [m,a.toString()])),
@@ -202,7 +267,7 @@ async function collect({dir, wallet, PublicKey, rpc, historyOnly=false}) {
     before = batch[batch.length-1].signature;
   }
   const currentFact=r=>{const f=cache.get(r.signature); return f?.wallet===wallet && f?.schema_version>=2
-    && (f.schema_version>=9 || f.classification!=='unclassified')
+    && (f.schema_version>=10 || f.classification!=='unclassified')
     && (f.schema_version>=7 || f.classification!=='recorded_bot')
     && (!(events.get(r.signature)?.kind==='swap' && !events.get(r.signature)?.position) || f.token_pre_balances_raw!=null)
     && f.event_position===events.get(r.signature)?.position;};
