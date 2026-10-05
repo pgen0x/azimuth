@@ -18,11 +18,33 @@ from unittest.mock import patch
 
 import dlmm_pipeline as pipeline
 import dlmm_stats as stats
+import dlmm_weights as weights_module
 import dlmm_realized as realized_module
 from dlmm_realized import apply_realized
 
 
 def main():
+    # A profitable pre-swap mark is not a measured learner outcome. Missing
+    # SOL must never fall back to percentages; real zero remains a valid loss.
+    for row in [
+        {"pnl_basis":"pre_swap_mark","pnl_sol":.1},
+        {"pnl_basis":"realized","pnl_sol":None,"pnl_pct":20},
+        {"pnl_basis":"realized","pnl_sol":float("nan")},
+        {"pnl_basis":"realized","pnl_sol":float("inf")},
+        {"pnl_basis":"realized","pnl_sol":True},
+    ]:
+        assert weights_module.outcome_sol(row) is None
+    assert weights_module.outcome_sol({"pnl_basis":"realized","pnl_sol":0}) == 0
+    with tempfile.TemporaryDirectory() as directory:
+        root=Path(directory);(root/"memories").mkdir()
+        closes=root/"memories/dlmm_closes.jsonl"
+        records=[{"position":p,"ts":time.time(),"signal":{"score":90},"pnl_sol":.1,"pnl_basis":"pre_swap_mark"} for p in ["settled","pending"]]
+        closes.write_text("".join(json.dumps(r)+"\n" for r in records))
+        (root/"memories/dlmm_realized.jsonl").write_text(json.dumps({"position":"settled","realized_sol":-.02,"realized_pct":-20})+"\n")
+        with patch.object(weights_module,"PROFILE_DIR",str(root)), patch.object(weights_module,"CLOSES_PATH",str(closes)):
+            eligible=weights_module.load_recent_closes()
+        assert [r["position"] for r in eligible]==["settled"]
+        assert weights_module.outcome_sol(eligible[0]) == -.02
     # Proved cash can disagree with the mark; legacy/unresolved marks retain
     # the existing conservative ranking penalty without being called cash.
     with patch.object(pipeline, "load_signal_weights", return_value={}):

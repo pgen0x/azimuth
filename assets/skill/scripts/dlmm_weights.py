@@ -2,7 +2,7 @@
 """Darwinian signal weighting — learn which entry signals predict winners.
 
 Reads the close journal (memories/dlmm_closes.jsonl), splits closed positions
-into wins/losses, and computes each entry signal's predictive lift (normalized
+into wins/losses using finite, reconciled LP outcomes only, and computes each entry signal's predictive lift (normalized
 win-mean minus loss-mean). Each signal's weight is then pulled part-way toward
 a target derived from that lift, clamped to [0.3, 2.5]. Weights persist to
 memories/signal_weights.json and to Redis (sol:dlmm:signal_weights) where the
@@ -37,6 +37,7 @@ clamp):
 """
 import argparse
 import json
+import math
 import os
 import subprocess
 import time
@@ -135,13 +136,18 @@ def load_recent_closes():
     # Learn against money, not against the monitor's last mark — a phantom
     # -100% close would otherwise teach the weights that whatever signals that
     # position carried predict a total loss (dlmm_realized.py).
-    return apply_realized(records, os.path.join(PROFILE_DIR, "memories", "dlmm_realized.jsonl"))
+    reconciled = apply_realized(records, os.path.join(PROFILE_DIR, "memories", "dlmm_realized.jsonl"))
+    return [rec for rec in reconciled if outcome_sol(rec) is not None]
 
 
 def outcome_sol(rec):
-    if rec.get("pnl_sol") is not None:
-        return float(rec["pnl_sol"])
-    return float(rec.get("pnl_pct") or 0)
+    # Reconciled Meteora LP value, not wallet net cash. Pending marks and
+    # missing amounts cannot label training examples as winners or losers.
+    value = rec.get("pnl_sol")
+    if (rec.get("pnl_basis") != "realized" or isinstance(value, bool)
+            or not isinstance(value, (int, float)) or not math.isfinite(value)):
+        return None
+    return float(value)
 
 
 def numeric_lift(signal, wins, losses):
