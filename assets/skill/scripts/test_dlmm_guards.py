@@ -127,15 +127,24 @@ def main():
          patch.object(monitor, "get_position_metadata", return_value={"base_mint": "TOKEN"}), \
          patch.object(monitor, "get_wallet_address", return_value="wallet"), \
          patch.object(monitor, "position_live_onchain", return_value=False), \
-         patch.object(monitor, "get_meteora_portfolio_positions", return_value=({}, None)):
+         patch.object(monitor, "get_meteora_portfolio_positions", return_value=({}, None)), \
+         patch.object(monitor, "run_command", return_value=("1", "", 0)) as capacity:
         monitor.queue_settlement("position")
         path = Path(tmp) / "position.json"
         with patch.object(monitor, "run_command_json", side_effect=[({"balance": 10}, None), ({"success": False}, "slippage")]):
             monitor.settle_pending()
         assert path.exists()
+        capacity.assert_not_called()
+        # Even a successful swap cannot resume scanning while balance is unknown.
+        with patch.object(monitor, "run_command_json", side_effect=[({"balance": 10}, None), ({"success": True}, None), (None, "RPC unavailable")]):
+            monitor.settle_pending()
+        assert path.exists()
+        capacity.assert_not_called()
         with patch.object(monitor, "run_command_json", side_effect=[({"balance": 10}, None), ({"success": True}, None), ({"balance": 0}, None)]):
             monitor.settle_pending()
         assert not path.exists()
+        capacity.assert_called_once_with("redis-cli DEL sol:dlmm:capacity:wallet", timeout=2)
+        capacity.reset_mock()
         # Route/fee failures remain inventory, with backoff and no global entry
         # block. Unknown RPC failures must remain pending instead.
         for reason in ("swap_no_route", "net_recovery_below_floor", "net_recovery_unmeasured"):
@@ -143,6 +152,7 @@ def main():
             with patch.object(monitor, "run_command_json", side_effect=[({"balance": 0.000001}, None), ({"success": False, "reason": reason}, None)]) as run:
                 monitor.settle_pending()
             assert run.call_args_list[1].args[0].endswith(" 15 300 1")
+            capacity.assert_not_called()
             item = json.loads(path.read_text())
             assert item["state"] == ("pending" if reason == "net_recovery_unmeasured" else "deferred")
             if item["state"] == "deferred":
@@ -151,9 +161,13 @@ def main():
                     run.assert_not_called()
                 item["last_attempt"] = 0
                 path.write_text(json.dumps(item))
-                with patch.object(monitor, "run_command_json", return_value=({"balance": 0}, None)):
+                # Redis failure leaves the existing bounded TTL as fallback;
+                # it does not recreate an already settled marker.
+                with patch.object(monitor, "run_command_json", return_value=({"balance": 0}, None)), \
+                     patch.object(monitor, "run_command", return_value=("", "Redis unavailable", 1)) as failed_resume:
                     monitor.settle_pending()
                 assert not path.exists()
+                failed_resume.assert_called_once_with("redis-cli DEL sol:dlmm:capacity:wallet", timeout=2)
             else:
                 path.unlink()
 
