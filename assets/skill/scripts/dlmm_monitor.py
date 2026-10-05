@@ -774,6 +774,9 @@ def log_close(pool, pair, meta, pos_addr, pnl_pct, realized_sol, fee_per_tvl_24h
         try:
             rec = json.dumps({
                 "ts": entry["ts"],
+                "position": entry["position"],
+                "root_chain_id": entry["root_chain_id"],
+                "pnl_basis": entry["pnl_basis"],
                 "pnl_pct": entry["pnl_pct"],
                 "pnl_sol": entry["pnl_sol"],
                 "mode": entry["mode"],

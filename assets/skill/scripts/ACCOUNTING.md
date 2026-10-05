@@ -284,3 +284,22 @@ full horizons from partial models, and `observed_until_ts` states the actual end
 The evaluation summarizes these counts. Past snapshots remain available, but new
 extended holding-period bin studies beyond these horizons would require explicit
 collection changes. Trading monitors and actual position exits are independent.
+
+
+### Pool selection history
+
+The periodic `dlmm_executor.js accounting` command publishes a local-only cash
+history cache after collecting finalized facts. It expires after 15 minutes.
+The scanner compares the cache's latest close timestamp and close count against
+its Redis journal; a newly closed position invalidates older cash evidence.
+
+Signals expose `prior_mark_pnl_sol` separately from `prior_net_pnl_sol`.
+Net is present only with `prior_pnl_basis=matched_refund_cash`: every root in the
+last ten closes (within 30 days) must be wholly covered by verified refund groups.
+Shared cleanup fees count once. A refund group spanning different pools is not
+split arbitrarily, so those pools retain unknown cash. Unknown is not zero.
+
+Ranking prefers verified cash, with the existing conservative mark loss penalty
+when cash is unavailable. The separate pool percentage-loss safety gate continues
+to use the existing marked history and its unchanged threshold. This cache is
+advisory selection evidence, not portfolio NAV or a new risk-limit authority.

@@ -930,9 +930,12 @@ def apply_batch_conviction(candidates, mode="multiday"):
             adj -= 15; notes.append("mcap>5M-15")
         if float(c.get("bot_holders_pct") or 0) > 20:
             adj -= 15; notes.append("bots-15")
-        prior_pnl = c.get("prior_net_pnl_sol")
+        # New signals distinguish proved cash from marks. Legacy signals carried
+        # marks under prior_net_pnl_sol; retain their conservative loss penalty.
+        cash_history = c.get("prior_pnl_basis") == "matched_refund_cash"
+        prior_pnl = c.get("prior_net_pnl_sol") if cash_history else c.get("prior_mark_pnl_sol", c.get("prior_net_pnl_sol"))
         if prior_pnl is not None and float(prior_pnl) < 0:
-            adj -= 20; notes.append("prior_loss-20")
+            adj -= 20; notes.append("prior_cash_loss-20" if cash_history else "prior_mark_loss-20")
         # Surviving PVP candidates (score >= 60) still yield to a clean pick.
         if c.get("is_pvp"):
             adj -= 10; notes.append("pvp-10")
@@ -1456,7 +1459,7 @@ def main():
                 except (ValueError, json.JSONDecodeError):
                     continue
             if len(past_pnls) >= 2 and sum(past_pnls) <= POOL_MEMORY_NET_FLOOR_PCT:
-                print(f"Skipping {c['name']} - pool memory: {len(past_pnls)} past closes net {sum(past_pnls):+.1f}% PnL")
+                print(f"Skipping {c['name']} - pool memory: {len(past_pnls)} past closes marked {sum(past_pnls):+.1f}% PnL")
                 continue
         # Momentum screen across ALL candidates (not just deploy winner).
         # Filters dumping tokens before ranking so the winner isn't a falling knife.

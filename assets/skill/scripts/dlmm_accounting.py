@@ -328,6 +328,52 @@ def report(profile, as_of=None):
             "chains": sorted(chains.values(), key=lambda c: c["root_chain_id"])}
 
 
+
+def pool_cash_history(closes, ledger, as_of):
+    """Last ten closes per pool; net cash only when whole roots/refunds match.
+
+    Keep marks separate. Cross-pool shared cleanup fees have no unique pool
+    allocation, so those pools retain unknown net cash rather than an invented
+    split. This view does not change the existing mark-based risk floor.
+    """
+    by_pool = {}
+    for row in closes:
+        if (row.get("dry_run") or not row.get("pool") or not row.get("position")
+                or not as_of - 30 * 86400 <= row.get("ts", 0) <= as_of):
+            continue
+        by_pool.setdefault(row["pool"], {})[row["position"]] = row
+    chains = {c["root_chain_id"]: c for c in ledger["chains"]}
+    result = {}
+    for pool, records in by_pool.items():
+        selected = sorted(records.values(), key=lambda r: r["ts"], reverse=True)[:10]
+        positions = {r["position"] for r in selected}
+        roots = {r.get("root_chain_id") or r.get("recenter_of") or r["position"] for r in selected}
+        covered, cash = set(), 0.0
+        for group in ledger["rent_refund_groups"]:
+            ids = set(group["root_chain_ids"])
+            if not ids or not ids <= roots or ids & covered:
+                continue
+            if any(r not in chains or chains[r]["accounting_status"] != "settled_cash"
+                   or not set(chains[r]["positions"]) <= positions for r in ids):
+                continue
+            value = group.get("cash_with_matched_refunds_sol")
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+                continue
+            covered.update(ids)
+            cash += value
+        marks = [r.get("pnl_sol") for r in selected]
+        valid_marks = all(not isinstance(v, bool) and isinstance(v, (int, float)) and math.isfinite(v) for v in marks)
+        result[pool] = {
+            "prior_closes": len(selected), "last_close_ts": selected[0]["ts"],
+            "prior_mark_pnl_sol": sum(marks) if valid_marks else None,
+            "prior_net_pnl_sol": round(cash, 9) if covered == roots else None,
+            "prior_cash_roots": len(covered), "prior_roots": len(roots),
+            "prior_pnl_basis": "matched_refund_cash" if covered == roots else "pre_swap_mark_only",
+            "observed_at": as_of,
+        }
+    return result
+
+
 def root_decision(chain, opportunity_sol, floor_sol=-0.015, strike_cap=3):
     """Conservative gate: projected 30m fees must repay cumulative cash loss + next observed cycle cost."""
     result = dict(allow=False, reason="incomplete_chain", chain=chain, opportunity_sol=opportunity_sol,
@@ -367,12 +413,23 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--profile", type=Path, default=PROFILE_DIR)
     parser.add_argument("--refresh", action="store_true")
+    parser.add_argument("--sync-pool-memory", action="store_true", help="Publish local reconciled pool history to Redis; no RPC")
     parser.add_argument("--hours", type=int, default=24, help="Select chains active in this window; include all their recorded legs")
     parser.add_argument("--check-root")
     parser.add_argument("--opportunity", type=float)
     parser.add_argument("--floor", type=float, default=-0.015)
     parser.add_argument("--strike-cap", type=int, default=3)
     args = parser.parse_args()
+    if args.sync_pool_memory:
+        now = time.time()
+        summary = pool_cash_history(rows(args.profile / "memories/dlmm_closes.jsonl"), report(args.profile), now)
+        response = subprocess.run(["redis-cli", "--raw", "-x", "eval", "return redis.call('SET', KEYS[1], ARGV[1], 'EX', 900)", "1", "sol:dlmm:cash_history"],
+                                  input=json.dumps(summary, allow_nan=False), text=True,
+                                  capture_output=True, timeout=10, check=True)
+        if response.stdout.strip() != "OK":
+            raise RuntimeError("Pool cash history Redis write failed")
+        print(json.dumps({"pools": len(summary), "observed_at": now}))
+        return
     if args.check_root:
         print(json.dumps(check_root(args.profile, args.check_root, args.opportunity, args.floor, args.strike_cap)))
         return
