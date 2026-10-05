@@ -77,3 +77,20 @@ with tempfile.TemporaryDirectory() as directory:
  assert result['native_cash_change']['basis']=='observed_native_balance_change_not_trading_profit'
  assert evaluate(profile,101,200,profile/'rejects.jsonl')['native_cash_change'] is None
 print('Evaluation excludes unvalued gifts and subtracts known external cash flows')
+
+# A positive LP mark can coexist with negative spendable cash while rent is held.
+from dlmm_evaluate import root_cash_cohort
+cash_root = dict(root_chain_id='closed', positions=['p'], first_activity=100,
+                 last_activity=190, accounting_status='settled_cash',
+                 wallet_delta_lamports=-865793, settled_cash_pnl_sol=-0.000865793,
+                 lp_pnl_sol=0.000676761, reasons=[])
+incomplete = dict(cash_root, root_chain_id='open', accounting_status='incomplete',
+                  settled_cash_pnl_sol=None, reasons=['open_or_unjournaled_positions'])
+cash = root_cash_cohort({'chains': [cash_root, incomplete,
+    dict(cash_root, first_activity=99), dict(cash_root, last_activity=201),
+    dict(cash_root, positions=[], root_chain_id='unattributed')]}, 100, 200)
+assert (cash['window_roots'], cash['settled_roots'], cash['incomplete_roots']) == (2, 1, 1)
+assert cash['settled_cash_sol'] == -0.000865793 and cash['cash_positive_roots'] == 0
+assert cash['roots'][0]['lp_pnl_sol'] > 0
+assert root_cash_cohort({'chains': [incomplete]}, 100, 200)['settled_cash_sol'] is None
+print('Root cash cohort excludes carry-in, future and unattributed cash; incomplete is not zero')

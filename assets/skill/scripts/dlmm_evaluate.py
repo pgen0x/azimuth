@@ -26,6 +26,22 @@ def replay_root_decision(decision):
                 basis='persisted_executor_decision_evidence')
 
 
+def root_cash_cohort(accounting, start, end):
+    """Root cash for recorded activity contained in the window; unknowns stay visible."""
+    cohort = [c for c in accounting['chains'] if c.get('positions')
+              and c.get('first_activity') is not None
+              and start <= c['first_activity'] <= c['last_activity'] <= end]
+    settled = [c for c in cohort if c['accounting_status'] == 'settled_cash']
+    return dict(window_roots=len(cohort), settled_roots=len(settled),
+                incomplete_roots=len(cohort)-len(settled),
+                cash_positive_roots=sum(c['wallet_delta_lamports'] > 0 for c in settled),
+                settled_cash_sol=sum(c['wallet_delta_lamports'] for c in settled)/1e9 if settled else None,
+                basis='root_wallet_cash_after_fees_and_rent_not_economic_profit_or_trading_win_rate',
+                roots=[dict(root=c['root_chain_id'], status=c['accounting_status'],
+                            cash_sol=c['settled_cash_pnl_sol'], lp_pnl_sol=c['lp_pnl_sol'],
+                            reasons=c['reasons']) for c in cohort])
+
+
 def evaluate(profile, start, end, rejects):
     memory=profile/'memories'
     accounting=report(profile, end)
@@ -98,6 +114,7 @@ def evaluate(profile, start, end, rejects):
         token_counts=dict(collections.Counter(t.get('basis','unknown') if t.get('mark_sol') is not None else 'unpriced' for t in last_nav.get('tokens',[]))))
     live=[r for r in rows(memory/'dlmm_root_decisions.jsonl') if start<=r['ts']<=end]
     return dict(start=start,end=end,generated_at=int(time.time()),close_count=len(closes),close_account_proofs=close_proofs,accounting=accounting,
+                root_cash_cohort=root_cash_cohort(accounting,start,end),
                 wealth_change=wealth,native_cash_change=native_cash,unvalued_external_token_inflows=unvalued_inflows,price_coverage=price_coverage,nav_samples=len(snapshots),complete_nav_samples=len(valid),
                 root_replay=[replay_root_decision(r) for r in live],eligibility_replay=comparisons,root_live_decisions=live,
                 rejected_candidates=groups,bin_replay=bins,
@@ -165,6 +182,9 @@ def main():
         'Cash uses the displayed snapshot times. Rent is recoverable reserve; token and LP marks are not necessarily executable proceeds. Complete wallet profit remains unmeasured when NAV is incomplete.',
         '## LP comparison (full-life cohort; not net wallet profit)',json.dumps({k:{field:value for field,value in v.items() if field!="positions"} for k,v in data.get('lp_comparison',{}).items()}),'## Wallet wealth',json.dumps(data['wealth_change']) if data['wealth_change'] else 'Unmeasured: incomplete marks/history or external token inflows without transfer-time valuation.',
         'Unvalued external token inflows: '+json.dumps(data['unvalued_external_token_inflows']),
+        '## Root settlement cash (recorded activity within window; not economic profit)',
+        json.dumps(data['root_cash_cohort']),
+        'Cash includes network fees and rent paid by recorded root transactions. Recoverable rent remains an asset; later wallet-level rent refunds are not credited to these roots. Cash-positive roots are not a trading win rate. Incomplete roots are excluded from the cash subtotal, not counted as zero.',
         '## Pooled settlement cash (full-life groups; no per-root allocation)',
         json.dumps([g for g in data['accounting'].get('pooled_settlements',[]) if a.start <= g['first_activity'] and g['last_activity'] <= a.end]),
         '## Latest token valuation coverage',json.dumps(data['price_coverage']),
