@@ -13,6 +13,30 @@ import dlmm_pipeline as pipeline
 
 
 def main():
+    # Replay production eligibility and both profitable-exit cooldown shortcuts.
+    tree = ast.parse(Path(monitor.__file__).read_text())
+    churn = next(n.value for n in ast.walk(tree) if isinstance(n, ast.Assign)
+                 and any(isinstance(t, ast.Name) and t.id == "is_turnover_churn" for t in n.targets))
+    shortcuts = [n.test for n in ast.walk(tree) if isinstance(n, ast.If)
+                 and any(isinstance(c, ast.Call) and isinstance(c.func, ast.Name)
+                         and c.func.id == "adverse_exit" for c in ast.walk(n.test))]
+    assert len(shortcuts) == 2
+    ns = dict(mode_cd="turnover", strategy="sol_bidask", emergency_close=False,
+              realized_sol=0.0015, rebalance_budget_ok=True, adverse_exit=monitor.adverse_exit)
+    for reason, allowed in [("Fast-out dump exit (5m -8.6%, PnL +1.29%)", False),
+                            ("Fast-out dump exit (5m -4.2%, PnL +16.50%)", False),
+                            ("RUG velocity dump", False), ("Peak-giveback stop", False),
+                            ("Sell pressure exit", False), ("Momentum exit", False),
+                            ("Downtrend exit", False), ("Stop-loss", False),
+                            ("Trailing take-profit", True), ("Take-profit", True),
+                            ("Out of Range (above)", True)]:
+        ns["reason_lower"] = reason.lower()
+        for expression in [churn, *shortcuts]:
+            assert eval(compile(ast.Expression(expression), "exit-policy", "eval"), ns) is allowed, reason
+    for reason in ("Low yield", "Fee pace death"):
+        ns["reason_lower"] = reason.lower()
+        assert not eval(compile(ast.Expression(churn), "exit-policy", "eval"), ns)
+
     meta={}
     state=dict(updated_at=1000,unclaimed_fees_sol=0.001,balances_sol=0.1)
     assert monitor.observe_root_fee_pace(meta,state,1000)
