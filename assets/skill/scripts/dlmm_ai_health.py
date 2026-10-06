@@ -39,8 +39,8 @@ def probe(runtime, model, opener=None):
                  "Authorization": "Bearer " + runtime["api_key"]},
     )
     opener = opener or urllib.request.build_opener(NoRedirect)
-    # The configured router chain took 44s to return a valid tool call in a
-    # live read-only probe. Allow that chain to finish before declaring it down.
+    # The configured router chain can take tens of seconds to answer. Allow it
+    # to finish before declaring the route down.
     with opener.open(request, timeout=60) as response:
         data = json.loads(response.read(1_000_000))
     if data.get("error"):
@@ -48,7 +48,8 @@ def probe(runtime, model, opener=None):
     choices = data.get("choices") or []
     if not choices:
         return False
-    calls = choices[0].get("message", {}).get("tool_calls") or []
+    message = choices[0].get("message", {})
+    calls = message.get("tool_calls") or []
     for call in calls:
         function = call.get("function", {})
         if function.get("name") != "health_check":
@@ -62,7 +63,10 @@ def probe(runtime, model, opener=None):
         # a provider availability check.
         if isinstance(arguments, dict):
             return True
-    return False
+    # Some compatible routers/models ignore tool_choice and return a normal
+    # assistant completion. That still proves the route can infer; requiring a
+    # tool call here falsely forced every eligible batch into deterministic mode.
+    return bool(isinstance(message.get("content"), str) and message["content"].strip())
 
 
 def main():

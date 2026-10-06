@@ -33,8 +33,12 @@ class ProbeTest(unittest.TestCase):
         for arguments in ('null', '[]', '"text"', 'broken'):
             good["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"] = arguments
             self.assertFalse(probe(runtime, "markt", Opener(good)))
-        for response in ({}, {"error": "quota"}, {"choices": [{"message": {"content": "OK"}}]}):
+        for response in ({}, {"error": "quota"}):
             self.assertFalse(probe(runtime, "markt", Opener(response)))
+        self.assertTrue(probe(runtime, "markt", Opener(
+            {"choices": [{"message": {"content": "OK"}}]})))
+        self.assertFalse(probe(runtime, "markt", Opener(
+            {"choices": [{"message": {"content": "   "}}]})))
 
 
 if __name__ == "__main__":
