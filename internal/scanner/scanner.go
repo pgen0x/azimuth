@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
+	"net/url"
 	"os/exec"
 	"sort"
 	"strings"
@@ -26,6 +28,33 @@ func batchSummary(batch []*meteora.Candidate) string {
 		parts = append(parts, fmt.Sprintf("%s(%.0f)", c.BaseSymbol, c.Score))
 	}
 	return strings.Join(parts, ", ")
+}
+
+// webhookListenerReady avoids selecting AI when the local Hermes gateway is
+// still restarting. Remote webhook URLs are left to the HTTP client so this
+// preflight never adds a second network request in production deployments.
+func webhookListenerReady(rawURL string) bool {
+	u, err := url.Parse(rawURL)
+	if err != nil || u.Hostname() == "" {
+		return true
+	}
+	if u.Hostname() != "127.0.0.1" && u.Hostname() != "localhost" && u.Hostname() != "::1" {
+		return true
+	}
+	port := u.Port()
+	if port == "" {
+		if u.Scheme == "https" {
+			port = "443"
+		} else {
+			port = "80"
+		}
+	}
+	conn, err := net.DialTimeout("tcp", net.JoinHostPort(u.Hostname(), port), 750*time.Millisecond)
+	if err != nil {
+		return false
+	}
+	_ = conn.Close()
+	return true
 }
 
 // reasonKey collapses a Screen reject reason to its stable prefix (the words
@@ -1053,35 +1082,40 @@ func (s *Scanner) pollMode(ctx context.Context, mp meteora.ModeParams) {
 		// webhook through direct deploy: a late Hermes turn could still execute.
 		useDirect := s.dep.Enabled()
 		if useDirect && s.cfg.WebhookURL != "" && s.cfg.AIHealthCmd != "" {
-			args := strings.Fields(s.cfg.AIHealthCmd)
-			// Include Python/config startup above the probe's 60s HTTP deadline.
-			probeCtx, cancel := context.WithTimeout(ctx, 65*time.Second)
-			var err error
-			if len(args) == 0 {
-				err = fmt.Errorf("empty AI health command")
+			if !webhookListenerReady(s.cfg.WebhookURL) {
+				log.Printf("scanner[%s]: entry_route=deterministic_fallback reason=webhook_unavailable; Hermes listener is not ready", mp.Mode)
+				useDirect = true
 			} else {
-				err = exec.CommandContext(probeCtx, args[0], args[1:]...).Run()
-			}
-			probeTimedOut := probeCtx.Err() == context.DeadlineExceeded
-			cancel()
-			if ctx.Err() != nil {
-				return
-			}
-			useDirect = err != nil
-			if useDirect {
-				reason := "command_failure"
-				var exitErr *exec.ExitError
-				if errors.As(err, &exitErr) {
-					if label, ok := map[int]string{10: "rate_limit", 11: "http_error", 12: "timeout", 13: "invalid_response", 14: "config_error", 15: "auth_error", 16: "connection_error"}[exitErr.ExitCode()]; ok {
-						reason = label
+				args := strings.Fields(s.cfg.AIHealthCmd)
+				// Include Python/config startup above the probe's 60s HTTP deadline.
+				probeCtx, cancel := context.WithTimeout(ctx, 65*time.Second)
+				var err error
+				if len(args) == 0 {
+					err = fmt.Errorf("empty AI health command")
+				} else {
+					err = exec.CommandContext(probeCtx, args[0], args[1:]...).Run()
+				}
+				probeTimedOut := probeCtx.Err() == context.DeadlineExceeded
+				cancel()
+				if ctx.Err() != nil {
+					return
+				}
+				useDirect = err != nil
+				if useDirect {
+					reason := "command_failure"
+					var exitErr *exec.ExitError
+					if errors.As(err, &exitErr) {
+						if label, ok := map[int]string{10: "rate_limit", 11: "http_error", 12: "timeout", 13: "invalid_response", 14: "config_error", 15: "auth_error", 16: "connection_error"}[exitErr.ExitCode()]; ok {
+							reason = label
+						}
 					}
+					if probeTimedOut {
+						reason = "command_timeout"
+					}
+					log.Printf("scanner[%s]: entry_route=deterministic_fallback reason=%s; batch not sent to Hermes", mp.Mode, reason)
+				} else {
+					log.Printf("scanner[%s]: entry_route=hermes_ai AI probe passed", mp.Mode)
 				}
-				if probeTimedOut {
-					reason = "command_timeout"
-				}
-				log.Printf("scanner[%s]: entry_route=deterministic_fallback reason=%s; batch not sent to Hermes", mp.Mode, reason)
-			} else {
-				log.Printf("scanner[%s]: entry_route=hermes_ai AI probe passed", mp.Mode)
 			}
 		}
 		if useDirect {

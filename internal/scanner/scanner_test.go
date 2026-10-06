@@ -3,6 +3,7 @@ package scanner
 import (
 	"context"
 	"errors"
+	"net"
 	"testing"
 	"time"
 
@@ -22,6 +23,24 @@ type fakeRunner struct {
 	inv      robinhood.Inventory
 	invErr   error
 	deployed int
+}
+
+func TestWebhookListenerReady(t *testing.T) {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	if !webhookListenerReady("http://" + l.Addr().String()) {
+		t.Fatal("expected listening local webhook to pass preflight")
+	}
+	l.Close()
+	if webhookListenerReady("http://" + l.Addr().String()) {
+		t.Fatal("expected closed local webhook to fail preflight")
+	}
+	if !webhookListenerReady("https://webhook.example.invalid") {
+		t.Fatal("remote webhook must remain delegated to HTTP client")
+	}
 }
 
 func (f *fakeRunner) Enabled() bool { return f.enabled }
