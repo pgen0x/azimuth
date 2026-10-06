@@ -466,9 +466,18 @@ async function collect({dir, wallet, PublicKey, rpc, historyOnly=false}) {
   // Rotate the bounded quote budget: illiquid early accounts must not starve later ones.
   const cursorPath=path.join(dir,'dlmm_quote_cursor.json');
   const cursor=fs.existsSync(cursorPath) ? JSON.parse(fs.readFileSync(cursorPath,'utf8')).offset : 0;
+  const quoteMarksPath=path.join(dir,'dlmm_quote_marks.json');
+  let quoteMarks={};
+  try { quoteMarks=JSON.parse(fs.readFileSync(quoteMarksPath,'utf8')); } catch { /* first run */ }
+  const freshQuote=m=>{
+    const q=quoteMarks[m];
+    return q && Number.isFinite(q.sol_per_token) && q.sol_per_token>0
+      && Number.isSafeInteger(q.observed_at) && now()-q.observed_at<=600
+      && Number.isSafeInteger(q.slot) && q.slot<=slot && slot-q.slot<=1500;
+  };
   const missingAccounts=allAccounts.filter(a=>{
     const i=a.account.data.parsed.info;
-    return BigInt(i.tokenAmount.amount)>0n && i.mint!==SOL && !(marks.has(i.mint)&&marks.has(SOL)) && !heliusMark(i);
+    return BigInt(i.tokenAmount.amount)>0n && i.mint!==SOL && !(marks.has(i.mint)&&marks.has(SOL)) && !heliusMark(i) && !freshQuote(i.mint);
   });
   const selected=new Set();
   for(let i=0;i<Math.min(10,missingAccounts.length);i++) selected.add(missingAccounts[(cursor+i)%missingAccounts.length]);
@@ -489,18 +498,25 @@ async function collect({dir, wallet, PublicKey, rpc, historyOnly=false}) {
           value=Number(raw)/10**info.tokenAmount.decimals*mark.usdPrice/helius.marks.get(SOL).usdPrice;
           basis='helius_wallet_estimate'; freshness='provider_timestamp_unavailable'; priceObservedAt=mark.observed_at;
           issues.push(`undated_helius_price:${mint}`);
+        } else if (freshQuote(mint)) {
+          const mark=quoteMarks[mint];
+          value=Number(raw)/10**info.tokenAmount.decimals*mark.sol_per_token;
+          basis='cached_quote'; freshness='quote_cached'; priceObservedAt=mark.observed_at;
         } else {
           if (quoteRateLimited) throw new Error('quote_rate_limit_deferred');
           if (!selected.has(account)) throw new Error('quote_budget_deferred');
           const q=await json(`https://api.jup.ag/swap/v1/quote?inputMint=${mint}&outputMint=${SOL}&amount=${raw}&slippageBps=100`,1,2500);
           if (q.inAmount!==raw || !q.outAmount) throw new Error('Quote mismatch');
           value=Number(q.outAmount)/1e9; basis="full_balance_quote"; freshness="quote_received_now";
+          const solPerToken=Number(q.outAmount)/Number(raw);
+          if (Number.isFinite(solPerToken) && solPerToken>0) quoteMarks[mint]={sol_per_token:solPerToken,observed_at:now(),slot};
         }
         if (!Number.isFinite(value) || value<0) throw new Error('Invalid mark');
       } catch (err) { value=null; freshness="unavailable"; markError=err.message; if (err.message==='HTTP 429') quoteRateLimited=true; issues.push(`unpriced_token:${mint}`); }
       tokens.push({mint,raw,mark_sol:value,basis,mark_error:markError,price_freshness:freshness,price_observed_at:priceObservedAt,observed_at:now()});
       if (value!==null) tokenValue+=value;
   }
+  fs.writeFileSync(quoteMarksPath,JSON.stringify(quoteMarks),{mode:0o600});
   let apiPositions=0;
   for (let page=1; page<=100; page++) {
     const data=await json(`https://dlmm.datapi.meteora.ag/portfolio/open?user=${wallet}&page=${page}&pageSize=50`);

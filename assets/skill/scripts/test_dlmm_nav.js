@@ -196,12 +196,14 @@ global.fetch=async url=>{if(url.includes('/quote?'))throw new Error('no route');
  global.fetch=async url=>{if(url.includes('/quote?')){quoted.push(new URL(url).searchParams.get('inputMint'));throw new Error('no route');}return{ok:true,json:async()=>({totalPositions:0,pools:[],hasNext:false})}};
  await collect(args);await collect(args);
  assert.equal(new Set(quoted).size,12);
+ fs.writeFileSync(path.join(dir,'dlmm_quote_marks.json'),JSON.stringify({unknown0:{sol_per_token:2,observed_at:Math.floor(Date.now()/1000),slot:100}}));
  let rateLimitedRequests=0;
  global.fetch=async url=>{if(url.includes('/quote?')){rateLimitedRequests++;return {ok:false,status:429};}return{ok:true,json:async()=>({totalPositions:0,pools:[],hasNext:false})}};
  const limited=await collect(args);
  assert.equal(rateLimitedRequests,1);assert.equal(limited.nav_sol,null);
  const latest=JSON.parse(fs.readFileSync(path.join(dir,'dlmm_nav.jsonl'),'utf8').trim().split('\n').at(-1));
  assert.ok(latest.tokens.some(t=>t.mark_error==='quote_rate_limit_deferred'));
+ assert.equal(latest.tokens.find(t=>t.mint==='unknown0').basis,'cached_quote');
  // Helius paginates, rotates keys, rejects unusable prices and keeps secrets out of URLs.
  const sol='So11111111111111111111111111111111111111112';
  const calls=[];
