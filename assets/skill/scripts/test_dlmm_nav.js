@@ -196,7 +196,7 @@ global.fetch=async url=>{if(url.includes('/quote?'))throw new Error('no route');
  global.fetch=async url=>{if(url.includes('/quote?')){quoted.push(new URL(url).searchParams.get('inputMint'));throw new Error('no route');}return{ok:true,json:async()=>({totalPositions:0,pools:[],hasNext:false})}};
  await collect(args);await collect(args);
  assert.equal(new Set(quoted).size,12);
- fs.writeFileSync(path.join(dir,'dlmm_quote_marks.json'),JSON.stringify({unknown0:{sol_per_token:2,observed_at:Math.floor(Date.now()/1000),slot:100}}));
+ fs.writeFileSync(path.join(dir,'dlmm_quote_marks.json'),JSON.stringify({unknown0:{in_amount:'1',out_lamports:'2000000',observed_at:Math.floor(Date.now()/1000),slot:100}}));
  let rateLimitedRequests=0;
  global.fetch=async url=>{if(url.includes('/quote?')){rateLimitedRequests++;return {ok:false,status:429};}return{ok:true,json:async()=>({totalPositions:0,pools:[],hasNext:false})}};
  const limited=await collect(args);
@@ -204,6 +204,28 @@ global.fetch=async url=>{if(url.includes('/quote?'))throw new Error('no route');
  const latest=JSON.parse(fs.readFileSync(path.join(dir,'dlmm_nav.jsonl'),'utf8').trim().split('\n').at(-1));
  assert.ok(latest.tokens.some(t=>t.mark_error==='quote_rate_limit_deferred'));
  assert.equal(latest.tokens.find(t=>t.mint==='unknown0').basis,'cached_quote');
+ assert.equal(latest.tokens.find(t=>t.mint==='unknown0').mark_sol,0.002);
+ // Reject different balances, future/expired marks, and the old unit-ambiguous schema.
+ for (const invalid of [
+   {in_amount:'2',out_lamports:'2000000',observed_at:Math.floor(Date.now()/1000)},
+   {in_amount:'1',out_lamports:'2000000',observed_at:Math.floor(Date.now()/1000)+60},
+   {in_amount:'1',out_lamports:'2000000',observed_at:Math.floor(Date.now()/1000)-601},
+   {sol_per_token:2,observed_at:Math.floor(Date.now()/1000)},
+ ]) {
+   fs.writeFileSync(path.join(dir,'dlmm_quote_marks.json'),JSON.stringify({unknown0:{...invalid,slot:100}}));
+   await collect(args);
+   const rejected=JSON.parse(fs.readFileSync(path.join(dir,'dlmm_nav.jsonl'),'utf8').trim().split('\n').at(-1));
+   assert.equal(rejected.tokens.find(t=>t.mint==='unknown0').mark_sol,null);
+ }
+ // A six-decimal token must retain the exact SOL quote on the next collection.
+ const previousAccounts=connection.getParsedTokenAccountsByOwner;
+ connection.getParsedTokenAccountsByOwner=async(_,o)=>({value:o.programId.toString().startsWith('Tokenkeg') ? [{account:{lamports:2039280,data:{parsed:{info:{mint:'six-decimal',tokenAmount:{amount:'1000000',decimals:6}}}}}}] : []});
+ let quoteCalls=0;
+ global.fetch=async url=>{if(url.includes('/quote?')){quoteCalls++;return {ok:true,json:async()=>({inAmount:'1000000',outAmount:'2000000'})};}return{ok:true,json:async()=>({totalPositions:0,pools:[],hasNext:false})}};
+ await collect(args);await collect(args);
+ const cached=JSON.parse(fs.readFileSync(path.join(dir,'dlmm_nav.jsonl'),'utf8').trim().split('\n').at(-1));
+ assert.equal(quoteCalls,1);assert.equal(cached.tokens[0].basis,'cached_quote');assert.equal(cached.tokens[0].mark_sol,0.002);
+ connection.getParsedTokenAccountsByOwner=previousAccounts;
  // Helius paginates, rotates keys, rejects unusable prices and keeps secrets out of URLs.
  const sol='So11111111111111111111111111111111111111112';
  const calls=[];
