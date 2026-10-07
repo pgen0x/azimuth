@@ -106,17 +106,21 @@ async function recordedClaim(connection, tx, wallet, position) {
   tx.feePayer = wallet.publicKey;
   tx.sign(wallet);
   const raw = tx.serialize();
-  recordSubmission(wallet, position, "claim", bs58.encode(tx.signature), lastValidBlockHeight);
-  const signature = await connection.sendRawTransaction(raw, CONFIRM_OPTIONS);
-  await confirmSignedTransaction(connection, { signature, blockhash, lastValidBlockHeight });
+  const signature = bs58.encode(tx.signature);
+  recordSubmission(wallet, position, "claim", signature, lastValidBlockHeight);
+  await confirmSignedTransaction(connection, { signature, blockhash, lastValidBlockHeight }, raw);
   return signature;
 }
 
-// Confirm the signed transaction before treating a timeout as a failed send.
-async function confirmSignedTransaction(connection, strategy) {
+// Reconcile the exact signed signature after either broadcast or confirmation errors.
+async function confirmSignedTransaction(connection, strategy, raw, options = CONFIRM_OPTIONS) {
   console.warn(`[TX] ${JSON.stringify({stage: "confirm", ...strategy})}`);
   let confirmation;
   try {
+    if (raw) {
+      try { await connection.sendRawTransaction(raw, options); }
+      catch { console.warn("[TX] Broadcast error; reconciling the signed signature"); }
+    }
     confirmation = await connection.confirmTransaction({ ...strategy, abortSignal: AbortSignal.timeout(8000) }, "confirmed");
   } catch (err) {
     const status = (await connection.getSignatureStatuses(
@@ -124,10 +128,16 @@ async function confirmSignedTransaction(connection, strategy) {
     )).value[0];
     console.warn(`[TX] ${JSON.stringify({stage: "reconcile", signature: strategy.signature,
       status: status?.confirmationStatus || "unknown", chainError: status?.err || null})}`);
-    if (!status || !["confirmed", "finalized"].includes(status.confirmationStatus)) throw err;
+    if (!status || !["confirmed", "finalized"].includes(status.confirmationStatus)
+        || (status.err !== null && !status.err)) throw err;
     confirmation = { value: { err: status.err } };
   }
-  if (confirmation.value.err) throw new Error(`Transaction failed: ${JSON.stringify(confirmation.value.err)}`);
+  if (confirmation.value.err !== null) {
+    if (!confirmation.value.err) throw new Error("Transaction confirmation unmeasured");
+    const error = new Error(`Transaction failed: ${JSON.stringify(confirmation.value.err)}`);
+    error.transactionFailed = true;
+    throw error;
+  }
 }
 
 async function getActiveBin(poolAddressStr) {
@@ -378,12 +388,7 @@ async function reclaimEmptyAccounts(execute = false) {
     fs.mkdirSync(path.dirname(pendingPath), { recursive: true, mode: 0o700 });
     fs.writeFileSync(pendingPath, JSON.stringify({ signature, blockhash, lastValidBlockHeight }), { mode: 0o600, flag: "wx", flush: true });
     recordSubmission(wallet, null, "rent_reclaim", signature, lastValidBlockHeight);
-    try {
-      await connection.sendRawTransaction(raw, CONFIRM_OPTIONS);
-    } catch (_) {
-      // Sending may have succeeded despite the RPC error. Never rebuild/retry.
-    }
-    await confirmSignedTransaction(connection, { signature, blockhash, lastValidBlockHeight });
+    await confirmSignedTransaction(connection, { signature, blockhash, lastValidBlockHeight }, raw);
     fs.rmSync(pendingPath);
     return { ...result, txHash: signature, fee_lamports: fee };
   } finally {
@@ -538,9 +543,8 @@ async function deployPosition(poolAddressStr, amountX, amountY, binsBelow, binsA
           console.warn(`[TX] ${JSON.stringify({stage: "send", signature, blockhash, lastValidBlockHeight})}`);
           // Retry the same signed transaction, never the position builder.
           return await runWithFailover(async (rpc) => {
-            const hash = await rpc.sendRawTransaction(raw, CONFIRM_OPTIONS);
-            await confirmSignedTransaction(rpc, { signature: hash, blockhash, lastValidBlockHeight });
-            return hash;
+            await confirmSignedTransaction(rpc, { signature, blockhash, lastValidBlockHeight }, raw);
+            return signature;
           });
         };
         if (binsBelow + binsAbove > 69) {
@@ -711,8 +715,7 @@ async function closePositionLocked(positionAddressStr, emptyOnly = false) {
     if (status?.pending) {
       try {
         await runWithFailover(async c => {
-          await c.sendRawTransaction(Buffer.from(pending.raw, "base64"), CONFIRM_OPTIONS);
-          await confirmSignedTransaction(c, pending);
+          await confirmSignedTransaction(c, pending, Buffer.from(pending.raw, "base64"));
         });
         fs.rmSync(pendingPath, { force: true });
       } catch (err) {
@@ -768,9 +771,8 @@ async function closePositionLocked(positionAddressStr, emptyOnly = false) {
       // A timeout is ambiguous; never build a replacement while it may still land.
       const txHash = await runWithFailover(async (rpc) => {
         try {
-          const hash = await rpc.sendRawTransaction(raw, CONFIRM_OPTIONS);
-          await confirmSignedTransaction(rpc, { signature: hash, blockhash, lastValidBlockHeight });
-          return hash;
+          await confirmSignedTransaction(rpc, { signature, blockhash, lastValidBlockHeight }, raw);
+          return signature;
         } catch (err) {
           submissionError = err.message;
           throw err;
@@ -1148,7 +1150,7 @@ async function swapToken(inputMintStr, outputMintStr, amountFloat, maxPriceImpac
       lastValidBlockHeight, inputMint: input_mint, outputMint: output_mint,
       inputAmount: quoteResponse.inAmount, outputAmount: quoteResponse.outAmount }), { mode: 0o600 });
     fs.renameSync(markerTmp, pendingPath);
-    let txid;
+    const txid = signedTxid;
     recordSubmission(wallet, process.env.DLMM_SETTLEMENT_POSITION, "swap", signedTxid, lastValidBlockHeight, {
       observed_at: quoteObservedAt, input_mint, output_mint,
       in_amount: quoteResponse.inAmount, out_amount: quoteResponse.outAmount,
@@ -1159,25 +1161,15 @@ async function swapToken(inputMintStr, outputMintStr, amountFloat, maxPriceImpac
     });
     submittedSignature = signedTxid;
     try {
-      txid = await connection.sendRawTransaction(rawTransaction, {
+      await confirmSignedTransaction(connection, { blockhash, lastValidBlockHeight, signature: txid }, rawTransaction, {
         skipPreflight: true,
         maxRetries: RPC_SEND_MAX_RETRIES
       });
     } catch (err) {
-      return { success: false, pending: true, txHash: signedTxid,
-        error: `Swap submission uncertain: ${err.message}` };
-    }
-
-    try {
-      const confirmation = await connection.confirmTransaction({
-        blockhash, lastValidBlockHeight, signature: txid
-      }, "confirmed");
-      if (confirmation.value.err) {
+      if (err.transactionFailed) {
         fs.rmSync(pendingPath, { force: true });
-        return { success: false, txHash: txid,
-          error: `Swap failed: ${JSON.stringify(confirmation.value.err)}` };
+        return { success: false, txHash: txid, error: err.message };
       }
-    } catch (err) {
       let status;
       try {
         status = (await connection.getSignatureStatuses(

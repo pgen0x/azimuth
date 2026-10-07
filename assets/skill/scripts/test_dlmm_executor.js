@@ -11,7 +11,7 @@ const root = worker ? process.argv[3] : fs.mkdtempSync(path.join(os.tmpdir(), "d
 let reads = 0, sends = 0, builds = 0, minted = 0, height = 100, sendError = false, buildError = false;
 let lastSlippage = null, lastMaxRetries = null;
 let positions = [], confirmationError = false, signatureStatus = null;
-let confirmTimeout = false, accountExists = true, failNextSend = false;
+let confirmTimeout = false, accountExists = true, failNextSend = false, sendFailed = false;
 const closeBytes = [];
 const key = (value) => ({ toString: () => value });
 const wallet = { publicKey: key(`test-wallet-${worker ? "swap" : process.pid}`) };
@@ -48,9 +48,9 @@ class Connection {
       assert.equal(typeof event.swap_quote.observed_at,"number");
       assert.equal(event.swap_quote.unrelatedDebug,undefined);
     }
-    sends++; closeBytes.push(raw.toString("hex")); if (failNextSend) { failNextSend = false; throw new Error("429 max usage reached"); } lastMaxRetries = options.maxRetries; assert.equal(raw.toString(), "exact-blockhash"); if (sendError) throw new Error("timeout after send"); return "sig";
+    sends++; closeBytes.push(raw.toString("hex")); sendFailed = failNextSend || sendError; if (failNextSend) { failNextSend = false; throw new Error("429 max usage reached"); } lastMaxRetries = options.maxRetries; assert.equal(raw.toString(), "exact-blockhash"); if (sendError) throw new Error("timeout after send"); return "sig";
   }
-  async confirmTransaction(strategy) { if (confirmTimeout) throw new Error("confirmation timeout"); assert.equal(strategy.blockhash, "exact-blockhash"); return { value: { err: confirmationError ? "chain error" : null } }; }
+  async confirmTransaction(strategy) { if (confirmTimeout || sendFailed) throw new Error("confirmation timeout"); assert.equal(strategy.blockhash, "exact-blockhash"); return { value: { err: confirmationError ? "chain error" : null } }; }
 }
 const rentInstructions = [];
 class RentTransaction {
@@ -285,8 +285,7 @@ const clearMarker = () => fs.rmSync(marker, { force: true });
   assert.throws(() => slippageBpsToPercent(0), /positive integer/);
   assert.doesNotMatch(source, /const latestBlockHash = await connection\.getLatestBlockhash/);
   assert.match(source, /blockhash, lastValidBlockHeight, signature: txid/);
-  assert.match(source, /success: false, pending: true, txHash: signedTxid/);
-  assert.ok(source.indexOf("fs.renameSync(markerTmp, pendingPath)") < source.indexOf("txid = await connection.sendRawTransaction(rawTransaction"));
+  assert.ok(source.indexOf("fs.renameSync(markerTmp, pendingPath)") < source.indexOf("await confirmSignedTransaction(connection, { blockhash, lastValidBlockHeight, signature: txid }, rawTransaction"));
   const swapMarker = path.join(root, "pending-swap.json");
   fs.writeFileSync(swapMarker, JSON.stringify({ signature: "swap-sig", lastValidBlockHeight: 150,
     inputAmount: "10", outputAmount: "20" }));
@@ -381,6 +380,41 @@ const clearMarker = () => fs.rmSync(marker, { force: true });
   assert.equal(deployMarker.position, recoveredDeploy.position);
   assert.equal(deployMarker.signature, recoveredDeploy.txHashes[0]);
   clearMarker();
+  // A broadcast error can follow a landed transaction. Reconcile its signed
+  // signature before trying another RPC, keeping exactly one build and send.
+  sendError = true;
+  const beforeLanded = { sends, builds };
+  signatureStatus = { confirmationStatus: "finalized", err: null };
+  const landed = await deploy();
+  assert.equal(landed.success, true);
+  assert.equal(landed.txHash, "signature");
+  assert.equal(sends-beforeLanded.sends, 1);
+  assert.equal(builds-beforeLanded.builds, 1);
+  clearMarker();
+  const closeSends = sends;
+  assert.equal((await closePosition("landed-close")).success, true);
+  assert.equal(sends-closeSends, 1);
+  const signed = { signature: "signature", blockhash: "exact-blockhash", lastValidBlockHeight: 150 };
+  for (const status of [null, {confirmationStatus:"processed",err:null},
+      {confirmationStatus:"confirmed"}, {confirmationStatus:"confirmed",err:false},
+      {confirmationStatus:"finalized",err:"chain failure"}]) {
+    signatureStatus = status;
+    await assert.rejects(confirmSignedTransaction(new Connection(), signed, Buffer.from("exact-blockhash")));
+  }
+  Connection.prototype.getSignatureStatuses = async () => { throw new Error("status offline"); };
+  await assert.rejects(confirmSignedTransaction(new Connection(), signed, Buffer.from("exact-blockhash")), /status offline/);
+  Connection.prototype.getSignatureStatuses = async (signatures, options) => {
+    assert.deepEqual(Array.from(signatures), ["signature"]);
+    assert.equal(options.searchTransactionHistory, true);
+    return {value:[signatureStatus]};
+  };
+  signatureStatus = null; sendError = false;
+  confirmationError = true;
+  const failedSwap = await swapToken("So11111111111111111111111111111111111111112", "TOKEN", 0.1);
+  assert.equal(failedSwap.success, false);
+  assert.equal(failedSwap.pending, undefined); // explicit chain failure is definitive
+  assert.match(failedSwap.error, /Transaction failed/);
+  confirmationError = false;
   deps["./dlmm_nav.js"] = {...require("./dlmm_nav.js"), collect: async () => ({})};
   deps.child_process = {execFileSync: () => JSON.stringify({allow:false,reason:"incomplete_chain"})};
   await assert.rejects(sandbox.module.exports.assertRootBudget(), /ENTRY REFUSED: incomplete_chain/);
