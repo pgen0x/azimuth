@@ -25,6 +25,37 @@ from dlmm_realized import apply_realized
 
 
 def main():
+    # AI ranking context must use local reads only, retain unknown metadata,
+    # and return before any financial path or deterministic picker runs.
+    address = "1" * 32
+    replies = [([address], None), ([json.dumps({"weights":{"score":1.2}}),
+                                  json.dumps({"pool":"pool", "mode":"pulse", "secret":"omit"})], None)]
+    with patch.object(pipeline, "run_command_json", side_effect=replies) as reads:
+        context = pipeline.ai_pick_context("pulse")
+        assert context["open_mode_positions"] == 1 and context["positions_complete"]
+        assert context["positions"] == [{"pool":"pool", "mode":"pulse"}]
+        assert context["signal_weights"]["weights"]["score"] == 1.2
+        assert len(reads.call_args_list) == 2
+        assert all(shlex.split(c.args[0])[:3] == ["redis-cli", "-e", "--json"] for c in reads.call_args_list)
+    with patch.object(pipeline, "run_command_json", side_effect=[([address],None),([None,None],None)]):
+        context = pipeline.ai_pick_context("pulse")
+        assert context["open_mode_positions"] is None and not context["positions_complete"]
+        assert context["signal_weights"] is None
+    with patch.object(pipeline, "run_command_json", side_effect=[([],None),([None],None)]):
+        context = pipeline.ai_pick_context("pulse")
+        assert context["open_mode_positions"] == 0 and context["positions_complete"]
+    for replies in [[(None,"Redis error")], [([address],None),([],None)], [(["bad address"],None)]]:
+        with patch.object(pipeline, "run_command_json", side_effect=replies):
+            try: pipeline.ai_pick_context("pulse")
+            except ValueError: pass
+            else: raise AssertionError("Unmeasured context accepted")
+    with patch.object(sys, "argv", ["dlmm_pipeline.py","--pick-context","--mode","pulse"]), \
+            patch.object(pipeline, "ai_pick_context", return_value={"mode":"pulse"}), \
+            patch.object(pipeline, "reconcile_redis_vs_meteora", side_effect=AssertionError("API called")), \
+            patch.object(pipeline, "apply_batch_conviction", side_effect=AssertionError("AI pick replaced")), \
+            contextlib.redirect_stdout(io.StringIO()) as output:
+        pipeline.main()
+        assert json.loads(output.getvalue()) == {"mode":"pulse"}
     from dlmm_evaluate import delivery_outcomes
     with tempfile.TemporaryDirectory() as directory:
         profile=Path(directory);db=sqlite3.connect(profile/"state.db")
@@ -125,24 +156,15 @@ def main():
             os.killpg(process.pid, signal.SIGKILL)
             process.wait()
 
-    # The real webhook count expressions must treat an empty wallet as a
-    # successful zero, including when a model combines steps using &&.
+    # The webhook consumes one context command; live holding/cooldown checks
+    # still belong to the pipeline, with AI selection remaining from-signal.
     subscription = json.loads((Path(__file__).resolve().parents[2] /
                                "hermes/webhook_subscriptions.json").read_text())
     prompt = subscription['dlmm-signal']['prompt']
     assert '{payload_json}' in prompt and '__raw__' not in prompt
     assert 'set `workdir` to `__PROFILE__`' in prompt
-    assert 'redis-cli --no-raw get sol:dlmm:signal_weights' in prompt
-    counts = [line.split(' | ', 1)[1] for line in prompt.splitlines()
-              if line.startswith('for a in $(redis-cli smembers')]
-    assert len(counts) == 2
-    for expression in counts:
-        expression = expression.replace('MODE', 'turnover').replace('POOL', 'ABC')
-        for payload, expected in [('', '0'), ('{"mode":"pulse","pool":"DEF"}\n', '0'),
-                                  ('{"mode":"turnover","pool":"ABC"}\n', '1')]:
-            result = subprocess.run(['bash', '-o', 'pipefail', '-c', expression],
-                                    input=payload, text=True, capture_output=True)
-            assert result.returncode == 0 and result.stdout.strip() == expected, result
+    assert '--pick-context --mode MODE' in prompt and 'signal_weights from STEP 1' in prompt
+    assert 'redis-cli' not in prompt and '--from-signal' in prompt
 
     # Missing/invalid API economics must be retried, while measured zero is valid.
     with tempfile.TemporaryDirectory() as directory:
@@ -247,7 +269,7 @@ def main():
         for source in ("from_signal", "from_batch", None):
             args = argparse.Namespace(mode=mode, strategy="balanced_tight",
                                       from_signal=None, from_batch=None,
-                                      analyze_only=False)
+                                      analyze_only=False, pick_context=False)
             if source:
                 setattr(args, source, "{}")
             with patch.object(argparse.ArgumentParser, "parse_args", return_value=args), \
