@@ -391,6 +391,8 @@ funds:
 For **AI-first Solana entry**, configure `AI_HEALTH_CMD` alongside `DEPLOY_CMD`
 and the Hermes webhook (see `.env.example`). A successful inference probe sends
 the batch to Hermes; a failed probe chooses deterministic entry before dispatch.
+The short probe accepts generated content or reasoning as inference availability;
+completed AI picks and tool execution require separate evidence.
 There is no fallback after an accepted or ambiguous webhook, or after an AI
 rejection, because a late agent turn could otherwise execute a second entry.
 
