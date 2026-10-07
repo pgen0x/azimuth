@@ -891,8 +891,16 @@ def load_signal_weights():
     if code != 0 or not out or out == "(nil)":
         return {}
     try:
-        weights = json.loads(out)
-        return weights if isinstance(weights, dict) else {}
+        stored = json.loads(out)
+        if not isinstance(stored, dict):
+            return {}
+        weights = stored.get("weights", stored)  # Current writer envelope or legacy flat map.
+        if not isinstance(weights, dict):
+            return {}
+        return {name: float(value) for name, value in weights.items()
+                if name in WEIGHTED_SIGNALS_HIGHER_IS_BETTER
+                and not isinstance(value, bool) and isinstance(value, (int, float))
+                and math.isfinite(value) and 0.3 <= value <= 2.5}
     except (ValueError, json.JSONDecodeError):
         return {}
 
