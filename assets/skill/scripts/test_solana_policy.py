@@ -161,6 +161,7 @@ def main():
     subscription = json.loads((Path(__file__).resolve().parents[2] /
                                "hermes/webhook_subscriptions.json").read_text())
     prompt = subscription['dlmm-signal']['prompt']
+    assert subscription['dlmm-signal']['toolsets'] == ['terminal']
     assert '{payload_json}' in prompt and '__raw__' not in prompt
     assert 'set `workdir` to `__PROFILE__`' in prompt
     assert '--pick-context --mode MODE' in prompt and 'signal_weights from STEP 1' in prompt

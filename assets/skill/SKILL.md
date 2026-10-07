@@ -56,6 +56,9 @@ Two modes with **isolated position budgets** (2 slots each, max 4 total):
 positions and learned weights in one read-only command. No RPC, screening or deploy.
 Missing position metadata leaves the mode count null. This is ranking context;
 the pipeline rechecks live holding, cooldown, sizing and risk gates before entry.
+The DLMM webhook advertises Hermes's `terminal` toolset (terminal plus process
+management), covering context, token audit and pipeline commands. Other sessions
+use their configured toolsets; webhook reports still pass through the receipt guard.
 
 **Batch mode (`--from-batch '<payload array>' --mode <mode>`)**: consumes the
 azimuth daemon's whole signal batch and replaces the LLM agent's pick step —
