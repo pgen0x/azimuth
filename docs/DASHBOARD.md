@@ -85,3 +85,26 @@ not a sandbox against an agent with arbitrary shell access. Direct agent messagi
 outside the webhook final response is outside this hook.
 
 Offline check: `python3 assets/hermes/plugins/dlmm-report-guard/test_guard.py`.
+
+## Shared router account cooldown
+
+The installed 9router 0.5.95 CLI build has a version-pinned operational fix in
+`assets/hermes/scripts/router_account_cooldown.py`. Exact CodeBuddy CN/Intl account
+restriction (`403 / 11140`) and exhausted credit (`429 / 14018`) responses use
+the existing connection-wide lock for 30 minutes, extended by a later provider
+retry deadline. Antigravity `RESOURCE_EXHAUSTED / QUOTA_EXHAUSTED` responses
+with a valid Google `RetryInfo.retryDelay` preserve the specified reset deadline
+in the existing model-specific lock; malformed/absent delays keep normal fallback.
+Temporary rate limits and unrelated provider/model errors retain
+the router's existing behavior. A future global lock remains effective when a
+model-specific lock has expired. Model order, credentials, quotas and trading risk
+settings are preserved. This respects provider limits and does not replenish quota.
+
+Run the script with `--app /path/to/9router/app` to validate the exact build and
+exercise every patched lock reader and the account error writer without network
+calls. Add `--apply --backup-dir /new/backup/directory` to install, then restart
+9router. The backup manifest lists original JS files and before/after hashes.
+Restore those backups and restart to roll back. A router package update can
+replace the compiled fix; version/build mismatches stop before edits. Re-audit
+upstream before applying to another version. Do not clear live provider locks
+to test or speed up fallback.
