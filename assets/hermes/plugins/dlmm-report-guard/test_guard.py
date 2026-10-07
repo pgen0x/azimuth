@@ -61,7 +61,7 @@ with tempfile.TemporaryDirectory() as tmp:
         os.environ.update(DLMM_REPORT_NONCE=nonce, DLMM_REPORT_SESSION="session")
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
-            pipeline.emit_execution_receipt("SI-SOL actual-position\nPosition Size | 0.12 SOL", "actual-position", "actual-signature", dry, verified)
+            pipeline.emit_execution_receipt("SI-SOL actual-position\nPosition Size | 0.12 SOL", "2" * 44, "3" * 88, dry, verified)
         return {"output": out.getvalue(), "exit_code": 0, "error": None}
 
     for dry, verified, label in [(False, True, "🚀 DEPLOYED"), (False, False, "SUBMITTED"), (True, True, "no live deployment")]:
@@ -82,7 +82,12 @@ with tempfile.TemporaryDirectory() as tmp:
         assert "report withheld" in guard.transform(fabricated, **ids)
     rows = [json.loads(line) for line in (home / "memories/dlmm_report_guard.jsonl").read_text().splitlines()]
     assert any(row["status"] == "receipt_report" for row in rows)
-    assert all(set(row) == {"ts", "session_id", "status", "receipt_count"} for row in rows)
+    assert all(set(row) == {"ts", "session_id", "status", "receipt_count", "executions"} for row in rows)
+    executions = [e for row in rows for e in row["executions"]]
+    assert len(executions) == 3
+    assert [(e["dry_run"], e["execution_verified"]) for e in executions] == [(False, True), (False, False), (True, False)]
+    assert all(set(e) == {"position", "signature", "dry_run", "execution_verified"} for e in executions)
+    assert all(e["position"] == "2" * 44 and e["signature"] == "3" * 88 for e in executions)
     assert not guard.scoped("bad/session")
     with contextlib.redirect_stdout(io.StringIO()):
         os.environ["DLMM_REPORT_NONCE"] = "invalid"

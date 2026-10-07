@@ -114,7 +114,7 @@ def main():
         before=delivery_outcomes(profile,journal,90,110)["deliveries"][0]
         assert before["session_state"]=="not_ended_at_cutoff" and before["transport"]=="accepted"
         after=delivery_outcomes(profile,journal,90,130)["deliveries"][0]
-        assert after["session_state"]=="ended_execution_unverified" and not after["execution_verified"]
+        assert after["session_state"]=="ended" and not after["execution_verified"]
         assert delivery_outcomes(profile,journal,90,101)["deliveries"][0]["transport"]=="unconfirmed"
     # A profitable pre-swap mark is not a measured learner outcome. Missing
     # SOL must never fall back to percentages; real zero remains a valid loss.

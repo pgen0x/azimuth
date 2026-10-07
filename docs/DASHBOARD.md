@@ -78,6 +78,10 @@ flight. The plugin needs no dependencies and does not change model order or risk
 
 The dashboard journal reads only `dlmm_report_guard.jsonl` metadata (session ID,
 status, receipt count, timestamp), never raw messages, tool output or receipt nonce.
+Evaluation also correlates allowlisted public position/signature IDs and dry-run/
+verification flags from guarded outputs. Legacy receipt counts alone never prove
+execution. Output preparation is separate from session closure and Telegram delivery;
+no lifecycle state proves a worker is live or permits retrying a batch.
 The guard is scoped to this profile and route, bounds in-memory state to 256 turns,
 and deliberately fails closed for execution claims after process restart or when
 an execution result was not completed. It is protection against model mistakes,

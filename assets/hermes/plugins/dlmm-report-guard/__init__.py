@@ -79,7 +79,7 @@ def pre(tool_name=None, args=None, session_id="", turn_id="", tool_call_id="", *
     nonce = uuid.uuid4().hex
     with _lock:
         key = (session_id, turn_id)
-        state = _turns.setdefault(key, {"calls": {}, "reports": []})
+        state = _turns.setdefault(key, {"calls": {}, "reports": [], "executions": []})
         state["calls"][tool_call_id] = nonce
         _turns.move_to_end(key)
         while len(_turns) > 256:
@@ -118,6 +118,14 @@ def post(tool_name=None, result=None, session_id="", turn_id="", tool_call_id=""
             else:
                 label = "⚠️ SUBMITTED — position verification pending"
             state["reports"].append(label + "\n" + report)
+            # Persist public identifiers and verification flags, never report text or nonce.
+            identifiers = {}
+            for key, pattern in (("position", r"[1-9A-HJ-NP-Za-km-z]{32,44}"),
+                                 ("signature", r"[1-9A-HJ-NP-Za-km-z]{64,88}")):
+                value = receipt.get(key)
+                identifiers[key] = value if isinstance(value, str) and re.fullmatch(pattern, value) else None
+            state["executions"].append(dict(identifiers, dry_run=receipt["dry_run"],
+                                            execution_verified=receipt["execution_verified"]))
         except (ValueError, TypeError, AttributeError):
             return
 
@@ -137,7 +145,8 @@ def transform(response_text="", session_id="", turn_id="", platform="", **kwargs
         memory.mkdir(exist_ok=True)
         with (memory / "dlmm_report_guard.jsonl").open("a") as out:
             out.write(json.dumps({"ts": time.time(), "session_id": session_id, "status": status,
-                                  "receipt_count": len(reports)}) + "\n")
+                                  "receipt_count": len(reports),
+                                  "executions": state["executions"] if state else []}) + "\n")
     except OSError:
         pass
     if reports:
