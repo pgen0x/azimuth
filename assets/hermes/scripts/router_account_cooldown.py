@@ -17,6 +17,16 @@ ANCHOR = 'r=function(a,b,c){if("github"'
 INSERT_V1 = 'r=function(a,b,c){if("codebuddy-cn"===(0,h.rs)(c)&&((403===Number(a)&&/"code"\\s*:\\s*11140\\b/.test(String(b||"")))||(429===Number(a)&&/"code"\\s*:\\s*14018\\b/.test(String(b||"")))))return Math.max(Date.now()+18e5,Number(k)||0);if("github"'
 INSERT = 'r=function(a,b,c){if(["codebuddy-cn","codebuddy-intl"].includes((0,h.rs)(c))&&((403===Number(a)&&/"code"\\s*:\\s*11140\\b/.test(String(b||"")))||(429===Number(a)&&/"code"\\s*:\\s*14018\\b/.test(String(b||"")))))return Math.max(Date.now()+18e5,Number(k)||0);if("antigravity"===(0,h.rs)(c)&&429===Number(a))try{let d=JSON.parse(String(b||"").slice(String(b||"").indexOf("{"))),e=d.error;if("RESOURCE_EXHAUSTED"===e?.status&&Array.isArray(e.details)&&e.details.some(a=>"QUOTA_EXHAUSTED"===a.reason)){let a=e.details.find(a=>"type.googleapis.com/google.rpc.RetryInfo"===a["@type"])?.retryDelay;if("string"==typeof a&&/^\\d+(?:\\.\\d+)?s$/.test(a)){let b=Date.now()+Math.ceil(parseFloat(a)*1e3);Number.isSafeInteger(b)&&Number.isFinite(new Date(b).getTime())&&b>Date.now()&&(k=Math.max(Number(k)||0,b))}}}catch{};if("github"'
 
+# Gemini daily quota is model-scoped. Honor its structured reset without the
+# generic 30-minute cap; per-minute throttling keeps the existing policy.
+INSERT_V2 = INSERT
+GEMINI_DAILY = r'if("gemini"===(0,h.rs)(c)&&429===Number(a))try{let d=JSON.parse(String(b||"").slice(String(b||"").indexOf("{"))),e=d.error;if("RESOURCE_EXHAUSTED"===e?.status&&Array.isArray(e.details)&&e.details.some(a=>"type.googleapis.com/google.rpc.QuotaFailure"===a["@type"]&&Array.isArray(a.violations)&&a.violations.some(a=>"string"==typeof a.quotaId&&/PerDay(?:-|$|Per)/.test(a.quotaId)))){let a=e.details.find(a=>"type.googleapis.com/google.rpc.RetryInfo"===a["@type"])?.retryDelay;if("string"==typeof a&&/^\d+(?:\.\d+)?s$/.test(a)){let b=Date.now()+Math.ceil(parseFloat(a)*1e3);Number.isSafeInteger(b)&&Number.isFinite(new Date(b).getTime())&&b>Date.now()&&(k=Math.max(Number(k)||0,b),Q=!0)}}}catch{};'
+INSERT = INSERT_V2.replace('if("github"', GEMINI_DAILY + 'if("github"')
+OLD_SCOPE = 'async function m(a,b,c,e=null,i=null,k=null){let l,n,o;'
+NEW_SCOPE = OLD_SCOPE + 'let Q=!1;'
+OLD_CAP = 'n="antigravity"===(0,h.rs)(e)?k-Date.now():Math.min(k-Date.now(),g.fh)'
+NEW_CAP = OLD_CAP.replace('n=', 'n=Q||')
+
 # A cached Antigravity reset must also reach the existing durable model lock.
 OLD_FALLBACK = '"antigravity"===y&&A||(await (0,f.vk)(b.connectionId,x.status,x.error,y,z,G)).shouldFallback'
 NEW_FALLBACK = '(await (0,f.vk)(b.connectionId,x.status,x.error,y,z,G)).shouldFallback'
@@ -34,10 +44,10 @@ def changes(app):
     for path in root.rglob("*.js"):
         original = path.read_text()
         readers += original.count(OLD_LOCK) + original.count(NEW_LOCK)
-        writers += original.count(ANCHOR) + original.count(INSERT_V1) + original.count(INSERT)
+        writers += original.count(ANCHOR) + original.count(INSERT_V1) + original.count(INSERT_V2) + original.count(INSERT)
         fallbacks += original.count(OLD_FALLBACK) + (0 if OLD_FALLBACK in original else original.count(NEW_FALLBACK))
         retries += original.count(OLD_RETRY) + original.count(NEW_RETRY)
-        updated = original.replace(OLD_LOCK, NEW_LOCK).replace(INSERT_V1, INSERT).replace(ANCHOR, INSERT).replace(OLD_FALLBACK, NEW_FALLBACK).replace(OLD_RETRY, NEW_RETRY)
+        updated = original.replace(OLD_LOCK, NEW_LOCK).replace(INSERT_V2, INSERT).replace(INSERT_V1, INSERT).replace(ANCHOR, INSERT).replace(NEW_SCOPE, OLD_SCOPE).replace(OLD_SCOPE, NEW_SCOPE).replace(OLD_CAP, NEW_CAP).replace(OLD_FALLBACK, NEW_FALLBACK).replace(OLD_RETRY, NEW_RETRY)
         if original != updated:
             patches.append((path, original, updated))
     if readers != 9 or writers != 1 or fallbacks != 1 or retries != 1:
@@ -51,7 +61,7 @@ def check(app, patched=False):
         raise ValueError("Installed build is not fully patched")
     # Exercise real functions extracted from every installed copy, without requests.
     for path in (app / ".next-cli-build/server").rglob("*.js"):
-        source = path.read_text().replace(OLD_LOCK, NEW_LOCK).replace(INSERT_V1, INSERT).replace(ANCHOR, INSERT).replace(OLD_FALLBACK, NEW_FALLBACK).replace(OLD_RETRY, NEW_RETRY)
+        source = path.read_text().replace(OLD_LOCK, NEW_LOCK).replace(INSERT_V2, INSERT).replace(INSERT_V1, INSERT).replace(ANCHOR, INSERT).replace(NEW_SCOPE, OLD_SCOPE).replace(OLD_SCOPE, NEW_SCOPE).replace(OLD_CAP, NEW_CAP).replace(OLD_FALLBACK, NEW_FALLBACK).replace(OLD_RETRY, NEW_RETRY)
         if NEW_LOCK in source:
             harness = """const assert=require('node:assert/strict'),vm=require('node:vm');
 const lock=vm.runInNewContext('('+process.argv[1]+')',{i:m=>'modelLock_'+m,h:'modelLock___all'});
@@ -96,6 +106,26 @@ h:{rs:p=>p},g:{fh:1800000},j:{warn:()=>{}},console:{error:()=>{}}});
  await mark('conn',429,invalid,'antigravity','model');
  assert(Number.isFinite(Date.parse(update.modelLock_model)));
  }
+ const daily=(id,delay)=>JSON.stringify({error:{status:'RESOURCE_EXHAUSTED',details:[
+ {'@type':'type.googleapis.com/google.rpc.QuotaFailure',violations:[{quotaId:id}]},
+ {'@type':'type.googleapis.com/google.rpc.RetryInfo',retryDelay:delay}]}});
+ for(const id of ['GenerateRequestsPerDayPerProjectPerModel-FreeTier','GenerateContentInputTokensPerModelPerDay-FreeTier']){
+ const before=Date.now();await mark('conn',429,'[429]: '+daily(id,'30737.25s'),'gemini','model');
+ assert(!Object.hasOwn(update,'modelLock___all'));
+ assert(Date.parse(update.modelLock_model)>=before+30737250);
+ }
+ for(const [provider,id,delay] of [
+ ['gemini','GenerateRequestsPerMinutePerProjectPerModel-FreeTier','30737s'],
+ ['other','GenerateRequestsPerDayPerProjectPerModel-FreeTier','30737s'],
+ ['gemini','GenerateRequestsPerDayPerProjectPerModel-FreeTier','0s'],
+ ['gemini','GenerateRequestsPerDayPerProjectPerModel-FreeTier','bad'],
+ ['gemini','GenerateRequestsPerDayPerProjectPerModel-FreeTier','999999999999999999s']]){
+ await mark('conn',429,daily(id,delay),provider,'model');
+ assert(Date.parse(update.modelLock_model)<Date.now()+60000);
+ }
+ const laterReset=Date.now()+86400000;
+ await mark('conn',429,daily('GenerateRequestsPerDayPerProjectPerModel-FreeTier','30737s'),'gemini','model',laterReset);
+ assert(Date.parse(update.modelLock_model)>=laterReset);
  const retry=Date.now()+3600000;
  await mark('conn',429,'{"code":14018}','codebuddy-cn','model',retry);
  assert(Date.parse(update.modelLock___all)>=retry);
