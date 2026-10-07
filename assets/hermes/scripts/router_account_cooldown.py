@@ -14,7 +14,8 @@ from pathlib import Path
 OLD_LOCK = 'function j(a,b){let c=a[i(b)]||a[h];return!!c&&new Date(c).getTime()>Date.now()}'
 NEW_LOCK = 'function j(a,b){return[a[i(b)],a[h]].some(c=>c&&new Date(c).getTime()>Date.now())}'
 ANCHOR = 'r=function(a,b,c){if("github"'
-INSERT = 'r=function(a,b,c){if("codebuddy-cn"===(0,h.rs)(c)&&((403===Number(a)&&/"code"\\s*:\\s*11140\\b/.test(String(b||"")))||(429===Number(a)&&/"code"\\s*:\\s*14018\\b/.test(String(b||"")))))return Math.max(Date.now()+18e5,Number(k)||0);if("github"'
+INSERT_V1 = 'r=function(a,b,c){if("codebuddy-cn"===(0,h.rs)(c)&&((403===Number(a)&&/"code"\\s*:\\s*11140\\b/.test(String(b||"")))||(429===Number(a)&&/"code"\\s*:\\s*14018\\b/.test(String(b||"")))))return Math.max(Date.now()+18e5,Number(k)||0);if("github"'
+INSERT = 'r=function(a,b,c){if(["codebuddy-cn","codebuddy-intl"].includes((0,h.rs)(c))&&((403===Number(a)&&/"code"\\s*:\\s*11140\\b/.test(String(b||"")))||(429===Number(a)&&/"code"\\s*:\\s*14018\\b/.test(String(b||"")))))return Math.max(Date.now()+18e5,Number(k)||0);if("antigravity"===(0,h.rs)(c)&&429===Number(a))try{let d=JSON.parse(String(b||"").slice(String(b||"").indexOf("{"))),e=d.error;if("RESOURCE_EXHAUSTED"===e?.status&&Array.isArray(e.details)&&e.details.some(a=>"QUOTA_EXHAUSTED"===a.reason)){let a=e.details.find(a=>"type.googleapis.com/google.rpc.RetryInfo"===a["@type"])?.retryDelay;if("string"==typeof a&&/^\\d+(?:\\.\\d+)?s$/.test(a)){let b=Date.now()+Math.ceil(parseFloat(a)*1e3);Number.isSafeInteger(b)&&Number.isFinite(new Date(b).getTime())&&b>Date.now()&&(k=Math.max(Number(k)||0,b))}}}catch{};if("github"'
 
 
 def changes(app):
@@ -26,8 +27,8 @@ def changes(app):
     for path in root.rglob("*.js"):
         original = path.read_text()
         readers += original.count(OLD_LOCK) + original.count(NEW_LOCK)
-        writers += original.count(ANCHOR) + original.count(INSERT)
-        updated = original.replace(OLD_LOCK, NEW_LOCK).replace(ANCHOR, INSERT)
+        writers += original.count(ANCHOR) + original.count(INSERT_V1) + original.count(INSERT)
+        updated = original.replace(OLD_LOCK, NEW_LOCK).replace(INSERT_V1, INSERT).replace(ANCHOR, INSERT)
         if original != updated:
             patches.append((path, original, updated))
     if readers != 9 or writers != 1:
@@ -41,7 +42,7 @@ def check(app, patched=False):
         raise ValueError("Installed build is not fully patched")
     # Exercise real functions extracted from every installed copy, without requests.
     for path in (app / ".next-cli-build/server").rglob("*.js"):
-        source = path.read_text().replace(OLD_LOCK, NEW_LOCK).replace(ANCHOR, INSERT)
+        source = path.read_text().replace(OLD_LOCK, NEW_LOCK).replace(INSERT_V1, INSERT).replace(ANCHOR, INSERT)
         if NEW_LOCK in source:
             harness = """const assert=require('node:assert/strict'),vm=require('node:vm');
 const lock=vm.runInNewContext('('+process.argv[1]+')',{i:m=>'modelLock_'+m,h:'modelLock___all'});
@@ -66,6 +67,7 @@ h:{rs:p=>p},g:{fh:1800000},j:{warn:()=>{}},console:{error:()=>{}}});
  for(const [status,error,provider,global] of [
  [403,'{"code":11140,"msg":"restricted"}','codebuddy-cn',true],
  [429,'{"error":{"data":{"code":14018}}}','codebuddy-cn',true],
+ [429,'{"error":{"data":{"code":14018}}}','codebuddy-intl',true],
  [403,'{"code":111400}','codebuddy-cn',false],
  [429,'temporary rate limit','codebuddy-cn',false],
  [403,'{"code":11140}','other-provider',false],
@@ -73,6 +75,17 @@ h:{rs:p=>p},g:{fh:1800000},j:{warn:()=>{}},console:{error:()=>{}}});
  const before=Date.now();await mark('conn',status,error,provider,'model');
  assert.equal(Object.hasOwn(update,'modelLock___all'),global);
  if(global)assert(Date.parse(update.modelLock___all)>=before+1800000);
+ }
+ const quota=JSON.stringify({error:{status:'RESOURCE_EXHAUSTED',details:[
+ {reason:'QUOTA_EXHAUSTED'}, {'@type':'type.googleapis.com/google.rpc.RetryInfo',retryDelay:'580382.606185709s'}]}});
+ const quotaStart=Date.now();await mark('conn',429,'[429]: '+quota,'antigravity','model');
+ assert(!Object.hasOwn(update,'modelLock___all'));
+ assert(Date.parse(update.modelLock_model)>=quotaStart+580382606);
+ for(const delay of ['bad','1e100s','0s','999999999999999999999s']){
+ const invalid=JSON.stringify({error:{status:'RESOURCE_EXHAUSTED',details:[
+ {reason:'QUOTA_EXHAUSTED'}, {'@type':'type.googleapis.com/google.rpc.RetryInfo',retryDelay:delay}]}});
+ await mark('conn',429,invalid,'antigravity','model');
+ assert(Number.isFinite(Date.parse(update.modelLock_model)));
  }
  const retry=Date.now()+3600000;
  await mark('conn',429,'{"code":14018}','codebuddy-cn','model',retry);

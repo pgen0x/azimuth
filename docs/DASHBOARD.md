@@ -89,10 +89,13 @@ Offline check: `python3 assets/hermes/plugins/dlmm-report-guard/test_guard.py`.
 ## Shared router account cooldown
 
 The installed 9router 0.5.95 CLI build has a version-pinned operational fix in
-`assets/hermes/scripts/router_account_cooldown.py`. Exact CodeBuddy account
+`assets/hermes/scripts/router_account_cooldown.py`. Exact CodeBuddy CN/Intl account
 restriction (`403 / 11140`) and exhausted credit (`429 / 14018`) responses use
 the existing connection-wide lock for 30 minutes, extended by a later provider
-retry deadline. Temporary rate limits and unrelated provider/model errors retain
+retry deadline. Antigravity `RESOURCE_EXHAUSTED / QUOTA_EXHAUSTED` responses
+with a valid Google `RetryInfo.retryDelay` preserve the specified reset deadline
+in the existing model-specific lock; malformed/absent delays keep normal fallback.
+Temporary rate limits and unrelated provider/model errors retain
 the router's existing behavior. A future global lock remains effective when a
 model-specific lock has expired. Model order, credentials, quotas and trading risk
 settings are preserved. This respects provider limits and does not replenish quota.
