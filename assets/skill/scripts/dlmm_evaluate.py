@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Deterministic read-only evaluation; persists report plus auditable inputs."""
 import argparse
+import base64
 import collections
 import concurrent.futures
 import json
@@ -46,8 +47,11 @@ def delivery_outcomes(profile, path, start, end):
                     "execution_verified": False}
             if conn is not None:
                 try:
-                    sessions = conn.execute("SELECT id,started_at,ended_at FROM sessions WHERE source='webhook' AND chat_id=? AND started_at<=?",
-                                            ("webhook:dlmm-signal:" + ident, end)).fetchall()
+                    # Hermes multiplex gateways encode profile, route and delivery as a tuple.
+                    identity = json.dumps([profile.name, "dlmm-signal", ident], ensure_ascii=False, separators=(",", ":")).encode()
+                    chat_v2 = "webhook:v2:" + base64.urlsafe_b64encode(identity).decode().rstrip("=")
+                    sessions = conn.execute("SELECT id,started_at,ended_at FROM sessions WHERE source='webhook' AND chat_id IN (?,?) AND started_at<=?",
+                                            ("webhook:dlmm-signal:" + ident, chat_v2, end)).fetchall()
                     if len(sessions) == 1:
                         session = sessions[0]
                         item["session_id"] = session["id"]
