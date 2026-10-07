@@ -95,6 +95,10 @@ the existing connection-wide lock for 30 minutes, extended by a later provider
 retry deadline. Antigravity `RESOURCE_EXHAUSTED / QUOTA_EXHAUSTED` responses
 with a valid Google `RetryInfo.retryDelay` preserve the specified reset deadline
 in the existing model-specific lock; malformed/absent delays keep normal fallback.
+The chat fallback also persists reset deadlines learned by the Antigravity quota
+cache before selecting another account, so restarting the router preserves them.
+Explicit Antigravity quota exhaustion stops retries within that HTTP call;
+temporary rate limits and capacity errors retain the existing retry behavior.
 Temporary rate limits and unrelated provider/model errors retain
 the router's existing behavior. A future global lock remains effective when a
 model-specific lock has expired. Model order, credentials, quotas and trading risk
