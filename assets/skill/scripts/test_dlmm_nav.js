@@ -230,6 +230,7 @@ global.fetch=async url=>{if(url.includes('/quote?'))throw new Error('no route');
  assert.equal(JSON.parse(fs.readFileSync(path.join(dir,'dlmm_quote_marks.json')))["six-decimal"].slot,115);
  const goodQuote={inputMint:'mint',outputMint:'So11111111111111111111111111111111111111112',inAmount:'1',outAmount:'2000',swapMode:'ExactIn',contextSlot:2000};
  assert.equal(navQuoteMark(goodQuote,'mint','1',2001).slot,2000);
+ for(const slot of [undefined,null,0,NaN,2000.5]) assert.throws(()=>navQuoteMark(goodQuote,'mint','1',slot),/quote evidence/);
  for(const bad of [{inputMint:'wrong'},{outputMint:'wrong'},{inAmount:'2'},{swapMode:'ExactOut'},
    {outAmount:'0'},{outAmount:'-1'},{outAmount:'1e6'},{outAmount:2000},
    {contextSlot:undefined},{contextSlot:1},{contextSlot:4001},{contextSlot:2000.5}]){

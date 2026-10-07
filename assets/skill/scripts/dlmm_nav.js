@@ -18,7 +18,7 @@ async function json(url, attempts=3, timeout=12000) {
 
 // Validate the response identity and provider slot before promoting a quote to NAV.
 function navQuoteMark(q, mint, raw, slot) {
-  if (!q || q.inputMint!==mint || q.outputMint!==SOL || q.inAmount!==raw || q.swapMode!=='ExactIn'
+  if (!Number.isSafeInteger(slot) || slot<=0 || !q || q.inputMint!==mint || q.outputMint!==SOL || q.inAmount!==raw || q.swapMode!=='ExactIn'
       || typeof q.outAmount!=='string' || !/^[0-9]+$/.test(q.outAmount) || BigInt(q.outAmount)<=0n
       || !Number.isFinite(Number(q.outAmount)) || !Number.isSafeInteger(q.contextSlot) || q.contextSlot<=0
       || Math.abs(q.contextSlot-slot)>1500) throw new Error('Invalid or stale quote evidence');
