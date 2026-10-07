@@ -1,0 +1,14 @@
+[Unit]
+Description=Azimuth operational dashboard (local read-only evidence)
+
+[Service]
+Type=simple
+WorkingDirectory=__REPO__
+ExecStart=%h/.local/bin/azimuth-dashboard -env-file __REPO__/.env
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+UMask=0077
+
+[Install]
+WantedBy=default.target

@@ -30,10 +30,12 @@ jobs:
           fi
 
       - name: Test
-        run: go test ./internal/...
+        run: go test ./...
 
       - name: Build
-        run: go build -o azimuth .
+        run: |
+          go build -o azimuth .
+          go build -o azimuth-dashboard ./cmd/dashboard
 
       - name: Smoke test (-version)
         run: ./azimuth -version
