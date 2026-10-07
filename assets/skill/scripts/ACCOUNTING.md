@@ -36,7 +36,17 @@ Unrecognized/manual operations block flow-adjusted performance and root promotio
 Marked NAV = native SOL + current SPL marks/quotes + Meteora open LP balance and
 unclaimed fees + recoverable token/position account reserves. SPL marks use batched
 Jupiter prices bounded by observed timestamp and price slot; at most ten missing
-marks per pass fall back to full-balance quotes. Stale, absent or changing snapshots
+marks per pass fall back to full-balance quotes. Rotation processes the selected
+accounts in cursor order and advances only for attempts made, so a rate limit
+does not skip unattempted accounts. Quote marks must match the requested input
+mint, full raw balance, SOL output mint and ExactIn mode, have a positive integer
+output amount, and carry a valid provider context slot within 1,500 slots of the
+finalized balance observation. Slots may lead finalized RPC when the provider
+quotes at a more recent commitment. Cache schema 2 retains that actual slot;
+legacy marks with an assumed wallet slot expire from use and are recollected
+within the same budget. Fresh quote and cache evidence retains the provider slot
+in each NAV token row. This validates [Jupiter quote response fields](https://developers.jup.ag/docs/api-reference/swap/v1/quote),
+without adding signing, RPC calls or quota allowance. Stale, absent or changing snapshots
 return null NAV plus a known-asset subtotal. Marked NAV is not liquidation proceeds.
 Wealth change subtracts external flows between the first and last complete marks;
 it is not an annualized return or a closed-position ROI.
