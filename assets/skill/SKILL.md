@@ -52,6 +52,11 @@ Two modes with **isolated position budgets** (2 slots each, max 4 total):
 
 **Flags**: `--analyze-only` (screen only, non-blocking), `--pool <ADDR>`, `--strategy <NAME>`
 
+**AI context (`--pick-context --mode <mode>`)**: prints local time, cached Redis
+positions and learned weights in one read-only command. No RPC, screening or deploy.
+Missing position metadata leaves the mode count null. This is ranking context;
+the pipeline rechecks live holding, cooldown, sizing and risk gates before entry.
+
 **Batch mode (`--from-batch '<payload array>' --mode <mode>`)**: consumes the
 azimuth daemon's whole signal batch and replaces the LLM agent's pick step —
 deterministic conviction re-rank (dev-exit / global-fees / PVP hard rejects,

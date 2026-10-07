@@ -259,6 +259,46 @@ def run_command_json(cmd):
     except Exception as e:
         return None, f"JSON parse error: {e}. Raw: {out}"
 
+
+def ai_pick_context(mode):
+    """Read advisory ranking context locally; live entry gates still run at deploy."""
+    def redis_json(*args):
+        data, error = run_command_json(shlex.join(["redis-cli", "-e", "--json", *args]))
+        if error or not isinstance(data, list):
+            raise ValueError("Redis context unavailable")
+        return data
+
+    addresses = redis_json("SMEMBERS", "sol:dlmm:active_positions")
+    # ponytail: context is capped at 64 positions; paginate if portfolios outgrow it.
+    if len(addresses) > 64 or any(not isinstance(a, str) or not re.fullmatch(r"[1-9A-HJ-NP-Za-km-z]{32,44}", a) for a in addresses):
+        raise ValueError("Invalid active position context")
+    values = redis_json("MGET", "sol:dlmm:signal_weights",
+                        *("sol:dlmm:position:" + a for a in addresses))
+    if len(values) != len(addresses) + 1:
+        raise ValueError("Incomplete Redis context")
+    weights = None
+    if values[0] is not None:
+        try:
+            stored = json.loads(values[0])
+            if isinstance(stored, dict):
+                weights = {k: stored[k] for k in ("weights", "lifts", "last_recalc") if k in stored}
+        except (ValueError, TypeError):
+            pass
+    positions = []
+    complete = True
+    for value in values[1:]:
+        try:
+            record = json.loads(value)
+            if not isinstance(record, dict) or not all(isinstance(record.get(k), str) for k in ("pool", "mode")):
+                raise ValueError("Missing position metadata")
+            positions.append({k: record[k] for k in ("pool", "mode")})
+        except (ValueError, TypeError):
+            complete = False
+    return dict(observed_at=int(time.time()), time=local_time_str("%H:%M"), mode=mode,
+                open_mode_positions=sum(p["mode"] == mode for p in positions) if complete else None,
+                positions=positions, positions_complete=complete, signal_weights=weights,
+                basis="Redis ranking context only; pipeline rechecks live entry gates")
+
 def get_wallet_sol_balance():
     # NOTE: this used to short-circuit to a hardcoded 10.0 under DRY_RUN, which made
     # every dry-run soak log fictional ticket sizes ((10.0-0.2)*0.45 = 4.41 SOL) and
@@ -1124,6 +1164,7 @@ def defer_capacity_signals(cli, wallet=True):
 def main():
     import argparse
     parser = argparse.ArgumentParser()
+    parser.add_argument("--pick-context", action="store_true", help="Read local time, Redis positions and signal weights for the AI pick; no network APIs or deploy")
     parser.add_argument("--analyze-only", action="store_true", help="Screen pools, print all candidates JSON, exit without deploying")
     parser.add_argument("--strategy", type=str, default=None, help="Override SOUL.md strategy (sol_bidask, spot, custom_ratio_spot, balanced_tight, single_sided_reseed, fee_compounding, partial_harvest)")
     parser.add_argument("--pool", type=str, default=None, help="Deploy a specific pool address instead of auto-selecting winner")
@@ -1133,6 +1174,13 @@ def main():
     cli = parser.parse_args()
 
     mode = cli.mode
+    if cli.pick_context:
+        try:
+            print(json.dumps(ai_pick_context(mode), allow_nan=False))
+        except (ValueError, TypeError):
+            print("AI pick context unavailable", file=sys.stderr)
+            sys.exit(1)
+        return
     print(f"🔍 Starting DLMM Ingestion Pipeline [{mode.upper()} mode]")
 
     params = load_soul_dlmm_params(mode=mode)
