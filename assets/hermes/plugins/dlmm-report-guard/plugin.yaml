@@ -1,0 +1,6 @@
+name: dlmm-report-guard
+version: "0.1.0"
+description: Require pipeline execution receipts for DLMM webhook deployment reports.
+author: Azimuth
+hooks: [pre_tool_call, post_tool_call, transform_llm_output]
+provides_hooks: [pre_tool_call, post_tool_call, transform_llm_output]

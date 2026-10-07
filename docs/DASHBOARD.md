@@ -56,3 +56,32 @@ Refreshes serve an immutable in-memory snapshot. A background collector updates 
 Native SOL increases include recovered principal/rent and transfers; they do not establish profit. The existing 0.20 SOL reserve + 0.05 allowance + 0.10 minimum position rule is displayed as a 0.35 SOL floor; this dashboard never authorizes or changes entry behavior.
 
 Configuration editing, restarts, historical indexing and active provider/bot probes are outside this read-only MVP.
+
+## Verified deployment reports
+
+The Solanza `dlmm-report-guard` Hermes plugin uses official pre/post tool hooks and
+`transform_llm_output`. For the `dlmm-signal` webhook it injects a fresh nonce into
+a direct terminal pipeline call, accepts a receipt only from that call's successful
+completed result, and replaces AI deployment text with the pipeline's exact values.
+Dry runs and submissions awaiting position verification have separate statuses.
+Without a matching receipt, deployment claims are withheld; inspect transaction
+facts before retrying. Receipts prove tool execution and its verification result,
+not profit. Rejections without deployment claims keep their AI narrative.
+
+Install into the target profile's `plugins/dlmm-report-guard/` by copying
+`assets/hermes/plugins/dlmm-report-guard/{plugin.yaml,__init__.py}`; then run
+`hermes -p solanza plugins enable dlmm-report-guard --no-allow-tool-override` and
+`hermes -p solanza plugins doctor dlmm-report-guard --ci`. Set
+`display.platforms.webhook.streaming: false` so provisional model text cannot
+precede the final guard. Restart the gateway after checking no deployment is in
+flight. The plugin needs no dependencies and does not change model order or risk.
+
+The dashboard journal reads only `dlmm_report_guard.jsonl` metadata (session ID,
+status, receipt count, timestamp), never raw messages, tool output or receipt nonce.
+The guard is scoped to this profile and route, bounds in-memory state to 256 turns,
+and deliberately fails closed for execution claims after process restart or when
+an execution result was not completed. It is protection against model mistakes,
+not a sandbox against an agent with arbitrary shell access. Direct agent messaging
+outside the webhook final response is outside this hook.
+
+Offline check: `python3 assets/hermes/plugins/dlmm-report-guard/test_guard.py`.

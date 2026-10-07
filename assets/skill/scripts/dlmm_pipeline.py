@@ -14,6 +14,21 @@ from local_indicators import check_local_indicators
 from tz_util import local_time_str
 from dlmm_monitor import position_live_onchain
 
+def emit_execution_receipt(report, position, signature, dry_run, verified):
+    """Optional Hermes proof marker; failure must never turn a landed tx into a retry."""
+    nonce = os.environ.get("DLMM_REPORT_NONCE", "")
+    if not re.fullmatch(r"[0-9a-f]{32}", nonce):
+        return
+    try:
+        print("DLMM_EXECUTION_RECEIPT=" + json.dumps({
+            "nonce": nonce, "session_id": os.environ.get("DLMM_REPORT_SESSION", ""),
+            "position": position, "signature": signature, "dry_run": bool(dry_run),
+            "execution_verified": bool(verified and not dry_run), "report": report,
+        }, ensure_ascii=False))
+    except Exception:
+        print("Warning: execution receipt unavailable; inspect transaction evidence.", file=sys.stderr)
+
+
 # Configuration
 MIN_TVL_USD = 10000
 MIN_FEE_TVL_24H = 1.0
@@ -2004,7 +2019,7 @@ def main():
     status_label = "🧪 DRY RUN DEPLOY" if is_dry_run else "🚀 DEPLOYED"
     verify_line = "" if verified else "⚠️ UNVERIFIED — not found via on-chain query after 3 retries\n"
     report = f"""{status_label} — {ts_str}
-{verify_line}{winner['name']} {position_address}
+{verify_line}{' '.join(str(winner['name']).splitlines())} {position_address}
 Pool | {winner['pool']}
 Metric | Value
 Strategy | {strategy}
@@ -2022,6 +2037,8 @@ Holders | {winner['holders']:,}
 TX | https://solscan.io/tx/{tx_hash}
 """
     print(report)
+    # Guard renders its own status, then copies these exact pipeline values.
+    emit_execution_receipt("\n".join(report.splitlines()[1:]), position_address, tx_hash, is_dry_run, verified)
 
 if __name__ == "__main__":
     main()
