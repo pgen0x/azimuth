@@ -52,14 +52,14 @@ def collect(profile, state):
     for filename,stage,root in [
         ('solana_deliveries.jsonl','AI / fallback',state),('solana_rejects.jsonl','gate',state),
         ('dlmm_transactions.jsonl','transaction',memory),('dlmm_transaction_facts.jsonl','transaction',memory),('dlmm_wallet_transactions.jsonl','transaction',memory),('dlmm_closes.jsonl','exit',memory),
-        ('dlmm_root_decisions.jsonl','gate',memory),('dlmm_recenter_decisions.jsonl','gate',memory),
+        ('dlmm_report_guard.jsonl','AI / fallback',memory),('dlmm_root_decisions.jsonl','gate',memory),('dlmm_recenter_decisions.jsonl','gate',memory),
         ('dlmm_rent_history.jsonl','refund',memory),('dlmm_realized.jsonl','settlement',memory)]:
         rows,meta=tail(root/filename);sources.append(meta)
         for i,row in enumerate(rows):
             kind=row.get('kind','')
             actual={'deploy':'deploy','open':'deploy','close':'exit','swap':'swap','rent_refund':'refund','rent_reclaim':'refund'}.get(kind,stage)
             if row.get('stage')=='prepared': actual='candidate'
-            evidence=select(row,'ts observed_at closed_at fetched_at delivery_id id entry_id root_chain_id position pool mode stage kind signature refund_signature account http_status reason gate allow status landed failed slot block_time fee_lamports event_position classification complete dry_run session_id route fallback_reason lp_pnl_sol settled_cash_pnl_sol net_pnl_sol accounting_status realized_sol pnl_sol wallet_delta_lamports network_fee_lamports token_deltas_raw error')
+            evidence=select(row,'ts observed_at closed_at fetched_at delivery_id id entry_id root_chain_id position pool mode stage kind signature refund_signature account http_status reason gate allow status landed failed slot block_time fee_lamports event_position classification complete dry_run session_id receipt_count route fallback_reason lp_pnl_sol settled_cash_pnl_sol net_pnl_sol accounting_status realized_sol pnl_sol wallet_delta_lamports network_fee_lamports token_deltas_raw error')
             if isinstance(row.get('candidate'),dict): evidence['candidate']=select(row['candidate'],'pool name base_symbol base_mint mode')
             if isinstance(row.get('signal'),dict):
                 evidence['candidates']=[select(c,'pool name base_symbol base_mint mode') for c in row['signal'].get('payload',[]) if isinstance(c,dict)]
