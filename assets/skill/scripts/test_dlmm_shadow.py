@@ -240,3 +240,29 @@ with tempfile.TemporaryDirectory() as directory:
     assert len(evaluate(profile, 9999, 10000, profile/'rejects.jsonl')['liquidation_observations']) == 2
     assert not evaluate(profile, 9999, 9999, profile/'rejects.jsonl')['liquidation_observations']
 print('Liquidation quotes preserve inventory, cost limits, unknown evidence and bounded collection')
+
+# API float noise is break-even, and an empty position is not a carry-in trade.
+from dlmm_evaluate import lp_cohort, compare_lp
+lp = dict(positionAddress='win', createdAt=100, closedAt=150, pnlSol='0.001',
+          allTimeDeposits=dict(total=dict(sol='0.1')))
+records = [lp, lp, dict(lp, positionAddress='noise', pnlSol='2.7755575615628914e-17'),
+           dict(lp, positionAddress='loss', pnlSol='-0.001'),
+           dict(lp, positionAddress='one-lamport', pnlSol='0.000000001'),
+           dict(lp, positionAddress='carry', createdAt=99),
+           dict(lp, positionAddress='empty', allTimeDeposits=dict(total=dict(sol='0'))),
+           dict(lp, positionAddress='future', closedAt=200)]
+cohort = lp_cohort(records, 100, 200)
+assert cohort['full_life_positions'] == 4 and cohort['carry_in_closes'] == 1
+assert cohort['zero_deposit_closes'] == 1
+assert (cohort['wins'], cohort['losses'], cohort['breakeven_positions']) == (2, 1, 1)
+assert abs(cohort['lp_pnl_sol'] - 1e-9) < 1e-15
+with patch.object(evaluation_module, 'fetch_pools', return_value=[dict(poolAddress='pool', lastClosedAt=150)]), \
+     patch.object(evaluation_module, 'fetch_closed_positions', return_value=records):
+    assert compare_lp({'azimuth':'wallet'}, 100, 200)['azimuth'] == cohort
+    for bad in [dict(lp, pnlSol='NaN'), dict(lp, pnlSol=True), dict(lp, createdAt=151),
+                dict(lp, allTimeDeposits=dict(total=dict(sol=True))),
+                dict(lp, allTimeDeposits=dict(total=dict(sol='NaN'))),
+                dict(lp, allTimeDeposits={})]:
+        with patch.object(evaluation_module, 'fetch_closed_positions', return_value=[bad]):
+            assert compare_lp({'azimuth':'wallet'}, 100, 200)['azimuth']['status'] == 'unmeasured'
+print('LP cohorts exclude empty positions and float-noise wins; missing valuations stay unmeasured')
