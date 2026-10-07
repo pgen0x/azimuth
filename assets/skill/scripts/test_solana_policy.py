@@ -25,6 +25,52 @@ from dlmm_realized import apply_realized
 
 
 def main():
+    # Audit data outages are unknown; measured risk/concentration still rejects.
+    spec = importlib.util.spec_from_file_location("token_audit", Path(__file__).resolve().parents[1] /
+                                                 "solana-web3-scripts/audit_token.py")
+    audit = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(audit)
+    mint = "1" * 32
+    for risk, metrics, verdict in [
+        (None, {}, "UNKNOWN"), (True, {}, "UNKNOWN"), (-1, {}, "UNKNOWN"),
+        (0, {}, "PASS"), (1, {}, "PASS"), (3, {}, "PASS"), (4, {}, "FAIL"),
+        (None, {"holdersDevPercent": 31, "holdersTop10Percent": "bad"}, "FAIL"),
+        (0, {"holdersTop10Percent": 96}, "FAIL"),
+        (0, {"holdersDevPercent": 30, "holdersTop10Percent": 95}, "PASS"),
+        (0, {"holdersDevPercent": 0, "holdersTop10Percent": 0}, "PASS"),
+        (0, {"holdersDevPercent": "NaN", "holdersTop10Percent": True}, "PASS"),
+    ]:
+        stdout = io.StringIO()
+        responses = [(json.dumps({"success": True, "data": {
+            "hasResult": True, "isSupported": True, "riskLevel": risk}}), ""),
+            (json.dumps({"success": True, "data": [{"contractAddress": mint, **metrics}]}), "")]
+        with patch.object(sys, "argv", ["audit_token.py", mint]), \
+                patch.object(audit, "run_command", side_effect=responses) as reads, \
+                contextlib.redirect_stdout(stdout):
+            try:
+                audit.main()
+            except SystemExit as exc:
+                assert exc.code == 0
+        result = json.loads(stdout.getvalue())
+        assert result["verdict"] == verdict, result
+        if verdict != "FAIL":
+            assert result["risk_level"] == (risk if type(risk) is int and risk >= 0 else None)
+            if not metrics or "NaN" in str(metrics):
+                assert result["dev_pct"] is None and result["top10_pct"] is None
+        assert reads.call_count == (1 if risk == 4 else 2)
+    assert audit.percentage(0) == 0 and audit.percentage("30.5") == 30.5
+    assert all(audit.percentage(v) is None for v in [None, True, "NaN", "Infinity", -1, 101, "bad"])
+    with patch.object(audit.subprocess, "run", side_effect=subprocess.TimeoutExpired("curl", 12)) as read:
+        assert audit.run_command("curl")[1]
+        assert read.call_args.kwargs["timeout"] == 12
+    with patch.object(sys, "argv", ["audit_token.py", "bad'; echo injected"]), \
+            patch.object(audit, "run_command") as read, contextlib.redirect_stdout(io.StringIO()):
+        try:
+            audit.main()
+            raise AssertionError("invalid mint accepted")
+        except SystemExit as exc:
+            assert exc.code == 1
+        read.assert_not_called()
     # AI ranking context must use local reads only, retain unknown metadata,
     # and return before any financial path or deterministic picker runs.
     address = "1" * 32
