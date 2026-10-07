@@ -345,3 +345,7 @@ with quoted SOL proceeds, including the provider's route costs. It excludes
 network fees and rent and is **not net cash**. Inventory and quote are different
 observations; withdrawing liquidity can change the eventual route and price.
 These observations do not change exit rules, selection, learning or risk limits.
+
+## LP comparison precision
+
+Full-life LP cohorts include funded positions created and closed inside the report window. Funded positions created earlier are carry-in closes; positions with zero deposit are counted separately. A win requires at least one lamport of positive LP valuation PnL, a loss at least one lamport negative, and smaller marks count as break-even. This affects win labels only; raw LP PnL and deposit totals are retained. LP wins are before wallet fees and settlement costs. Missing or nonfinite required values leave the wallet comparison unmeasured.

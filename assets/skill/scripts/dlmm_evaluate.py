@@ -254,6 +254,39 @@ def evaluate(profile, start, end, rejects):
                         'Unavailable historical bin/settlement observations are unmeasured; never reconstructed using future information.'])
 
 
+def lp_cohort(records, start, end):
+    """Classify closed, funded LP valuations at native SOL's one-lamport resolution."""
+    positions = {p["positionAddress"]: p for p in records
+                 if start <= int(p.get("closedAt") or 0) < end}
+    funded = []
+    empty = 0
+    for p in positions.values():
+        amount = p["allTimeDeposits"]["total"]["sol"]
+        deposit = float(amount)
+        if isinstance(amount, bool) or not math.isfinite(deposit) or deposit < 0:
+            raise ValueError("invalid LP deposit")
+        if deposit == 0:
+            empty += 1
+            continue
+        created = p["createdAt"]
+        if isinstance(created, bool) or not 0 < int(created) <= int(p["closedAt"]):
+            raise ValueError("invalid LP lifetime")
+        funded.append(p)
+    cohort = [p for p in funded if start <= int(p["createdAt"])]
+    pnl = [float(p["pnlSol"]) for p in cohort]
+    if any(isinstance(p["pnlSol"], bool) for p in cohort) or not all(map(math.isfinite, pnl)):
+        raise ValueError("invalid LP valuation")
+    deposit = sum(float(p["allTimeDeposits"]["total"]["sol"]) for p in cohort)
+    wins, losses = sum(v >= 1e-9 for v in pnl), sum(v <= -1e-9 for v in pnl)
+    return dict(status="measured", full_life_positions=len(cohort),
+                carry_in_closes=len(funded)-len(cohort), zero_deposit_closes=empty,
+                lp_pnl_sol=sum(pnl), deposits_sol=deposit, wins=wins, losses=losses,
+                breakeven_positions=len(cohort)-wins-losses, break_even_tolerance_sol=1e-9,
+                win_basis="full_life_funded_LP_valuation_at_least_one_lamport_before_wallet_costs",
+                pnl_per_deposit_pct=sum(pnl)/deposit*100 if deposit else None,
+                basis="Meteora_position_LP_valuations_not_wallet_NAV", positions=list(positions.values()))
+
+
 def compare_lp(wallets, start, end):
     result = {}
     for name, wallet in wallets.items():
@@ -267,14 +300,7 @@ def compare_lp(wallets, start, end):
                     for p in batch:
                         if start <= int(p.get("closedAt") or 0) < end:
                             positions[p["positionAddress"]] = p
-            cohort = [p for p in positions.values() if start <= int(p.get("createdAt") or 0)
-                      and float(p.get("allTimeDeposits", {}).get("total", {}).get("sol") or 0) > 0]
-            pnl = [float(p["pnlSol"]) for p in cohort]
-            deposit = sum(float(p["allTimeDeposits"]["total"]["sol"]) for p in cohort)
-            result[name] = dict(status="measured", full_life_positions=len(cohort), carry_in_closes=len(positions)-len(cohort),
-                                lp_pnl_sol=sum(pnl), deposits_sol=deposit, wins=sum(v>0 for v in pnl),
-                                pnl_per_deposit_pct=sum(pnl)/deposit*100 if deposit else None,
-                                basis="Meteora_position_LP_valuations_not_wallet_NAV", positions=list(positions.values()))
+            result[name] = lp_cohort(positions.values(), start, end)
         except Exception as exc:
             result[name] = dict(status="unmeasured", error=type(exc).__name__)
     return result
