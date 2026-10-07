@@ -6,7 +6,7 @@ from dlmm_ai_health import probe
 
 
 class ProbeTest(unittest.TestCase):
-    def test_actual_tool_response_required_and_model_preserved(self):
+    def test_availability_probe_and_model_preserved(self):
         runtime = {"api_mode": "chat_completions", "base_url": "http://router.test/v1", "api_key": "test"}
         good = {"choices": [{"message": {"tool_calls": [{"function": {
             "name": "health_check", "arguments": "{}"}}]}}]}
@@ -18,9 +18,10 @@ class ProbeTest(unittest.TestCase):
             def open(inner, req, timeout):
                 body = json.loads(req.data)
                 self.assertEqual(body["model"], "markt")
-                # CodeBuddy rejects object tool_choice before running inference.
-                self.assertEqual(body["tool_choice"], "required")
-                self.assertEqual([t["function"]["name"] for t in body["tools"]], ["health_check"])
+                self.assertNotIn("tools", body)
+                self.assertNotIn("tool_choice", body)
+                self.assertEqual(body["messages"], [{"role": "user", "content": "Reply with OK."}])
+                self.assertEqual(body["max_tokens"], 64)
                 self.assertEqual(req.full_url, "http://router.test/v1/chat/completions")
                 self.assertEqual(timeout, 60)
                 return io.BytesIO(json.dumps(inner.response).encode())
@@ -39,6 +40,14 @@ class ProbeTest(unittest.TestCase):
             {"choices": [{"message": {"content": "OK"}}]})))
         self.assertFalse(probe(runtime, "markt", Opener(
             {"choices": [{"message": {"content": "   "}}]})))
+        # The low-token availability probe can stop during valid reasoning.
+        self.assertTrue(probe(runtime, "markt", Opener(
+            {"choices": [{"finish_reason": "length", "message": {
+                "content": "", "reasoning_content": "Need to reply concisely."}}]})))
+        for reasoning in (None, "   ", {}, []):
+            self.assertFalse(probe(runtime, "markt", Opener(
+                {"choices": [{"message": {"content": "", "reasoning_content": reasoning}}]})))
+
 
 
 if __name__ == "__main__":
