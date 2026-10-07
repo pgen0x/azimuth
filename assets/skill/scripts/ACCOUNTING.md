@@ -105,6 +105,15 @@ is explicitly separate from Azimuth wallet NAV. No reports are automatically sen
 
 Use an isolated checkout for development: the live profile scripts are symlinks.
 
+Signed deploy, close, claim, swap and rent transactions reconcile their own signature
+after broadcast errors as well as confirmation timeouts. RPC acknowledgement is not
+proof of execution. Confirmation is bounded to eight seconds; its fallback uses
+[`getSignatureStatuses` with `searchTransactionHistory`](https://solana.com/docs/rpc/http/getsignaturestatuses).
+Only confirmed/finalized status with an explicit null error proves success. Missing,
+processed or unavailable status keeps the submission uncertain; on-chain failures
+remain failures. Durable pending markers and retries of the same signed bytes remain
+in place. Normal successful sends add no status lookup.
+
 ## September 26 evaluation corrections
 
 - Executor authorization replay uses its persisted post-refresh evidence; the earlier
