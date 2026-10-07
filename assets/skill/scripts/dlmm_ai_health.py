@@ -25,14 +25,9 @@ def probe(runtime, model, opener=None):
         runtime["base_url"].rstrip("/") + "/chat/completions",
         data=json.dumps({
             "model": model,
-            "messages": [{"role": "user", "content": "Call health_check now."}],
-            "tools": [{"type": "function", "function": {
-                "name": "health_check", "description": "Read-only availability check",
-                "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
-            }}],
-            # One available tool: required preserves the tool-call check while
-            # supporting providers whose tool_choice accepts only a string.
-            "tool_choice": "required",
+            # This gate measures inference availability. A forced tool response
+            # can be truncated or rejected by a provider even when inference works.
+            "messages": [{"role": "user", "content": "Reply with OK."}],
             "max_tokens": 64, "stream": False,
         }).encode(),
         headers={"Content-Type": "application/json",
@@ -63,10 +58,10 @@ def probe(runtime, model, opener=None):
         # a provider availability check.
         if isinstance(arguments, dict):
             return True
-    # Some compatible routers/models ignore tool_choice and return a normal
-    # assistant completion. That still proves the route can infer; requiring a
-    # tool call here falsely forced every eligible batch into deterministic mode.
-    return bool(isinstance(message.get("content"), str) and message["content"].strip())
+    # A small output budget can be exhausted by reasoning before final content.
+    # Both fields prove generated inference; neither proves a completed AI pick.
+    return any(isinstance(message.get(key), str) and message[key].strip()
+               for key in ("content", "reasoning_content"))
 
 
 def main():
