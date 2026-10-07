@@ -1,5 +1,5 @@
 const assert=require('node:assert/strict'), fs=require('node:fs'), os=require('node:os'), path=require('node:path');
-const {collect,transactionFact,heliusPrices,parsedAccountingTransaction}=require('./dlmm_nav.js');
+const {collect,transactionFact,heliusPrices,parsedAccountingTransaction,navQuoteMark}=require('./dlmm_nav.js');
 const wallet='wallet',key=s=>({toString:()=>s});
 const tx={slot:100,blockTime:Math.floor(Date.now()/1000),transaction:{message:{accountKeys:[{pubkey:key(wallet)},{pubkey:key('outside')}],instructions:[{program:'system',parsed:{type:'transfer',info:{source:wallet,destination:'outside',lamports:100}}}]}},meta:{err:null,fee:5,preBalances:[1000,0],postBalances:[895,100],preTokenBalances:[],postTokenBalances:[]}};
 const fact=transactionFact(tx,wallet,'sig');
@@ -196,7 +196,7 @@ global.fetch=async url=>{if(url.includes('/quote?'))throw new Error('no route');
  global.fetch=async url=>{if(url.includes('/quote?')){quoted.push(new URL(url).searchParams.get('inputMint'));throw new Error('no route');}return{ok:true,json:async()=>({totalPositions:0,pools:[],hasNext:false})}};
  await collect(args);await collect(args);
  assert.equal(new Set(quoted).size,12);
- fs.writeFileSync(path.join(dir,'dlmm_quote_marks.json'),JSON.stringify({unknown0:{in_amount:'1',out_lamports:'2000000',observed_at:Math.floor(Date.now()/1000),slot:100}}));
+ fs.writeFileSync(path.join(dir,'dlmm_quote_marks.json'),JSON.stringify({unknown0:{schema_version:2,in_amount:'1',out_lamports:'2000000',observed_at:Math.floor(Date.now()/1000),slot:100}}));
  let rateLimitedRequests=0;
  global.fetch=async url=>{if(url.includes('/quote?')){rateLimitedRequests++;return {ok:false,status:429};}return{ok:true,json:async()=>({totalPositions:0,pools:[],hasNext:false})}};
  const limited=await collect(args);
@@ -212,7 +212,7 @@ global.fetch=async url=>{if(url.includes('/quote?'))throw new Error('no route');
    {in_amount:'1',out_lamports:'2000000',observed_at:Math.floor(Date.now()/1000)-601},
    {sol_per_token:2,observed_at:Math.floor(Date.now()/1000)},
  ]) {
-   fs.writeFileSync(path.join(dir,'dlmm_quote_marks.json'),JSON.stringify({unknown0:{...invalid,slot:100}}));
+   fs.writeFileSync(path.join(dir,'dlmm_quote_marks.json'),JSON.stringify({unknown0:{schema_version:2,...invalid,slot:100}}));
    await collect(args);
    const rejected=JSON.parse(fs.readFileSync(path.join(dir,'dlmm_nav.jsonl'),'utf8').trim().split('\n').at(-1));
    assert.equal(rejected.tokens.find(t=>t.mint==='unknown0').mark_sol,null);
@@ -221,11 +221,30 @@ global.fetch=async url=>{if(url.includes('/quote?'))throw new Error('no route');
  const previousAccounts=connection.getParsedTokenAccountsByOwner;
  connection.getParsedTokenAccountsByOwner=async(_,o)=>({value:o.programId.toString().startsWith('Tokenkeg') ? [{account:{lamports:2039280,data:{parsed:{info:{mint:'six-decimal',tokenAmount:{amount:'1000000',decimals:6}}}}}}] : []});
  let quoteCalls=0;
- global.fetch=async url=>{if(url.includes('/quote?')){quoteCalls++;return {ok:true,json:async()=>({inAmount:'1000000',outAmount:'2000000'})};}return{ok:true,json:async()=>({totalPositions:0,pools:[],hasNext:false})}};
+ global.fetch=async url=>{if(url.includes('/quote?')){quoteCalls++;return {ok:true,json:async()=>({inputMint:'six-decimal',outputMint:'So11111111111111111111111111111111111111112',swapMode:'ExactIn',inAmount:'1000000',outAmount:'2000000',contextSlot:115})};}return{ok:true,json:async()=>({totalPositions:0,pools:[],hasNext:false})}};
  await collect(args);await collect(args);
  const cached=JSON.parse(fs.readFileSync(path.join(dir,'dlmm_nav.jsonl'),'utf8').trim().split('\n').at(-1));
- assert.equal(quoteCalls,1);assert.equal(cached.tokens[0].basis,'cached_quote');assert.equal(cached.tokens[0].mark_sol,0.002);
+ assert.equal(quoteCalls,1);assert.equal(cached.tokens[0].basis,'cached_quote');assert.equal(cached.tokens[0].mark_sol,0.002);assert.equal(cached.tokens[0].price_context_slot,115);
  connection.getParsedTokenAccountsByOwner=previousAccounts;
+ // Preserve the provider slot, including a processed slot ahead of finalized RPC.
+ assert.equal(JSON.parse(fs.readFileSync(path.join(dir,'dlmm_quote_marks.json')))["six-decimal"].slot,115);
+ const goodQuote={inputMint:'mint',outputMint:'So11111111111111111111111111111111111111112',inAmount:'1',outAmount:'2000',swapMode:'ExactIn',contextSlot:2000};
+ assert.equal(navQuoteMark(goodQuote,'mint','1',2001).slot,2000);
+ for(const slot of [undefined,null,0,NaN,2000.5]) assert.throws(()=>navQuoteMark(goodQuote,'mint','1',slot),/quote evidence/);
+ for(const bad of [{inputMint:'wrong'},{outputMint:'wrong'},{inAmount:'2'},{swapMode:'ExactOut'},
+   {outAmount:'0'},{outAmount:'-1'},{outAmount:'1e6'},{outAmount:2000},
+   {contextSlot:undefined},{contextSlot:1},{contextSlot:4001},{contextSlot:2000.5}]){
+   assert.throws(()=>navQuoteMark({...goodQuote,...bad},'mint','1',2001),/quote evidence/);
+ }
+ // A 429 on the first selected account advances only one place, even at wraparound.
+ connection.getParsedTokenAccountsByOwner=previousAccounts;
+ fs.writeFileSync(path.join(dir,'dlmm_quote_marks.json'),'{}');
+ fs.writeFileSync(path.join(dir,'dlmm_quote_cursor.json'),JSON.stringify({offset:11}));
+ const attempted=[];
+ global.fetch=async url=>{if(url.includes('/quote?')){attempted.push(new URL(url).searchParams.get('inputMint'));return {ok:false,status:429};}return{ok:true,json:async()=>({totalPositions:0,pools:[],hasNext:false})}};
+ await collect(args);await collect(args);
+ assert.deepEqual(attempted,['unknown11','unknown0']);
+ assert.equal(JSON.parse(fs.readFileSync(path.join(dir,'dlmm_quote_cursor.json'))).offset,1);
  // Helius paginates, rotates keys, rejects unusable prices and keeps secrets out of URLs.
  const sol='So11111111111111111111111111111111111111112';
  const calls=[];

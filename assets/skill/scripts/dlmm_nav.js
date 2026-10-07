@@ -16,6 +16,16 @@ async function json(url, attempts=3, timeout=12000) {
   }
 }
 
+// Validate the response identity and provider slot before promoting a quote to NAV.
+function navQuoteMark(q, mint, raw, slot) {
+  if (!Number.isSafeInteger(slot) || slot<=0 || !q || q.inputMint!==mint || q.outputMint!==SOL || q.inAmount!==raw || q.swapMode!=='ExactIn'
+      || typeof q.outAmount!=='string' || !/^[0-9]+$/.test(q.outAmount) || BigInt(q.outAmount)<=0n
+      || !Number.isFinite(Number(q.outAmount)) || !Number.isSafeInteger(q.contextSlot) || q.contextSlot<=0
+      || Math.abs(q.contextSlot-slot)>1500) throw new Error('Invalid or stale quote evidence');
+  // Quote slots can lead finalized balance slots; retain the provider's slot.
+  return {schema_version:2,in_amount:raw,out_lamports:q.outAmount,observed_at:now(),slot:q.contextSlot};
+}
+
 // Additional provider marks only; finalized RPC remains the balance source.
 async function heliusPrices(wallet, env=process.env) {
   const keys=new Set([env.HELIUS_API_KEY].filter(Boolean));
@@ -465,17 +475,21 @@ async function collect({dir, wallet, PublicKey, rpc, historyOnly=false}) {
   const heliusMark=info=>helius.marks.get(SOL)?.decimals===9 && helius.marks.has(info.mint) && helius.marks.get(info.mint).decimals===info.tokenAmount.decimals;
   // Rotate the bounded quote budget: illiquid early accounts must not starve later ones.
   const cursorPath=path.join(dir,'dlmm_quote_cursor.json');
-  const cursor=fs.existsSync(cursorPath) ? JSON.parse(fs.readFileSync(cursorPath,'utf8')).offset : 0;
+  let cursor=0;
+  try {
+    const stored=JSON.parse(fs.readFileSync(cursorPath,'utf8')).offset;
+    if(Number.isSafeInteger(stored) && stored>=0) cursor=stored;
+  } catch { /* First run or damaged cursor: restart the bounded rotation. */ }
   const quoteMarksPath=path.join(dir,'dlmm_quote_marks.json');
   let quoteMarks={};
   try { quoteMarks=JSON.parse(fs.readFileSync(quoteMarksPath,'utf8')); } catch { /* first run */ }
   const freshQuote=info=>{
     const q=quoteMarks[info.mint];
-    return q && q.in_amount===info.tokenAmount.amount
+    return q && q.schema_version===2 && q.in_amount===info.tokenAmount.amount
       && typeof q.out_lamports==='string' && /^[0-9]+$/.test(q.out_lamports)
       && Number.isFinite(Number(q.out_lamports)) && Number(q.out_lamports)>0
       && Number.isSafeInteger(q.observed_at) && q.observed_at<=now() && now()-q.observed_at<=600
-      && Number.isSafeInteger(q.slot) && q.slot<=slot && slot-q.slot<=1500;
+      && Number.isSafeInteger(q.slot) && q.slot>0 && Math.abs(slot-q.slot)<=1500;
   };
   const missingAccounts=allAccounts.filter(a=>{
     const i=a.account.data.parsed.info;
@@ -483,14 +497,14 @@ async function collect({dir, wallet, PublicKey, rpc, historyOnly=false}) {
   });
   const selected=new Set();
   for(let i=0;i<Math.min(10,missingAccounts.length);i++) selected.add(missingAccounts[(cursor+i)%missingAccounts.length]);
-  fs.writeFileSync(cursorPath,JSON.stringify({offset:missingAccounts.length ? (cursor+selected.size)%missingAccounts.length : 0}),{mode:0o600});
-  let quoteRateLimited=false;
-  for (const account of allAccounts) {
+  let quoteRateLimited=false, quoteAttempts=0;
+  // Process the selected rotation in order, including across the list boundary.
+  for (const account of [...selected,...allAccounts.filter(a=>!selected.has(a))]) {
       const info=account.account.data.parsed.info, raw=info.tokenAmount.amount, mint=info.mint;
       // Include recoverable ATA reserves, but never count wrapped principal twice.
       rent += account.account.lamports-(mint===SOL ? Number(raw) : 0);
       if (BigInt(raw)===0n) continue;
-      let value = null, basis="spot_mark", markError=null, priceObservedAt=null, freshness="timestamp_and_slot_checked";
+      let value = null, basis="spot_mark", markError=null, priceObservedAt=null, priceContextSlot=null, freshness="timestamp_and_slot_checked";
       try {
         if (mint===SOL) { value=Number(raw)/1e9; freshness="finalized_balance"; }
         else if (marks.has(mint) && marks.has(SOL)) {
@@ -503,21 +517,24 @@ async function collect({dir, wallet, PublicKey, rpc, historyOnly=false}) {
         } else if (freshQuote(info)) {
           const mark=quoteMarks[mint];
           value=Number(mark.out_lamports)/1e9;
-          basis='cached_quote'; freshness='quote_cached'; priceObservedAt=mark.observed_at;
+          basis='cached_quote'; freshness='quote_cached'; priceObservedAt=mark.observed_at; priceContextSlot=mark.slot;
         } else {
           if (quoteRateLimited) throw new Error('quote_rate_limit_deferred');
           if (!selected.has(account)) throw new Error('quote_budget_deferred');
+          quoteAttempts++;
           const q=await json(`https://api.jup.ag/swap/v1/quote?inputMint=${mint}&outputMint=${SOL}&amount=${raw}&slippageBps=100`,1,2500);
-          if (q.inAmount!==raw || !q.outAmount) throw new Error('Quote mismatch');
-          value=Number(q.outAmount)/1e9; basis="full_balance_quote"; freshness="quote_received_now";
+          const mark=navQuoteMark(q,mint,raw,slot);
+          value=Number(mark.out_lamports)/1e9; basis="full_balance_quote"; freshness="quote_context_slot_checked";
+          priceObservedAt=mark.observed_at; priceContextSlot=mark.slot;
           // Full-balance quotes only apply to the same amount; liquidity impact is nonlinear.
-          if (Number.isFinite(value) && value>0) quoteMarks[mint]={in_amount:raw,out_lamports:q.outAmount,observed_at:now(),slot};
+          quoteMarks[mint]=mark;
         }
         if (!Number.isFinite(value) || value<0) throw new Error('Invalid mark');
       } catch (err) { value=null; freshness="unavailable"; markError=err.message; if (err.message==='HTTP 429') quoteRateLimited=true; issues.push(`unpriced_token:${mint}`); }
-      tokens.push({mint,raw,mark_sol:value,basis,mark_error:markError,price_freshness:freshness,price_observed_at:priceObservedAt,observed_at:now()});
+      tokens.push({mint,raw,mark_sol:value,basis,mark_error:markError,price_freshness:freshness,price_observed_at:priceObservedAt,price_context_slot:priceContextSlot,observed_at:now()});
       if (value!==null) tokenValue+=value;
   }
+  fs.writeFileSync(cursorPath,JSON.stringify({offset:missingAccounts.length ? (cursor+quoteAttempts)%missingAccounts.length : 0}),{mode:0o600});
   fs.writeFileSync(quoteMarksPath,JSON.stringify(quoteMarks),{mode:0o600});
   let apiPositions=0;
   for (let page=1; page<=100; page++) {
@@ -555,4 +572,4 @@ async function collect({dir, wallet, PublicKey, rpc, historyOnly=false}) {
   append(path.join(dir,'dlmm_nav.jsonl'),snapshot);
   return {nav_sol:snapshot.nav_sol,issues,missing_transactions:missing,wallet_history_complete:snapshot.wallet_history_complete};
 }
-module.exports={collect,transactionFact,heliusPrices,collectRentHistory,parsedAccountingTransaction};
+module.exports={collect,transactionFact,heliusPrices,collectRentHistory,parsedAccountingTransaction,navQuoteMark};
