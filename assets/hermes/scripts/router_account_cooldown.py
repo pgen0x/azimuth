@@ -21,7 +21,11 @@ INSERT = 'r=function(a,b,c){if(["codebuddy-cn","codebuddy-intl"].includes((0,h.r
 # generic 30-minute cap; per-minute throttling keeps the existing policy.
 INSERT_V2 = INSERT
 GEMINI_DAILY = r'if("gemini"===(0,h.rs)(c)&&429===Number(a))try{let d=JSON.parse(String(b||"").slice(String(b||"").indexOf("{"))),e=d.error;if("RESOURCE_EXHAUSTED"===e?.status&&Array.isArray(e.details)&&e.details.some(a=>"type.googleapis.com/google.rpc.QuotaFailure"===a["@type"]&&Array.isArray(a.violations)&&a.violations.some(a=>"string"==typeof a.quotaId&&/PerDay(?:-|$|Per)/.test(a.quotaId)))){let a=e.details.find(a=>"type.googleapis.com/google.rpc.RetryInfo"===a["@type"])?.retryDelay;if("string"==typeof a&&/^\d+(?:\.\d+)?s$/.test(a)){let b=Date.now()+Math.ceil(parseFloat(a)*1e3);Number.isSafeInteger(b)&&Number.isFinite(new Date(b).getTime())&&b>Date.now()&&(k=Math.max(Number(k)||0,b),Q=!0)}}}catch{};'
-INSERT = INSERT_V2.replace('if("github"', GEMINI_DAILY + 'if("github"')
+INSERT_V3 = INSERT_V2.replace('if("github"', GEMINI_DAILY + 'if("github"')
+# Account-wide budget failures cannot recover on another model. xAI retries
+# after the existing 30-minute restriction interval; Cloudflare resets at UTC midnight.
+ACCOUNT_BUDGET = r'if(("xai"===(0,h.rs)(c)&&402===Number(a))||("cloudflare-ai"===(0,h.rs)(c)&&429===Number(a)))try{let d=JSON.parse(String(b||"").slice(String(b||"").indexOf("{")));if("xai"===(0,h.rs)(c)&&"personal-team-blocked:spending-limit"===d.code)return Math.max(Date.now()+18e5,Number(k)||0);if("cloudflare-ai"===(0,h.rs)(c)&&!1===d.success&&Array.isArray(d.errors)&&d.errors.some(a=>4006===a.code&&"string"==typeof a.message&&/used up your daily free allocation/i.test(a.message)))return Math.max((Math.floor(Date.now()/864e5)+1)*864e5,Number(k)||0)}catch{};'
+INSERT = INSERT_V3.replace('if("github"', ACCOUNT_BUDGET + 'if("github"')
 OLD_SCOPE = 'async function m(a,b,c,e=null,i=null,k=null){let l,n,o;'
 NEW_SCOPE = OLD_SCOPE + 'let Q=!1;'
 OLD_CAP = 'n="antigravity"===(0,h.rs)(e)?k-Date.now():Math.min(k-Date.now(),g.fh)'
@@ -44,10 +48,10 @@ def changes(app):
     for path in root.rglob("*.js"):
         original = path.read_text()
         readers += original.count(OLD_LOCK) + original.count(NEW_LOCK)
-        writers += original.count(ANCHOR) + original.count(INSERT_V1) + original.count(INSERT_V2) + original.count(INSERT)
+        writers += original.count(ANCHOR) + original.count(INSERT_V1) + original.count(INSERT_V2) + original.count(INSERT_V3) + original.count(INSERT)
         fallbacks += original.count(OLD_FALLBACK) + (0 if OLD_FALLBACK in original else original.count(NEW_FALLBACK))
         retries += original.count(OLD_RETRY) + original.count(NEW_RETRY)
-        updated = original.replace(OLD_LOCK, NEW_LOCK).replace(INSERT_V2, INSERT).replace(INSERT_V1, INSERT).replace(ANCHOR, INSERT).replace(NEW_SCOPE, OLD_SCOPE).replace(OLD_SCOPE, NEW_SCOPE).replace(OLD_CAP, NEW_CAP).replace(OLD_FALLBACK, NEW_FALLBACK).replace(OLD_RETRY, NEW_RETRY)
+        updated = original.replace(OLD_LOCK, NEW_LOCK).replace(INSERT_V3, INSERT).replace(INSERT_V2, INSERT).replace(INSERT_V1, INSERT).replace(ANCHOR, INSERT).replace(NEW_SCOPE, OLD_SCOPE).replace(OLD_SCOPE, NEW_SCOPE).replace(OLD_CAP, NEW_CAP).replace(OLD_FALLBACK, NEW_FALLBACK).replace(OLD_RETRY, NEW_RETRY)
         if original != updated:
             patches.append((path, original, updated))
     if readers != 9 or writers != 1 or fallbacks != 1 or retries != 1:
@@ -61,7 +65,7 @@ def check(app, patched=False):
         raise ValueError("Installed build is not fully patched")
     # Exercise real functions extracted from every installed copy, without requests.
     for path in (app / ".next-cli-build/server").rglob("*.js"):
-        source = path.read_text().replace(OLD_LOCK, NEW_LOCK).replace(INSERT_V2, INSERT).replace(INSERT_V1, INSERT).replace(ANCHOR, INSERT).replace(NEW_SCOPE, OLD_SCOPE).replace(OLD_SCOPE, NEW_SCOPE).replace(OLD_CAP, NEW_CAP).replace(OLD_FALLBACK, NEW_FALLBACK).replace(OLD_RETRY, NEW_RETRY)
+        source = path.read_text().replace(OLD_LOCK, NEW_LOCK).replace(INSERT_V3, INSERT).replace(INSERT_V2, INSERT).replace(INSERT_V1, INSERT).replace(ANCHOR, INSERT).replace(NEW_SCOPE, OLD_SCOPE).replace(OLD_SCOPE, NEW_SCOPE).replace(OLD_CAP, NEW_CAP).replace(OLD_FALLBACK, NEW_FALLBACK).replace(OLD_RETRY, NEW_RETRY)
         if NEW_LOCK in source:
             harness = """const assert=require('node:assert/strict'),vm=require('node:vm');
 const lock=vm.runInNewContext('('+process.argv[1]+')',{i:m=>'modelLock_'+m,h:'modelLock___all'});
@@ -77,10 +81,12 @@ assert(!lock({},'m'));
             start = source.index("async function m(a,b,c,e=null,i=null,k=null){")
             end = source.index("async function n(a,b,c=null){", start)
             harness = """const assert=require('node:assert/strict'),vm=require('node:vm');
-let update;
+let update,clock=null;
+class Clock extends Date{static now(){return clock??Date.now()}}
 const mark=vm.runInNewContext('('+process.argv[1]+')',{
 d:{getProviderConnections:async()=>[{id:'conn',backoffLevel:0}],updateProviderConnection:async(id,value)=>{update=value}},
-f:{hk:()=>({shouldFallback:true,cooldownMs:30000}),S5:(model,ms)=>({[model?'modelLock_'+model:'modelLock___all']:new Date(Date.now()+ms).toISOString()})},
+Date:Clock,
+f:{hk:()=>({shouldFallback:true,cooldownMs:30000}),S5:(model,ms)=>({[model?'modelLock_'+model:'modelLock___all']:new Date(Clock.now()+ms).toISOString()})},
 h:{rs:p=>p},g:{fh:1800000},j:{warn:()=>{}},console:{error:()=>{}}});
 (async()=>{
  for(const [status,error,provider,global] of [
@@ -94,6 +100,33 @@ h:{rs:p=>p},g:{fh:1800000},j:{warn:()=>{}},console:{error:()=>{}}});
  const before=Date.now();await mark('conn',status,error,provider,'model');
  assert.equal(Object.hasOwn(update,'modelLock___all'),global);
  if(global)assert(Date.parse(update.modelLock___all)>=before+1800000);
+ }
+ const spending=JSON.stringify({code:'personal-team-blocked:spending-limit',error:'budget depleted'});
+ const cf=JSON.stringify({success:false,errors:[{code:4006,message:'AiError: you have used up your daily free allocation of 10,000 neurons'}]});
+ for(const stamp of ['2026-10-07T15:00:00Z','2026-10-07T23:59:59.999Z','2026-10-08T00:00:00Z']){
+ clock=Date.parse(stamp);
+ await mark('conn',402,'[402]: '+spending,'xai','model');
+ assert.equal(Date.parse(update.modelLock___all),clock+1800000);
+ await mark('conn',402,spending,'xai','model',clock+3600000);
+ assert.equal(Date.parse(update.modelLock___all),clock+3600000);
+ await mark('conn',429,cf,'cloudflare-ai','model');
+ assert.equal(Date.parse(update.modelLock___all),(Math.floor(clock/86400000)+1)*86400000);
+ const later=(Math.floor(clock/86400000)+2)*86400000;
+ await mark('conn',429,cf,'cloudflare-ai','model',later);
+ assert.equal(Date.parse(update.modelLock___all),later);
+ }
+ clock=null;
+ for(const [status,error,provider] of [
+ [429,spending,'xai'],[402,spending,'other'],[402,'{"code":"other"}','xai'],
+ [402,'broken {','xai'],[402,'{"error":{"code":"personal-team-blocked:spending-limit"}}','xai'],
+ [503,cf,'cloudflare-ai'],[429,cf,'other'],
+ [429,'{"success":false,"errors":[{"code":4006,"message":"temporary rate limit"}]}','cloudflare-ai'],
+ [429,'{"success":false,"errors":[{"code":4007,"message":"used up your daily free allocation"}]}','cloudflare-ai'],
+ [429,'{"success":true,"errors":[{"code":4006,"message":"used up your daily free allocation"}]}','cloudflare-ai'],
+ [429,'{"success":false,"errors":null}','cloudflare-ai'],[429,'broken {','cloudflare-ai']]){
+ await mark('conn',status,error,provider,'model');
+ assert(!Object.hasOwn(update,'modelLock___all'));
+ assert(Date.parse(update.modelLock_model)<Date.now()+60000);
  }
  const quota=JSON.stringify({error:{status:'RESOURCE_EXHAUSTED',details:[
  {reason:'QUOTA_EXHAUSTED'}, {'@type':'type.googleapis.com/google.rpc.RetryInfo',retryDelay:'580382.606185709s'}]}});
