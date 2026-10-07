@@ -127,6 +127,20 @@ def main():
     ]:
         assert weights_module.outcome_sol(row) is None
     assert weights_module.outcome_sol({"pnl_basis":"realized","pnl_sol":0}) == 0
+    # Exercise the actual writer envelope through the fallback reader and ranker.
+    for stored in [{"weights": {"holders": 1.4}, "lifts": {"holders": .2}}, {"holders": 1.4}]:
+        with patch.object(pipeline, "run_command", return_value=(json.dumps(stored), "", 0)):
+            assert pipeline.load_signal_weights() == {"holders": 1.4}
+            candidates = [{"name":"lower", "score":70, "holders":1000},
+                          {"name":"higher", "score":70, "holders":2000}]
+            ranked = pipeline.apply_batch_conviction(candidates, "turnover")
+            assert ranked[0]["score"] == 70 and abs(ranked[1]["score"] - 74) < 1e-9
+    for stored in [None, [], {"weights": None}, {"weights": {
+            "holders": True, "score": "1.4", "organic_score": float("nan"),
+            "fee_tvl_ratio": float("inf"), "volume_tvl_ratio": 2.6,
+            "global_fees_sol": .2, "ignored": 1.4}}]:
+        with patch.object(pipeline, "run_command", return_value=(json.dumps(stored), "", 0)):
+            assert pipeline.load_signal_weights() == {}
     with tempfile.TemporaryDirectory() as directory:
         root=Path(directory);(root/"memories").mkdir()
         closes=root/"memories/dlmm_closes.jsonl"
