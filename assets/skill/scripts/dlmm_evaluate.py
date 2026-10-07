@@ -33,6 +33,12 @@ def delivery_outcomes(profile, path, start, end):
             prepared[ident] = row
         else:
             states[ident] = row.get("stage")
+    guard_outputs = collections.defaultdict(list)
+    for row in rows(profile / "memories/dlmm_report_guard.jsonl"):
+        if (isinstance(row.get("session_id"), str) and type(row.get("ts")) in (int, float) and start <= row["ts"] <= end
+                and row.get("status") in ("receipt_report", "claim_withheld", "no_execution_claim")
+                and type(row.get("receipt_count")) is int and row["receipt_count"] >= 0):
+            guard_outputs[row.get("session_id")].append(row)
     result = []
     database = profile / "state.db"
     try:
@@ -44,7 +50,7 @@ def delivery_outcomes(profile, path, start, end):
         for ident, row in prepared.items():
             item = {"delivery_id": ident, "prepared_at": row["observed_at"],
                     "transport": states.get(ident, "unconfirmed"), "session_state": "unobserved",
-                    "execution_verified": False}
+                    "execution_verified": False, "output_state": "unobserved", "guard_outputs": []}
             if conn is not None:
                 try:
                     # Hermes multiplex gateways encode profile, route and delivery as a tuple.
@@ -55,7 +61,35 @@ def delivery_outcomes(profile, path, start, end):
                     if len(sessions) == 1:
                         session = sessions[0]
                         item["session_id"] = session["id"]
-                        item["session_state"] = "ended_execution_unverified" if session["ended_at"] is not None and session["ended_at"] <= end else "not_ended_at_cutoff"
+                        item["session_state"] = "ended" if session["ended_at"] is not None and session["ended_at"] <= end else "not_ended_at_cutoff"
+                        # A transformed output does not close Hermes' session. Neither
+                        # lifecycle marker proves a live worker or authorizes a retry.
+                        for output in guard_outputs.get(session["id"], []):
+                            if output["ts"] < session["started_at"]:
+                                continue
+                            executions = output.get("executions", [])
+                            if not isinstance(executions, list) or len(executions) != output["receipt_count"]:
+                                executions = []
+                            valid = []
+                            for execution in executions:
+                                if (not isinstance(execution, dict) or type(execution.get("dry_run")) is not bool
+                                        or type(execution.get("execution_verified")) is not bool):
+                                    continue
+                                identifiers = {}
+                                for key, pattern in (("position", r"[1-9A-HJ-NP-Za-km-z]{32,44}"),
+                                                     ("signature", r"[1-9A-HJ-NP-Za-km-z]{64,88}")):
+                                    value = execution.get(key)
+                                    identifiers[key] = value if isinstance(value, str) and re.fullmatch(pattern, value) else None
+                                verified = (output["status"] == "receipt_report" and not execution["dry_run"]
+                                            and execution["execution_verified"] and all(identifiers.values()))
+                                valid.append(dict(identifiers, dry_run=execution["dry_run"], execution_verified=bool(verified)))
+                            item["guard_outputs"].append(dict(ts=output["ts"], status=output["status"],
+                                receipt_count=output["receipt_count"], executions=valid,
+                                elapsed_seconds=output["ts"]-session["started_at"]))
+                        if item["guard_outputs"]:
+                            item["output_state"] = "prepared"
+                            item["execution_verified"] = any(e["execution_verified"]
+                                for output in item["guard_outputs"] for e in output["executions"])
                     elif len(sessions) > 1:
                         item["session_state"] = "ambiguous"
                 except sqlite3.Error:
@@ -66,7 +100,7 @@ def delivery_outcomes(profile, path, start, end):
     finally:
         if conn is not None:
             conn.close()
-    return {"deliveries": result, "basis": "webhook_acceptance_and_session_lifecycle_only; not_AI_pick_success_or_trade_proof; no_retry_authorization"}
+    return {"deliveries": result, "basis": "webhook_session_and_guarded_pipeline_receipts; execution_verified_means_pipeline_position_verification_not_finalized_cash_profit_or_Telegram_delivery; output_prepared_and_session_open_do_not_prove_worker_liveness; no_retry_authorization"}
 
 
 def replay_root_decision(decision):
@@ -334,7 +368,7 @@ def main():
     (a.output/'evaluation.json').write_text(json.dumps(data,indent=2,allow_nan=False))
     lines=['# Azimuth Solana evaluation',f"Window UTC epoch: {a.start} – {a.end}",
         f"Closes: {data['close_count']}; account deletion proofs: {sum(bool(v) for v in data['close_account_proofs'].values())}; complete marked NAV samples: {data['complete_nav_samples']}/{data['nav_samples']}.",
-        '## AI delivery tracking (not execution proof)',json.dumps(data['delivery_tracking']),
+        '## AI delivery tracking (guarded pipeline position proof; not cash profit)',json.dumps(data['delivery_tracking']),
         '## Native SOL cash (not trading profit)',json.dumps(data['native_cash_change']) if data['native_cash_change'] else 'Unmeasured: fewer than two distinct native balance snapshots in this window.',
         'Cash uses the displayed snapshot times. Rent is recoverable reserve; token and LP marks are not necessarily executable proceeds. Complete wallet profit remains unmeasured when NAV is incomplete.',
         '## LP comparison (full-life cohort; not net wallet profit)',json.dumps({k:{field:value for field,value in v.items() if field!="positions"} for k,v in data.get('lp_comparison',{}).items()}),'## Wallet wealth',json.dumps(data['wealth_change']) if data['wealth_change'] else 'Unmeasured: incomplete marks/history or external token inflows without transfer-time valuation.',
