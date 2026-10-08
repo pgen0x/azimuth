@@ -362,9 +362,6 @@ def settlement_inventory(profile, position, mint, wallet):
     # Zero owned inventory completes settlement without touching legacy tokens.
     if raw == 0:
         return {"success": True, "amount_raw": "0"}
-    if any(other is not c and int(other["token_deltas_raw"].get(mint, 0))
-           for other in ledger["chains"]):
-        return refusal
     if any(r.get("classification") == "external_token_inflow" and not r.get("failed")
            and r.get("landed") is not False and int(r.get("token_deltas_raw", {}).get(mint, 0)) > 0
            and (r.get("block_time") is None or r["block_time"] >= c["first_activity"])
@@ -372,14 +369,28 @@ def settlement_inventory(profile, position, mint, wallet):
         return refusal
     landed = [facts[s] for s in c["recorded_signatures"]
               if facts[s].get("landed") is not False and not facts[s].get("failed")]
-    if any(type(f.get("slot")) is not int or not isinstance(f.get("token_post_balances_raw"), dict)
+    if any(type(f.get("slot")) is not int
+           or any(not isinstance(f.get(k), dict) for k in ("token_pre_balances_raw", "token_post_balances_raw"))
+           or int(f["token_post_balances_raw"].get(mint, 0))-int(f["token_pre_balances_raw"].get(mint, 0))
+                != int(f.get("token_deltas_raw", {}).get(mint, 0))
            for f in landed):
         return refusal
-    latest = max(landed, key=lambda f: f["slot"])
-    balance = int(latest["token_post_balances_raw"].get(mint, 0))
-    if raw > balance:
+    first = min(landed, key=lambda f: f["slot"])
+    initial = int(first["token_pre_balances_raw"].get(mint, 0))
+    last_slot = max(f["slot"] for f in landed)
+    # Preserve the transaction-time legacy balance, not historical ledger debts.
+    # Claim and close can share a slot; only the conserved terminal balance fits.
+    terminal = [f for f in landed if f["slot"] == last_slot
+                and int(f["token_post_balances_raw"].get(mint, 0)) == initial+raw]
+    if initial < 0 or not terminal:
         return refusal
-    return {"success": True, "amount_raw": str(raw), "wallet_balance_raw": str(balance), "slot": latest["slot"]}
+    if any(s not in c["recorded_signatures"] and f.get("wallet") == wallet
+           and f.get("landed") is not False and not f.get("failed")
+           and int(f.get("token_deltas_raw", {}).get(mint, 0))
+           and (f.get("slot") is None or f["slot"] >= first["slot"])
+           for s, f in facts.items()):
+        return refusal
+    return {"success": True, "amount_raw": str(raw), "wallet_balance_raw": str(initial+raw), "slot": last_slot}
 
 
 def refund_cash_bounds(group, chains, selected):

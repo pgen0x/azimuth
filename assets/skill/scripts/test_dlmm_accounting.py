@@ -355,6 +355,44 @@ with TemporaryDirectory() as root:
     write("dlmm_transactions.jsonl",events)
     write("dlmm_transaction_facts.jsonl",facts)
     (memories / "dlmm_entries/other.json").unlink()
+    # A fee claim and close in the same slot must choose the conserved endpoint.
+    claimed=dict(facts[1],signature="aa-fee",position_account_closed=False,
+                 token_deltas_raw={"TOKEN":"10"},token_post_balances_raw={"TOKEN":"5443"})
+    closed=dict(facts[1],token_deltas_raw={"TOKEN":"90"},token_pre_balances_raw={"TOKEN":"5443"})
+    write("dlmm_transactions.jsonl",events+[dict(signature="aa-fee",position="p",wallet="wallet",kind="claim",ts=199)])
+    write("dlmm_transaction_facts.jsonl",[facts[0],claimed,closed])
+    assert proof()=={"success":True,"amount_raw":"100","wallet_balance_raw":"5533","slot":20}
+    write("dlmm_transactions.jsonl",events);write("dlmm_transaction_facts.jsonl",facts)
+    # Historic debts for this mint cannot seize or strand a newly proved lot.
+    (memories / "dlmm_entries/old.json").write_text(json.dumps(dict(position="old",base_mint="TOKEN",deployed_at=50)))
+    old_event=dict(signature="old",position="old",wallet="wallet",kind="deploy",ts=50)
+    old_fact=dict(facts[0],signature="old",slot=5,block_time=50,
+                  token_pre_balances_raw={"TOKEN":"0"},token_post_balances_raw={"TOKEN":"9007199254740993"},
+                  token_deltas_raw={"TOKEN":"9007199254740993"})
+    write("dlmm_transactions.jsonl",events+[old_event]);write("dlmm_transaction_facts.jsonl",facts+[old_fact])
+    assert proof()["amount_raw"]=="100" and proof()["wallet_balance_raw"]=="5533"
+    # Fresh-wallet lot: old offsetting/unattributed accounting is not its inventory.
+    fresh=[dict(facts[0],token_pre_balances_raw={"TOKEN":"0"},token_post_balances_raw={"TOKEN":"0"}),
+           dict(facts[1],token_pre_balances_raw={"TOKEN":"0"},token_post_balances_raw={"TOKEN":"100"})]
+    old_fact.update(token_pre_balances_raw={"TOKEN":"9007199254740993"},token_post_balances_raw={"TOKEN":"0"},
+                    token_deltas_raw={"TOKEN":"-9007199254740993"})
+    write("dlmm_transaction_facts.jsonl",fresh+[old_fact]);assert proof()["amount_raw"]=="100"
+    (memories / "dlmm_entries/old.json").unlink();write("dlmm_transactions.jsonl",events)
+    # Refuse unexplained baseline shifts despite a valid local close delta.
+    for shift in (-10,10):
+        moved=dict(facts[1],token_pre_balances_raw={"TOKEN":str(5433+shift)},
+                   token_post_balances_raw={"TOKEN":str(5533+shift)})
+        write("dlmm_transaction_facts.jsonl",[facts[0],moved]);assert not proof()["success"]
+    # A known external outflow after close is not permission to sell legacy tokens.
+    transfer=dict(facts[1],signature="transfer",slot=30,classification="external_token_outflow",
+                  token_deltas_raw={"TOKEN":"-100"},token_pre_balances_raw={"TOKEN":"5533"},
+                  token_post_balances_raw={"TOKEN":"5433"})
+    write("dlmm_wallet_transactions.jsonl",[transfer]);write("dlmm_transaction_facts.jsonl",facts)
+    assert not proof()["success"]
+    write("dlmm_wallet_transactions.jsonl",[])
+    invalid=dict(facts[1]);invalid.pop("token_pre_balances_raw")
+    write("dlmm_transaction_facts.jsonl",[facts[0],invalid]);assert not proof()["success"]
+    write("dlmm_transaction_facts.jsonl",facts)
     # Only the owned amount is removed; legacy wallet dust may remain nonzero.
     swap=dict(facts[1],signature="sale",slot=30,position_account_closed=False,
               token_deltas_raw={"TOKEN":"-100"},token_post_balances_raw={"TOKEN":"5433"})
