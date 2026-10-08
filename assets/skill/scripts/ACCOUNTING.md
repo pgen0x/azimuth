@@ -322,11 +322,17 @@ its Redis journal; a newly closed position invalidates older cash evidence.
 Signals expose `prior_mark_pnl_sol` separately from `prior_net_pnl_sol`.
 Net is present only with `prior_pnl_basis=matched_refund_cash`: every root in the
 last ten closes (within 30 days) must be wholly covered by verified refund groups.
-Shared cleanup fees count once. A refund group spanning different pools is not
-split arbitrarily, so those pools retain unknown cash. Unknown is not zero.
+Shared cleanup fees count once. For a group spanning pools, individually proved
+refund amounts produce `prior_cash_lower_sol` / `prior_cash_upper_sol` with
+`matched_refund_cash_bounds`. Lower charges every shared refund fee in full;
+upper assigns none. These ranges cannot be added across pools, and exact net
+remains absent. The whole group's cash reconciles before projecting a range.
+Missing components, partial roots and uncovered closes retain unknown cash.
+Unknown is not zero.
 
-Ranking prefers verified cash, with the existing conservative mark loss penalty
-when cash is unavailable. The separate pool percentage-loss safety gate continues
+Ranking prefers exact cash or a proved interval sign (upper < 0 means loss;
+lower >= 0 means nonnegative). A range crossing zero retains the existing
+conservative mark loss penalty. No penalty size or risk limit changes. The separate pool percentage-loss safety gate continues
 to use the existing marked history and its unchanged threshold. This cache is
 advisory selection evidence, not portfolio NAV or a new risk-limit authority.
 

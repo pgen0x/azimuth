@@ -108,7 +108,7 @@ def rent_refund_groups(chains, facts, histories, as_of):
             owners.setdefault(signature, set()).add(c["root_chain_id"])
     evidence = {(r.get("refund_signature"), r.get("account")): r for r in histories
                 if r.get("observed_at", float("inf")) <= as_of}
-    groups = []
+    groups, components = [], {}
     for signature, refund in facts.items():
         items = refund.get("token_rent_evidence", {}).get("refunded", [])
         if (not items or refund.get("failed") or refund.get("landed") is False
@@ -118,7 +118,7 @@ def rent_refund_groups(chains, facts, histories, as_of):
                 or len({i["account"] for i in items}) != len(items)
                 or sum(i["lamports"] for i in items)-refund["fee_lamports"] != refund["wallet_delta_lamports"]):
             continue
-        roots = set()
+        roots, gross_by_root = set(), {}
         for item in items:
             proof = evidence.get((signature, item["account"]), {})
             history = proof.get("history_signatures", [])
@@ -146,9 +146,12 @@ def rent_refund_groups(chains, facts, histories, as_of):
                     if (c["accounting_status"] == "settled_cash" and c["positions"]
                             and c["last_activity"] <= as_of):
                         roots.add(root)
+                        gross_by_root[root] = gross_by_root.get(root, 0) + item["lamports"]
                         continue
             break
         else:
+            components[signature] = dict(signature=signature, gross_by_root=gross_by_root,
+                                         fee_lamports=refund["fee_lamports"])
             # Connected refunds share roots; include each root's cash only once.
             group = dict(roots=roots, refunds={signature})
             linked = [g for g in groups if g["roots"] & roots]
@@ -158,6 +161,7 @@ def rent_refund_groups(chains, facts, histories, as_of):
                 groups.remove(g)
             groups.append(group)
     return [dict(root_chain_ids=sorted(g["roots"]), refund_signatures=sorted(g["refunds"]),
+                 refund_components=[components[s] for s in sorted(g["refunds"])],
                  first_activity=min(by_root[r]["first_activity"] for r in g["roots"]),
                  last_activity=max([facts[s]["block_time"] for s in g["refunds"]]
                                    + [by_root[r]["last_activity"] for r in g["roots"]]),
@@ -329,12 +333,48 @@ def report(profile, as_of=None):
 
 
 
+def refund_cash_bounds(group, chains, selected):
+    """Project validated refund cash; charge a shared TX fee fully or not at all.
+
+    Bounds from different pools cannot be summed: their shared fee ranges overlap.
+    """
+    ids = set(group["root_chain_ids"])
+    pieces = group.get("refund_components")
+    if (not selected or not selected <= ids or not isinstance(pieces, list) or not pieces
+            or any(r not in chains or chains[r].get("accounting_status") != "settled_cash"
+                   or type(chains[r].get("wallet_delta_lamports")) is not int for r in ids)):
+        return None
+    seen, touched = set(), set()
+    total = sum(chains[r]["wallet_delta_lamports"] for r in ids)
+    lower = upper = sum(chains[r]["wallet_delta_lamports"] for r in selected)
+    for piece in pieces:
+        if not isinstance(piece, dict):
+            return None
+        signature, gross, fee = piece.get("signature"), piece.get("gross_by_root"), piece.get("fee_lamports")
+        if (not isinstance(signature, str) or signature in seen or not isinstance(gross, dict)
+                or not gross or not set(gross) <= ids or type(fee) is not int or fee < 0
+                or any(type(v) is not int or v < 0 for v in gross.values())):
+            return None
+        seen.add(signature); touched.update(gross)
+        total += sum(gross.values()) - fee
+        chosen = set(gross) & selected
+        if chosen:
+            value = sum(gross[r] for r in chosen)
+            lower += value - fee
+            upper += value - (fee if set(gross) <= selected else 0)
+    value = group.get("cash_with_matched_refunds_sol")
+    if (seen != set(group.get("refund_signatures", [])) or touched != ids
+            or isinstance(value, bool) or not isinstance(value, (int, float))
+            or not math.isfinite(value) or total != round(value * 1e9)):
+        return None
+    return lower, upper
+
+
 def pool_cash_history(closes, ledger, as_of):
     """Last ten closes per pool; net cash only when whole roots/refunds match.
 
-    Keep marks separate. Cross-pool shared cleanup fees have no unique pool
-    allocation, so those pools retain unknown net cash rather than an invented
-    split. This view does not change the existing mark-based risk floor.
+    Keep marks separate. Cross-pool cleanup fees produce a conservative range,
+    never an invented split. This does not change the mark-based risk floor.
     """
     by_pool = {}
     for row in closes:
@@ -348,27 +388,39 @@ def pool_cash_history(closes, ledger, as_of):
         selected = sorted(records.values(), key=lambda r: r["ts"], reverse=True)[:10]
         positions = {r["position"] for r in selected}
         roots = {r.get("root_chain_id") or r.get("recenter_of") or r["position"] for r in selected}
-        covered, cash = set(), 0.0
+        covered, lower, upper = set(), 0.0, 0.0
         for group in ledger["rent_refund_groups"]:
             ids = set(group["root_chain_ids"])
-            if not ids or not ids <= roots or ids & covered:
+            chosen = ids & roots
+            if not chosen or chosen & covered or group.get("last_activity", as_of) > as_of:
                 continue
             if any(r not in chains or chains[r]["accounting_status"] != "settled_cash"
-                   or not set(chains[r]["positions"]) <= positions for r in ids):
+                   or not set(chains[r]["positions"]) <= positions for r in chosen):
                 continue
-            value = group.get("cash_with_matched_refunds_sol")
-            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
-                continue
-            covered.update(ids)
-            cash += value
+            if ids <= roots:
+                value = group.get("cash_with_matched_refunds_sol")
+                if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+                    continue
+                lo = hi = value
+            else:
+                bounds = refund_cash_bounds(group, chains, chosen)
+                if bounds is None:
+                    continue
+                lo, hi = (v / 1e9 for v in bounds)
+            covered.update(chosen)
+            lower += lo; upper += hi
+        complete = covered == roots
+        exact = complete and round(lower, 9) == round(upper, 9)
         marks = [r.get("pnl_sol") for r in selected]
         valid_marks = all(not isinstance(v, bool) and isinstance(v, (int, float)) and math.isfinite(v) for v in marks)
         result[pool] = {
             "prior_closes": len(selected), "last_close_ts": selected[0]["ts"],
             "prior_mark_pnl_sol": sum(marks) if valid_marks else None,
-            "prior_net_pnl_sol": round(cash, 9) if covered == roots else None,
+            "prior_net_pnl_sol": round(lower, 9) if exact else None,
+            "prior_cash_lower_sol": round(lower, 9) if complete else None,
+            "prior_cash_upper_sol": round(upper, 9) if complete else None,
             "prior_cash_roots": len(covered), "prior_roots": len(roots),
-            "prior_pnl_basis": "matched_refund_cash" if covered == roots else "pre_swap_mark_only",
+            "prior_pnl_basis": "matched_refund_cash" if exact else "matched_refund_cash_bounds" if complete else "pre_swap_mark_only",
             "observed_at": as_of,
         }
     return result

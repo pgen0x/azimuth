@@ -81,6 +81,8 @@ type PoolHistory struct {
 	Closes     int      `json:"prior_closes"`
 	Mark       *float64 `json:"prior_mark_pnl_sol"`
 	Net        *float64 `json:"prior_net_pnl_sol"`
+	Lower      *float64 `json:"prior_cash_lower_sol"`
+	Upper      *float64 `json:"prior_cash_upper_sol"`
 	LastClose  int64    `json:"last_close_ts"`
 	ObservedAt float64  `json:"observed_at"`
 	Basis      string   `json:"prior_pnl_basis"`
@@ -130,10 +132,15 @@ func (s *Seen) PoolCloseHistory(ctx context.Context, pool string) *PoolHistory {
 		return h
 	}
 	cash, ok := cached[pool]
-	if ok && cash.Basis == "matched_refund_cash" && cash.Net != nil &&
-		cash.LastClose == h.LastClose && cash.Closes == h.Closes &&
-		cash.ObservedAt <= float64(now)+1 && cash.ObservedAt >= float64(now-900) {
+	if !ok || cash.LastClose != h.LastClose || cash.Closes != h.Closes ||
+		cash.ObservedAt > float64(now)+1 || cash.ObservedAt < float64(now-900) {
+		return h
+	}
+	if cash.Basis == "matched_refund_cash" && cash.Net != nil {
 		h.Net, h.Basis = cash.Net, cash.Basis
+	} else if cash.Basis == "matched_refund_cash_bounds" && cash.Net == nil &&
+		cash.Lower != nil && cash.Upper != nil && *cash.Lower <= *cash.Upper {
+		h.Lower, h.Upper, h.Basis = cash.Lower, cash.Upper, cash.Basis
 	}
 	return h
 }

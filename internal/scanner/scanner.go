@@ -1037,6 +1037,8 @@ func (s *Scanner) pollMode(ctx context.Context, mp meteora.ModeParams) {
 			cand.PriorMarkPnlSOL = history.Mark
 			cand.PriorNetPnlSOL = history.Net
 			cand.PriorPnlBasis = history.Basis
+			cand.PriorCashLowerSOL = history.Lower
+			cand.PriorCashUpperSOL = history.Upper
 		}
 
 		batch = append(batch, cand)

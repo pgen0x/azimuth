@@ -997,8 +997,14 @@ def apply_batch_conviction(candidates, mode="multiday"):
         # marks under prior_net_pnl_sol; retain their conservative loss penalty.
         cash_history = c.get("prior_pnl_basis") == "matched_refund_cash"
         prior_pnl = c.get("prior_net_pnl_sol") if cash_history else c.get("prior_mark_pnl_sol", c.get("prior_net_pnl_sol"))
+        bounded_cash = False
+        if c.get("prior_pnl_basis") == "matched_refund_cash_bounds":
+            lo, hi = c.get("prior_cash_lower_sol"), c.get("prior_cash_upper_sol")
+            if (all(type(v) in (int, float) and math.isfinite(v) for v in (lo, hi))
+                    and lo <= hi and (hi < 0 or lo >= 0)):
+                prior_pnl, bounded_cash = hi, True
         if prior_pnl is not None and float(prior_pnl) < 0:
-            adj -= 20; notes.append("prior_cash_loss-20" if cash_history else "prior_mark_loss-20")
+            adj -= 20; notes.append("prior_bounded_cash_loss-20" if bounded_cash else "prior_cash_loss-20" if cash_history else "prior_mark_loss-20")
         # Surviving PVP candidates (score >= 60) still yield to a clean pick.
         if c.get("is_pvp"):
             adj -= 10; notes.append("pvp-10")
