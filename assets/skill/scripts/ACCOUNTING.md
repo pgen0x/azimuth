@@ -440,3 +440,15 @@ counts. Its positive rate uses only roots with a proved sign; ambiguous and
 missing evidence are explicit, not zero losses or wins. This measured subset
 is root cash after fees and matched refunds, not position win rate or full NAV.
 No trading rule, risk limit or historical decision is changed.
+
+### Quote collection pacing
+
+NAV quote collection uses keyless Jupiter pacing (at least 2.1 seconds between
+requests) and honors a valid provider reset timestamp when the response reports
+no remaining quota. Reset headers must fall inside the documented 60-second
+window. The quote phase reserves response time inside 90 seconds and retains
+its ten-attempt rotation; 429 still stops the remaining quotes for that run.
+No quote retry, Helius Wallet API call, stale mark or zero price is introduced.
+Other clients sharing the same public rate bucket can still cause deferrals.
+
+Provider limits: https://developers.jup.ag/docs/portal/rate-limits
