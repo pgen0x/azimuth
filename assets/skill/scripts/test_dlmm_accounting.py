@@ -202,11 +202,11 @@ for alter in (
     lambda a:[r.update(history_signatures=["unknown"]+r["history_signatures"]) for r in a[2]],
 ):
     args=deepcopy(original);alter(args);assert rent_refund_groups(*args,220)==[]
-# Same account used by another root is ambiguous even with complete history.
+# Reuse by known settled roots keeps the refund tied to its proved funder.
 args=deepcopy(original)
 args[2][0]["history_signatures"].insert(0,"fund-b")
 remaining,=rent_refund_groups(*args,220)
-assert remaining["refund_signatures"]==["refund-b"] and remaining["root_chain_ids"]==["a"]
+assert remaining==group
 # A refund already included in root cash must never be added again.
 args=deepcopy(original);args[0][0]["recorded_signatures"].append("refund-b")
 remaining,=rent_refund_groups(*args,220)
@@ -267,3 +267,43 @@ for mutate in [
 partial = deepcopy(bounded_ledger);partial["chains"][0]["positions"].append("unselected")
 assert pool_cash_history(split,partial,220)["P"]["prior_cash_lower_sol"] is None
 print("Cross-pool refund bounds conserve full-group cash and retain unknown/partial evidence")
+
+# A later account user did not finance its rent. Count both users' cash once,
+# credit the recorded funder, and retain the shared fee range for either pool.
+from dlmm_accounting import refund_cash_bounds
+reuse=deepcopy(original)
+reuse[0].append(dict(root_chain_id="c",positions=["c"],recorded_signatures=["use-a"],
+                    accounting_status="settled_cash",first_activity=105,last_activity=180,
+                    wallet_delta_lamports=-20,network_fee_lamports=5))
+reuse[1]["use-a"]=dict(signature="use-a",wallet="wallet",slot=20,failed=False)
+reuse[2][0]["history_signatures"].insert(0,"use-a")
+reuse_before=deepcopy(reuse)
+reused,=rent_refund_groups(*reuse,220)
+assert reused["root_chain_ids"]==["a","b","c"]
+assert reused["cash_with_matched_refunds_sol"]==-230/1e9
+assert reused["network_fee_sol"]==25/1e9
+component=next(p for p in reused["refund_components"] if p["signature"]=="refund-a")
+assert component["gross_by_root"]=={"a":100,"b":100,"c":0}
+by_root={c["root_chain_id"]:c for c in reuse[0]}
+assert refund_cash_bounds(reused,by_root,{"c"})==(-25,-20)
+assert refund_cash_bounds(reused,by_root,{"a","b","c"})==(-230,-230)
+views=pool_cash_history(closes+[dict(position="c",pool="R",ts=115,pnl_sol=.01)],
+                        dict(chains=reuse[0],rent_refund_groups=[reused]),220)
+assert views["R"]["prior_cash_lower_sol"]==-25/1e9
+assert views["R"]["prior_cash_upper_sol"]==-20/1e9
+assert views["R"]["prior_net_pnl_sol"] is None
+assert reuse==reuse_before
+for mutate in (
+    lambda a:a[0][-1].update(accounting_status="incomplete"),
+    lambda a:a[0][-1].update(positions=[]),
+    lambda a:a[0][-1].update(last_activity=221),
+    lambda a:a[0][0]["recorded_signatures"].append("use-a"),
+    lambda a:a[1]["use-a"].update(wallet="other"),
+    lambda a:a[1]["use-a"].update(landed=False),
+    lambda a:a[2][0]["history_signatures"].insert(0,"unknown"),
+):
+    invalid=deepcopy(reuse);mutate(invalid)
+    surviving,=rent_refund_groups(*invalid,220)
+    assert surviving["refund_signatures"]==["refund-b"]
+assert rent_refund_groups(*reuse,219)==[]
+print("Reused account refunds prove funding, all settled users, shared fee bounds and conservation")
