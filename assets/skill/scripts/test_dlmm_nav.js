@@ -398,6 +398,12 @@ console.log('Allocated account funding classification passed');
  }
  headers={'x-ratelimit-remaining':'5','x-ratelimit-reset':String(Math.floor(clock/1000)+10)};
  await request();headers={};await request();assert.equal(sleeps.at(-1),2100);
+ headers={'x-ratelimit-remaining':'-2','x-ratelimit-reset':String(Math.floor(clock/1000)+10)};
+ await request();headers={};await request();assert.ok(sleeps.at(-1)>7000);
+ for(const remaining of [true,'bad','-Infinity','',' ']){
+   headers={'x-ratelimit-remaining':remaining,'x-ratelimit-reset':String(Math.floor(clock/1000)+10)};
+   await request();headers={};await request();assert.equal(sleeps.at(-1),2100);
+ }
  status=429;headers={'x-ratelimit-reset':String(Math.floor(clock/1000)+10)};
  const before=calls;await assert.rejects(request(),/HTTP 429/);assert.equal(calls,before+1);
  status=200;headers={};const limited=calls;
