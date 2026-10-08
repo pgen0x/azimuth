@@ -2,7 +2,8 @@
 """Darwinian signal weighting — learn which entry signals predict winners.
 
 Reads the close journal (memories/dlmm_closes.jsonl), splits closed positions
-into wins/losses using finite, reconciled LP outcomes only, and computes each entry signal's predictive lift (normalized
+into wins/losses using proved root cash after fees and matched rent refunds,
+and computes each entry signal's predictive lift (normalized
 win-mean minus loss-mean). Each signal's weight is then pulled part-way toward
 a target derived from that lift, clamped to [0.3, 2.5]. Weights persist to
 memories/signal_weights.json and to Redis (sol:dlmm:signal_weights) where the
@@ -42,13 +43,14 @@ import os
 import subprocess
 import time
 
-from dlmm_realized import apply_realized
+from dlmm_accounting import report, refund_cash_bounds
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROFILE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(SCRIPT_DIR)))
 CLOSES_PATH = os.path.join(PROFILE_DIR, "memories", "dlmm_closes.jsonl")
 WEIGHTS_PATH = os.path.join(PROFILE_DIR, "memories", "signal_weights.json")
 REDIS_WEIGHTS_KEY = "sol:dlmm:signal_weights"
+OUTCOME_BASIS = "matched_refund_cash_bounds"
 
 WINDOW_DAYS = 60
 MIN_SAMPLES = 10
@@ -111,6 +113,7 @@ def save_weights(data):
         "weights": data["weights"],
         "lifts": data.get("lifts") or {},
         "last_recalc": data["last_recalc"],
+        "outcome_basis": data["outcome_basis"],
     })
     run_command(f"redis-cli set \"{REDIS_WEIGHTS_KEY}\" '{compact}'")
 
@@ -119,7 +122,7 @@ def load_recent_closes():
     if not os.path.exists(CLOSES_PATH):
         return []
     cutoff = time.time() - WINDOW_DAYS * 86400
-    records = []
+    records = {}
     with open(CLOSES_PATH, encoding="utf-8") as f:
         for line in f:
             try:
@@ -132,22 +135,35 @@ def load_recent_closes():
                 continue  # pre-snapshot records can't be attributed
             if (rec.get("ts") or 0) < cutoff:
                 continue
-            records.append(rec)
-    # Learn against money, not against the monitor's last mark — a phantom
-    # -100% close would otherwise teach the weights that whatever signals that
-    # position carried predict a total loss (dlmm_realized.py).
-    reconciled = apply_realized(records, os.path.join(PROFILE_DIR, "memories", "dlmm_realized.jsonl"))
-    return [rec for rec in reconciled if outcome_sol(rec) is not None]
+            if rec.get("position"):
+                records[rec["position"]] = rec
+    ledger = report(PROFILE_DIR)
+    chains = {c["root_chain_id"]: c for c in ledger["chains"]}
+    eligible = []
+    for group in ledger["rent_refund_groups"]:
+        for root in group["root_chain_ids"]:
+            chain = chains[root]
+            # A recenter's combined cash cannot label each leg's entry signals.
+            if len(chain["positions"]) != 1 or chain["positions"][0] not in records:
+                continue
+            bounds = refund_cash_bounds(group, chains, {root})
+            if bounds is None:
+                continue
+            rec = {**records[chain["positions"][0]], "outcome_basis": OUTCOME_BASIS,
+                   "cash_pnl_lower_sol": bounds[0] / 1e9, "cash_pnl_upper_sol": bounds[1] / 1e9}
+            if outcome_sol(rec) is not None:
+                eligible.append(rec)
+    return eligible
 
 
 def outcome_sol(rec):
-    # Reconciled Meteora LP value, not wallet net cash. Pending marks and
-    # missing amounts cannot label training examples as winners or losers.
-    value = rec.get("pnl_sol")
-    if (rec.get("pnl_basis") != "realized" or isinstance(value, bool)
-            or not isinstance(value, (int, float)) or not math.isfinite(value)):
+    # Return a bound for classification only; shared fees prevent an exact PnL.
+    lower, upper = rec.get("cash_pnl_lower_sol"), rec.get("cash_pnl_upper_sol")
+    if (rec.get("outcome_basis") != OUTCOME_BASIS
+            or any(isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v)
+                   for v in (lower, upper)) or lower > upper):
         return None
-    return float(value)
+    return float(lower) if lower > 0 else float(upper) if upper <= 0 else None
 
 
 def numeric_lift(signal, wins, losses):
@@ -224,6 +240,7 @@ def recalculate(quiet=False):
 
     now = time.time()
     data["weights"] = weights
+    data["outcome_basis"] = OUTCOME_BASIS
     # Published so the daily proposal job can read WHY a weight sits where it
     # does. A weight alone cannot distinguish "no evidence" from "evidence of
     # no effect" — both land near 1.0 — and an agent proposing thresholds off
@@ -239,6 +256,7 @@ def recalculate(quiet=False):
             "window_size": len(recent),
             "wins": len(wins),
             "losses": len(losses),
+            "outcome_basis": OUTCOME_BASIS,
         }
         if dropped:
             entry["retired"] = dropped
@@ -281,8 +299,9 @@ def main():
         return
 
     if not cli.force:
-        last = load_weights().get("last_recalc_ts") or 0
-        if time.time() - last < RECALC_GUARD_SECS:
+        data = load_weights()
+        last = data.get("last_recalc_ts") or 0
+        if data.get("outcome_basis") == OUTCOME_BASIS and time.time() - last < RECALC_GUARD_SECS:
             if not cli.quiet:
                 print(f"Recalc guard: last run {int((time.time() - last) / 60)}m ago "
                       f"(interval {RECALC_GUARD_SECS // 3600}h). Use --force to override.")

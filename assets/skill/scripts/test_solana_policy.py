@@ -116,17 +116,27 @@ def main():
         after=delivery_outcomes(profile,journal,90,130)["deliveries"][0]
         assert after["session_state"]=="ended" and not after["execution_verified"]
         assert delivery_outcomes(profile,journal,90,101)["deliveries"][0]["transport"]=="unconfirmed"
-    # A profitable pre-swap mark is not a measured learner outcome. Missing
-    # SOL must never fall back to percentages; real zero remains a valid loss.
+    # Neither a mark nor realized LP PnL proves cash after swap fees and rent.
     for row in [
         {"pnl_basis":"pre_swap_mark","pnl_sol":.1},
         {"pnl_basis":"realized","pnl_sol":None,"pnl_pct":20},
         {"pnl_basis":"realized","pnl_sol":float("nan")},
         {"pnl_basis":"realized","pnl_sol":float("inf")},
         {"pnl_basis":"realized","pnl_sol":True},
+        {"pnl_basis":"realized","pnl_sol":0},
+        {"pnl_basis":"realized","pnl_sol":.1},
     ]:
         assert weights_module.outcome_sol(row) is None
-    assert weights_module.outcome_sol({"pnl_basis":"realized","pnl_sol":0}) == 0
+    cash = lambda lo, hi: {"outcome_basis": weights_module.OUTCOME_BASIS,
+                           "cash_pnl_lower_sol": lo, "cash_pnl_upper_sol": hi}
+    assert weights_module.outcome_sol(cash(.001, .002)) == .001
+    assert weights_module.outcome_sol(cash(-.002, -.001)) == -.001
+    assert weights_module.outcome_sol(cash(0, 0)) == 0
+    assert weights_module.outcome_sol(cash(-.001, 0)) == 0
+    for lo, hi in [(-.001, .001), (0, .001), (.002, .001), (None, .1),
+                   (True, .1), (0, False), (float("nan"), .1), (0, float("inf"))]:
+        assert weights_module.outcome_sol(cash(lo, hi)) is None
+    assert weights_module.outcome_sol({**cash(.001, .002), "outcome_basis":"realized"}) is None
     # Exercise the actual writer envelope through the fallback reader and ranker.
     for stored in [{"weights": {"holders": 1.4}, "lifts": {"holders": .2}}, {"holders": 1.4}]:
         with patch.object(pipeline, "run_command", return_value=(json.dumps(stored), "", 0)):
@@ -144,13 +154,51 @@ def main():
     with tempfile.TemporaryDirectory() as directory:
         root=Path(directory);(root/"memories").mkdir()
         closes=root/"memories/dlmm_closes.jsonl"
-        records=[{"position":p,"ts":time.time(),"signal":{"score":90},"pnl_sol":.1,"pnl_basis":"pre_swap_mark"} for p in ["settled","pending"]]
+        records=[{"position":p,"ts":time.time(),"signal":{"score":90},"pnl_sol":.1,"pnl_basis":"realized"}
+                 for p in ["loss", "win", "ambiguous", "leg1", "leg2", "pending", "missing", "dry", "old"]]
+        records[-2]["dry_run"] = True
+        records[-1]["ts"] = time.time() - 61 * 86400
+        records.append({**records[0], "signal":{"score":45}})
         closes.write_text("".join(json.dumps(r)+"\n" for r in records))
-        (root/"memories/dlmm_realized.jsonl").write_text(json.dumps({"position":"settled","realized_sol":-.02,"realized_pct":-20})+"\n")
-        with patch.object(weights_module,"PROFILE_DIR",str(root)), patch.object(weights_module,"CLOSES_PATH",str(closes)):
+        chains=[{"root_chain_id":p,"positions": ["leg1","leg2"] if p=="recenter" else [p],
+                 "accounting_status":"incomplete" if p=="pending" else "settled_cash",
+                 "wallet_delta_lamports":amount} for p,amount in
+                [("loss",-120),("win",-90),("ambiguous",-99),("recenter",-100),("pending",-100),("dry",-90),("old",-90)]]
+        def refund_group(ids):
+            selected=[c for c in chains if c["root_chain_id"] in ids]
+            return {"root_chain_ids":ids, "refund_signatures":["refund-"+ids[0]],
+                    "refund_components":[{"signature":"refund-"+ids[0],
+                       "gross_by_root":{p:100 for p in ids},"fee_lamports":5}],
+                    "cash_with_matched_refunds_sol":(sum(c["wallet_delta_lamports"] for c in selected)+100*len(ids)-5)/1e9}
+        ledger={"chains":chains,"rent_refund_groups":[refund_group(["loss","win","ambiguous","recenter"]),
+                 refund_group(["pending"]),refund_group(["dry"]),refund_group(["old"])]}
+        with patch.object(weights_module,"PROFILE_DIR",str(root)), patch.object(weights_module,"CLOSES_PATH",str(closes)), \
+                patch.object(weights_module,"report",return_value=ledger):
             eligible=weights_module.load_recent_closes()
-        assert [r["position"] for r in eligible]==["settled"]
-        assert weights_module.outcome_sol(eligible[0]) == -.02
+        assert [r["position"] for r in eligible]==["loss","win"]
+        assert weights_module.outcome_sol(eligible[0]) == -20/1e9
+        assert weights_module.outcome_sol(eligible[1]) == 5/1e9
+        assert eligible[0]["signal"]["score"] == 45  # One example per root, latest close.
+        assert eligible[0]["pnl_sol"] == .1  # Preserve the separate LP evidence.
+        output_path=root/"weights.json"
+        with patch.object(weights_module,"load_recent_closes",return_value=eligible), \
+                patch.object(weights_module,"WEIGHTS_PATH",str(output_path)), \
+                patch.object(weights_module,"MIN_SAMPLES",2), \
+                patch.object(weights_module,"run_command",return_value="OK") as publish:
+            assert weights_module.recalculate(quiet=True)
+        learned=json.loads(output_path.read_text())
+        assert learned["outcome_basis"]==weights_module.OUTCOME_BASIS
+        assert learned["history"][-1]["wins"]==learned["history"][-1]["losses"]==1
+        assert learned["weights"]["score"] == 1.525
+        assert json.loads(shlex.split(publish.call_args.args[0])[-1])["outcome_basis"]==weights_module.OUTCOME_BASIS
+        assert closes.read_text()=="".join(json.dumps(r)+"\n" for r in records)
+    # Re-label once on migration; the six-hour guard still applies afterwards.
+    for basis, called in [(None,True),(weights_module.OUTCOME_BASIS,False)]:
+        with patch.object(sys,"argv",["dlmm_weights.py","--quiet"]), \
+                patch.object(weights_module,"load_weights",return_value={"last_recalc_ts":time.time(),"outcome_basis":basis}), \
+                patch.object(weights_module,"recalculate") as recalc:
+            weights_module.main()
+            assert recalc.called == called
     # Proved cash can disagree with the mark; legacy/unresolved marks retain
     # the existing conservative ranking penalty without being called cash.
     with patch.object(pipeline, "load_signal_weights", return_value={}):
