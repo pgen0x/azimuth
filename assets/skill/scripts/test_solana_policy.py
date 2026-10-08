@@ -308,6 +308,36 @@ def main():
          patch.object(pipeline, "get_price_impact_sol_to_token", return_value=6.0):
         assert "price impact" in pipeline.predeploy_live_gate_reject(candidate, 0.1, "30m")
 
+    # Execute the actual shared gate before the legacy token-only entry swap.
+    # A healthy first pair cannot hide a dumping deepest pair; explicit pool
+    # overrides also retain the gate, including the batch CLI path.
+    source = Path(pipeline.__file__).read_text()
+    start = source.index("    # 6. Deploy Position")
+    end = source.index("    entry_context =", start)
+    entry = textwrap.dedent(source[start:end])
+    dex = {"pairs": [{"liquidity":{"usd":100}, "priceChange":{"m5":0}},
+                     {"liquidity":{"usd":46000}, "priceChange":{"m5":-6}}]}
+    for batch, explicit_pool in [(False, None), (True, "yield")]:
+        ns = dict(vars(pipeline), winner=dict(candidate, volatility=1, bin_step=100, base_symbol="TOKEN"),
+                  batch_mode=batch, cli=argparse.Namespace(strategy="single_sided_reseed", pool=explicit_pool),
+                  params={}, deploy_sol=0.1, timeframe="30m", mode="turnover")
+        with patch.object(pipeline.urllib.request, "urlopen", return_value=contextlib.nullcontext(io.StringIO(json.dumps(dex)))), \
+                patch.object(pipeline, "run_swap_with_retry", side_effect=AssertionError("swap before rejection")) as swap, \
+                contextlib.redirect_stdout(io.StringIO()) as output:
+            ns["run_swap_with_retry"] = swap
+            try: exec(compile(entry, pipeline.__file__, "exec"), ns)
+            except SystemExit as exc: assert exc.code == 0
+            else: raise AssertionError("dumping deepest pair accepted")
+            assert "live gate rejected: dumping -6.00%" in output.getvalue()
+            swap.assert_not_called()
+    # Healthy deepest quotes pass even when pairs[0] is an illiquid corpse.
+    dex["pairs"][0]["priceChange"]["m5"]=-99
+    dex["pairs"][1]["priceChange"]["m5"]=0
+    with patch.object(pipeline.urllib.request, "urlopen", return_value=contextlib.nullcontext(io.StringIO(json.dumps(dex)))), \
+            patch.object(pipeline, "fetch_live_fee_tvl", return_value=2), \
+            patch.object(pipeline, "get_price_impact_sol_to_token", return_value=0):
+        assert pipeline.predeploy_live_gate_reject(candidate, .1, "30m") is None
+
     # Execute the actual selection loop, including its live gate and continue.
     source = Path(pipeline.__file__).read_text()
     start = source.index("        winner = None", source.index("# Auto-pick:"))

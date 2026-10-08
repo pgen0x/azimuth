@@ -1749,6 +1749,17 @@ def main():
             print(f"Entry timing: indicator data unavailable for {winner['base_symbol']} — proceeding on other gates (fail-open).")
 
     # 6. Deploy Position
+    # Batch auto-picks already passed this gate inside the runner-up loop.
+    # All other picks use the same source/thresholds before any entry swap.
+    if not winner.get("base_mint"):
+        print(f"Aborting deploy: {winner['name']} has no base_mint resolved — cannot guarantee auto-swap on exit.")
+        sys.exit(1)
+    if not batch_mode or cli.pool:
+        rejection = predeploy_live_gate_reject(winner, deploy_sol, timeframe)
+        if rejection:
+            print(f"Aborting deploy: live gate rejected: {rejection}")
+            sys.exit(0)
+
     print(f"\n🚀 WINNING CANDIDATE: {winner['name']} ({winner['pool']})")
 
     vol = winner["volatility"]
@@ -1883,52 +1894,6 @@ def main():
         print(f"Strategy: sol_bidask (SOL-only Bid-Ask ladder, SOL is token{'X' if sol_is_x else 'Y'}). "
               f"bins_below: {bins_below}, bins_above: {bins_above} "
               f"(~{(1 - (1 + max(bin_step,1)/10000.0) ** -bins_ladder) * 100:.0f}% downside coverage).")
-
-    # Pre-deploy checks: momentum gate + fee/TVL freshness + depth/exit-liquidity gate
-    base_mint = winner.get("base_mint", "")
-    if not base_mint:
-        print(f"Aborting deploy: {winner['name']} has no base_mint resolved — cannot guarantee auto-swap on exit.")
-        sys.exit(1)
-    if base_mint and os.environ.get("DRY_RUN") != "true" and not batch_mode:
-        # B. Momentum gate: abort if 5m price < -5% (dumping token)
-        try:
-            dex_url = f"https://api.dexscreener.com/latest/dex/tokens/{base_mint}"
-            req = urllib.request.Request(dex_url, headers={"User-Agent": "Mozilla/5.0"})
-            with urllib.request.urlopen(req, timeout=8) as resp:
-                dex_data = json.loads(resp.read())
-            pairs = dex_data.get("pairs") or []
-            if pairs:
-                price_m5 = float((pairs[0].get("priceChange") or {}).get("m5", 0) or 0)
-                print(f"Pre-deploy momentum check: 5m price change = {price_m5:+.2f}%")
-                if price_m5 < -5.0:
-                    print(f"Aborting deploy: {winner['name']} dumping {price_m5:.2f}% in last 5m — momentum gate triggered")
-                    sys.exit(0)
-        except Exception as e:
-            print(f"Warning: pre-deploy momentum check failed ({e}) — proceeding with deploy")
-
-        # C. Fee/TVL freshness: re-query Meteora for the pool's LIVE fee/TVL and
-        # abort if it dropped >50% since screening. Apples-to-apples (same discovery timeframe),
-        # replacing the old DexScreener volume proxy that systematically false-aborted.
-        screened_fee_tvl = winner["fee_tvl_ratio"]
-        live_fee_tvl = fetch_live_fee_tvl(winner["pool"], timeframe)
-        if live_fee_tvl is not None and screened_fee_tvl > 0:
-            drop_pct = (screened_fee_tvl - live_fee_tvl) / screened_fee_tvl * 100
-            print(f"Fee/TVL freshness: screened={screened_fee_tvl:.2f}% live={live_fee_tvl:.2f}% (drop={drop_pct:.1f}%)")
-            if drop_pct > 50:
-                print(f"Aborting deploy: fee/TVL dropped {drop_pct:.1f}% since screening — pool yield degraded")
-                sys.exit(0)
-        else:
-            print("Fee/TVL freshness: live re-query unavailable — proceeding on screened value")
-
-        # D. Depth / exit-liquidity gate: refuse entry if pool too thin to exit cleanly at our size.
-        impact_pct = get_price_impact_sol_to_token(base_mint, deploy_sol)
-        if impact_pct is not None:
-            print(f"Pre-deploy depth check: SOL->{winner['base_symbol']} price impact = {impact_pct:.2f}% at {deploy_sol} SOL")
-            if impact_pct > MAX_PRICE_IMPACT_PCT:
-                print(f"Aborting deploy: price impact {impact_pct:.2f}% > {MAX_PRICE_IMPACT_PCT}% — pool too thin, exit would strand token")
-                sys.exit(0)
-        else:
-            print("Pre-deploy depth check: Jupiter quote unavailable — proceeding without depth gate")
 
     # balanced_tight acquires its token side only now — after every abort-able
     # gate has passed — so a gate abort never leaves a swapped token stranded.
