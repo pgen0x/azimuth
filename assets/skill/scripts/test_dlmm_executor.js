@@ -528,7 +528,7 @@ const clearMarker = () => fs.rmSync(marker, { force: true });
   deps["@solana/spl-token"] = { TOKEN_PROGRAM_ID: tokenProgram, TOKEN_2022_PROGRAM_ID: token2022,
     createCloseAccountInstruction: (account, destination, authority, signers, program) => {
       assert.equal(destination, wallet.publicKey); assert.equal(authority, wallet.publicKey);
-      assert.equal(program.toString(), account.toString() === "safe-2022" ? "token2022" : "classic-token");
+      assert.equal(program.toString(), ["safe-2022","route-2022"].includes(account.toString()) ? "token2022" : "classic-token");
       return account.toString();
     } };
   // Transaction was destructured when the executor loaded; use its injected class.
@@ -559,6 +559,29 @@ const clearMarker = () => fs.rmSync(marker, { force: true });
     account("withheld-2022", {extensions:[{extension:"immutableOwner"},{extension:"transferFeeAmount",state:{withheldAmount:"1"}}]}, {owner:token2022}),
     account("active-2022", {mint:"TOKEN",extensions:[{extension:"immutableOwner"}]}, {owner:token2022}),
     account("unknown-2022", {extensions:[{extension:"unknown"}]}, {owner:token2022})];
+  // Observed empty route account: immutableOwner + pausableAccount + idle hook.
+  const { tokenAccountCanClose } = sandbox.module.exports;
+  const routeExtensions=[{extension:"immutableOwner"},{extension:"pausableAccount"},
+    {extension:"transferHookAccount",state:{transferring:false}}];
+  const routeAccount=()=>account("route-2022",{extensions:routeExtensions},{owner:token2022});
+  assert.equal(tokenAccountCanClose(routeAccount().account,wallet.publicKey.toString()),true);
+  for (const extensions of [routeExtensions.concat({extension:"unknown"}),routeExtensions.concat(null),
+      routeExtensions.concat({extension:"transferFeeAmount",state:{withheldAmount:"1"}}),
+      [{extension:"transferHookAccount",state:{transferring:true}}],
+      [{extension:"transferHookAccount",state:{transferring:"false"}}],
+      [{extension:"transferHookAccount"}],[]]) {
+    assert.equal(tokenAccountCanClose(account("bad-route",{extensions},{owner:token2022}).account,wallet.publicKey.toString()),false);
+  }
+  for (const info of [{tokenAmount:{amount:"1"}},{owner:"other"},{closeAuthority:"other"},
+      {delegate:"other"},{isNative:true},{state:"frozen"}]) {
+    assert.equal(tokenAccountCanClose(account("bad-route",{extensions:routeExtensions,...info},{owner:token2022}).account,wallet.publicKey.toString()),false);
+  }
+  assert.equal(tokenAccountCanClose(account("nonempty-route",{extensions:routeExtensions,tokenAmount:{amount:"1"}},{owner:token2022}).account,wallet.publicKey.toString(),"1"),false);
+  // Exercise the actual maintenance path and unchanged active-mint exclusion.
+  const previousAccounts=tokenAccounts;
+  tokenAccounts=[routeAccount(),account("active-route",{mint:"TOKEN",extensions:routeExtensions},{owner:token2022})];
+  assert.deepEqual(Array.from((await reclaimEmptyAccounts()).accounts,a=>a.account),["route-2022"]);
+  tokenAccounts=previousAccounts;
   fs.rmSync(path.dirname(marker), {recursive: true, force: true});
   fs.rmSync(path.join(root, "memories/dlmm_pending_swaps"), {recursive: true, force: true});
   const beforeRent = sends;
@@ -600,9 +623,10 @@ const clearMarker = () => fs.rmSync(marker, { force: true });
   try { await assert.rejects(reclaimEmptyAccounts(true), /ENTRY BUSY/); }
   finally { await releaseRentLock(); }
   env.DLMM_ENTRY_ID = "must-not-attribute-rent-to-entry";
+  tokenAccounts.push(routeAccount());
   const reclaimed = await reclaimEmptyAccounts(true);
-  assert.equal(reclaimed.recovered_lamports_before_fee, 2976880); assert.equal(sends, beforeRent + 1);
-  assert.deepEqual(rentInstructions, ["eligible", "safe-2022", "eligible", "safe-2022"]); // fee rejection builds but never sends
+  assert.equal(reclaimed.recovered_lamports_before_fee, 4465320); assert.equal(sends, beforeRent + 1);
+  assert.deepEqual(rentInstructions, ["eligible", "safe-2022", "eligible", "safe-2022", "route-2022"]); // fee rejection builds but never sends
   const rentEvent = JSON.parse(fs.readFileSync(journal, "utf8").trim().split("\n").at(-1));
   assert.equal(rentEvent.kind, "rent_reclaim"); assert.equal(rentEvent.entry_id, null); assert.equal(rentEvent.root_chain_id, null);
   signatureStatus = null; sendError = true; confirmTimeout = true; height = 100;
