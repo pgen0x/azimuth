@@ -66,10 +66,21 @@ def bin_replay(entry, samples, cost_sol=None):
         return {'status': 'unmeasured', 'reason': 'missing_capital'}
     sol_x = initial['sol_is_x']
     dx, dy = Decimal(10)**initial['decimals_x'], Decimal(10)**initial['decimals_y']
+    deposited_sol, deposited_token = ((entry.get('amount_x'), entry.get('amount_y')) if sol_x
+                                      else (entry.get('amount_y'), entry.get('amount_x')))
+    sol_only = (type(sol_x) is bool and type(deposited_sol) in (int, float)
+                and math.isfinite(deposited_sol) and deposited_sol > 0
+                and type(deposited_token) in (int, float) and deposited_token == 0
+                and Decimal(str(deposited_sol)) == amount)
     def sol_value(x, y, price):
         return x/dx + y/dy/price if sol_x else x/dx*price + y/dy
-    prices = Decimal(str(initial['price']))
     ids = sorted(start)
+    reference = ('far_active' if sol_only and sol_x is False
+                 and entry.get('strategy') == 'sol_bidask'
+                 and entry.get('entry_bin') == initial['active_bin'] and entry.get('bins_above') == 0
+                 and type(entry.get('bins_below')) is int and entry['bins_below'] >= 0
+                 and ids == list(range(initial['active_bin']-entry['bins_below'], initial['active_bin']+1))
+                 else None)
     results = {}
     for scheme in ('uniform', 'near_active', 'far_active'):
         distances = {i: abs(i-initial['active_bin'])+1 for i in ids}
@@ -98,7 +109,8 @@ def bin_replay(entry, samples, cost_sol=None):
         fx=sum(Decimal((int(shares[i]) >> 64)*(int(bins[i]['fee_x'])-int(start[i]['fee_x'])) >> 64) for i in ids)
         fy=sum(Decimal((int(shares[i]) >> 64)*(int(bins[i]['fee_y'])-int(start[i]['fee_y'])) >> 64) for i in ids)
         principal=sol_value(x,y,price); fees=sol_value(fx,fy,price)
-        hodl=sol_value(initial_x,initial_y,price)
+        # HODL starts before deposit, not after acquiring the active bin's mixed reserves.
+        hodl=amount if sol_only else sol_value(initial_x,initial_y,price)
         gross=principal+fees-amount
         results[scheme]=dict(fee_capture_sol=float(fees),principal_change_sol=float(principal-amount),
             inventory_drift_x_raw=str(x-initial_x),inventory_drift_y_raw=str(y-initial_y),
@@ -107,6 +119,8 @@ def bin_replay(entry, samples, cost_sol=None):
             net_after_observed_cost_sol=float(gross)-cost_sol if cost_sol is not None else None)
     return {'status':'modeled', 'horizon_target_ts':target, 'observed_until_ts':ordered[-1]['ts'],
             'horizon_complete':ordered[-1]['ts'] >= target,
+            'hodl_basis':'recorded_SOL_only_input' if sol_only else 'modeled_initial_bin_inventory',
+            'expected_bidask_reference_scheme':reference,
             'basis':'infinitesimal_fixed_shares; fixed_mode_horizon_with_600s_terminal_grace; sampled_OOR; observed_costs_only; no_slippage_or_recenter_counterfactual', 'schemes':results}
 
 

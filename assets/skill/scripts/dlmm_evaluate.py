@@ -434,6 +434,8 @@ def main():
         str(dict(collections.Counter(r['status'] for r in data['liquidation_observations']))),
         'Per-position observations are in evaluation JSON. Quote-based asset change excludes network fees and rent; it is not net cash or a guaranteed exit price.',
         '## Bin replay',str(dict(collections.Counter(r['status'] for r in data['bin_replay']))),
+        'Modeled HODL benchmarks: '+str(dict(collections.Counter(r.get('hodl_basis') for r in data['bin_replay'] if r['status']=='modeled'))),
+        f"Expected pre-broadcast SDK BidAsk references: {sum(r.get('expected_bidask_reference_scheme') == 'far_active' for r in data['bin_replay'])}; modeled references do not prove executed shares or live IL.",
         f"Modeled full horizons: {sum(r.get('horizon_complete') is True for r in data['bin_replay'])}; partial horizons: {sum(r['status']=='modeled' and r.get('horizon_complete') is False for r in data['bin_replay'])}.",
         '## Runtime',json.dumps(data['runtime']), '## Limits',*['- '+s for s in data['limits']],
         'Full evidence: evaluation.json and runtime.log. No trading parameters were changed by this evaluation.']

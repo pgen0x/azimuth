@@ -95,6 +95,13 @@ inventory change, HODL-relative IL, sampled OOR, utilization and observed-cost-a
 PnL where costs exist. Empty/reset/missing bins are unmeasured. Price impact and
 hypothetical recenter/slippage costs are not inferred. Live weights are unchanged.
 
+For recorded SOL-only inputs whose amount matches replay capital, HODL retains
+that SOL, including when the active bin contains both tokens. Other entries retain
+the explicitly labeled modeled-inventory benchmark. `far_active` is labeled as the
+expected SDK BidAsk reference only for a SOL=Y, contiguous below-to-active range
+matching the recorded entry. This is a pre-broadcast allocation reference, not
+proof of executed shares, fills or live IL; other geometries remain unlabeled.
+
 ## Operations
 
 `azimuth-sol-accounting.timer` and `azimuth-sol-shadow.timer` collect outside the
