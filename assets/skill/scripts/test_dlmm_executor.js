@@ -536,6 +536,10 @@ const clearMarker = () => fs.rmSync(marker, { force: true });
   // Transaction was destructured when the executor loaded; use its injected class.
   let tokenAccounts = [];
   Connection.prototype.getParsedTokenAccountsByOwner = async (_, {programId}) => ({ value: tokenAccounts.filter(a=>a.account.owner.toString()===programId.toString()) });
+  Connection.prototype.getLatestBlockhash = async commitment => {
+    assert.equal(commitment, "finalized");
+    return { blockhash: "exact-blockhash", lastValidBlockHeight: 150 };
+  };
   Connection.prototype.getFeeForMessage = async () => ({ value: fee });
   // Match the installed SDK contract: Map<string, PositionInfo>, nested fees.
   const sdkPosition = { publicKey: key("live-position"), positionData: {

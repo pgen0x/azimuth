@@ -169,6 +169,8 @@ wrapped SOL, other/unknown Token-2022 extensions, delegated/frozen accounts, for
 mints with open Meteora positions are excluded. Entry and swap locks are held;
 unexpired trading reservations block maintenance. An uncertain send retains its
 signed transaction identity for reconciliation before another batch can run.
+Rent batches use a finalized blockhash and require a measured network fee below
+the reclaimed rent before signing; a missing fee still prevents submission.
 
 Submissions use `rent_reclaim` with no entry/root attribution. Reclaimed lamports
 are a move from recoverable account reserves to spendable SOL, **not trading

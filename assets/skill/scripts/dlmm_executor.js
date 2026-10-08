@@ -385,7 +385,8 @@ async function reclaimEmptyAccounts(execute = false) {
     const connection = state.connection;
     const tx = new Transaction();
     for (const a of accounts) tx.add(createCloseAccountInstruction(a.pubkey, wallet.publicKey, wallet.publicKey, [], a.account.owner));
-    const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash("confirmed");
+    // A finalized hash is already available to the bank measuring the fee.
+    const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash("finalized");
     tx.recentBlockhash = blockhash;
     tx.feePayer = wallet.publicKey;
     const fee = (await connection.getFeeForMessage(tx.compileMessage(), "confirmed")).value;
