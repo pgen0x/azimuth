@@ -297,6 +297,12 @@ remain explicit. Negative shortfall means the fill improved on the quote. These
 groups are execution evidence, not trading profit or causal savings; failures
 before a signed submission are outside their attempt counts.
 
+Atomic settlement sales record `token_rent_close_included` before broadcast.
+Finalized mixed token-account closes set `token_rent_evidence.refunds_unmeasured`
+when the pure refund proof cannot separate rent from sale proceeds. These rows
+retain native cash and known fees but remain unmeasured for quote-to-fill
+comparisons. This additive evidence does not refetch historical caches.
+
 ### Mode-specific bin replay horizons
 
 Bin shadow collection uses the existing mode horizons: pulse 30 minutes,

@@ -1144,6 +1144,7 @@ async function swapToken(inputMintStr, outputMintStr, amountFloat, maxPriceImpac
     // 4. Deserialize and sign
     const swapTransactionBuf = Buffer.from(swapTransaction, "base64");
     let transaction = VersionedTransaction.deserialize(swapTransactionBuf);
+    let tokenRentCloseIncluded = false;
     
     const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash("confirmed");
     transaction.message.recentBlockhash = blockhash;
@@ -1176,7 +1177,9 @@ async function swapToken(inputMintStr, outputMintStr, amountFloat, maxPriceImpac
         const combined = await settlementRentClose(connection, wallet, transaction, input_mint, inputRaw);
         if (combined !== transaction) {
           const withRent = await measureRecovery(combined);
-          if (withRent !== null && withRent >= minNetLamports) { transaction = combined; conservativeNet = withRent; }
+          if (withRent !== null && withRent >= minNetLamports) {
+            transaction = combined; conservativeNet = withRent; tokenRentCloseIncluded = true;
+          }
         }
       }
       if (conservativeNet < minNetLamports) {
@@ -1204,6 +1207,7 @@ async function swapToken(inputMintStr, outputMintStr, amountFloat, maxPriceImpac
       in_amount: quoteResponse.inAmount, out_amount: quoteResponse.outAmount,
       minimum_out_amount: quoteResponse.otherAmountThreshold ?? null,
       authorized_slippage_bps: slippageBps, context_slot: quoteResponse.contextSlot ?? null,
+      token_rent_close_included: tokenRentCloseIncluded,
       price_impact_pct: quoteResponse.priceImpactPct ?? null,
       basis: "provider_quote_before_broadcast; raw_token_units; not_realized_proceeds",
     });
