@@ -335,6 +335,53 @@ def report(profile, as_of=None):
 
 
 
+def settlement_inventory(profile, position, mint, wallet):
+    """Authorize only finalized closed-root inventory, never the wallet balance."""
+    ledger = report(profile)
+    matches = [c for c in ledger["chains"] if position in c["positions"]]
+    refusal = {"success": False, "reason": "settlement_inventory_unproven"}
+    if len(matches) != 1:
+        return refusal
+    c = matches[0]
+    if c["pending_signatures"]:
+        return dict(refusal, pending_signatures=c["pending_signatures"])
+    if set(c["reasons"]) - {"token_inventory_requires_valuation", "wallet_wide_coverage_not_verified"}:
+        return refusal
+    memories = Path(profile) / "memories"
+    entry = json.loads((memories / "dlmm_entries" / (position + ".json")).read_text())
+    if entry.get("base_mint") != mint:
+        return refusal
+    events = [e for e in rows(memories / "dlmm_transactions.jsonl") if e["signature"] in c["recorded_signatures"]]
+    if any(e.get("wallet") != wallet for e in events):
+        return refusal
+    facts = {r["signature"]: r for name in ("dlmm_transaction_facts.jsonl", "dlmm_wallet_transactions.jsonl")
+             for r in rows(memories / name)}
+    raw = int(c["token_deltas_raw"].get(mint, 0))
+    if raw < 0:
+        return refusal
+    # Zero owned inventory completes settlement without touching legacy tokens.
+    if raw == 0:
+        return {"success": True, "amount_raw": "0"}
+    if any(other is not c and int(other["token_deltas_raw"].get(mint, 0))
+           for other in ledger["chains"]):
+        return refusal
+    if any(r.get("classification") == "external_token_inflow" and not r.get("failed")
+           and r.get("landed") is not False and int(r.get("token_deltas_raw", {}).get(mint, 0)) > 0
+           and (r.get("block_time") is None or r["block_time"] >= c["first_activity"])
+           for r in facts.values()):
+        return refusal
+    landed = [facts[s] for s in c["recorded_signatures"]
+              if facts[s].get("landed") is not False and not facts[s].get("failed")]
+    if any(type(f.get("slot")) is not int or not isinstance(f.get("token_post_balances_raw"), dict)
+           for f in landed):
+        return refusal
+    latest = max(landed, key=lambda f: f["slot"])
+    balance = int(latest["token_post_balances_raw"].get(mint, 0))
+    if raw > balance:
+        return refusal
+    return {"success": True, "amount_raw": str(raw), "wallet_balance_raw": str(balance), "slot": latest["slot"]}
+
+
 def refund_cash_bounds(group, chains, selected):
     """Project validated refund cash; charge a shared TX fee fully or not at all.
 
@@ -470,10 +517,14 @@ def main():
     parser.add_argument("--sync-pool-memory", action="store_true", help="Publish local reconciled pool history to Redis; no RPC")
     parser.add_argument("--hours", type=int, default=24, help="Select chains active in this window; include all their recorded legs")
     parser.add_argument("--check-root")
+    parser.add_argument("--settlement-inventory", nargs=3, metavar=("POSITION", "MINT", "WALLET"))
     parser.add_argument("--opportunity", type=float)
     parser.add_argument("--floor", type=float, default=-0.015)
     parser.add_argument("--strike-cap", type=int, default=3)
     args = parser.parse_args()
+    if args.settlement_inventory:
+        print(json.dumps(settlement_inventory(args.profile, *args.settlement_inventory)))
+        return
     if args.sync_pool_memory:
         now = time.time()
         summary = pool_cash_history(rows(args.profile / "memories/dlmm_closes.jsonl"), report(args.profile), now)

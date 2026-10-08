@@ -410,3 +410,18 @@ These observations do not change exit rules, selection, learning or risk limits.
 ## LP comparison precision
 
 Full-life LP cohorts include funded positions created and closed inside the report window. Funded positions created earlier are carry-in closes; positions with zero deposit are counted separately. A win requires at least one lamport of positive LP valuation PnL, a loss at least one lamport negative, and smaller marks count as break-even. This affects win labels only; raw LP PnL and deposit totals are retained. LP wins are before wallet fees and settlement costs. Missing or nonfinite required values leave the wallet comparison unmeasured.
+
+## Automatic settlement inventory
+
+The durable settlement worker sells only the positive raw token delta proved by
+finalized transactions of the closed root. It never uses the full wallet token
+balance as the sale amount. Pending root signatures are reconciled individually;
+missing entry/close evidence, foreign wallet attribution, external inflows,
+negative inventory or another unresolved owner of the same mint refuse a sale.
+Before building the swap, the executor verifies the position is absent and the
+live token balance still matches the cached transaction balance. Quotes must
+match the authorized mint pair and exact raw amount. Partial sales cannot close
+an ATA containing legacy tokens. Zero owned inventory completes settlement
+without selling wallet dust; a nonzero wallet balance alone is not a blocker.
+This proof authorizes inventory disposal, not NAV or profit. Older legacy sales
+remain incomplete in accounting. Ambiguous inventory requires investigation.
