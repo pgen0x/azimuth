@@ -263,9 +263,13 @@ cash reports and root re-entry gates are unchanged.
 ### Cash groups including matched rent refunds
 
 `rent_refund_groups` combines settled root cash with wallet-level pure-close
-refunds only when every refunded account has observed history evidence and all
-its referenced signatures belong to one root. Every account in a shared refund
-must match; unknown, cross-root or incomplete ownership leaves the refund out.
+refunds only when every refunded account has observed history evidence and each
+referenced signature belongs to exactly one known, settled root. An account may
+be reused by several settled roots: all users join the group, while its exact
+rent principal returns to the root that paid the proved funding transaction.
+Other users receive zero rent principal and participate in shared fee bounds.
+Every account in a shared refund must match; unknown, ambiguous or incomplete
+ownership leaves the refund out.
 Roots connected by shared refunds form one group. Root cash and each refund
 transaction (including its fee) appear once within that group. Refunds between
 root legs are included only after the entire root is settled.

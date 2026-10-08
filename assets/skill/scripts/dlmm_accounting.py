@@ -100,7 +100,7 @@ def pooled_settlements(chains):
 
 
 def rent_refund_groups(chains, facts, histories, as_of):
-    """Combine settled roots and uniquely owned refunds, charging shared fees once."""
+    """Combine settled account users and proved funding refunds; charge fees once."""
     by_root = {c["root_chain_id"]: c for c in chains}
     owners = {}
     for c in chains:
@@ -140,12 +140,14 @@ def rent_refund_groups(chains, facts, histories, as_of):
                     break
                 root_owners.update(owners[s])
             else:
-                if len(root_owners) == 1 and "unattributed" not in root_owners:
-                    root = next(iter(root_owners))
-                    c = by_root[root]
-                    if (c["accounting_status"] == "settled_cash" and c["positions"]
-                            and c["last_activity"] <= as_of):
-                        roots.add(root)
+                if root_owners and "unattributed" not in root_owners:
+                    if all(by_root[r]["accounting_status"] == "settled_cash" and by_root[r]["positions"]
+                           and by_root[r]["last_activity"] <= as_of for r in root_owners):
+                        roots.update(root_owners)
+                        # Rent returns to its proved funder; all users share the fee bounds.
+                        for r in root_owners:
+                            gross_by_root.setdefault(r, 0)
+                        root = next(iter(owners[proof["funding_signature"]]))
                         gross_by_root[root] = gross_by_root.get(root, 0) + item["lamports"]
                         continue
             break
