@@ -324,6 +324,14 @@ collection changes. Trading monitors and actual position exits are independent.
 
 ### Pool selection history
 
+New pipeline entries retain `signal.entry_live_gates` in executor provenance and
+Redis tracking, which the close journal also preserves. These are the already
+fetched pre-deploy momentum windows, screened/live fee ratio and timeframe,
+depth impact, checked amount and local observation time. Missing/nonfinite
+momentum remains null; a measured zero stays zero. This adds no market request
+and does not reconstruct older entry conditions or prove a hypothetical filter
+would have prevented a loss. Risk thresholds and exit rules are unchanged.
+
 The periodic `dlmm_executor.js accounting` command publishes a local-only cash
 history cache after collecting finalized facts. It expires after 15 minutes.
 The scanner compares the cache's latest close timestamp and close count against

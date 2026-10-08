@@ -361,6 +361,45 @@ def main():
         exec(compile(section, pipeline.__file__, "exec"), ns)
     assert ns["winner"]["pool"] == "yield"
 
+    # Keep real zero, missing windows and invalid market numbers distinct.
+    for changes, expected in [
+        ({"m5":0,"h1":"1.2"},(0.0,1.2,None,None)),
+        ({"m5":None,"h6":-15},(None,None,-15.0,None)),
+        ({"m5":-99,"h24":-99},(None,None,None,-99.0)),
+        ({"m5":True,"h1":"NaN","h6":"Infinity"},(None,None,None,None)),
+    ]:
+        response={"pairs":[{"liquidity":{"usd":100},"priceChange":changes}]}
+        with patch.object(pipeline.urllib.request,"urlopen",return_value=contextlib.nullcontext(io.StringIO(json.dumps(response)))):
+            assert pipeline.get_momentum("token")==expected
+    with patch.object(pipeline,"get_momentum",return_value=(0,None,-2,3)) as momentum, \
+         patch.object(pipeline,"fetch_live_fee_tvl",return_value=1.4) as fees, \
+         patch.object(pipeline,"get_price_impact_sol_to_token",return_value=.1) as impact:
+        winner=dict(candidate,base_symbol="TOKEN",sol_is_x=False,score=70,entry_live_gates={"forged":True})
+        assert pipeline.predeploy_live_gate_reject(winner,.12,"5m") is None
+        checks=winner["entry_live_gates"]
+        assert checks["m5_pct"]==0 and checks["h1_pct"] is None
+        assert checks["checked_deploy_sol"]==.12 and checks["fee_timeframe"]=="5m"
+        assert checks["screened_fee_tvl_ratio"]==2 and checks["live_fee_tvl_ratio"]==1.4
+        assert checks["price_impact_pct"]==.1 and "forged" not in checks
+        assert momentum.call_count==fees.call_count==impact.call_count==1
+    # Run the real context/Redis serialization, without invoking any executor.
+    source=Path(pipeline.__file__).read_text()
+    ns=dict(vars(pipeline),winner=winner,entry_id="entry",mode="pulse",strategy="sol_bidask",
+            deploy_sol=.12,amount_x=0,amount_y=.12,bins_below=44,bins_above=0,
+            strategy_type="bid_ask",slippage_bps=1000)
+    start=source.index("    entry_context =");end=source.index('    print(f"Running deploy:',start)
+    exec(compile(textwrap.dedent(source[start:end]),pipeline.__file__,"exec"),ns)
+    encoded=shlex.split(ns["deploy_cmd"])[0].split("=",1)[1]
+    assert json.loads(encoded)["signal"]["entry_live_gates"]==checks
+    ns.update(active_price=1,active_bin=0,bin_step=100,sol_is_x=False,ts=1,tx_hash="tx")
+    start=source.index("    tracking_data =");end=source.index("    if not is_dry_run:",start)
+    exec(compile(textwrap.dedent(source[start:end]),pipeline.__file__,"exec"),ns)
+    assert json.loads(json.dumps(ns["tracking_data"],allow_nan=False))["signal"]["entry_live_gates"]==checks
+    with patch.dict(os.environ,DRY_RUN="true"),patch.object(pipeline,"get_momentum",side_effect=AssertionError("dry run fetched market")):
+        dry=dict(candidate,entry_live_gates={"forged":True})
+        assert pipeline.predeploy_live_gate_reject(dry,.1,"5m") is None
+        assert "entry_live_gates" not in dry
+
     # Exercise the real CLI entry path, stopping at its slot gate before any
     # wallet/network work. Neither a stale prompt nor SOUL can override signals.
     for mode in ("turnover", "pulse", "casual", "multiday"):
