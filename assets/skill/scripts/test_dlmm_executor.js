@@ -58,8 +58,15 @@ class RentTransaction {
   add(instruction) { rentInstructions.push(instruction); return this; }
   compileMessage() { return {}; }
 }
+class SwapTransaction {
+  constructor(message) { this.message = message; this.signatures = [Buffer.from([1])]; }
+  static deserialize() { return new SwapTransaction({ header: { numRequiredSignatures: 1 }, staticAccountKeys: [wallet.publicKey], addressTableLookups: [], instructions: [] }); }
+  sign() {}
+  serialize() { return Buffer.from(this.message.recentBlockhash || "unsigned"); }
+}
 const deps = {
-  "@solana/web3.js": { Transaction: RentTransaction, Connection, Keypair: { generate: () => ({ publicKey: key(`position-${++minted}`) }) }, PublicKey: function (v) { return key(v); }, VersionedTransaction: class { constructor(message) { this.message=message; } static deserialize = () => ({ message: {}, signatures: [Buffer.from([1])], sign() {}, serialize() { return Buffer.from(this.message.recentBlockhash); } }) } },
+  "@solana/web3.js": { Transaction: RentTransaction, Connection, Keypair: { generate: () => ({ publicKey: key(`position-${++minted}`) }) }, PublicKey: function (v) { return key(v); }, VersionedTransaction: SwapTransaction,
+    TransactionMessage: { decompile(message) { const instructions = [...message.instructions]; return {instructions, compileToV0Message() { return {...message, instructions}; }}; } } },
   "@meteora-ag/dlmm": { create: async () => pool, StrategyType: { Spot: 0, Curve: 1, BidAsk: 2 }, positionOwnerFilter: () => ({}) },
   "bn.js": function (value) { this.value = value; }, "bs58": { encode: () => "signature" },
   "dotenv": { config() {}, parse: () => ({}) },
@@ -220,6 +227,52 @@ const clearMarker = () => fs.rmSync(marker, { force: true });
   assert.equal(sends, previousSends);
   assert.equal((await recover(4100)).success, true);
   assert.equal(sends, previousSends + 1);
+  // Actual negative recovery example: rent is counted only by simulating a
+  // combined full-balance swap + close, never by adding an estimated refund.
+  const settlementPosition = "11111111111111111111111111111111";
+  const settlementMarker = path.join(root, "memories/dlmm_settlements", settlementPosition + ".json");
+  fs.mkdirSync(path.dirname(settlementMarker), {recursive: true});
+  fs.writeFileSync(settlementMarker, JSON.stringify({position:settlementPosition,mint:"TOKEN"}));
+  env.DLMM_SETTLEMENT_POSITION = settlementPosition;
+  const token = key("settlement-token"), owner = wallet.publicKey.toString();
+  deps["@solana/spl-token"] = {TOKEN_PROGRAM_ID:token,TOKEN_2022_PROGRAM_ID:key("2022"),
+    createCloseAccountInstruction(account,destination,authority,_,program) {
+      assert.equal(destination, wallet.publicKey); assert.equal(authority, wallet.publicKey);
+      assert.equal(program, token); return {closeAccount:account.toString()};
+    }};
+  const eligible = () => ({pubkey:key("settlement-ata"),account:{owner:token,lamports:1488440,
+    data:{parsed:{info:{owner,mint:"TOKEN",tokenAmount:{amount:"100000000"},state:"initialized",isNative:false}}}}});
+  let accounts = [eligible()], combinedError = false, combinedChanged = false, accountReads = 0;
+  Connection.prototype.getParsedTokenAccountsByOwner = async () => {accountReads++;return {value:accounts};};
+  Connection.prototype.getBalanceAndContext = async () => ({context:{slot:10},value:++balanceReads%2===0 && combinedChanged ? 10001 : 10000});
+  Connection.prototype.simulateTransaction = async tx => {
+    const combined = tx.message.instructions.some(i=>i.closeAccount);
+    return {context:{slot:10},value:{err:combined && combinedError ? "close refused" : null,
+      accounts:[{lamports:8449+(combined?1488440:0)}]}};
+  };
+  sandbox.fetch = async url => ({ok:true,json:async()=>url.includes("/quote?")
+    ? {inputMint:"TOKEN",outputMint:"So11111111111111111111111111111111111111112",inAmount:"100000000",outAmount:"5000",otherAmountThreshold:"4500",priceImpactPct:"0"}
+    : {swapTransaction:"AA=="}});
+  accountExists = false;
+  const beforeAtomic = sends;
+  assert.equal((await recover(1)).success, true); assert.equal(sends,beforeAtomic+1);
+  for(const alter of [a=>a.account.data.parsed.info.owner="other",a=>a.account.data.parsed.info.closeAuthority="other",
+    a=>a.account.data.parsed.info.tokenAmount.amount="100000001",a=>a.account.data.parsed.info.state="frozen",
+    a=>a.account.data.parsed.info.delegate="other",a=>a.account.data.parsed.info.isNative=true]){
+    accounts=[eligible()];alter(accounts[0]);assert.equal((await recover(1)).reason,"net_recovery_below_floor");
+  }
+  accounts=[eligible(),eligible()];assert.equal((await recover(1)).reason,"net_recovery_below_floor");
+  accounts=[eligible()];accountExists=true;assert.equal((await recover(1)).reason,"net_recovery_below_floor");accountExists=false;
+  combinedError=true;assert.equal((await recover(1)).reason,"net_recovery_below_floor");combinedError=false;
+  combinedChanged=true;assert.equal((await recover(1)).reason,"net_recovery_unmeasured");combinedChanged=false;
+  fs.writeFileSync(settlementMarker,JSON.stringify({position:settlementPosition,mint:"OTHER"}));
+  assert.equal((await recover(1)).reason,"net_recovery_below_floor");
+  assert.equal(sends,beforeAtomic+1);
+  fs.rmSync(settlementMarker);delete env.DLMM_SETTLEMENT_POSITION;accountExists=true;
+  // Healthy swap-only recovery never spends account/lookup RPCs for optional rent.
+  const readBefore=accountReads;Connection.prototype.simulateTransaction=async()=>({context:{slot:10},value:{err:null,accounts:[{lamports:14600}]}});
+  assert.equal((await recover(4100)).success,true);assert.equal(accountReads,readBefore);
+  delete deps["@solana/spl-token"];
   sandbox.fetch = async () => ({ok:false,status:400,text:async()=>JSON.stringify({errorCode:"COULD_NOT_FIND_ANY_ROUTE"})});
   assert.equal((await recover()).reason, "swap_no_route");
   sandbox.fetch = async () => ({ok:false,status:429,text:async()=>JSON.stringify({errorCode:"COULD_NOT_FIND_ANY_ROUTE"})});
