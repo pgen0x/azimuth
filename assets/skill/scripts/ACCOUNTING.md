@@ -425,3 +425,18 @@ an ATA containing legacy tokens. Zero owned inventory completes settlement
 without selling wallet dust; a nonzero wallet balance alone is not a blocker.
 This proof authorizes inventory disposal, not NAV or profit. Older legacy sales
 remain incomplete in accounting. Ambiguous inventory requires investigation.
+
+### Evaluation of root cash after refunds
+
+`matched_refund_cash_cohort` selects roots whose entire recorded activity lies
+inside the evaluation window, then projects complete proved refund groups onto
+those roots using the same cash bounds as the learner. Older carry-in roots can
+share the refund batch but their cash and funding returns are excluded. Shared
+fees are charged once per group in the cohort bounds. Individual root bounds
+must not be added; their fee assumptions overlap.
+
+The report gives positive, negative, exact-zero, ambiguous and unmeasured root
+counts. Its positive rate uses only roots with a proved sign; ambiguous and
+missing evidence are explicit, not zero losses or wins. This measured subset
+is root cash after fees and matched refunds, not position win rate or full NAV.
+No trading rule, risk limit or historical decision is changed.
