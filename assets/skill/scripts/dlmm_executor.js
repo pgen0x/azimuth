@@ -315,15 +315,17 @@ async function reconcilePendingSwap(connection, pendingPath, label = "Swap") {
   return null;
 }
 
-// Close only owner-controlled initialized accounts with no delegation or
-// extensions beyond immutableOwner; the SPL program enforces emptiness atomically.
+// Empty-account closes bypass transfer hooks/pauses; other extensions stay excluded.
+// The SPL program enforces emptiness and owner authority atomically.
 function tokenAccountCanClose(account, owner, raw = "0") {
   const { TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID } = require("@solana/spl-token");
   const info = account.data?.parsed?.info, extensions = info?.extensions;
   const program = account.owner?.toString();
   const supported = program === TOKEN_PROGRAM_ID.toString()
     || program === TOKEN_2022_PROGRAM_ID.toString()
-      && Array.isArray(extensions) && extensions.length === 1 && extensions[0].extension === "immutableOwner";
+      && Array.isArray(extensions) && extensions.length > 0 && extensions.every(e=>
+        e?.extension === "immutableOwner" || raw === "0" && (e?.extension === "pausableAccount"
+          || e?.extension === "transferHookAccount" && e.state?.transferring === false));
   return supported && info?.owner === owner && (info.closeAuthority || owner) === owner
     && info.tokenAmount?.amount === raw && info.state === "initialized"
     && info.isNative === false && !info.delegate
