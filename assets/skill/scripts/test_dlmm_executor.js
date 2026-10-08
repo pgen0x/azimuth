@@ -71,7 +71,8 @@ const deps = {
   "bn.js": function (value) { this.value = value; }, "bs58": { encode: () => "signature" },
   "dotenv": { config() {}, parse: () => ({}) },
 };
-const env = { SOLANA_RPC_URLS: "fake-rpc-1,fake-rpc-2", DLMM_ENTRY_CONTEXT: JSON.stringify({ mode: "turnover", recenter_of: "root", pair: "TEST-SOL" }) };
+const entryGates = { observed_at: 1, checked_deploy_sol: .1, fee_timeframe: "30m", m5_pct: 0, h1_pct: null, live_fee_tvl_ratio: 1.4, price_impact_pct: .1 };
+const env = { SOLANA_RPC_URLS: "fake-rpc-1,fake-rpc-2", DLMM_ENTRY_CONTEXT: JSON.stringify({ mode: "turnover", recenter_of: "root", pair: "TEST-SOL", signal: { entry_live_gates: entryGates } }) };
 const sandbox = { require: (name) => deps[name] || require(name), module: { exports: {} },
   process: { argv: ["node", path.join(root, "skills/solana-dlmm/scripts/dlmm_executor.js")], env },
   fetch: async (url, options) => {
@@ -370,6 +371,7 @@ const clearMarker = () => fs.rmSync(marker, { force: true });
   assert.equal((await deploy()).pending, true); // prior blockhash still valid
   assert.equal(sends, 1);
   const provenance = JSON.parse(fs.readFileSync(path.join(root, "memories/dlmm_entries/position-1.json")));
+  assert.deepEqual(provenance.signal.entry_live_gates, entryGates);
   assert.equal(provenance.mode, "turnover"); assert.equal(provenance.recenter_of, "root");
   assert.equal(provenance.pool, "pool");
   assert.equal(provenance.bin_step, 100);

@@ -702,24 +702,33 @@ def fetch_live_fee_tvl(pool_address, timeframe="24h"):
 
 def predeploy_live_gate_reject(candidate, deploy_sol, timeframe):
     """Return a live-gate rejection so batch selection can try the next pool."""
+    candidate.pop("entry_live_gates", None)
     if os.environ.get("DRY_RUN") == "true":
         return None
     base_mint = candidate.get("base_mint", "")
     if not base_mint:
         return "base mint unavailable"
-    m5, _, _, _ = get_momentum(base_mint)
+    m5, h1, h6, h24 = get_momentum(base_mint)
+    checks = candidate["entry_live_gates"] = {
+        "observed_at": int(time.time()), "checked_deploy_sol": deploy_sol, "fee_timeframe": timeframe,
+        "m5_pct": m5, "h1_pct": h1, "h6_pct": h6, "h24_pct": h24,
+        "screened_fee_tvl_ratio": None, "live_fee_tvl_ratio": None, "price_impact_pct": None,
+    }
     if m5 is not None:
         print(f"Pre-deploy momentum check {candidate['name']}: 5m price change = {m5:+.2f}%")
         if m5 < -5.0:
             return f"dumping {m5:.2f}% in last 5m"
     screened = float(candidate.get("fee_tvl_ratio") or 0)
     live = fetch_live_fee_tvl(candidate["pool"], timeframe)
+    checks.update(screened_fee_tvl_ratio=screened if math.isfinite(screened) else None,
+                  live_fee_tvl_ratio=live)
     if live is not None and screened > 0:
         drop_pct = (screened - live) / screened * 100
         print(f"Fee/TVL freshness {candidate['name']}: screened={screened:.2f}% live={live:.2f}% (drop={drop_pct:.1f}%)")
         if drop_pct > 50:
             return f"fee/TVL dropped {drop_pct:.1f}% since screening"
     impact = get_price_impact_sol_to_token(base_mint, deploy_sol)
+    checks["price_impact_pct"] = impact if impact is not None and math.isfinite(impact) else None
     if impact is not None:
         print(f"Pre-deploy depth check {candidate['name']}: price impact = {impact:.2f}% at {deploy_sol} SOL")
         if impact > MAX_PRICE_IMPACT_PCT:
@@ -784,20 +793,20 @@ def get_momentum(mint):
             return None, None, None, None
         deepest = max(pairs, key=lambda p: float((p.get("liquidity") or {}).get("usd") or 0.0))
         pc = deepest.get("priceChange") or {}
-        m5 = float(pc.get("m5", 0) or 0)
-        h1 = float(pc.get("h1", 0) or 0)
-        h6 = float(pc.get("h6", 0) or 0)
-        h24 = float(pc.get("h24", 0) or 0)
+        values = [None if pc.get(k) is None or isinstance(pc[k], bool) else float(pc[k])
+                  for k in ("m5", "h1", "h6", "h24")]
+        m5, h1, h6, h24 = (v if v is not None and math.isfinite(v) else None for v in values)
         # A short-window reading this deep is a bad pair, not a dump: no pool
         # sheds 95% inside 5 minutes and still quotes. Unknown, so the gate
         # fails open exactly as it does for a missing field. h6/h24 are left
         # alone — a token really can be down 99% over a day, and nulling that
         # would walk a corpse straight past the downtrend gate below.
-        if m5 <= IMPLAUSIBLE_CHANGE_PCT or h1 <= IMPLAUSIBLE_CHANGE_PCT:
+        if ((m5 is not None and m5 <= IMPLAUSIBLE_CHANGE_PCT)
+                or (h1 is not None and h1 <= IMPLAUSIBLE_CHANGE_PCT)):
             print(f"Warning: implausible momentum for {mint[:8]} "
-                  f"(m5 {m5:+.1f}%, h1 {h1:+.1f}%) — treating short windows as unknown")
-            m5 = None if m5 <= IMPLAUSIBLE_CHANGE_PCT else m5
-            h1 = None if h1 <= IMPLAUSIBLE_CHANGE_PCT else h1
+                  f"(m5 {m5!r}, h1 {h1!r}) — treating short windows as unknown")
+            m5 = None if m5 is not None and m5 <= IMPLAUSIBLE_CHANGE_PCT else m5
+            h1 = None if h1 is not None and h1 <= IMPLAUSIBLE_CHANGE_PCT else h1
         return m5, h1, h6, h24
     except Exception as e:
         print(f"Warning: momentum fetch failed for {mint[:8]}: {e}")
@@ -1926,7 +1935,7 @@ def main():
     entry_context = {key: winner.get(key) for key in ("pair", "base_mint", "base_symbol", "sol_is_x")}
     entry_context.update(entry_id=entry_id, pair=winner["name"], mode=mode, strategy=strategy, size_sol=deploy_sol,
                          signal={key: winner.get(key) for key in (
-                             "score", "organic_score", "fee_tvl_ratio", "volatility", "tvl")})
+                             "score", "organic_score", "fee_tvl_ratio", "volatility", "tvl", "entry_live_gates")})
     context_env = "DLMM_ENTRY_CONTEXT=" + shlex.quote(json.dumps(entry_context))
     deploy_cmd = f"{context_env} node {EXECUTOR_PATH} deploy {winner['pool']} {amount_x} {amount_y} {bins_below} {bins_above} {strategy_type} {slippage_bps}"
     print(f"Running deploy: {deploy_cmd}")
@@ -2022,6 +2031,7 @@ def main():
             "volatility", "mcap", "holders", "tvl", "fee_pct",
             "volume_tvl_ratio", "swap_count", "unique_traders",
             "bot_holders_pct", "global_fees_sol", "bin_step",
+            "entry_live_gates",
         ) if winner.get(k) is not None},
     }
 
