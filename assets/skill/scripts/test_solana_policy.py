@@ -160,6 +160,13 @@ def main():
             ({"prior_net_pnl_sol":-.01}, "prior_mark_loss-20"),
             ({"prior_pnl_basis":"matched_refund_cash", "prior_net_pnl_sol":0, "prior_mark_pnl_sol":-.01}, None),
             ({"prior_pnl_basis":"pre_swap_mark_only"}, None),
+            ({"prior_pnl_basis":"matched_refund_cash_bounds", "prior_cash_lower_sol":-.02, "prior_cash_upper_sol":-.01, "prior_mark_pnl_sol":.01}, "prior_bounded_cash_loss-20"),
+            ({"prior_pnl_basis":"matched_refund_cash_bounds", "prior_cash_lower_sol":.001, "prior_cash_upper_sol":.002, "prior_mark_pnl_sol":-.01}, None),
+            ({"prior_pnl_basis":"matched_refund_cash_bounds", "prior_cash_lower_sol":-.01, "prior_cash_upper_sol":0, "prior_mark_pnl_sol":-.01}, "prior_mark_loss-20"),
+            ({"prior_pnl_basis":"matched_refund_cash_bounds", "prior_cash_lower_sol":0, "prior_cash_upper_sol":.001, "prior_mark_pnl_sol":-.01}, None),
+            ({"prior_pnl_basis":"matched_refund_cash_bounds", "prior_cash_lower_sol":True, "prior_cash_upper_sol":.001, "prior_mark_pnl_sol":-.01}, "prior_mark_loss-20"),
+            ({"prior_pnl_basis":"matched_refund_cash_bounds", "prior_cash_lower_sol":float("nan"), "prior_cash_upper_sol":.001, "prior_mark_pnl_sol":-.01}, "prior_mark_loss-20"),
+            ({"prior_pnl_basis":"matched_refund_cash_bounds", "prior_cash_lower_sol":.01, "prior_cash_upper_sol":-.01, "prior_mark_pnl_sol":-.01}, "prior_mark_loss-20"),
         ]:
             candidate = {"name":"P", "score":100, **fields}
             pipeline.apply_batch_conviction([candidate])

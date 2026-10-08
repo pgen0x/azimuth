@@ -242,3 +242,28 @@ assert pool_cash_history(closes,zero,120)["P"]["prior_net_pnl_sol"] == 0
 bad=deepcopy(closes);bad[0]["pnl_sol"]=None
 assert pool_cash_history(bad,ledger,120)["P"]["prior_mark_pnl_sol"] is None
 print("Pool cash history separates marks, unknown cash, whole roots and shared fees")
+
+# Cross-pool bounds use individually proved refunds; shared fee is never split.
+bounded_ledger = {"chains": chains, "rent_refund_groups": [group]}
+views = pool_cash_history(split, bounded_ledger, 220)
+assert views["P"]["prior_net_pnl_sol"] is None and views["Q"]["prior_net_pnl_sol"] is None
+assert views["P"]["prior_pnl_basis"] == "matched_refund_cash_bounds"
+assert views["P"]["prior_cash_lower_sol"] == -810/1e9 and views["P"]["prior_cash_upper_sol"] == -805/1e9
+assert views["Q"]["prior_cash_lower_sol"] == 595/1e9 and views["Q"]["prior_cash_upper_sol"] == 600/1e9
+whole = pool_cash_history(closes, bounded_ledger, 220)["P"]
+assert whole["prior_net_pnl_sol"] == -210/1e9 and whole["prior_cash_lower_sol"] == whole["prior_cash_upper_sol"]
+# The whole batch cash lies inside the sum of intervals, not at either end.
+assert sum(v["prior_cash_lower_sol"] for v in views.values()) < whole["prior_net_pnl_sol"] < sum(v["prior_cash_upper_sol"] for v in views.values())
+assert all(v["prior_cash_lower_sol"] is None for v in pool_cash_history(split, bounded_ledger, 205).values())
+for mutate in [
+    lambda g: g["refund_components"][0].update(fee_lamports=-1),
+    lambda g: g["refund_components"][0]["gross_by_root"].update(a=True),
+    lambda g: g["refund_components"][0]["gross_by_root"].update(a=101),
+    lambda g: g["refund_components"].pop(),
+    lambda g: g["refund_components"].append(g["refund_components"][0]),
+]:
+    bad = deepcopy(bounded_ledger);mutate(bad["rent_refund_groups"][0])
+    assert all(v["prior_cash_lower_sol"] is None for v in pool_cash_history(split,bad,220).values())
+partial = deepcopy(bounded_ledger);partial["chains"][0]["positions"].append("unselected")
+assert pool_cash_history(split,partial,220)["P"]["prior_cash_lower_sol"] is None
+print("Cross-pool refund bounds conserve full-group cash and retain unknown/partial evidence")
