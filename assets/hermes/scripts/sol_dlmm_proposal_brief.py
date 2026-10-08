@@ -194,7 +194,8 @@ def section_weights():
     weights = data.get("weights") or {}
     lifts = data.get("lifts") or {}
     print(f"last recalc {data.get('last_recalc') or 'never'} "
-          f"(recalc_count {data.get('recalc_count') or 0})\n")
+          f"(recalc_count {data.get('recalc_count') or 0}); "
+          f"outcomes: {data.get('outcome_basis') or 'legacy LP outcomes'}\n")
     print("| signal | weight | lift |")
     print("|---|---|---|")
     for name in sorted(weights):

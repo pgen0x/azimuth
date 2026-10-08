@@ -282,6 +282,22 @@ unchanged. Groups are not full NAV or proof all historical refunds are measured.
 Evaluation includes only groups whose whole activity lies within its window;
 history evidence observed later cannot alter earlier reports or decisions.
 
+### Signal learner outcomes
+
+`dlmm_weights.py` learns win/non-win labels from `refund_cash_bounds`, using
+cached finalized cash and complete account histories. Only roots containing
+one position can label that position's entry signals. Recenter chains, missing
+refund proofs and intervals crossing from nonpositive to positive are excluded;
+LP marks and realized LP values cannot substitute for cash. Close rows are
+deduplicated by position without rewriting the source journal.
+
+The bounds establish a label, not an exact per-root profit or summable portfolio
+PnL. The existing sample floor, smoothing, weight limits and scoring signals
+remain; the first cash recalc updates existing weights once, then retains the
+six-hour guard. File, Redis and proposal output identify `outcome_basis`.
+Only the observed, fully reconciled subset can train, so these lifts may have
+coverage and selection bias and do not prove improved prospective returns.
+
 ### Swap quote evidence
 
 New swap submission rows include `swap_quote`: quote receipt time, input/output
