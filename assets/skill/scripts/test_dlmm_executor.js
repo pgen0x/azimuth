@@ -203,7 +203,7 @@ const clearMarker = () => fs.rmSync(marker, { force: true });
     assert.equal(options.minContextSlot, 10);
     return { context: { slot: 10 }, value: { err: simulationError, accounts: [{ lamports: simulatedPost }] } };
   };
-  const recover = (floor=4000) => swapToken("TOKEN", "So11111111111111111111111111111111111111112", 0.1, 5, 100, floor);
+  const recover = (floor=4000) => swapToken("TOKEN", "So11111111111111111111111111111111111111112", env.DLMM_SETTLEMENT_POSITION ? "raw:100000000" : 0.1, 5, 100, floor);
   assert.equal(swapAmountRaw(66.324429, 6), "66324429");
   assert.equal(swapAmountRaw("9007199254.740993", 6), "9007199254740993");
   assert.equal(swapAmountRaw("1e-9", 9), "1");
@@ -235,6 +235,28 @@ const clearMarker = () => fs.rmSync(marker, { force: true });
   fs.mkdirSync(path.dirname(settlementMarker), {recursive: true});
   fs.writeFileSync(settlementMarker, JSON.stringify({position:settlementPosition,mint:"TOKEN"}));
   env.DLMM_SETTLEMENT_POSITION = settlementPosition;
+  let inventoryProof = {success:true,amount_raw:"100000000",wallet_balance_raw:"100000000",slot:10};
+  deps["child_process"] = {execFileSync: (_, args) => {
+    assert.equal(args.includes("--settlement-inventory"),true);
+    return JSON.stringify(inventoryProof);
+  }};
+  // Only the root's missing signature is fetched, never unrelated history.
+  const journalPath=path.join(root,"memories/dlmm_transactions.jsonl");
+  const factPath=path.join(root,"memories/dlmm_wallet_transactions.jsonl");
+  const originalJournal=fs.readFileSync(journalPath,"utf8");
+  const originalFacts=fs.existsSync(factPath)?fs.readFileSync(factPath,"utf8"):null;
+  fs.appendFileSync(journalPath,JSON.stringify({signature:"proof-close",wallet:wallet.publicKey.toString(),position:settlementPosition,kind:"close"})+"\n");
+  let proofCalls=0; const requestedFacts=[];
+  deps["child_process"].execFileSync=()=>JSON.stringify(++proofCalls===1
+    ? {success:false,pending_signatures:["proof-close"]} : inventoryProof);
+  deps["./dlmm_nav.js"]={parsedAccountingTransaction:async(_,sig)=>{requestedFacts.push(sig);return {meta:{}};},
+    transactionFact:(_,owner,sig)=>({signature:sig,wallet:owner,landed:true})};
+  assert.equal((await sandbox.module.exports.settlementInventory(settlementPosition,"TOKEN",wallet.publicKey.toString())).success,true);
+  assert.deepEqual(requestedFacts,["proof-close"]);assert.equal(proofCalls,2);
+  fs.writeFileSync(journalPath,originalJournal);
+  if(originalFacts===null) fs.rmSync(factPath);else fs.writeFileSync(factPath,originalFacts);
+  delete deps["./dlmm_nav.js"];
+  deps["child_process"].execFileSync=()=>JSON.stringify(inventoryProof);
   const token = key("settlement-token"), owner = wallet.publicKey.toString();
   deps["@solana/spl-token"] = {TOKEN_PROGRAM_ID:token,TOKEN_2022_PROGRAM_ID:key("2022"),
     createCloseAccountInstruction(account,destination,authority,_,program) {
@@ -262,15 +284,35 @@ const clearMarker = () => fs.rmSync(marker, { force: true });
   for(const alter of [a=>a.account.data.parsed.info.owner="other",a=>a.account.data.parsed.info.closeAuthority="other",
     a=>a.account.data.parsed.info.tokenAmount.amount="100000001",a=>a.account.data.parsed.info.state="frozen",
     a=>a.account.data.parsed.info.delegate="other",a=>a.account.data.parsed.info.isNative=true]){
-    accounts=[eligible()];alter(accounts[0]);assert.equal((await recover(1)).reason,"net_recovery_below_floor");
+    accounts=[eligible()];alter(accounts[0]);
+    if(accounts[0].account.data.parsed.info.owner!==owner) await assert.rejects(recover(1),/All 2 RPC endpoints failed/);
+    else assert.equal((await recover(1)).reason,accounts[0].account.data.parsed.info.tokenAmount.amount!=="100000000" ? "settlement_inventory_changed" : "net_recovery_below_floor");
   }
-  accounts=[eligible(),eligible()];assert.equal((await recover(1)).reason,"net_recovery_below_floor");
-  accounts=[eligible()];accountExists=true;assert.equal((await recover(1)).reason,"net_recovery_below_floor");accountExists=false;
+  accounts=[eligible(),eligible()];assert.equal((await recover(1)).reason,"settlement_inventory_changed");
+  accounts=[eligible()];accountExists=true;assert.equal((await recover(1)).reason,"settlement_position_still_open");accountExists=false;
   combinedError=true;assert.equal((await recover(1)).reason,"net_recovery_below_floor");combinedError=false;
   combinedChanged=true;assert.equal((await recover(1)).reason,"net_recovery_unmeasured");combinedChanged=false;
   fs.writeFileSync(settlementMarker,JSON.stringify({position:settlementPosition,mint:"OTHER"}));
-  assert.equal((await recover(1)).reason,"net_recovery_below_floor");
+  await assert.rejects(recover(1),/Settlement marker mismatch/);
+  fs.writeFileSync(settlementMarker,JSON.stringify({position:settlementPosition,mint:"TOKEN"}));
+  inventoryProof={success:false,reason:"settlement_inventory_unproven"};
+  assert.equal((await recover(1)).reason,"settlement_inventory_unproven");
+  inventoryProof={success:true,amount_raw:"0"};
+  const legacyFetch=sandbox.fetch;
+  sandbox.fetch=async()=>{throw new Error("Legacy dust must not be quoted or sold");};
+  assert.equal((await recover(1)).settled,true);
+  inventoryProof={success:true,amount_raw:"50000000",wallet_balance_raw:"100000000",slot:10};
+  assert.equal((await recover(1)).reason,"settlement_amount_mismatch");
+  sandbox.fetch=async url=>({ok:true,json:async()=>url.includes("/quote?")
+    ? {inputMint:"TOKEN",outputMint:"So11111111111111111111111111111111111111112",inAmount:"50000000",outAmount:"5000",otherAmountThreshold:"4500",priceImpactPct:"0"}
+    : {swapTransaction:"AA=="}});
+  // Selling the owned half cannot close the ATA containing the legacy half.
+  assert.equal((await swapToken("TOKEN","So11111111111111111111111111111111111111112","raw:50000000",5,100,1)).reason,"net_recovery_below_floor");
+  sandbox.fetch=async()=>({ok:true,json:async()=>({inputMint:"TOKEN",outputMint:"So11111111111111111111111111111111111111112",inAmount:"100000000",outAmount:"5000"})});
+  assert.equal((await swapToken("TOKEN","So11111111111111111111111111111111111111112","raw:50000000",5,100,1)).reason,"settlement_quote_mismatch");
+  sandbox.fetch=legacyFetch;
   assert.equal(sends,beforeAtomic+1);
+  delete deps["child_process"];
   fs.rmSync(settlementMarker);delete env.DLMM_SETTLEMENT_POSITION;accountExists=true;
   // Healthy swap-only recovery never spends account/lookup RPCs for optional rent.
   const readBefore=accountReads;Connection.prototype.simulateTransaction=async()=>({context:{slot:10},value:{err:null,accounts:[{lamports:14600}]}});

@@ -3,7 +3,7 @@
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from dlmm_accounting import report, cleanup_owner
+from dlmm_accounting import report, cleanup_owner, settlement_inventory
 
 with TemporaryDirectory() as root:
     memories = Path(root) / "memories"
@@ -307,3 +307,63 @@ for mutate in (
     assert surviving["refund_signatures"]==["refund-b"]
 assert rent_refund_groups(*reuse,219)==[]
 print("Reused account refunds prove funding, all settled users, shared fee bounds and conservation")
+
+# Legacy wallet inventory is never a source of automatic position settlement.
+with TemporaryDirectory() as root:
+    memories = Path(root) / "memories"
+    (memories / "dlmm_entries").mkdir(parents=True)
+    (memories / "dlmm_entries/p.json").write_text(json.dumps(
+        dict(position="p", deployed_at=100, base_mint="TOKEN")))
+    def write(name, records):
+        (memories / name).write_text("".join(json.dumps(r) + "\n" for r in records))
+    events = [dict(signature=s, position="p", wallet="wallet", kind=k, ts=t)
+              for s,k,t in [("deploy","deploy",100),("close","close",200)]]
+    facts = [dict(signature=s, wallet="wallet", observed_at=t, block_time=t, slot=slot,
+                  wallet_delta_lamports=0, fee_lamports=5000, failed=False,
+                  token_deltas_raw={"TOKEN":"0"}, token_pre_balances_raw={"TOKEN":"5433"},
+                  token_post_balances_raw={"TOKEN":"5433"}, position_account_closed=s=="close")
+             for s,t,slot in [("deploy",100,10),("close",200,20)]]
+    write("dlmm_closes.jsonl", [dict(position="p", ts=200, deployed_at=100, base_mint="TOKEN")])
+    write("dlmm_transactions.jsonl", events)
+    write("dlmm_transaction_facts.jsonl", facts)
+    proof = lambda: settlement_inventory(root,"p","TOKEN","wallet")
+    assert proof() == {"success":True,"amount_raw":"0"}  # actual testicle pre-sale balances
+    # A filled position adds exactly 100 raw units to 5433 old units.
+    facts[1]["token_deltas_raw"]={"TOKEN":"100"}
+    facts[1]["token_post_balances_raw"]={"TOKEN":"5533"}
+    write("dlmm_transaction_facts.jsonl",facts)
+    assert proof() == {"success":True,"amount_raw":"100","wallet_balance_raw":"5533","slot":20}
+    assert not settlement_inventory(root,"p","TOKEN","other-wallet")["success"]
+    assert not settlement_inventory(root,"p","OTHER","wallet")["success"]
+    # Cached evidence is mandatory; a close not finalized yet cannot sell.
+    write("dlmm_transaction_facts.jsonl",facts[:1])
+    assert proof()["pending_signatures"] == ["close"]
+    write("dlmm_transaction_facts.jsonl",facts)
+    write("dlmm_closes.jsonl",[])
+    assert not proof()["success"]
+    write("dlmm_closes.jsonl",[dict(position="p",ts=200,deployed_at=100)])
+    gift=dict(signature="gift",wallet="wallet",classification="external_token_inflow",slot=30,
+              block_time=300,observed_at=300,token_deltas_raw={"TOKEN":"5"})
+    write("dlmm_wallet_transactions.jsonl",[gift])
+    assert not proof()["success"]  # also refuse gifts received AFTER the close
+    write("dlmm_wallet_transactions.jsonl",[])
+    # Other unsettled ownership of the same mint is not allocated pro rata.
+    (memories / "dlmm_entries/other.json").write_text(json.dumps(dict(position="other",base_mint="TOKEN",deployed_at=250)))
+    write("dlmm_transactions.jsonl",events+[dict(signature="other",position="other",wallet="wallet",kind="deploy",ts=250)])
+    write("dlmm_transaction_facts.jsonl",facts+[dict(facts[0],signature="other",slot=30,token_deltas_raw={"TOKEN":"1"})])
+    assert not proof()["success"]
+    write("dlmm_transactions.jsonl",events)
+    write("dlmm_transaction_facts.jsonl",facts)
+    (memories / "dlmm_entries/other.json").unlink()
+    # Only the owned amount is removed; legacy wallet dust may remain nonzero.
+    swap=dict(facts[1],signature="sale",slot=30,position_account_closed=False,
+              token_deltas_raw={"TOKEN":"-100"},token_post_balances_raw={"TOKEN":"5433"})
+    write("dlmm_transactions.jsonl",events+[dict(signature="sale",position="p",wallet="wallet",kind="swap",ts=300)])
+    write("dlmm_transaction_facts.jsonl",facts+[swap])
+    assert proof()=={"success":True,"amount_raw":"0"}
+    # Historical legacy sales remain an error, never zeroed or called profit.
+    swap["token_deltas_raw"]={"TOKEN":"-5533"}
+    swap["token_post_balances_raw"]={}
+    write("dlmm_transaction_facts.jsonl",facts+[swap])
+    assert not proof()["success"]
+print("Settlement inventory provenance, legacy preservation and finalized evidence passed")

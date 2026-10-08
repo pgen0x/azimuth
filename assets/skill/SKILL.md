@@ -133,6 +133,10 @@ Measured over the 7d to 2026-08-19: journal -1.6120 SOL, chain -0.0213 SOL. Near
 *   `node ~/.hermes/profiles/<profile>/skills/solana-dlmm/scripts/dlmm_executor.js close <position_address>`
 *   `node ~/.hermes/profiles/<profile>/skills/solana-dlmm/scripts/dlmm_executor.js positions`
 
+Automatic SOL settlement is limited to finalized closed-root inventory. Use the
+durable worker; a wallet SPL balance can include legacy tokens and must never
+be used as the position's sale amount. Unknown or mixed ownership stays pending.
+
 ### 5. `uni_executor.js` — Robinhood Chain (Uniswap v3) Executor
 **Purpose**: EVM sibling of `dlmm_executor.js` for the Robinhood Chain venue
 (chain ID 4663, see `docs/ROBINHOOD_CHAIN_PLAN.md`). Wraps ETH, swaps via

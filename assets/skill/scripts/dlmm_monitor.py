@@ -1238,16 +1238,17 @@ def settle_pending():
         with open(path + ".tmp", "w") as out:
             json.dump(item, out)
         os.replace(path + ".tmp", path)
-        bal, err = run_command_json(f"node {EXECUTOR_PATH} spl-balance {shlex.quote(mint)}")
-        if not bal or "balance" not in bal:
+        balance_cmd = f"node {EXECUTOR_PATH} settlement-balance {shlex.quote(pos)} {shlex.quote(mint)}"
+        bal, err = run_command_json(balance_cmd)
+        if not bal or not bal.get("success") or "amount_raw" not in bal:
             return
-        if bal["balance"] > 0:
+        if bal["amount_raw"] != "0":
             result, err = run_command_json(
-                f"DLMM_SETTLEMENT_POSITION={shlex.quote(pos)} node {EXECUTOR_PATH} swap {shlex.quote(mint)} SOL {shlex.quote(str(bal['balance']))} 15 {slippage_bps} 1", timeout=90)
+                f"DLMM_SETTLEMENT_POSITION={shlex.quote(pos)} node {EXECUTOR_PATH} swap {shlex.quote(mint)} SOL {shlex.quote('raw:' + bal['amount_raw'])} 15 {slippage_bps} 1", timeout=90)
             if not result or not result.get("success"):
                 reason = (result or {}).get("reason")
                 if reason in ("swap_no_route", "net_recovery_below_floor") and not result.get("pending"):
-                    item.update(state="deferred", reason=reason, remaining_balance=bal["balance"])
+                    item.update(state="deferred", reason=reason, remaining_raw=bal["amount_raw"])
                     with open(path + ".tmp", "w") as out:
                         json.dump(item, out)
                         out.flush()
@@ -1255,8 +1256,8 @@ def settle_pending():
                     os.replace(path + ".tmp", path)
                 print(f"⚠️ Settlement {item['state']} {pos}: {err or result}")
                 return
-            bal, err = run_command_json(f"node {EXECUTOR_PATH} spl-balance {shlex.quote(mint)}")
-        if bal and bal.get("balance") == 0:
+            bal, err = run_command_json(balance_cmd)
+        if bal and bal.get("success") and bal.get("amount_raw") == "0":
             os.unlink(path)
             # Settlement invalidates the earlier wallet-capacity refusal. The
             # pipeline still checks live balance/reserve before any new entry.

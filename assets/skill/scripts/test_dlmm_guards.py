@@ -154,7 +154,7 @@ def main():
         assert closed["success"] is (live is False)
         indexer.assert_not_called()
 
-    # A failed swap remains queued across worker runs and clears only after a zero balance read.
+    # A failed swap remains queued across worker runs and clears only after a zero owned-inventory proof.
     with tempfile.TemporaryDirectory() as tmp, patch.object(monitor, "SETTLEMENT_DIR", tmp), \
          patch.object(monitor, "get_position_metadata", return_value={"base_mint": "TOKEN"}), \
          patch.object(monitor, "get_wallet_address", return_value="wallet"), \
@@ -163,27 +163,35 @@ def main():
          patch.object(monitor, "run_command", return_value=("1", "", 0)) as capacity:
         monitor.queue_settlement("position")
         path = Path(tmp) / "position.json"
-        with patch.object(monitor, "run_command_json", side_effect=[({"balance": 10}, None), ({"success": False}, "slippage")]) as first:
+        with patch.object(monitor, "run_command_json", side_effect=[({"success": True, "amount_raw": "10"}, None), ({"success": False}, "slippage")]) as first:
             monitor.settle_pending()
         assert first.call_args_list[1].args[0].endswith(" 15 100 1")
         assert path.exists()
         capacity.assert_not_called()
         # Even a successful swap cannot resume scanning while balance is unknown.
-        with patch.object(monitor, "run_command_json", side_effect=[({"balance": 10}, None), ({"success": True}, None), (None, "RPC unavailable")]) as retry:
+        with patch.object(monitor, "run_command_json", side_effect=[({"success": True, "amount_raw": "10"}, None), ({"success": True}, None), (None, "RPC unavailable")]) as retry:
             monitor.settle_pending()
         assert retry.call_args_list[1].args[0].endswith(" 15 300 1")
         assert path.exists()
         capacity.assert_not_called()
-        with patch.object(monitor, "run_command_json", side_effect=[({"balance": 10}, None), ({"success": True}, None), ({"balance": 0}, None)]):
+        with patch.object(monitor, "run_command_json", side_effect=[({"success": True, "amount_raw": "10"}, None), ({"success": True}, None), ({"success": True, "amount_raw": "0"}, None)]):
             monitor.settle_pending()
         assert not path.exists()
         capacity.assert_called_once_with("redis-cli DEL sol:dlmm:capacity:wallet", timeout=2)
         capacity.reset_mock()
+        # Wallet-zero or unknown provenance never completes a settlement.
+        monitor.queue_settlement("position")
+        with patch.object(monitor, "run_command_json", return_value=({"success": False, "reason": "settlement_inventory_unproven", "amount_raw": "0"}, None)) as unknown:
+            monitor.settle_pending()
+        assert path.exists()
+        assert unknown.call_count == 1
+        capacity.assert_not_called()
+        path.unlink()
         # Route/fee failures remain inventory, with backoff and no global entry
         # block. Unknown RPC failures must remain pending instead.
         for reason in ("swap_no_route", "net_recovery_below_floor", "net_recovery_unmeasured"):
             monitor.queue_settlement("position")
-            with patch.object(monitor, "run_command_json", side_effect=[({"balance": 0.000001}, None), ({"success": False, "reason": reason}, None)]) as run:
+            with patch.object(monitor, "run_command_json", side_effect=[({"success": True, "amount_raw": "1"}, None), ({"success": False, "reason": reason}, None)]) as run:
                 monitor.settle_pending()
             assert run.call_args_list[1].args[0].endswith(" 15 100 1")
             capacity.assert_not_called()
@@ -197,7 +205,7 @@ def main():
                 path.write_text(json.dumps(item))
                 # Redis failure leaves the existing bounded TTL as fallback;
                 # it does not recreate an already settled marker.
-                with patch.object(monitor, "run_command_json", return_value=({"balance": 0}, None)), \
+                with patch.object(monitor, "run_command_json", return_value=({"success": True, "amount_raw": "0"}, None)), \
                      patch.object(monitor, "run_command", return_value=("", "Redis unavailable", 1)) as failed_resume:
                     monitor.settle_pending()
                 assert not path.exists()

@@ -1026,6 +1026,21 @@ async function settlementRentClose(connection, wallet, transaction, mint, raw) {
   }
 }
 
+async function settlementInventory(position, mint, wallet) {
+  if (!/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(position)) throw new Error("Invalid settlement position");
+  const marker = JSON.parse(fs.readFileSync(path.join(PROFILE_DIR, "memories", "dlmm_settlements", `${position}.json`), "utf8"));
+  if (marker.position !== position || marker.mint !== mint) throw new Error("Settlement marker mismatch");
+  const read = () => JSON.parse(require("child_process").execFileSync("python3", [
+    path.join(SCRIPT_DIR, "dlmm_accounting.py"), "--profile", PROFILE_DIR,
+    "--settlement-inventory", position, mint, wallet], { encoding: "utf8", timeout: 20000 }));
+  let proof = read();
+  if (proof.pending_signatures?.length) {
+    await reconcileAccounting(new Set(proof.pending_signatures));
+    proof = read();
+  }
+  return proof;
+}
+
 async function swapToken(inputMintStr, outputMintStr, amountFloat, maxPriceImpactPct = 5, slippageBps = 100, minNetLamports = null) {
   const input_mint = normalizeMint(inputMintStr);
   const output_mint = normalizeMint(outputMintStr);
@@ -1053,19 +1068,32 @@ async function swapToken(inputMintStr, outputMintStr, amountFloat, maxPriceImpac
         error: `Swap reconciliation unavailable; refusing duplicate submission: ${err.message}` };
     }
 
+    let inventory;
+    if (process.env.DLMM_SETTLEMENT_POSITION) {
+      if (output_mint !== "So11111111111111111111111111111111111111112" || input_mint === output_mint) {
+        throw new Error("Settlement requires token-to-SOL");
+      }
+      inventory = await settlementInventory(process.env.DLMM_SETTLEMENT_POSITION, input_mint, wallet.publicKey.toString());
+      if (!inventory.success) return inventory;
+      if (inventory.amount_raw === "0") return { success: true, settled: true, inputAmount: "0" };
+    }
+
     // Fetch quote outside runWithFailover as it's a HTTP call to Jupiter, then execute/send via standard RPC rotation
     let quoteResponse, quoteObservedAt, inputRaw;
     try {
     // 1. Get input decimals
     let decimals = 9;
-    if (input_mint !== "So11111111111111111111111111111111111111112") {
+    if (!inventory && input_mint !== "So11111111111111111111111111111111111111112") {
       // We'll perform a quick connection just to fetch decimals
       await runWithFailover(async (connection) => {
         const mintInfo = await connection.getParsedAccountInfo(new PublicKey(input_mint));
         decimals = mintInfo.value?.data?.parsed?.info?.decimals;
       });
     }
-    const amountRaw = swapAmountRaw(amountFloat, decimals);
+    const amountRaw = inventory ? swapAmountRaw(inventory.amount_raw, 0) : swapAmountRaw(amountFloat, decimals);
+    if (inventory && amountFloat !== `raw:${amountRaw}`) {
+      return { success: false, aborted: true, reason: "settlement_amount_mismatch" };
+    }
     inputRaw = amountRaw;
 
     // 2. Fetch a quote within the authorized slippage limit.
@@ -1086,6 +1114,9 @@ async function swapToken(inputMintStr, outputMintStr, amountFloat, maxPriceImpac
           continue;
         }
         const q = await quoteRes.json();
+        if (inventory && (q?.inputMint !== input_mint || q?.outputMint !== output_mint || q?.inAmount !== amountRaw)) {
+          return { success: false, aborted: true, reason: "settlement_quote_mismatch" };
+        }
         if (!q || !q.outAmount || q.outAmount === "0") {
           lastErr = `Jupiter returned empty quote at slippage ${bps}bps (no route/liquidity)`;
           continue;
@@ -1127,6 +1158,21 @@ async function swapToken(inputMintStr, outputMintStr, amountFloat, maxPriceImpac
     return await runWithFailover(async (connection) => {
     if (submittedSignature) return { success: false, pending: true, txHash: submittedSignature,
       error: "Previous swap submission needs reconciliation" };
+    if (inventory) {
+      if (await positionAccountExists(connection, process.env.DLMM_SETTLEMENT_POSITION)) {
+        return { success: false, reason: "settlement_position_still_open" };
+      }
+      const accounts = await connection.getParsedTokenAccountsByOwner(wallet.publicKey,
+        { mint: new PublicKey(input_mint) }, { commitment: "confirmed", minContextSlot: inventory.slot });
+      const raw = accounts.value.reduce((sum, a) => {
+        const info = a.account.data.parsed.info;
+        if (info.owner !== wallet.publicKey.toString() || info.mint !== input_mint) throw new Error("Invalid settlement token account");
+        return sum + BigInt(info.tokenAmount.amount);
+      }, 0n);
+      if (raw.toString() !== inventory.wallet_balance_raw || raw < BigInt(inputRaw)) {
+        return { success: false, reason: "settlement_inventory_changed" };
+      }
+    }
     // 3. Fetch swap transaction
     const swapRes = await fetch("https://api.jup.ag/swap/v1/swap", {
       method: "POST",
@@ -1270,7 +1316,7 @@ async function binSnapshot(pool, lower, upper) {
 }
 
 // Read-only reconciliation. A missing transaction remains unknown, never zero.
-async function reconcileAccounting() {
+async function reconcileAccounting(signatures = null) {
   const dir = path.join(PROFILE_DIR, "memories");
   const readRows = (name) => {
     const file = path.join(dir, name);
@@ -1280,6 +1326,7 @@ async function reconcileAccounting() {
   const facts = new Map([...readRows("dlmm_transaction_facts.jsonl"), ...readRows("dlmm_wallet_transactions.jsonl")].map(r => [r.signature, r]));
   let pending = 0;
   for (const event of events) {
+    if (signatures && !signatures.has(event.signature)) continue;
     if (facts.has(event.signature)) continue;
     try {
       const { parsedAccountingTransaction, transactionFact } = require("./dlmm_nav.js");
@@ -1427,6 +1474,8 @@ async function main() {
       if (!token) throw new Error("Usage: spl-balance <token_mint>");
       const res = await getSplBalance(token);
       console.log(JSON.stringify(res));
+    } else if (command === "settlement-balance") {
+      console.log(JSON.stringify(await settlementInventory(args[1], args[2], getWallet().publicKey.toString())));
     } else if (command === "list-tokens") {
       const TOKEN_PROGRAM_ID = new PublicKey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA");
       const TOKEN_2022_PROGRAM_ID = new PublicKey("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb");
@@ -1470,5 +1519,5 @@ async function main() {
 }
 
 if (require.main === module) main();
-module.exports = { swapAmountRaw, reclaimEmptyAccounts, assertRootBudget, reconcileAccounting, recordSubmission, closePosition, swapToken, confirmSignedTransaction, deployPosition, acquireDeployLock, acquireSwapLock, reconcilePendingSwap,
+module.exports = { settlementInventory, swapAmountRaw, reclaimEmptyAccounts, assertRootBudget, reconcileAccounting, recordSubmission, closePosition, swapToken, confirmSignedTransaction, deployPosition, acquireDeployLock, acquireSwapLock, reconcilePendingSwap,
   assertNoTokenExposure, positionIsEmpty, positionAccountExists, slippageBpsToPercent, settlementRentClose, tokenAccountCanClose };
