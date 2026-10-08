@@ -6,10 +6,25 @@ const TOKEN_PROGRAMS = ['TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA', 'TokenzQd
 const read = file => fs.existsSync(file) ? fs.readFileSync(file, 'utf8').split('\n').filter(Boolean).map(JSON.parse) : [];
 const append = (file, row) => fs.appendFileSync(file, JSON.stringify(row) + '\n', {mode: 0o600});
 const now = () => Math.floor(Date.now()/1000);
-async function json(url, attempts=3, timeout=12000) {
+let quoteReadyAt = 0;
+async function json(url, attempts=3, timeout=12000, deadline=Infinity) {
   for (let attempt=0; attempt<attempts; attempt++) {
-    if (url.includes("/quote?")) await new Promise(resolve=>setTimeout(resolve,1100));
+    const quote = url.includes("/quote?");
+    if (quote) {
+      // Keyless Jupiter is 0.5 RPS; reserve time for the response before waiting.
+      const wait = Math.max(2100, quoteReadyAt-Date.now());
+      if (Date.now()+wait+timeout > deadline) throw new Error('quote_budget_deferred');
+      await new Promise(resolve=>setTimeout(resolve,wait));
+    }
     const response = await fetch(url, {headers: {'User-Agent': 'curl/8.5.0'}, signal: AbortSignal.timeout(timeout)});
+    if (quote) {
+      const remaining = response.headers?.get('x-ratelimit-remaining');
+      const reset = response.headers?.get('x-ratelimit-reset');
+      const stamp = Number(reset)*1000;
+      if ((response.status===429 || (typeof remaining==='string' && remaining.trim() && Number.isSafeInteger(Number(remaining)) && Number(remaining)<=0))
+          && typeof reset==='string' && /^[0-9]+$/.test(reset) && Number.isSafeInteger(stamp)
+          && stamp>Date.now() && stamp-Date.now()<=60000) quoteReadyAt=stamp+100;
+    }
     if (response.status===429 && attempt<attempts-1) { await new Promise(resolve=>setTimeout(resolve,1000*(attempt+1))); continue; }
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     return response.json();
@@ -511,7 +526,7 @@ async function collect({dir, wallet, PublicKey, rpc, historyOnly=false}) {
   });
   const selected=new Set();
   for(let i=0;i<Math.min(10,missingAccounts.length);i++) selected.add(missingAccounts[(cursor+i)%missingAccounts.length]);
-  let quoteRateLimited=false, quoteAttempts=0;
+  let quoteDeferredReason=null, quoteAttempts=0;
   // Process the selected rotation in order, including across the list boundary.
   for (const account of [...selected,...allAccounts.filter(a=>!selected.has(a))]) {
       const info=account.account.data.parsed.info, raw=info.tokenAmount.amount, mint=info.mint;
@@ -533,10 +548,10 @@ async function collect({dir, wallet, PublicKey, rpc, historyOnly=false}) {
           value=Number(mark.out_lamports)/1e9;
           basis='cached_quote'; freshness='quote_cached'; priceObservedAt=mark.observed_at; priceContextSlot=mark.slot;
         } else {
-          if (quoteRateLimited) throw new Error('quote_rate_limit_deferred');
+          if (quoteDeferredReason) throw new Error(quoteDeferredReason);
           if (!selected.has(account)) throw new Error('quote_budget_deferred');
           quoteAttempts++;
-          const q=await json(`https://api.jup.ag/swap/v1/quote?inputMint=${mint}&outputMint=${SOL}&amount=${raw}&slippageBps=100`,1,2500);
+          const q=await json(`https://api.jup.ag/swap/v1/quote?inputMint=${mint}&outputMint=${SOL}&amount=${raw}&slippageBps=100`,1,2500,(started+90)*1000);
           const mark=navQuoteMark(q,mint,raw,slot);
           value=Number(mark.out_lamports)/1e9; basis="full_balance_quote"; freshness="quote_context_slot_checked";
           priceObservedAt=mark.observed_at; priceContextSlot=mark.slot;
@@ -544,7 +559,12 @@ async function collect({dir, wallet, PublicKey, rpc, historyOnly=false}) {
           quoteMarks[mint]=mark;
         }
         if (!Number.isFinite(value) || value<0) throw new Error('Invalid mark');
-      } catch (err) { value=null; freshness="unavailable"; markError=err.message; if (err.message==='HTTP 429') quoteRateLimited=true; issues.push(`unpriced_token:${mint}`); }
+      } catch (err) {
+        value=null; freshness="unavailable"; markError=err.message;
+        if (err.message==='HTTP 429') quoteDeferredReason='quote_rate_limit_deferred';
+        if (err.message==='quote_budget_deferred') quoteDeferredReason=err.message;
+        issues.push(`unpriced_token:${mint}`);
+      }
       tokens.push({mint,raw,mark_sol:value,basis,mark_error:markError,price_freshness:freshness,price_observed_at:priceObservedAt,price_context_slot:priceContextSlot,observed_at:now()});
       if (value!==null) tokenValue+=value;
   }

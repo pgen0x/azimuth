@@ -162,6 +162,8 @@ for(const alter of [
  t=>{t.meta.err={failed:true}},
 ]){const t=JSON.parse(JSON.stringify(pumpCleaning));alter(t);assert.equal(transactionFact(t,pumpWallet,'bad-pump').rent_maintenance,null);}
 const dir=fs.mkdtempSync(path.join(os.tmpdir(),'nav-check-'));
+const originalTimer=global.setTimeout;
+global.setTimeout=callback=>{callback();}; // Mock HTTP fixtures need no real pacing waits.
 let unknown=false, height=101, signatureStatus=null;
 const connection={
  getSignaturesForAddress:async(_,options)=>options.before ? [] : [{signature:'sig',slot:100,blockTime:tx.blockTime}],
@@ -323,7 +325,7 @@ global.fetch=async url=>{if(url.includes('/quote?'))throw new Error('no route');
  assert.equal(refreshed,1); // No broad schema migration of already-recorded transactions.
 
  console.log('NAV includes reserves once, classifies external flows, keeps failed fees and rejects unpriced assets');
-})().catch(e=>{console.error(e);process.exitCode=1}).finally(()=>fs.rmSync(dir,{recursive:true,force:true}));
+})().catch(e=>{console.error(e);process.exitCode=1}).finally(()=>{global.setTimeout=originalTimer;fs.rmSync(dir,{recursive:true,force:true});});
 
 const allocated={...tx,transaction:{message:{...tx.transaction.message,instructions:[
   ...tx.transaction.message.instructions,
@@ -374,4 +376,40 @@ console.log('Allocated account funding classification passed');
     assert.equal(cache.get('refund').wallet_delta_lamports,undefined); // evidence cannot allocate cash
     console.log('Bounded rent account history, retry, cache completeness and no cash mutation passed');
   } finally {fs.rmSync(rentDir,{recursive:true,force:true});}
+})().catch(e=>{console.error(e);process.exitCode=1});
+
+// Drive the real request helper with a fake clock and provider headers.
+(async()=>{
+ const vm=require('node:vm');let clock=1000000,calls=0;const sleeps=[];
+ let headers={},status=200;
+ const context={require,module:{exports:{}},Date:{now:()=>clock},AbortSignal,
+   setTimeout:(callback,ms)=>{sleeps.push(ms);clock+=ms;callback();},
+   fetch:async()=>{calls++;return {ok:status===200,status,headers:{get:name=>headers[name]??null},json:async()=>({outAmount:'2000'})};}};
+ vm.runInNewContext(fs.readFileSync(path.join(__dirname,'dlmm_nav.js'),'utf8')+'\nmodule.exports.request=json;',context);
+ const request=(deadline=clock+90000)=>context.module.exports.request('https://api.jup.ag/swap/v1/quote?test=1',1,2500,deadline);
+ assert.equal((await request()).outAmount,'2000');assert.equal(sleeps.at(-1),2100);
+ headers={'x-ratelimit-remaining':'0','x-ratelimit-reset':String(Math.floor((clock+10000)/1000))};
+ await request();headers={};const afterResponse=clock;
+ await request();assert.ok(sleeps.at(-1)>7000 && sleeps.at(-1)<=10100);assert.ok(clock>afterResponse+7000);
+ // Missing/malformed/expired or implausibly future headers cannot stall collection.
+ for(const reset of [null,'','bad','1.1','1','9999999999999999999999',String(Math.floor(clock/1000)+200)]){
+   headers={'x-ratelimit-remaining':'0','x-ratelimit-reset':reset};await request();
+   headers={};await request();assert.equal(sleeps.at(-1),2100);
+ }
+ headers={'x-ratelimit-remaining':'5','x-ratelimit-reset':String(Math.floor(clock/1000)+10)};
+ await request();headers={};await request();assert.equal(sleeps.at(-1),2100);
+ headers={'x-ratelimit-remaining':'-2','x-ratelimit-reset':String(Math.floor(clock/1000)+10)};
+ await request();headers={};await request();assert.ok(sleeps.at(-1)>7000);
+ for(const remaining of [true,'bad','-Infinity','',' ']){
+   headers={'x-ratelimit-remaining':remaining,'x-ratelimit-reset':String(Math.floor(clock/1000)+10)};
+   await request();headers={};await request();assert.equal(sleeps.at(-1),2100);
+ }
+ status=429;headers={'x-ratelimit-reset':String(Math.floor(clock/1000)+10)};
+ const before=calls;await assert.rejects(request(),/HTTP 429/);assert.equal(calls,before+1);
+ status=200;headers={};const limited=calls;
+ await assert.rejects(request(clock+2000),/quote_budget_deferred/);assert.equal(calls,limited);
+ const waited=sleeps.length;
+ await context.module.exports.request('https://dlmm.datapi.meteora.ag/portfolio/open');
+ assert.equal(sleeps.length,waited); // Jupiter limits do not delay unrelated data/RPC.
+ console.log('Keyless quote pacing, provider reset headers, bounded time and no extra retries passed');
 })().catch(e=>{console.error(e);process.exitCode=1});
