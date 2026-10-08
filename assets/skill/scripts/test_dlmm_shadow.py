@@ -163,6 +163,21 @@ for bad in [dict(fact, token_rent_evidence={}), dict(fact, token_deltas_raw={"TO
 for bad in [dict(quote, out_amount="NaN"), dict(quote, minimum_out_amount="1001"),
             dict(quote, observed_at=102), dict(quote, output_mint="OTHER")]:
     assert swap_execution([dict(event, swap_quote=bad)], {"ok":fact}, 100, 200)['attempts'][0]['status'] == 'unmeasured'
+# A mixed close's unknown rent must not look like a favorable fill. Exact proven
+# refunds can still be deducted; root cash keeps the actual full wallet delta.
+for rent in [dict(version=1, funded=[], refunded=[], refunds_unmeasured=True),
+             dict(version=1, funded=[], refunded=[])]:
+    combined = dict(event, swap_quote=dict(quote, token_rent_close_included=True))
+    r = swap_execution([combined], {'ok':dict(fact, wallet_delta_lamports=1486220,
+                        token_rent_evidence=rent)}, 100, 200)
+    assert r['attempts'][0]['reason'] == 'token_rent_refund_unmeasured'
+    assert r['by_slippage_bps']['100']['measured'] == 0
+    assert r['by_slippage_bps']['100']['known_network_fee_lamports'] == 5
+    assert 'actual_gross_lamports' not in r['attempts'][0]
+    if rent.get('refunds_unmeasured'):
+        assert swap_execution([event], {'ok':dict(fact, token_rent_evidence=rent)}, 100, 200)['attempts'][0]['status'] == 'unmeasured'
+proven = dict(event, swap_quote=dict(quote, token_rent_close_included=True))
+assert swap_execution([proven], {'ok':fact}, 100, 200)['attempts'][0]['actual_gross_lamports'] == 1000
 improved = swap_execution([event], {"ok":dict(fact, wallet_delta_lamports=805)}, 100, 200)
 assert improved['attempts'][0]['shortfall_lamports'] == -10
 expired = dict(observed_at=110, landed=False, classification='expired_unlanded',

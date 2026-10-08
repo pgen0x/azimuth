@@ -180,6 +180,10 @@ def swap_execution(events, facts, start, end):
                 or any(not isinstance(r, dict) or type(r.get('lamports')) is not int
                        or r['lamports'] < 0 for r in funded + refunded)):
             continue
+        if (rent.get('refunds_unmeasured') is True
+                or quote.get('token_rent_close_included') is True and not refunded):
+            item['reason'] = 'token_rent_refund_unmeasured'
+            continue
         gross = delta + fee + sum(r['lamports'] for r in funded) - sum(r['lamports'] for r in refunded)
         if gross < 0:
             continue

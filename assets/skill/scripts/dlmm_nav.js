@@ -194,6 +194,17 @@ function tokenRentEvidence(tx, wallet) {
         || creates[0].parsed.info.lamports!==meta.postBalances[n]) continue;
     evidence.funded.push({account,mint:token.mint,lamports:meta.postBalances[n]});
   }
+  // Mixed closes can contain rent in the wallet delta without proving its amount.
+  const closes=instructions.filter(i=>TOKEN_PROGRAMS.includes(i.programId?.toString())
+    && i.parsed?.type==='closeAccount' && i.parsed.info?.destination===wallet);
+  if (closes.some(i=>{
+    const account=i.parsed.info.account, n=keys.indexOf(account);
+    const token=(meta.preTokenBalances || []).find(t=>t.accountIndex===n);
+    return token ? token.mint!==SOL : !(meta.preBalances[n]===0 && instructions.some(x=>
+      x.programId?.toString()===i.programId?.toString()
+      && ['initializeAccount','initializeAccount2','initializeAccount3'].includes(x.parsed?.type)
+      && x.parsed.info?.account===account && x.parsed.info.mint===SOL));
+  })) evidence.refunds_unmeasured=true;
   // Accept refunds only for pure empty-token-account closes with every native
   // balance change explained. Combined swaps/LP closes stay unmeasured here.
   if (keys[0]!==wallet || message.accountKeys[0].signer!==true
@@ -215,7 +226,10 @@ function tokenRentEvidence(tx, wallet) {
     refunds.push({account:keys[n],mint:token.mint,lamports});
   }
   if (refunds.length && closed.size===(meta.preTokenBalances || []).length
-      && changes.every((n,i)=>Number.isSafeInteger(n)&&meta.postBalances[i]-meta.preBalances[i]===n)) evidence.refunded=refunds;
+      && changes.every((n,i)=>Number.isSafeInteger(n)&&meta.postBalances[i]-meta.preBalances[i]===n)) {
+    evidence.refunded=refunds;
+    delete evidence.refunds_unmeasured;
+  }
   return evidence;
 }
 

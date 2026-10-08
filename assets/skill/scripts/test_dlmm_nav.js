@@ -42,6 +42,29 @@ for(const alter of [t=>{t.meta.err='failed'},t=>{t.meta.postBalances[0]--},
  const t=JSON.parse(JSON.stringify(reclaimedToken));alter(t);assert.deepEqual(transactionFact(t,wallet,'unproved').token_rent_evidence.refunded,[]);
 }
 
+// An atomic sale+close releases rent; its wallet credit is not all swap proceeds.
+const mixedClose=JSON.parse(JSON.stringify(reclaimedToken));
+mixedClose.meta.preTokenBalances[0].uiTokenAmount.amount='10';
+mixedClose.meta.postBalances[0]+=70;
+mixedClose.transaction.message.instructions.unshift({programId:'swap-route'});
+for (const inner of [false,true]) {
+ const t=JSON.parse(JSON.stringify(mixedClose));
+ if(inner) { t.meta.innerInstructions=[{instructions:[t.transaction.message.instructions.pop()]}]; }
+ const f=transactionFact(t,wallet,'atomic',{position:'position'});
+ assert.equal(f.wallet_delta_lamports,265);
+ assert.equal(f.token_rent_evidence.refunds_unmeasured,true);
+ assert.deepEqual(f.token_rent_evidence.refunded,[]);
+}
+// Existing and newly initialized WSOL closes are native proceeds, not ATA rent proof.
+for (const temporary of [false,true]) {
+ const t=JSON.parse(JSON.stringify(mixedClose));
+ if(temporary) {
+  t.meta.preBalances[1]=0;t.meta.preTokenBalances=[];
+  t.transaction.message.instructions.unshift({programId:rentToken,parsed:{type:'initializeAccount3',info:{account:'ata',mint:'So11111111111111111111111111111111111111112'}}});
+ } else t.meta.preTokenBalances[0].mint='So11111111111111111111111111111111111111112';
+ assert.equal(transactionFact(t,wallet,'wsol').token_rent_evidence.refunds_unmeasured,undefined);
+}
+
 const closed={...tx,meta:{...tx.meta,preBalances:[1000,100],postBalances:[1095,0]}};
 assert.equal(transactionFact(closed,wallet,'closed',{position:'outside'}).position_account_closed,true);
 assert.equal(transactionFact(tx,wallet,'open',{position:'outside'}).position_account_closed,false);

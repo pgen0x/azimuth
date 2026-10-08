@@ -256,6 +256,8 @@ const clearMarker = () => fs.rmSync(marker, { force: true });
   accountExists = false;
   const beforeAtomic = sends;
   assert.equal((await recover(1)).success, true); assert.equal(sends,beforeAtomic+1);
+  const recordedAtomic=fs.readFileSync(path.join(root,'memories/dlmm_transactions.jsonl'),'utf8').trim().split('\n').map(JSON.parse).at(-1);
+  assert.equal(recordedAtomic.swap_quote.token_rent_close_included,true);
   for(const alter of [a=>a.account.data.parsed.info.owner="other",a=>a.account.data.parsed.info.closeAuthority="other",
     a=>a.account.data.parsed.info.tokenAmount.amount="100000001",a=>a.account.data.parsed.info.state="frozen",
     a=>a.account.data.parsed.info.delegate="other",a=>a.account.data.parsed.info.isNative=true]){
