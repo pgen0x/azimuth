@@ -34,6 +34,37 @@ INSERT = INSERT_V4.replace('if("github"', GEMINI_RETIRED + 'if("github"')
 INSERT_V5 = INSERT
 AG_RETIRED = r'if("antigravity"===(0,h.rs)(c)&&404===Number(a)&&"string"==typeof i&&i)try{let d=JSON.parse(String(b||"").slice(String(b||"").indexOf("{"))),e=d.error;404===e?.code&&"NOT_FOUND"===e.status&&"MODEL_RETIRED"===e.reason&&e.model===i&&(k=Math.max(Date.now()+18e5,Number(k)||0))}catch{};'
 INSERT = INSERT_V5.replace('if("github"', AG_RETIRED + 'if("github"')
+INSERT_V6 = INSERT
+OR_UNAVAILABLE = r'if("openrouter"===(0,h.rs)(c)&&404===Number(a)&&"string"==typeof i&&i.endsWith(":free"))try{let d=JSON.parse(String(b||"").slice(String(b||"").indexOf("{"))),e=d.error;404===e?.code&&e.message==="This model is unavailable for free. The paid version is available now - use this slug instead: "+i.slice(0,-5)&&(k=Math.max(Date.now()+18e5,Number(k)||0))}catch{};'
+INSERT = INSERT_V6.replace('if("github"', OR_UNAVAILABLE + 'if("github"')
+
+# OpenCode has no connection row: consult the same module's cache before HTTP.
+# ponytail: public model locks reset on restart; revisit if 9router adds durable no-auth locks.
+OLD_AUTH = 'let k=Promise.resolve();async function l('
+NEW_AUTH = 'let k=Promise.resolve(),U=new Map;async function l('
+OLD_PUBLIC = 'let g=(0,h.rs)(a);if(h.IS[g]?.noAuth){'
+NEW_PUBLIC = '''let g=(0,h.rs)(a);
+if(h.IS[g]?.noAuth&&"opencode"===g){
+ const lock=U.get(c);
+ if(lock&&lock.until>Date.now()){
+  const retryAfter=new Date(lock.until).toISOString();
+  return{allRateLimited:!0,retryAfter,retryAfterHuman:(0,f.Qo)(retryAfter),lastError:lock.error,lastErrorCode:401};
+ }
+ U.delete(c);
+}
+if(h.IS[g]?.noAuth){'''
+OLD_PUBLIC_MARK = 'if(!a||"noauth"===a)return{shouldFallback:!1,cooldownMs:0};'
+NEW_PUBLIC_MARK = '''if(!a||"noauth"===a){
+ if("opencode"===(0,h.rs)(e)&&401===Number(b)&&"string"==typeof i&&i)try{
+  const body=JSON.parse(String(c||"").slice(String(c||"").indexOf("{")));
+  if(body.type==="error"&&body.error?.type==="ModelError"&&body.error.message==="Model "+i+" is not supported"){
+   for(const [model,lock]of U)if(lock.until<=Date.now())U.delete(model);
+   if(U.size>=256&&!U.has(i))U.delete(U.keys().next().value);
+   U.set(i,{until:Date.now()+18e5,error:body.error.message});
+  }
+ }catch{}
+ return{shouldFallback:!1,cooldownMs:0};
+}'''
 OLD_SCOPE = 'async function m(a,b,c,e=null,i=null,k=null){let l,n,o;'
 NEW_SCOPE = OLD_SCOPE + 'let Q=!1;'
 OLD_CAP = 'n="antigravity"===(0,h.rs)(e)?k-Date.now():Math.min(k-Date.now(),g.fh)'
@@ -115,19 +146,22 @@ def changes(app):
         raise ValueError("Unsupported 9router version; audit upstream before applying")
     root = app / ".next-cli-build/server"
     patches = []
-    readers = writers = fallbacks = retries = executors = 0
+    readers = writers = fallbacks = retries = executors = auth = public = public_mark = 0
     for path in root.rglob("*.js"):
         original = path.read_text()
         readers += original.count(OLD_LOCK) + original.count(NEW_LOCK)
-        writers += original.count(ANCHOR) + original.count(INSERT_V1) + original.count(INSERT_V2) + original.count(INSERT_V3) + original.count(INSERT_V4) + original.count(INSERT_V5) + original.count(INSERT)
+        writers += original.count(ANCHOR) + original.count(INSERT_V1) + original.count(INSERT_V2) + original.count(INSERT_V3) + original.count(INSERT_V4) + original.count(INSERT_V5) + original.count(INSERT_V6) + original.count(INSERT)
         fallbacks += original.count(OLD_FALLBACK) + (0 if OLD_FALLBACK in original else original.count(NEW_FALLBACK))
         retries += original.count(OLD_RETRY) + original.count(NEW_RETRY)
         executors += original.count(AG_CLASS)
-        updated = original.replace(OLD_LOCK, NEW_LOCK).replace(INSERT_V5, INSERT).replace(INSERT_V4, INSERT).replace(INSERT_V3, INSERT).replace(INSERT_V2, INSERT).replace(INSERT_V1, INSERT).replace(ANCHOR, INSERT).replace(NEW_SCOPE, OLD_SCOPE).replace(OLD_SCOPE, NEW_SCOPE).replace(OLD_CAP, NEW_CAP).replace(OLD_FALLBACK, NEW_FALLBACK).replace(OLD_RETRY, NEW_RETRY).replace(AG_PATCHED_CLASS, AG_CLASS).replace(AG_CLASS, AG_PATCHED_CLASS)
+        auth += original.count(OLD_AUTH) + original.count(NEW_AUTH)
+        public += original.count(OLD_PUBLIC) + original.count(NEW_PUBLIC)
+        public_mark += original.count(OLD_PUBLIC_MARK) + original.count(NEW_PUBLIC_MARK)
+        updated = original.replace(OLD_LOCK, NEW_LOCK).replace(INSERT_V6, INSERT).replace(INSERT_V5, INSERT).replace(INSERT_V4, INSERT).replace(INSERT_V3, INSERT).replace(INSERT_V2, INSERT).replace(INSERT_V1, INSERT).replace(ANCHOR, INSERT).replace(NEW_SCOPE, OLD_SCOPE).replace(OLD_SCOPE, NEW_SCOPE).replace(OLD_CAP, NEW_CAP).replace(OLD_FALLBACK, NEW_FALLBACK).replace(OLD_RETRY, NEW_RETRY).replace(AG_PATCHED_CLASS, AG_CLASS).replace(AG_CLASS, AG_PATCHED_CLASS).replace(NEW_AUTH, OLD_AUTH).replace(OLD_AUTH, NEW_AUTH).replace(NEW_PUBLIC, OLD_PUBLIC).replace(OLD_PUBLIC, NEW_PUBLIC).replace(NEW_PUBLIC_MARK, OLD_PUBLIC_MARK).replace(OLD_PUBLIC_MARK, NEW_PUBLIC_MARK)
         if original != updated:
             patches.append((path, original, updated))
-    if readers != 9 or writers != 1 or fallbacks != 1 or retries != 1 or executors != 1:
-        raise ValueError(f"Build shape changed: {readers} lock readers, {writers} account writer, {fallbacks} chat fallback, {retries} AG retry, {executors} AG executor")
+    if (readers, writers, fallbacks, retries, executors, auth, public, public_mark) != (9, 1, 1, 1, 1, 1, 1, 1):
+        raise ValueError(f"Build shape changed: {readers} lock readers, {writers} account writer, {fallbacks} chat fallback, {retries} AG retry, {executors} AG executor, {auth} auth module, {public} public selector, {public_mark} public writer")
     return patches
 
 
@@ -137,7 +171,7 @@ def check(app, patched=False):
         raise ValueError("Installed build is not fully patched")
     # Exercise real functions extracted from every installed copy, without requests.
     for path in (app / ".next-cli-build/server").rglob("*.js"):
-        source = path.read_text().replace(OLD_LOCK, NEW_LOCK).replace(INSERT_V5, INSERT).replace(INSERT_V4, INSERT).replace(INSERT_V3, INSERT).replace(INSERT_V2, INSERT).replace(INSERT_V1, INSERT).replace(ANCHOR, INSERT).replace(NEW_SCOPE, OLD_SCOPE).replace(OLD_SCOPE, NEW_SCOPE).replace(OLD_CAP, NEW_CAP).replace(OLD_FALLBACK, NEW_FALLBACK).replace(OLD_RETRY, NEW_RETRY).replace(AG_PATCHED_CLASS, AG_CLASS).replace(AG_CLASS, AG_PATCHED_CLASS)
+        source = path.read_text().replace(OLD_LOCK, NEW_LOCK).replace(INSERT_V6, INSERT).replace(INSERT_V5, INSERT).replace(INSERT_V4, INSERT).replace(INSERT_V3, INSERT).replace(INSERT_V2, INSERT).replace(INSERT_V1, INSERT).replace(ANCHOR, INSERT).replace(NEW_SCOPE, OLD_SCOPE).replace(OLD_SCOPE, NEW_SCOPE).replace(OLD_CAP, NEW_CAP).replace(OLD_FALLBACK, NEW_FALLBACK).replace(OLD_RETRY, NEW_RETRY).replace(AG_PATCHED_CLASS, AG_CLASS).replace(AG_CLASS, AG_PATCHED_CLASS).replace(NEW_AUTH, OLD_AUTH).replace(OLD_AUTH, NEW_AUTH).replace(NEW_PUBLIC, OLD_PUBLIC).replace(OLD_PUBLIC, NEW_PUBLIC).replace(NEW_PUBLIC_MARK, OLD_PUBLIC_MARK).replace(OLD_PUBLIC_MARK, NEW_PUBLIC_MARK)
         if NEW_LOCK in source:
             harness = """const assert=require('node:assert/strict'),vm=require('node:vm');
 const lock=vm.runInNewContext('('+process.argv[1]+')',{i:m=>'modelLock_'+m,h:'modelLock___all'});
@@ -157,7 +191,7 @@ let update,clock=null;
 class Clock extends Date{static now(){return clock??Date.now()}}
 const mark=vm.runInNewContext('('+process.argv[1]+')',{
 d:{getProviderConnections:async()=>[{id:'conn',backoffLevel:0}],updateProviderConnection:async(id,value)=>{update=value}},
-Date:Clock,
+Date:Clock,U:new Map,
 f:{hk:()=>({shouldFallback:true,cooldownMs:30000}),S5:(model,ms)=>({[model?'modelLock_'+model:'modelLock___all']:new Date(Clock.now()+ms).toISOString()})},
 h:{rs:p=>p},g:{fh:1800000},j:{warn:()=>{}},console:{error:()=>{}}});
 (async()=>{
@@ -269,12 +303,76 @@ h:{rs:p=>p},g:{fh:1800000},j:{warn:()=>{}},console:{error:()=>{}}});
  assert(!Object.hasOwn(update,'modelLock___all'));
  assert(Date.parse(update['modelLock_'+model])<Date.now()+60000);
  }
+ const freeModel='z-ai/glm-5.2:free';
+ const unavailable=(slug='z-ai/glm-5.2',code=404)=>JSON.stringify({error:{code,
+  message:'This model is unavailable for free. The paid version is available now - use this slug instead: '+slug}});
+ for(const prefix of ['', '[404]: ']){
+  const before=Date.now();await mark('conn',404,prefix+unavailable(),'openrouter',freeModel);
+  assert(!Object.hasOwn(update,'modelLock___all'));
+  assert(Date.parse(update['modelLock_'+freeModel])>=before+1800000);
+ }
+ for(const [http,error,provider,model] of [
+  [401,unavailable(),'openrouter',freeModel],[404,unavailable(),'other',freeModel],
+  [404,unavailable('other-model'),'openrouter',freeModel],[404,unavailable('z-ai/glm-5.2',403),'openrouter',freeModel],
+  [404,unavailable(),'openrouter','z-ai/glm-5.2'],[404,'broken {','openrouter',freeModel],
+  [404,'{"error":{"code":404,"message":"Model not found"}}','openrouter',freeModel]]){
+  await mark('conn',http,error,provider,model);
+  assert(!Object.hasOwn(update,'modelLock___all'));
+  assert(Date.parse(update['modelLock_'+model])<Date.now()+60000);
+ }
  await mark('conn',429,'{"code":14018}','codebuddy-cn','model',retry);
  assert(Date.parse(update.modelLock___all)>=retry);
  await mark('conn',402,"you've reached your additional usage limit for your plan",'github','model');
  assert(Object.hasOwn(update,'modelLock___all'));
 })().catch(e=>{console.error(e);process.exitCode=1});
 """
+            subprocess.run(["node", "-e", harness, source[start:end]], check=True)
+        if NEW_AUTH in source:
+            start = source.index(NEW_AUTH)
+            end = source.index('async function n(a,b,c=null){', start)
+            harness = r'''const assert=require('node:assert/strict'),vm=require('node:vm');
+let clock=Date.now(),writes=0,settings=0;
+class Clock extends Date{static now(){return clock}}
+const {select,mark,locks}=vm.runInNewContext(process.argv[1]+';({select:l,mark:m,locks:U})',{
+ Date:Clock,
+ d:{mt:async()=>{settings++;return{}},getProviderConnections:async()=>[{id:'conn',backoffLevel:0}],
+  updateProviderConnection:async()=>{writes++}},
+ e:{B:async()=>({}),p:()=>null},h:{rs:p=>p==='oc'?'opencode':p,IS:{opencode:{noAuth:true},publicOther:{noAuth:true}}},
+ f:{Qo:()=> '30 minutes',Bl:()=>false,hk:()=>({shouldFallback:true,cooldownMs:30000}),
+  S5:(model,ms)=>({['modelLock_'+model]:new Date(clock+ms).toISOString()})},
+ g:{fh:1800000},j:{warn:()=>{},debug:()=>{}},console:{error:()=>{}}});
+const model='deepseek-v4-flash-free';
+const unsupported=(selected=model,type='ModelError')=>JSON.stringify({type:'error',error:{type,message:'Model '+selected+' is not supported'}});
+(async()=>{
+ assert.equal((await select('oc',null,model)).id,'noauth');
+ // The first error exits this account attempt, preventing a no-auth retry loop.
+ assert.equal((await mark(null,401,'[401]: '+unsupported(),'oc',model)).shouldFallback,false);
+ const calls=settings,blocked=await select('opencode',null,model);
+ assert.equal(blocked.allRateLimited,true);assert.equal(blocked.lastErrorCode,401);
+ assert.equal(Date.parse(blocked.retryAfter),clock+1800000);assert.equal(settings,calls);assert.equal(writes,0);
+ assert.equal((await select('opencode',null,'another-model')).id,'noauth');
+ assert.equal((await select('publicOther',null,model)).id,'noauth');
+ clock+=1800000;assert.equal((await select('opencode',null,model)).id,'noauth');assert.equal(locks.size,0);
+ for(const [id,status,error,provider,selected] of [
+  [null,403,unsupported(),'opencode',model],[null,401,unsupported(),'publicOther',model],
+  [null,401,unsupported('other-model'),'opencode',model],[null,401,unsupported(model,'AuthError'),'opencode',model],
+  [null,401,'broken {','opencode',model],[null,401,'Model '+model+' is not supported','opencode',model],
+  [null,401,unsupported(),'opencode',null],['conn',401,unsupported(),'opencode',model]]){
+  await mark(id,status,error,provider,selected);
+  assert.equal(locks.size,0);assert.equal((await select('opencode',null,model)).id,'noauth');
+ }
+ await mark('noauth',401,unsupported(),'opencode',model);assert.equal(locks.size,1);
+ // Concurrent auth selection shares the cached lock; it does not change credentials.
+ const results=await Promise.all(Array.from({length:5},()=>select('opencode',null,model)));
+ assert(results.every(a=>a.allRateLimited));
+ locks.clear();locks.set('expired',{until:clock-1});
+ for(let i=0;i<256;i++)locks.set('other-'+i,{until:clock+1800000});
+ await mark(null,401,unsupported(),'opencode',model);
+ assert(!locks.has('expired'));assert.equal(locks.size,256);assert(locks.has(model));
+ assert.equal(writes,1); // Only the ordinary credentialed error above writes an account.
+ console.log('Public model cache, expiry, scoping, bounded storage and fallback checks passed');
+})().catch(e=>{console.error(e);process.exitCode=1});
+'''
             subprocess.run(["node", "-e", harness, source[start:end]], check=True)
         if NEW_FALLBACK in source:
             harness = """const assert=require('node:assert/strict'),vm=require('node:vm');
