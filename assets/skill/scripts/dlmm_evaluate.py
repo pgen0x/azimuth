@@ -12,7 +12,7 @@ import re
 import subprocess
 import sqlite3
 import time
-from dlmm_accounting import report, root_decision, rows, unvalued_token_inflows
+from dlmm_accounting import report, root_decision, rows, unvalued_token_inflows, refund_cash_bounds
 from dlmm_shadow import bin_replay, HORIZONS
 from dlmm_realized import fetch_pools, fetch_closed_positions
 
@@ -128,6 +128,41 @@ def root_cash_cohort(accounting, start, end):
                 roots=[dict(root=c['root_chain_id'], status=c['accounting_status'],
                             cash_sol=c['settled_cash_pnl_sol'], lp_pnl_sol=c['lp_pnl_sol'],
                             reasons=c['reasons']) for c in cohort])
+
+
+def matched_refund_cash_cohort(accounting, start, end):
+    """Project complete refund groups onto full-life roots; charge shared fees once."""
+    chains = {c['root_chain_id']: c for c in accounting['chains']}
+    cohort = {r for r, c in chains.items() if c.get('positions')
+              and c.get('first_activity') is not None
+              and start <= c['first_activity'] <= c['last_activity'] <= end}
+    groups = accounting.get('rent_refund_groups', [])
+    ownership = collections.Counter(r for g in groups for r in g['root_chain_ids'])
+    measured, ranges = [], []
+    for group in groups:
+        selected = cohort.intersection(group['root_chain_ids'])
+        if group.get('last_activity', end + 1) > end or any(ownership[r] != 1 for r in group['root_chain_ids']):
+            continue
+        bounds = refund_cash_bounds(group, chains, selected)
+        if bounds is None:
+            continue
+        ranges.append(bounds)
+        for root in sorted(selected):
+            lower, upper = refund_cash_bounds(group, chains, {root})
+            outcome = 'positive' if lower > 0 else 'negative' if upper < 0 else 'zero' if lower == upper == 0 else 'ambiguous'
+            measured.append(dict(root=root, cash_lower_sol=lower/1e9, cash_upper_sol=upper/1e9, outcome=outcome))
+    counts = collections.Counter(r['outcome'] for r in measured)
+    known = counts['positive'] + counts['negative'] + counts['zero']
+    covered = {r['root'] for r in measured}
+    return dict(window_roots=len(cohort), measured_roots=len(measured),
+                unmeasured_roots=len(cohort-covered), sign_resolved_roots=known,
+                cash_positive_roots=counts['positive'], cash_negative_roots=counts['negative'],
+                cash_zero_roots=counts['zero'], ambiguous_roots=counts['ambiguous'],
+                cash_positive_rate=counts['positive']/known if known else None,
+                cohort_cash_lower_sol=sum(a for a, _ in ranges)/1e9 if ranges else None,
+                cohort_cash_upper_sol=sum(b for _, b in ranges)/1e9 if ranges else None,
+                roots=measured, unmeasured_root_ids=sorted(cohort-covered),
+                basis='full_life_root_cash_plus_proved_funding_refunds; shared_fees_once; not_portfolio_NAV_or_position_win_rate')
 
 
 def swap_execution(events, facts, start, end):
@@ -280,6 +315,7 @@ def evaluate(profile, start, end, rejects):
                 liquidation_observations=[r for r in rows(memory/'dlmm_liquidation_quotes.jsonl')
                                           if start <= r.get('observed_at', end+1) <= end],
                 root_cash_cohort=root_cash_cohort(accounting,start,end),
+                matched_refund_cash_cohort=matched_refund_cash_cohort(accounting,start,end),
                 rent_refund_groups=[g for g in accounting.get('rent_refund_groups', [])
                                     if start <= g['first_activity'] <= g['last_activity'] <= end],
                 wealth_change=wealth,native_cash_change=native_cash,unvalued_external_token_inflows=unvalued_inflows,price_coverage=price_coverage,nav_samples=len(snapshots),complete_nav_samples=len(valid),
@@ -380,6 +416,9 @@ def main():
         '## Root settlement cash (recorded activity within window; not economic profit)',
         json.dumps(data['root_cash_cohort']),
         'Cash includes network fees and rent paid by recorded root transactions. Recoverable rent remains an asset; later wallet-level rent refunds are not credited to these roots. Cash-positive roots are not a trading win rate. Incomplete roots are excluded from the cash subtotal, not counted as zero.',
+        '## Root cash after proved rent refunds (measured subset)',
+        json.dumps(data['matched_refund_cash_cohort']),
+        'Each refund goes to its proved funder. Carry-in roots are excluded from the selected cohort even when they share a refund batch. Cohort bounds charge shared fees once; do not add individual root bounds or overlapping report subtotals. Positive rate uses only roots whose cash sign is proved and is not a position win rate or complete wallet profit. Missing refund evidence stays unmeasured.',
         '## Pooled settlement cash (full-life groups; no per-root allocation)',
         json.dumps([g for g in data['accounting'].get('pooled_settlements',[]) if a.start <= g['first_activity'] and g['last_activity'] <= a.end]),
         '## Cash including matched rent refunds (full-life groups)',

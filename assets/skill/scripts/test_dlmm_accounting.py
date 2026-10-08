@@ -367,3 +367,41 @@ with TemporaryDirectory() as root:
     write("dlmm_transaction_facts.jsonl",facts+[swap])
     assert not proof()["success"]
 print("Settlement inventory provenance, legacy preservation and finalized evidence passed")
+
+# Evaluations use full-life selected roots and conserve shared refund fees.
+from dlmm_evaluate import matched_refund_cash_cohort
+from copy import deepcopy
+def cash_root(root, cash, first=120, last=180, status="settled_cash"):
+    return dict(root_chain_id=root,positions=[root],first_activity=first,last_activity=last,
+                wallet_delta_lamports=cash,accounting_status=status)
+def cash_group(ids, gross, fee, cash, signature, last=190):
+    return dict(root_chain_ids=ids,refund_signatures=[signature],last_activity=last,
+                refund_components=[dict(signature=signature,gross_by_root=gross,fee_lamports=fee)],
+                cash_with_matched_refunds_sol=cash/1e9)
+ledger=dict(chains=[cash_root("a",-100),cash_root("b",-100),cash_root("old",-500,20),
+                    cash_root("zero",-10),cash_root("ambiguous",-2),cash_root("old2",-100,20),
+                    cash_root("unknown",-9,status="incomplete"),cash_root("future",1,220,250)],
+            rent_refund_groups=[cash_group(["a","b","old"],{"a":110,"b":90,"old":700},5,195,"batch"),
+                                cash_group(["zero"],{"zero":12},2,0,"zero-refund"),
+                                cash_group(["ambiguous","old2"],{"ambiguous":5,"old2":100},5,-2,"ambiguous-refund")])
+view=matched_refund_cash_cohort(ledger,100,200)
+assert view["window_roots"]==5 and view["measured_roots"]==4
+assert view["unmeasured_root_ids"]==["unknown"]
+assert (view["cash_positive_roots"],view["cash_negative_roots"],view["cash_zero_roots"],view["ambiguous_roots"])==(1,1,1,1)
+assert view["sign_resolved_roots"]==3 and view["cash_positive_rate"]==1/3
+assert (view["cohort_cash_lower_sol"],view["cohort_cash_upper_sol"])==(-7/1e9,3/1e9)
+assert {r["root"] for r in view["roots"]}=={"a","b","zero","ambiguous"}
+# Summing individual lower bounds would charge batch fees twice.
+assert sum(round(r["cash_lower_sol"]*1e9) for r in view["roots"])==-12
+assert round(view["cohort_cash_lower_sol"]*1e9)==-7
+for mutate in [lambda g:g.update(last_activity=201),lambda g:g.pop("refund_components"),
+               lambda g:g.update(cash_with_matched_refunds_sol=999),lambda g:g["refund_components"][0].update(fee_lamports=True)]:
+    invalid=deepcopy(ledger);mutate(invalid["rent_refund_groups"][0])
+    assert matched_refund_cash_cohort(invalid,100,200)["measured_roots"]==2
+# Duplicate/overlapping groups must never count the same root/cost twice.
+duplicate=deepcopy(ledger);duplicate["rent_refund_groups"].append(deepcopy(duplicate["rent_refund_groups"][0]))
+assert matched_refund_cash_cohort(duplicate,100,200)["measured_roots"]==2
+empty=matched_refund_cash_cohort(dict(chains=ledger["chains"],rent_refund_groups=[]),100,200)
+assert empty["cohort_cash_lower_sol"] is None and empty["cash_positive_rate"] is None
+assert empty["unmeasured_roots"]==5
+print("Evaluation matched refunds, cohort boundaries, fee conservation and unknown denominators passed")
