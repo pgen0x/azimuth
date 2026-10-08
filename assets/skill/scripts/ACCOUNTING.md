@@ -417,7 +417,7 @@ The durable settlement worker sells only the positive raw token delta proved by
 finalized transactions of the closed root. It never uses the full wallet token
 balance as the sale amount. Pending root signatures are reconciled individually;
 missing entry/close evidence, foreign wallet attribution, external inflows,
-negative inventory or another unresolved owner of the same mint refuse a sale.
+negative current-root inventory or another same-mint movement since entry refuse a sale.
 Before building the swap, the executor verifies the position is absent and the
 live token balance still matches the cached transaction balance. Quotes must
 match the authorized mint pair and exact raw amount. Partial sales cannot close
@@ -452,3 +452,11 @@ No quote retry, Helius Wallet API call, stale mark or zero price is introduced.
 Other clients sharing the same public rate bucket can still cause deferrals.
 
 Provider limits: https://developers.jup.ag/docs/portal/rate-limits
+
+Historical ledger residues alone do not prove ownership of a new position's
+withdrawal. Positive sale authorization now verifies each root fact's raw token
+balance conservation and preserves the exact wallet token balance seen before
+its first transaction. Same-mint activity by other owners/transfers since that
+entry refuses a sale; the live balance must still match before signing. This
+permits independently proved new lots even when earlier ledger residues remain
+unresolved, without selling old inventory or rewriting historical accounting.
