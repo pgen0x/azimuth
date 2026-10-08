@@ -31,6 +31,9 @@ INSERT = INSERT_V3.replace('if("github"', ACCOUNT_BUDGET + 'if("github"')
 INSERT_V4 = INSERT
 GEMINI_RETIRED = r'if("gemini"===(0,h.rs)(c)&&404===Number(a)&&"string"==typeof i&&i)try{let d=JSON.parse(String(b||"").slice(String(b||"").indexOf("{"))),e=d.error;404===e?.code&&"NOT_FOUND"===e.status&&"string"==typeof e.message&&e.message.includes("models/"+i+" is no longer available to new users.")&&(k=Math.max(Date.now()+18e5,Number(k)||0))}catch{};'
 INSERT = INSERT_V4.replace('if("github"', GEMINI_RETIRED + 'if("github"')
+INSERT_V5 = INSERT
+AG_RETIRED = r'if("antigravity"===(0,h.rs)(c)&&404===Number(a)&&"string"==typeof i&&i)try{let d=JSON.parse(String(b||"").slice(String(b||"").indexOf("{"))),e=d.error;404===e?.code&&"NOT_FOUND"===e.status&&"MODEL_RETIRED"===e.reason&&e.model===i&&(k=Math.max(Date.now()+18e5,Number(k)||0))}catch{};'
+INSERT = INSERT_V5.replace('if("github"', AG_RETIRED + 'if("github"')
 OLD_SCOPE = 'async function m(a,b,c,e=null,i=null,k=null){let l,n,o;'
 NEW_SCOPE = OLD_SCOPE + 'let Q=!1;'
 OLD_CAP = 'n="antigravity"===(0,h.rs)(e)?k-Date.now():Math.min(k-Date.now(),g.fh)'
@@ -44,23 +47,87 @@ NEW_FALLBACK = '(await (0,f.vk)(b.connectionId,x.status,x.error,y,z,G)).shouldFa
 OLD_RETRY = 'async computeRetryDelay(a,b){let c="",d=null,e=this.parseRetryHeaders(a.headers);try{d=(c=await a.clone().text())?JSON.parse(c):null}catch{}let f=this.extractErrorMessage(d,c);return(e||(e=this.parseRetryFromErrorMessage(f)),e)?e<=1e4&&e:!!this.isTransientAntigravityError(a.status,f)&&Math.min(1e3*2**b,a.status===i.gx.RATE_LIMITED?1e4:15e3)}'
 NEW_RETRY = OLD_RETRY.replace("catch{}let f=", "catch{}" + 'if(429===a.status&&"RESOURCE_EXHAUSTED"===d?.error?.status&&Array.isArray(d.error.details)&&d.error.details.some(a=>"QUOTA_EXHAUSTED"===a.reason))return!1;' + "let f=")
 
+# Normalize the observed HTTP-200 retirement notice before ChatCore can mark
+# success. Peek a bounded prefix, preserving every byte on ordinary responses.
+AG_CLASS = 'class x extends f.H{constructor(){super("antigravity",g.xq.antigravity)}'
+AG_EXECUTE = r'''async execute(args) {
+ const result = await super.execute(args), response = result.response;
+ const type = response.headers.get("content-type") || "";
+ if (!response.ok || !response.body || !/^gemini-[\d.]+-flash(?:-agent)?$/.test(args.model || "") ||
+     !/application\/json|text\/event-stream/.test(type)) return result;
+ const reader = response.body.getReader(), saved = [], decoder = new TextDecoder();
+ const sse = type.includes("text/event-stream");
+ let text = "", size = 0, ended = false, notice = false, complete = false;
+ const observed = "Gemini 3.5 Flash is no longer available. Please switch to Gemini 3.7 Flash in the latest version of Antigravity.";
+ const inspect = data => {
+  const body = data?.response, candidates = body?.candidates;
+  if (!Array.isArray(candidates) || !candidates.length) return;
+  const parts = candidates[0]?.content?.parts;
+  if (!Array.isArray(parts) || !parts.length) { complete = !!(body.usageMetadata || candidates[0].finishReason); return; }
+  complete = true;
+  notice = candidates.length === 1 && !body.usageMetadata && !candidates[0].finishReason &&
+   Array.isArray(parts) && parts.length === 1 && Object.keys(parts[0]).length === 1 && parts[0].text === observed;
+ };
+ try {
+  // ponytail: inspect at most 8 KiB; audit a new provider envelope if this notice changes.
+  while (!complete && size < 8192 && !ended) {
+   const item = await reader.read(); ended = item.done;
+   if (item.value) { saved.push(item.value); size += item.value.byteLength; }
+   if (size > 8192) break;
+   if (item.value) text += decoder.decode(item.value, {stream: true});
+   if (ended) text += decoder.decode();
+   if (sse) {
+    const frames = text.split(/\r?\n\r?\n/); text = frames.pop();
+    if (ended && text.trim()) { frames.push(text); text = ""; }
+    for (const frame of frames) {
+     const data = frame.split(/\r?\n/).filter(line => line.startsWith("data:")).map(line => line.slice(5).trimStart()).join("\n");
+     if (!data || data === "[DONE]") continue;
+     try { inspect(JSON.parse(data)); } catch { complete = true; }
+     if (complete) break;
+    }
+   } else {
+    try { inspect(JSON.parse(text)); complete = true; } catch { if (ended) complete = true; }
+   }
+  }
+ } catch (error) { reader.cancel().catch(() => {}); throw error; }
+ if (notice) {
+  await reader.cancel().catch(() => {});
+  result.response = new Response(JSON.stringify({error: {code: 404, status: "NOT_FOUND", reason: "MODEL_RETIRED",
+   model: args.model, message: "Antigravity returned a model retirement notice."}}),
+   {status: 404, headers: {"Content-Type": "application/json"}});
+ } else {
+  let index = 0;
+  result.response = new Response(new ReadableStream({
+   async pull(controller) {
+    if (index < saved.length) { controller.enqueue(saved[index++]); return; }
+    if (ended) { controller.close(); return; }
+    try { const item = await reader.read(); if (item.done) controller.close(); else controller.enqueue(item.value); }
+    catch (error) { controller.error(error); }
+   }, cancel(reason) { return reader.cancel(reason); }
+  }), {status: response.status, statusText: response.statusText, headers: response.headers});
+ }
+ return result;
+}'''
+AG_PATCHED_CLASS = AG_CLASS + AG_EXECUTE
+
 def changes(app):
     if json.loads((app.parent / "package.json").read_text()).get("version") != "0.5.95":
         raise ValueError("Unsupported 9router version; audit upstream before applying")
     root = app / ".next-cli-build/server"
     patches = []
-    readers = writers = fallbacks = retries = 0
+    readers = writers = fallbacks = retries = executors = 0
     for path in root.rglob("*.js"):
         original = path.read_text()
         readers += original.count(OLD_LOCK) + original.count(NEW_LOCK)
-        writers += original.count(ANCHOR) + original.count(INSERT_V1) + original.count(INSERT_V2) + original.count(INSERT_V3) + original.count(INSERT_V4) + original.count(INSERT)
+        writers += original.count(ANCHOR) + original.count(INSERT_V1) + original.count(INSERT_V2) + original.count(INSERT_V3) + original.count(INSERT_V4) + original.count(INSERT_V5) + original.count(INSERT)
         fallbacks += original.count(OLD_FALLBACK) + (0 if OLD_FALLBACK in original else original.count(NEW_FALLBACK))
         retries += original.count(OLD_RETRY) + original.count(NEW_RETRY)
-        updated = original.replace(OLD_LOCK, NEW_LOCK).replace(INSERT_V4, INSERT).replace(INSERT_V3, INSERT).replace(INSERT_V2, INSERT).replace(INSERT_V1, INSERT).replace(ANCHOR, INSERT).replace(NEW_SCOPE, OLD_SCOPE).replace(OLD_SCOPE, NEW_SCOPE).replace(OLD_CAP, NEW_CAP).replace(OLD_FALLBACK, NEW_FALLBACK).replace(OLD_RETRY, NEW_RETRY)
+        executors += original.count(AG_CLASS)
+        updated = original.replace(OLD_LOCK, NEW_LOCK).replace(INSERT_V5, INSERT).replace(INSERT_V4, INSERT).replace(INSERT_V3, INSERT).replace(INSERT_V2, INSERT).replace(INSERT_V1, INSERT).replace(ANCHOR, INSERT).replace(NEW_SCOPE, OLD_SCOPE).replace(OLD_SCOPE, NEW_SCOPE).replace(OLD_CAP, NEW_CAP).replace(OLD_FALLBACK, NEW_FALLBACK).replace(OLD_RETRY, NEW_RETRY).replace(AG_PATCHED_CLASS, AG_CLASS).replace(AG_CLASS, AG_PATCHED_CLASS)
         if original != updated:
             patches.append((path, original, updated))
-    if readers != 9 or writers != 1 or fallbacks != 1 or retries != 1:
-        raise ValueError(f"Build shape changed: {readers} lock readers, {writers} account writer, {fallbacks} chat fallback, {retries} AG retry")
+    if readers != 9 or writers != 1 or fallbacks != 1 or retries != 1 or executors != 1:
+        raise ValueError(f"Build shape changed: {readers} lock readers, {writers} account writer, {fallbacks} chat fallback, {retries} AG retry, {executors} AG executor")
     return patches
 
 
@@ -70,7 +137,7 @@ def check(app, patched=False):
         raise ValueError("Installed build is not fully patched")
     # Exercise real functions extracted from every installed copy, without requests.
     for path in (app / ".next-cli-build/server").rglob("*.js"):
-        source = path.read_text().replace(OLD_LOCK, NEW_LOCK).replace(INSERT_V4, INSERT).replace(INSERT_V3, INSERT).replace(INSERT_V2, INSERT).replace(INSERT_V1, INSERT).replace(ANCHOR, INSERT).replace(NEW_SCOPE, OLD_SCOPE).replace(OLD_SCOPE, NEW_SCOPE).replace(OLD_CAP, NEW_CAP).replace(OLD_FALLBACK, NEW_FALLBACK).replace(OLD_RETRY, NEW_RETRY)
+        source = path.read_text().replace(OLD_LOCK, NEW_LOCK).replace(INSERT_V5, INSERT).replace(INSERT_V4, INSERT).replace(INSERT_V3, INSERT).replace(INSERT_V2, INSERT).replace(INSERT_V1, INSERT).replace(ANCHOR, INSERT).replace(NEW_SCOPE, OLD_SCOPE).replace(OLD_SCOPE, NEW_SCOPE).replace(OLD_CAP, NEW_CAP).replace(OLD_FALLBACK, NEW_FALLBACK).replace(OLD_RETRY, NEW_RETRY).replace(AG_PATCHED_CLASS, AG_CLASS).replace(AG_CLASS, AG_PATCHED_CLASS)
         if NEW_LOCK in source:
             harness = """const assert=require('node:assert/strict'),vm=require('node:vm');
 const lock=vm.runInNewContext('('+process.argv[1]+')',{i:m=>'modelLock_'+m,h:'modelLock___all'});
@@ -190,6 +257,18 @@ h:{rs:p=>p},g:{fh:1800000},j:{warn:()=>{}},console:{error:()=>{}}});
  assert(Date.parse(update[key])<Date.now()+60000);
  }
  const retry=Date.now()+3600000;
+ const retiredAG=JSON.stringify({error:{code:404,status:'NOT_FOUND',reason:'MODEL_RETIRED',model:'gemini-3-flash-agent'}});
+ const agStart=Date.now();await mark('conn',404,'[404]: '+retiredAG,'antigravity','gemini-3-flash-agent');
+ assert(!Object.hasOwn(update,'modelLock___all'));
+ assert(Date.parse(update['modelLock_gemini-3-flash-agent'])>=agStart+1800000);
+ for(const [status,error,provider,model] of [
+ [503,retiredAG,'antigravity','gemini-3-flash-agent'],[404,retiredAG,'other','gemini-3-flash-agent'],
+ [404,retiredAG,'antigravity','other-model'],[404,retiredAG.replace('MODEL_RETIRED','OTHER'),'antigravity','gemini-3-flash-agent'],
+ [404,'broken {','antigravity','gemini-3-flash-agent']]){
+ await mark('conn',status,error,provider,model);
+ assert(!Object.hasOwn(update,'modelLock___all'));
+ assert(Date.parse(update['modelLock_'+model])<Date.now()+60000);
+ }
  await mark('conn',429,'{"code":14018}','codebuddy-cn','model',retry);
  assert(Date.parse(update.modelLock___all)>=retry);
  await mark('conn',402,"you've reached your additional usage limit for your plan",'github','model');
@@ -229,6 +308,68 @@ const response=(status,body)=>({status,headers:{},clone:()=>({text:async()=>JSON
 })().catch(e=>{console.error(e);process.exitCode=1});
 """
             subprocess.run(["node", "-e", harness, NEW_RETRY], check=True)
+        if AG_PATCHED_CLASS in source:
+            harness = r'''const assert=require('node:assert/strict'),vm=require('node:vm');
+let supplied,reads=0,cancelled=0;
+class Base {async execute(){return {response:supplied,url:'fixture',headers:{},transformedBody:{fixture:true}}}}
+const Executor=vm.runInNewContext('(class extends Base{'+process.argv[1]+'})',
+ {Base,Response,ReadableStream,TextDecoder});
+const executor=new Executor(),encoder=new TextEncoder();
+const model='gemini-3-flash-agent',notice='Gemini 3.5 Flash is no longer available. Please switch to Gemini 3.7 Flash in the latest version of Antigravity.';
+const payload=text=>({response:{candidates:[{content:{parts:[{text}]}}]}});
+const frame=data=>'data: '+JSON.stringify(data)+'\r\n\r\n';
+function fixture(text,type='application/json',fragment=1,status=200){
+ const bytes=encoder.encode(text);let offset=0;
+ return new Response(new ReadableStream({pull(c){reads++;if(offset>=bytes.length){c.close();return}
+ c.enqueue(bytes.slice(offset,offset+fragment));offset+=fragment},cancel(){cancelled++}}),
+ {status,headers:{'Content-Type':type,'X-Fixture':'preserved'}});
+}
+async function run(text,type,fragment=1,selected=model,status=200){
+ supplied=fixture(text,type,fragment,status);return executor.execute({model:selected,stream:type==='text/event-stream'});
+}
+(async()=>{
+ for(const [text,type] of [
+ [JSON.stringify(payload(notice)),'application/json'],[frame(payload(notice)),'text/event-stream'],
+ [': heartbeat\r\n\r\n'+frame({response:{candidates:[{content:{parts:[]}}]}})+frame(payload(notice)),'text/event-stream']]){
+ const result=await run(text,type);assert.equal(result.response.status,404);
+ const error=(await result.response.json()).error;assert.equal(error.reason,'MODEL_RETIRED');assert.equal(error.model,model);
+ assert.equal(result.url,'fixture');assert.equal(result.transformedBody.fixture,true);
+ }
+ const usage=payload(notice);usage.response.usageMetadata={totalTokenCount:10};
+ const finish=payload(notice);finish.response.candidates[0].finishReason='STOP';
+ const tool=payload(notice);tool.response.candidates[0].content.parts.push({functionCall:{name:'health_check'}});
+ const multiple=payload(notice);multiple.response.candidates.push(payload('other').response.candidates[0]);
+ for(const body of [payload('normal 🦀 output'),usage,finish,tool,multiple,payload(notice+' quoted')]){
+ for(const type of ['application/json','text/event-stream']){
+ const text=type==='application/json'?JSON.stringify(body):frame(body)+'data: [DONE]\r\n\r\n';
+ const result=await run(text,type);assert.equal(result.response.status,200);
+ assert.equal(result.response.headers.get('X-Fixture'),'preserved');assert.equal(await result.response.text(),text);
+ }}
+ for(const [text,type,fragment,selected,status] of [
+ [JSON.stringify(payload(notice)),'application/json',1,'claude-sonnet-4-6',200],
+ ['broken {','application/json',1,model,200],['data: broken {\n\n','text/event-stream',1,model,200],
+ [JSON.stringify(payload('x'.repeat(10000))),'application/json',257,model,200],
+ [frame(payload('normal'))+frame(payload(notice)),'text/event-stream',4096,model,200],
+ [JSON.stringify(payload(notice)),'application/json',4096,model,503]]){
+ const result=await run(text,type,fragment,selected,status);assert.equal(result.response.status,status);
+ assert.equal(await result.response.text(),text);
+ }
+ supplied=fixture(frame(payload('normal'))+'data: '+ 'x'.repeat(20000),'text/event-stream',5);
+ const result=await executor.execute({model});await result.response.body.cancel('stop');assert(cancelled>0);
+ supplied=new Response(new ReadableStream({pull(c){c.error(Error('fixture aborted'))}}),{headers:{'Content-Type':'application/json'}});
+ await assert.rejects(()=>executor.execute({model}),/fixture aborted/);
+ // A healthy response after the retired one is reached by the existing HTTP-error fallback.
+ let attempts=0,successes=0;
+ for(const text of [JSON.stringify(payload(notice)),JSON.stringify(payload('valid response'))]){
+ attempts++;const result=await run(text,'application/json',20);
+ if(!result.response.ok){assert.equal(result.response.status,404);continue}
+ successes++;assert.equal((await result.response.json()).response.candidates[0].content.parts[0].text,'valid response');break;
+ }
+ assert.equal(attempts,2);assert.equal(successes,1);
+ console.log('Retirement notice JSON/SSE, byte preservation, cancellation and fallback checks passed');
+})().catch(e=>{console.error(e);process.exitCode=1});
+'''
+            subprocess.run(["node", "-e", harness, AG_EXECUTE], check=True)
     print("Router lock, durable fallback and exhausted-quota retry checks passed")
 
 
