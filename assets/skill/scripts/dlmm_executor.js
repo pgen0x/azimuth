@@ -1,4 +1,4 @@
-const { Connection, Keypair, PublicKey, VersionedTransaction, Transaction } = require("@solana/web3.js");
+const { Connection, Keypair, PublicKey, VersionedTransaction, Transaction, TransactionMessage } = require("@solana/web3.js");
 const DLMM = require("@meteora-ag/dlmm");
 const { StrategyType } = require("@meteora-ag/dlmm");
 const BN = require("bn.js");
@@ -315,8 +315,21 @@ async function reconcilePendingSwap(connection, pendingPath, label = "Swap") {
   return null;
 }
 
-// Manual maintenance only. Token-2022/extensions and wrapped SOL are deliberately
-// excluded. The SPL program also rejects closure if tokens arrive after this read.
+// Close only owner-controlled initialized accounts with no delegation or
+// extensions beyond immutableOwner; the SPL program enforces emptiness atomically.
+function tokenAccountCanClose(account, owner, raw = "0") {
+  const { TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID } = require("@solana/spl-token");
+  const info = account.data?.parsed?.info, extensions = info?.extensions;
+  const program = account.owner?.toString();
+  const supported = program === TOKEN_PROGRAM_ID.toString()
+    || program === TOKEN_2022_PROGRAM_ID.toString()
+      && Array.isArray(extensions) && extensions.length === 1 && extensions[0].extension === "immutableOwner";
+  return supported && info?.owner === owner && (info.closeAuthority || owner) === owner
+    && info.tokenAmount?.amount === raw && info.state === "initialized"
+    && info.isNative === false && !info.delegate
+    && Number.isSafeInteger(account.lamports) && account.lamports > 0;
+}
+
 async function reclaimEmptyAccounts(execute = false) {
   const { TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID, createCloseAccountInstruction } = require("@solana/spl-token");
   const wallet = getWallet(), owner = wallet.publicKey.toString();
@@ -354,13 +367,7 @@ async function reclaimEmptyAccounts(execute = false) {
       }
       const accounts = candidates.filter(({ account }) => {
         const info = account.data?.parsed?.info;
-        const extensions = info?.extensions;
-        const supported = account.owner.toString() === TOKEN_PROGRAM_ID.toString()
-          || Array.isArray(extensions) && extensions.length === 1 && extensions[0].extension === "immutableOwner";
-        return supported && info?.owner === owner && (info.closeAuthority || owner) === owner
-          && info.tokenAmount?.amount === "0" && info.state === "initialized"
-          && info.isNative === false && !info.delegate && !excluded.has(info.mint)
-          && Number.isSafeInteger(account.lamports) && account.lamports > 0;
+        return tokenAccountCanClose(account, owner) && !excluded.has(info.mint);
       });
       return { connection, accounts };
     });
@@ -988,6 +995,34 @@ function swapAmountRaw(amount, decimals) {
   return raw.toString();
 }
 
+async function settlementRentClose(connection, wallet, transaction, mint, raw) {
+  const position = process.env.DLMM_SETTLEMENT_POSITION;
+  if (!position || !/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(position)) return transaction;
+  try {
+    const marker = JSON.parse(fs.readFileSync(path.join(PROFILE_DIR, "memories", "dlmm_settlements", `${position}.json`), "utf8"));
+    if (marker.position !== position || marker.mint !== mint || transaction.message.header.numRequiredSignatures !== 1
+        || transaction.message.staticAccountKeys?.[0]?.toString() !== wallet.publicKey.toString()
+        || await positionAccountExists(connection, position)) return transaction;
+    const accounts = await connection.getParsedTokenAccountsByOwner(wallet.publicKey, { mint: new PublicKey(mint) }, "confirmed");
+    // ponytail: one full-balance account only; leave split/unsupported inventory to the existing recovery gate.
+    if (accounts.value.length !== 1) return transaction;
+    const account = accounts.value[0];
+    if (account.account.data?.parsed?.info?.mint !== mint
+        || !tokenAccountCanClose(account.account, wallet.publicKey.toString(), raw)) return transaction;
+    const tables = await Promise.all(transaction.message.addressTableLookups.map(async lookup =>
+      (await connection.getAddressLookupTable(lookup.accountKey)).value));
+    if (tables.some(table => !table)) return transaction;
+    const message = TransactionMessage.decompile(transaction.message, { addressLookupTableAccounts: tables });
+    const { createCloseAccountInstruction } = require("@solana/spl-token");
+    message.instructions.push(createCloseAccountInstruction(account.pubkey, wallet.publicKey, wallet.publicKey, [], account.account.owner));
+    const combined = new VersionedTransaction(message.compileToV0Message(tables));
+    if (combined.serialize().length > 1232) return transaction;
+    return combined; // The SPL program atomically refuses closure unless the preceding swap empties this account.
+  } catch {
+    return transaction; // Unknown evidence never credits rent; the existing exact simulation still gates the swap.
+  }
+}
+
 async function swapToken(inputMintStr, outputMintStr, amountFloat, maxPriceImpactPct = 5, slippageBps = 100, minNetLamports = null) {
   const input_mint = normalizeMint(inputMintStr);
   const output_mint = normalizeMint(outputMintStr);
@@ -1016,7 +1051,7 @@ async function swapToken(inputMintStr, outputMintStr, amountFloat, maxPriceImpac
     }
 
     // Fetch quote outside runWithFailover as it's a HTTP call to Jupiter, then execute/send via standard RPC rotation
-    let quoteResponse, quoteObservedAt;
+    let quoteResponse, quoteObservedAt, inputRaw;
     try {
     // 1. Get input decimals
     let decimals = 9;
@@ -1028,6 +1063,7 @@ async function swapToken(inputMintStr, outputMintStr, amountFloat, maxPriceImpac
       });
     }
     const amountRaw = swapAmountRaw(amountFloat, decimals);
+    inputRaw = amountRaw;
 
     // 2. Fetch a quote within the authorized slippage limit.
     const slippageLadder = [slippageBps]; // Retry later with a fresh quote; never widen the authorized slippage.
@@ -1107,7 +1143,7 @@ async function swapToken(inputMintStr, outputMintStr, amountFloat, maxPriceImpac
     
     // 4. Deserialize and sign
     const swapTransactionBuf = Buffer.from(swapTransaction, "base64");
-    const transaction = VersionedTransaction.deserialize(swapTransactionBuf);
+    let transaction = VersionedTransaction.deserialize(swapTransactionBuf);
     
     const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash("confirmed");
     transaction.message.recentBlockhash = blockhash;
@@ -1118,19 +1154,31 @@ async function swapToken(inputMintStr, outputMintStr, amountFloat, maxPriceImpac
       if (!Number.isSafeInteger(out) || !Number.isSafeInteger(minimum) || minimum <= 0 || minimum > out) {
         return { success: false, aborted: true, reason: "net_recovery_invalid_quote" };
       }
-      const before = await connection.getBalanceAndContext(wallet.publicKey, "confirmed");
-      const simulated = await connection.simulateTransaction(transaction, {
-        commitment: "confirmed", sigVerify: false, minContextSlot: before.context.slot,
-        accounts: { encoding: "base64", addresses: [wallet.publicKey.toString()] }
-      });
-      const after = await connection.getBalanceAndContext(wallet.publicKey,
-        { commitment: "confirmed", minContextSlot: simulated.context.slot });
-      const post = simulated.value.accounts?.[0]?.lamports;
-      if (simulated.value.err || !Number.isSafeInteger(post) || !Number.isSafeInteger(before.value)
-          || before.value !== after.value) {
+      const measureRecovery = async candidate => {
+        const before = await connection.getBalanceAndContext(wallet.publicKey, "confirmed");
+        const simulated = await connection.simulateTransaction(candidate, {
+          commitment: "confirmed", sigVerify: false, minContextSlot: before.context.slot,
+          accounts: { encoding: "base64", addresses: [wallet.publicKey.toString()] }
+        });
+        const after = await connection.getBalanceAndContext(wallet.publicKey,
+          { commitment: "confirmed", minContextSlot: simulated.context.slot });
+        const post = simulated.value.accounts?.[0]?.lamports;
+        if (simulated.value.err || !Number.isSafeInteger(post) || !Number.isSafeInteger(before.value)
+            || before.value !== after.value) return null;
+        return post - before.value - (out - minimum);
+      };
+      let conservativeNet = await measureRecovery(transaction);
+      if (conservativeNet === null) {
         return { success: false, aborted: true, reason: "net_recovery_unmeasured" };
       }
-      const conservativeNet = post - before.value - (out - minimum);
+      if (conservativeNet < minNetLamports && quoteResponse.inputMint === input_mint
+          && quoteResponse.outputMint === output_mint && quoteResponse.inAmount === inputRaw) {
+        const combined = await settlementRentClose(connection, wallet, transaction, input_mint, inputRaw);
+        if (combined !== transaction) {
+          const withRent = await measureRecovery(combined);
+          if (withRent !== null && withRent >= minNetLamports) { transaction = combined; conservativeNet = withRent; }
+        }
+      }
       if (conservativeNet < minNetLamports) {
         return { success: false, aborted: true, reason: "net_recovery_below_floor",
           conservativeNetLamports: conservativeNet, minNetLamports };
@@ -1416,4 +1464,4 @@ async function main() {
 
 if (require.main === module) main();
 module.exports = { swapAmountRaw, reclaimEmptyAccounts, assertRootBudget, reconcileAccounting, recordSubmission, closePosition, swapToken, confirmSignedTransaction, deployPosition, acquireDeployLock, acquireSwapLock, reconcilePendingSwap,
-  assertNoTokenExposure, positionIsEmpty, positionAccountExists, slippageBpsToPercent };
+  assertNoTokenExposure, positionIsEmpty, positionAccountExists, slippageBpsToPercent, settlementRentClose, tokenAccountCanClose };
