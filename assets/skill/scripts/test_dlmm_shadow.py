@@ -23,6 +23,40 @@ for v in replay['schemes'].values():
  assert v['fee_capture_sol']>0
  assert v['net_after_observed_cost_sol']<v['gross_pnl_sol']
 assert bin_replay({},[end])['status']=='unmeasured'
+
+# A mixed active bin does not turn the SOL-only HODL benchmark into a token basket.
+mixed_bin=dict(b,x='1000000000')
+sol_entry=dict(entry,amount_x=0,amount_y=0.1,strategy='sol_bidask',entry_bin=0,
+               bins_below=0,bins_above=0,bin_snapshot=dict(entry['bin_snapshot'],bins=[mixed_bin]))
+dump=dict(end,price=0.5,bins=[dict(mixed_bin,x='1500000000',y='500000000')])
+sol_replay=bin_replay(sol_entry,[dump])
+assert sol_replay['hodl_basis']=='recorded_SOL_only_input'
+assert sol_replay['expected_bidask_reference_scheme']=='far_active'
+for v in sol_replay['schemes'].values():
+ assert abs(v['il_vs_hodl_sol']+0.0375)<1e-12
+ assert v['il_vs_hodl_sol']==v['principal_change_sol']
+legacy=bin_replay(dict(sol_entry,amount_y=None),[dump])
+assert legacy['hodl_basis']=='modeled_initial_bin_inventory'
+assert abs(legacy['schemes']['uniform']['il_vs_hodl_sol']+0.0125)<1e-12
+assert sol_replay['schemes']['uniform']['fee_capture_sol']==legacy['schemes']['uniform']['fee_capture_sol']
+assert sol_replay['schemes']['uniform']['gross_pnl_sol']==legacy['schemes']['uniform']['gross_pnl_sol']
+mirror=dict(sol_entry,amount_x=0.1,amount_y=0,
+            bin_snapshot=dict(sol_entry['bin_snapshot'],sol_is_x=True))
+mirror_replay=bin_replay(mirror,[dict(dump,price=2,bins=[dict(mixed_bin,x='500000000',y='1500000000')])])
+assert mirror_replay['hodl_basis']=='recorded_SOL_only_input'
+assert mirror_replay['expected_bidask_reference_scheme'] is None
+assert abs(mirror_replay['schemes']['uniform']['il_vs_hodl_sol']+0.0375)<1e-12
+for bad in (True,float('nan'),float('inf'),0.2):
+ assert bin_replay(dict(sol_entry,amount_y=bad),[dump])['hodl_basis']=='modeled_initial_bin_inventory'
+assert bin_replay(dict(sol_entry,amount_x=False),[dump])['hodl_basis']=='modeled_initial_bin_inventory'
+for change in ({'strategy':'turnover_rebalance'},{'entry_bin':1},{'bins_below':True},{'bins_above':1}):
+ assert bin_replay(dict(sol_entry,**change),[dump])['expected_bidask_reference_scheme'] is None
+three_bins=[dict(b,id=i) for i in (-2,-1,0)]
+wide=dict(sol_entry,bins_below=2,bin_snapshot=dict(sol_entry['bin_snapshot'],bins=three_bins))
+wide_end=dict(end,bins=three_bins)
+assert bin_replay(wide,[wide_end])['expected_bidask_reference_scheme']=='far_active'
+gap=dict(wide,bin_snapshot=dict(wide['bin_snapshot'],bins=[three_bins[0],three_bins[-1]]))
+assert bin_replay(gap,[wide_end])['expected_bidask_reference_scheme'] is None
 print('Root loss/cost gates and forward shadow outcomes/bin replay passed')
 
 from dlmm_evaluate import replay_root_decision
