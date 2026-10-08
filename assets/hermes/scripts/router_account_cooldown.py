@@ -26,6 +26,11 @@ INSERT_V3 = INSERT_V2.replace('if("github"', GEMINI_DAILY + 'if("github"')
 # after the existing 30-minute restriction interval; Cloudflare resets at UTC midnight.
 ACCOUNT_BUDGET = r'if(("xai"===(0,h.rs)(c)&&402===Number(a))||("cloudflare-ai"===(0,h.rs)(c)&&429===Number(a)))try{let d=JSON.parse(String(b||"").slice(String(b||"").indexOf("{")));if("xai"===(0,h.rs)(c)&&"personal-team-blocked:spending-limit"===d.code)return Math.max(Date.now()+18e5,Number(k)||0);if("cloudflare-ai"===(0,h.rs)(c)&&!1===d.success&&Array.isArray(d.errors)&&d.errors.some(a=>4006===a.code&&"string"==typeof a.message&&/used up your daily free allocation/i.test(a.message)))return Math.max((Math.floor(Date.now()/864e5)+1)*864e5,Number(k)||0)}catch{};'
 INSERT = INSERT_V3.replace('if("github"', ACCOUNT_BUDGET + 'if("github"')
+# A definite model retirement cannot recover in the generic two-minute retry.
+# Keep this connection/model scoped; other models and combo order still work.
+INSERT_V4 = INSERT
+GEMINI_RETIRED = r'if("gemini"===(0,h.rs)(c)&&404===Number(a)&&"string"==typeof i&&i)try{let d=JSON.parse(String(b||"").slice(String(b||"").indexOf("{"))),e=d.error;404===e?.code&&"NOT_FOUND"===e.status&&"string"==typeof e.message&&e.message.includes("models/"+i+" is no longer available to new users.")&&(k=Math.max(Date.now()+18e5,Number(k)||0))}catch{};'
+INSERT = INSERT_V4.replace('if("github"', GEMINI_RETIRED + 'if("github"')
 OLD_SCOPE = 'async function m(a,b,c,e=null,i=null,k=null){let l,n,o;'
 NEW_SCOPE = OLD_SCOPE + 'let Q=!1;'
 OLD_CAP = 'n="antigravity"===(0,h.rs)(e)?k-Date.now():Math.min(k-Date.now(),g.fh)'
@@ -48,10 +53,10 @@ def changes(app):
     for path in root.rglob("*.js"):
         original = path.read_text()
         readers += original.count(OLD_LOCK) + original.count(NEW_LOCK)
-        writers += original.count(ANCHOR) + original.count(INSERT_V1) + original.count(INSERT_V2) + original.count(INSERT_V3) + original.count(INSERT)
+        writers += original.count(ANCHOR) + original.count(INSERT_V1) + original.count(INSERT_V2) + original.count(INSERT_V3) + original.count(INSERT_V4) + original.count(INSERT)
         fallbacks += original.count(OLD_FALLBACK) + (0 if OLD_FALLBACK in original else original.count(NEW_FALLBACK))
         retries += original.count(OLD_RETRY) + original.count(NEW_RETRY)
-        updated = original.replace(OLD_LOCK, NEW_LOCK).replace(INSERT_V3, INSERT).replace(INSERT_V2, INSERT).replace(INSERT_V1, INSERT).replace(ANCHOR, INSERT).replace(NEW_SCOPE, OLD_SCOPE).replace(OLD_SCOPE, NEW_SCOPE).replace(OLD_CAP, NEW_CAP).replace(OLD_FALLBACK, NEW_FALLBACK).replace(OLD_RETRY, NEW_RETRY)
+        updated = original.replace(OLD_LOCK, NEW_LOCK).replace(INSERT_V4, INSERT).replace(INSERT_V3, INSERT).replace(INSERT_V2, INSERT).replace(INSERT_V1, INSERT).replace(ANCHOR, INSERT).replace(NEW_SCOPE, OLD_SCOPE).replace(OLD_SCOPE, NEW_SCOPE).replace(OLD_CAP, NEW_CAP).replace(OLD_FALLBACK, NEW_FALLBACK).replace(OLD_RETRY, NEW_RETRY)
         if original != updated:
             patches.append((path, original, updated))
     if readers != 9 or writers != 1 or fallbacks != 1 or retries != 1:
@@ -65,7 +70,7 @@ def check(app, patched=False):
         raise ValueError("Installed build is not fully patched")
     # Exercise real functions extracted from every installed copy, without requests.
     for path in (app / ".next-cli-build/server").rglob("*.js"):
-        source = path.read_text().replace(OLD_LOCK, NEW_LOCK).replace(INSERT_V3, INSERT).replace(INSERT_V2, INSERT).replace(INSERT_V1, INSERT).replace(ANCHOR, INSERT).replace(NEW_SCOPE, OLD_SCOPE).replace(OLD_SCOPE, NEW_SCOPE).replace(OLD_CAP, NEW_CAP).replace(OLD_FALLBACK, NEW_FALLBACK).replace(OLD_RETRY, NEW_RETRY)
+        source = path.read_text().replace(OLD_LOCK, NEW_LOCK).replace(INSERT_V4, INSERT).replace(INSERT_V3, INSERT).replace(INSERT_V2, INSERT).replace(INSERT_V1, INSERT).replace(ANCHOR, INSERT).replace(NEW_SCOPE, OLD_SCOPE).replace(OLD_SCOPE, NEW_SCOPE).replace(OLD_CAP, NEW_CAP).replace(OLD_FALLBACK, NEW_FALLBACK).replace(OLD_RETRY, NEW_RETRY)
         if NEW_LOCK in source:
             harness = """const assert=require('node:assert/strict'),vm=require('node:vm');
 const lock=vm.runInNewContext('('+process.argv[1]+')',{i:m=>'modelLock_'+m,h:'modelLock___all'});
@@ -159,6 +164,31 @@ h:{rs:p=>p},g:{fh:1800000},j:{warn:()=>{}},console:{error:()=>{}}});
  const laterReset=Date.now()+86400000;
  await mark('conn',429,daily('GenerateRequestsPerDayPerProjectPerModel-FreeTier','30737s'),'gemini','model',laterReset);
  assert(Date.parse(update.modelLock_model)>=laterReset);
+ const retired=(model='gemini-2.5-pro',code=404,status='NOT_FOUND',message=null)=>JSON.stringify({error:{code,status,
+ message:message??`This model models/${model} is no longer available to new users. Please update your code.`}});
+ const retiredStart=Date.now();
+ await mark('conn',404,retired(),'gemini','gemini-2.5-pro');
+ assert(!Object.hasOwn(update,'modelLock___all'));
+ assert(Date.parse(update['modelLock_gemini-2.5-pro'])>=retiredStart+1800000);
+ const retiredLater=Date.now()+3600000;
+ await mark('conn',404,'[404]: '+retired(),'gemini','gemini-2.5-pro',retiredLater);
+ assert(!Object.hasOwn(update,'modelLock___all'));
+ // The existing Gemini cap stays 30 minutes; daily-quota resets above bypass it.
+ assert(Date.parse(update['modelLock_gemini-2.5-pro'])>=Date.now()+1799990);
+ assert(Date.parse(update['modelLock_gemini-2.5-pro'])<retiredLater);
+ for(const [http,error,provider,model] of [
+ [404,retired(),'other','gemini-2.5-pro'],[429,retired(),'gemini','gemini-2.5-pro'],
+ [404,retired('other-model'),'gemini','gemini-2.5-pro'],
+ [404,retired('gemini-2.5-pro',403),'gemini','gemini-2.5-pro'],
+ [404,retired('gemini-2.5-pro',404,'OTHER'),'gemini','gemini-2.5-pro'],
+ [404,retired('gemini-2.5-pro',404,'NOT_FOUND','Model not found'),'gemini','gemini-2.5-pro'],
+ [404,'broken {','gemini','gemini-2.5-pro'],
+ [404,retired(),'gemini',null]]){
+ await mark('conn',http,error,provider,model);
+ if(model)assert(!Object.hasOwn(update,'modelLock___all'));
+ const key=model?'modelLock_'+model:'modelLock___all';
+ assert(Date.parse(update[key])<Date.now()+60000);
+ }
  const retry=Date.now()+3600000;
  await mark('conn',429,'{"code":14018}','codebuddy-cn','model',retry);
  assert(Date.parse(update.modelLock___all)>=retry);
