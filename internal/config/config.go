@@ -282,7 +282,8 @@ type Config struct {
 	DeployCmd string
 	// AIHealthCmd enables AI-first routing when both webhook and DeployCmd are
 	// configured. Exit 0 sends to Hermes; failure selects direct deploy BEFORE
-	// dispatch. Whitespace-split like DeployCmd. Bounded to 20 seconds.
+	// dispatch. Whitespace-split like DeployCmd. The probe is bounded to 65s,
+	// including startup time before its 60s HTTP request timeout.
 	AIHealthCmd string
 	// DeployTimeout bounds one direct-deploy run (pre-swap + on-chain deploy
 	// can take a couple of minutes on congested RPC).
