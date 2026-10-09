@@ -2,6 +2,7 @@
 const fs = require('fs');
 const path = require('path');
 const SOL = 'So11111111111111111111111111111111111111112';
+const QUOTE_CACHE_MAX_SLOT_LAG = 2500;
 const TOKEN_PROGRAMS = ['TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA', 'TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb'];
 const read = file => fs.existsSync(file) ? fs.readFileSync(file, 'utf8').split('\n').filter(Boolean).map(JSON.parse) : [];
 const append = (file, row) => fs.appendFileSync(file, JSON.stringify(row) + '\n', {mode: 0o600});
@@ -518,14 +519,16 @@ async function collect({dir, wallet, PublicKey, rpc, historyOnly=false}) {
       && typeof q.out_lamports==='string' && /^[0-9]+$/.test(q.out_lamports)
       && Number.isFinite(Number(q.out_lamports)) && Number(q.out_lamports)>0
       && Number.isSafeInteger(q.observed_at) && q.observed_at<=now() && now()-q.observed_at<=600
-      && Number.isSafeInteger(q.slot) && q.slot>0 && Math.abs(slot-q.slot)<=1500;
+      && Number.isSafeInteger(q.slot) && q.slot>0 && Math.abs(slot-q.slot)<=QUOTE_CACHE_MAX_SLOT_LAG;
   };
   const missingAccounts=allAccounts.filter(a=>{
     const i=a.account.data.parsed.info;
     return BigInt(i.tokenAmount.amount)>0n && i.mint!==SOL && !(marks.has(i.mint)&&marks.has(SOL)) && !heliusMark(i) && !freshQuote(i);
   });
   const selected=new Set();
-  for(let i=0;i<Math.min(10,missingAccounts.length);i++) selected.add(missingAccounts[(cursor+i)%missingAccounts.length]);
+  // Up to 75 balances currently need quotes: two rotations must fit inside cache freshness.
+  // The request helper still enforces pacing and the 90s deadline, even below this cap.
+  for(let i=0;i<Math.min(40,missingAccounts.length);i++) selected.add(missingAccounts[(cursor+i)%missingAccounts.length]);
   let quoteDeferredReason=null, quoteAttempts=0;
   // Process the selected rotation in order, including across the list boundary.
   for (const account of [...selected,...allAccounts.filter(a=>!selected.has(a))]) {

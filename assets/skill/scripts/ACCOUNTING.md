@@ -466,9 +466,19 @@ NAV quote collection uses keyless Jupiter pacing (at least 2.1 seconds between
 requests) and honors a valid provider reset timestamp when the response reports
 no remaining quota. Reset headers must fall inside the documented 60-second
 window. The quote phase reserves response time inside 90 seconds and retains
-its ten-attempt rotation; 429 still stops the remaining quotes for that run.
+its 40-attempt rotation; cached quotes must match the exact balance, be no more
+than 600 seconds old, and remain within 2,500 slots. Fresh provider quotes
+retain the stricter 1,500-slot check. A 429 stops the remaining quotes for that run.
 No quote retry, Helius Wallet API call, stale mark or zero price is introduced.
 Other clients sharing the same public rate bucket can still cause deferrals.
+
+The observed wallet has 105 nonzero token balances, with 65–74 requiring
+quotes instead of fresh spot marks. Two capped rotations can now cover up to
+80 balances before the 600-second cache limit at the current roughly 500-second
+collection interval. The 90-second deadline, 2.1-second pacing, provider reset
+headers and 429 stop remain authoritative: 40 is a ceiling, not a guarantee of
+complete NAV. Failed quotes stay unpriced. This changes read-only valuation
+capacity, not trading, RPC collection frequency or risk thresholds.
 
 Provider limits: https://developers.jup.ag/docs/portal/rate-limits
 
