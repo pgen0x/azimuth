@@ -13,6 +13,7 @@ import shlex
 from local_indicators import check_local_indicators
 from tz_util import local_time_str
 from dlmm_monitor import position_live_onchain
+from dlmm_weights import ranking_weight_context
 
 def emit_execution_receipt(report, position, signature, dry_run, verified):
     """Optional Hermes proof marker; failure must never turn a landed tx into a retry."""
@@ -281,7 +282,7 @@ def ai_pick_context(mode):
         try:
             stored = json.loads(values[0])
             if isinstance(stored, dict):
-                weights = {k: stored[k] for k in ("weights", "lifts", "last_recalc") if k in stored}
+                weights = ranking_weight_context(stored, mode)
         except (ValueError, TypeError):
             pass
     positions = []
@@ -890,7 +891,7 @@ def run_swap_with_retry(cmd, attempts=3):
     return last_res, last_err
 
 
-def load_signal_weights():
+def load_signal_weights(mode=None):
     """Darwinian signal weights learned from the close journal by dlmm_weights.py.
 
     Returns {signal_name: weight} (weights in [0.3, 2.5], 1.0 = neutral) or {}
@@ -901,15 +902,8 @@ def load_signal_weights():
         return {}
     try:
         stored = json.loads(out)
-        if not isinstance(stored, dict):
-            return {}
-        weights = stored.get("weights", stored)  # Current writer envelope or legacy flat map.
-        if not isinstance(weights, dict):
-            return {}
-        return {name: float(value) for name, value in weights.items()
-                if name in WEIGHTED_SIGNALS_HIGHER_IS_BETTER
-                and not isinstance(value, bool) and isinstance(value, (int, float))
-                and math.isfinite(value) and 0.3 <= value <= 2.5}
+        context = ranking_weight_context(stored, mode)
+        return context["weights"] if context else {}
     except (ValueError, json.JSONDecodeError):
         return {}
 
@@ -962,7 +956,7 @@ def apply_batch_conviction(candidates, mode="multiday"):
     if not survivors:
         return survivors
 
-    weights = load_signal_weights()
+    weights = load_signal_weights(mode)
     for c in survivors:
         adj = 0.0
         notes = []

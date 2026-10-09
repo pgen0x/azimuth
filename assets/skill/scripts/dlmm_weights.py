@@ -10,6 +10,9 @@ memories/signal_weights.json and to Redis (sol:dlmm:signal_weights) where the
 deploy pick reads them to prioritize candidates whose strongest attributes
 carry high weights.
 
+Current pickers use independent entry-mode fits: fee signals describe different
+windows in pulse and turnover. Pooled fits remain only for legacy readers.
+
 Runs from the tail of dlmm_monitor.py on every cycle; self-guards so a real
 recalc happens at most every RECALC_GUARD_SECS and only with enough samples.
 
@@ -51,6 +54,8 @@ CLOSES_PATH = os.path.join(PROFILE_DIR, "memories", "dlmm_closes.jsonl")
 WEIGHTS_PATH = os.path.join(PROFILE_DIR, "memories", "signal_weights.json")
 REDIS_WEIGHTS_KEY = "sol:dlmm:signal_weights"
 OUTCOME_BASIS = "matched_refund_cash_bounds"
+WEIGHT_SCOPE = "entry_mode"
+MODES = ("casual", "multiday", "turnover", "pulse")
 
 WINDOW_DAYS = 60
 MIN_SAMPLES = 10
@@ -114,6 +119,8 @@ def save_weights(data):
         "lifts": data.get("lifts") or {},
         "last_recalc": data["last_recalc"],
         "outcome_basis": data["outcome_basis"],
+        "weight_scope": data["weight_scope"],
+        "by_mode": data["by_mode"],
     })
     run_command(f"redis-cli set \"{REDIS_WEIGHTS_KEY}\" '{compact}'")
 
@@ -174,9 +181,9 @@ def numeric_lift(signal, wins, losses):
     and useful answer (the attribute anti-predicts), so the sign is never
     discarded. Returns None when the window cannot support a read."""
     win_vals = [float(r["signal"][signal]) for r in wins
-                if isinstance(r["signal"].get(signal), (int, float))]
+                if type(r["signal"].get(signal)) in (int, float) and math.isfinite(r["signal"][signal])]
     loss_vals = [float(r["signal"][signal]) for r in losses
-                 if isinstance(r["signal"].get(signal), (int, float))]
+                 if type(r["signal"].get(signal)) in (int, float) and math.isfinite(r["signal"][signal])]
     if not win_vals or not loss_vals or len(win_vals) + len(loss_vals) < MIN_SAMPLES:
         return None
     all_vals = win_vals + loss_vals
@@ -198,6 +205,60 @@ def target_weight(lift):
     last happened to reach."""
     target = 1.0 if lift is None else 1.0 + LIFT_GAIN * lift
     return max(WEIGHT_FLOOR, min(WEIGHT_CEILING, target))
+
+
+def ranking_weight_context(data, mode=None):
+    """Select the same mode evidence for the AI picker and deterministic ranker."""
+    if not isinstance(data, dict):
+        return None
+    selected = data
+    scope = "legacy_global"
+    if data.get("weight_scope") == WEIGHT_SCOPE and mode is not None:
+        groups = data.get("by_mode")
+        selected = groups.get(mode, {}) if isinstance(groups, dict) else {}
+        if not isinstance(selected, dict) or selected.get("status") != "measured":
+            selected = {}
+        scope = WEIGHT_SCOPE
+    weights = selected.get("weights", selected) if scope == "legacy_global" else selected.get("weights", {})
+    if not isinstance(weights, dict):
+        weights = {}
+    weights = {name: float(value) for name, value in weights.items()
+               if name in SIGNAL_NAMES and type(value) in (int, float)
+               and math.isfinite(value) and WEIGHT_FLOOR <= value <= WEIGHT_CEILING}
+    lifts = selected.get("lifts") or {}
+    if not isinstance(lifts, dict):
+        lifts = {}
+    return dict(weights=weights, lifts={name: value for name, value in lifts.items()
+                if name in SIGNAL_NAMES and (value is None or type(value) in (int, float) and math.isfinite(value))},
+                mode=mode, weight_scope=scope, outcome_basis=data.get("outcome_basis"),
+                last_recalc=data.get("last_recalc"), status=selected.get("status", "legacy" if scope == "legacy_global" else "insufficient_samples"))
+
+
+def mode_weights(recent, previous):
+    """Fit each mode independently; never seed a new mode from pooled history."""
+    result = {}
+    previous = previous if isinstance(previous, dict) else {}
+    for mode in MODES:
+        records = [r for r in recent if r.get("mode") == mode]
+        wins = [r for r in records if outcome_sol(r) > 0]
+        losses = [r for r in records if outcome_sol(r) <= 0]
+        bucket = dict(window_size=len(records), wins=len(wins), losses=len(losses),
+                      status="insufficient_samples", weights={}, lifts={})
+        if len(records) >= MIN_SAMPLES and wins and losses:
+            lifts = {name: numeric_lift(name, wins, losses) for name in SIGNAL_NAMES}
+            if any(v is not None for v in lifts.values()):
+                prior_context = ranking_weight_context(previous.get(mode))
+                old = prior_context["weights"] if prior_context else {}
+                weights = {}
+                for name, lift in lifts.items():
+                    prior = old.get(name, 1.0)
+                    if type(prior) not in (int, float) or not math.isfinite(prior) or not WEIGHT_FLOOR <= prior <= WEIGHT_CEILING:
+                        prior = 1.0
+                    weights[name] = round(prior + SMOOTHING * (target_weight(lift)-prior), 3)
+                bucket.update(status="measured", weights=weights,
+                              lifts={k:None if v is None else round(v, 4) for k,v in lifts.items()})
+        result[mode] = bucket
+    return result
 
 
 def recalculate(quiet=False):
@@ -241,6 +302,9 @@ def recalculate(quiet=False):
     now = time.time()
     data["weights"] = weights
     data["outcome_basis"] = OUTCOME_BASIS
+    previous_modes = data.get("by_mode") or {}
+    data["by_mode"] = mode_weights(recent, previous_modes)
+    data["weight_scope"] = WEIGHT_SCOPE
     # Published so the daily proposal job can read WHY a weight sits where it
     # does. A weight alone cannot distinguish "no evidence" from "evidence of
     # no effect" — both land near 1.0 — and an agent proposing thresholds off
@@ -249,7 +313,7 @@ def recalculate(quiet=False):
     data["last_recalc"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now))
     data["last_recalc_ts"] = int(now)
     data["recalc_count"] = (data.get("recalc_count") or 0) + 1
-    if changes or dropped:
+    if changes or dropped or data["by_mode"] != previous_modes:
         entry = {
             "timestamp": data["last_recalc"],
             "changes": changes,
@@ -257,6 +321,7 @@ def recalculate(quiet=False):
             "wins": len(wins),
             "losses": len(losses),
             "outcome_basis": OUTCOME_BASIS,
+            "by_mode": data["by_mode"],
         }
         if dropped:
             entry["retired"] = dropped
@@ -284,6 +349,15 @@ def main():
 
     if cli.show:
         data = load_weights()
+        if data.get("weight_scope") == WEIGHT_SCOPE:
+            for mode in MODES:
+                context = ranking_weight_context(data, mode)
+                print(f"{mode}: {context['status']}")
+                for name, weight in sorted(context['weights'].items()):
+                    print(f"  {name:<24} {weight:>6.3f} lift={context['lifts'].get(name)}")
+            print(f"last_recalc: {data.get('last_recalc') or 'never'} "
+                  f"(recalc_count {data.get('recalc_count') or 0})")
+            return
         weights = data.get("weights") or {}
         lifts = data.get("lifts") or {}
         # Weight and lift side by side: a weight near 1.0 is either an
@@ -301,7 +375,8 @@ def main():
     if not cli.force:
         data = load_weights()
         last = data.get("last_recalc_ts") or 0
-        if data.get("outcome_basis") == OUTCOME_BASIS and time.time() - last < RECALC_GUARD_SECS:
+        if (data.get("outcome_basis") == OUTCOME_BASIS and data.get("weight_scope") == WEIGHT_SCOPE
+                and time.time() - last < RECALC_GUARD_SECS):
             if not cli.quiet:
                 print(f"Recalc guard: last run {int((time.time() - last) / 60)}m ago "
                       f"(interval {RECALC_GUARD_SECS // 3600}h). Use --force to override.")
