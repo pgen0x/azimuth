@@ -215,12 +215,14 @@ global.fetch=async url=>{if(url.includes('/quote?'))throw new Error('no route');
  signatureStatus=null;await collect({...args,historyOnly:true});
  const expired=JSON.parse(fs.readFileSync(path.join(dir,'dlmm_wallet_transactions.jsonl'),'utf8').trim().split('\n').at(-1));
  assert.equal(expired.classification,'expired_unlanded');assert.equal(expired.landed,false);
- // More than ten unpriced accounts rotate; unavailable assets retain null value.
+ // More than thirty unpriced accounts rotate within the measured snapshot budget.
  const quoted=[];
- connection.getParsedTokenAccountsByOwner=async(_,o)=>({value:o.programId.toString().startsWith('Tokenkeg') ? Array.from({length:12},(_,i)=>({account:{lamports:2039280,data:{parsed:{info:{mint:'unknown'+i,tokenAmount:{amount:'1',decimals:9}}}}}})) : []});
+ connection.getParsedTokenAccountsByOwner=async(_,o)=>({value:o.programId.toString().startsWith('Tokenkeg') ? Array.from({length:36},(_,i)=>({account:{lamports:2039280,data:{parsed:{info:{mint:'unknown'+i,tokenAmount:{amount:'1',decimals:9}}}}}})) : []});
  global.fetch=async url=>{if(url.includes('/quote?')){quoted.push(new URL(url).searchParams.get('inputMint'));throw new Error('no route');}return{ok:true,json:async()=>({totalPositions:0,pools:[],hasNext:false})}};
- await collect(args);await collect(args);
- assert.equal(new Set(quoted).size,12);
+ await collect(args);
+ assert.equal(new Set(quoted).size,30);
+ await collect(args);
+ assert.equal(new Set(quoted).size,36);
  fs.writeFileSync(path.join(dir,'dlmm_quote_marks.json'),JSON.stringify({unknown0:{schema_version:2,in_amount:'1',out_lamports:'2000000',observed_at:Math.floor(Date.now()/1000),slot:100}}));
  let rateLimitedRequests=0;
  global.fetch=async url=>{if(url.includes('/quote?')){rateLimitedRequests++;return {ok:false,status:429};}return{ok:true,json:async()=>({totalPositions:0,pools:[],hasNext:false})}};
@@ -262,7 +264,7 @@ global.fetch=async url=>{if(url.includes('/quote?'))throw new Error('no route');
    assert.throws(()=>navQuoteMark({...goodQuote,...bad},'mint','1',2001),/quote evidence/);
  }
  // A 429 on the first selected account advances only one place, even at wraparound.
- connection.getParsedTokenAccountsByOwner=previousAccounts;
+ connection.getParsedTokenAccountsByOwner=async(_,o)=>({value:o.programId.toString().startsWith('Tokenkeg') ? Array.from({length:12},(_,i)=>({account:{lamports:2039280,data:{parsed:{info:{mint:'unknown'+i,tokenAmount:{amount:'1',decimals:9}}}}}})) : []});
  fs.writeFileSync(path.join(dir,'dlmm_quote_marks.json'),'{}');
  fs.writeFileSync(path.join(dir,'dlmm_quote_cursor.json'),JSON.stringify({offset:11}));
  const attempted=[];

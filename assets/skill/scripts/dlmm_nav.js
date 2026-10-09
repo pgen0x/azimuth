@@ -525,7 +525,8 @@ async function collect({dir, wallet, PublicKey, rpc, historyOnly=false}) {
     return BigInt(i.tokenAmount.amount)>0n && i.mint!==SOL && !(marks.has(i.mint)&&marks.has(SOL)) && !heliusMark(i) && !freshQuote(i);
   });
   const selected=new Set();
-  for(let i=0;i<Math.min(10,missingAccounts.length);i++) selected.add(missingAccounts[(cursor+i)%missingAccounts.length]);
+  // Measured snapshots finish in 22s with 9 quotes; 30 stays inside the 90s quote budget.
+  for(let i=0;i<Math.min(30,missingAccounts.length);i++) selected.add(missingAccounts[(cursor+i)%missingAccounts.length]);
   let quoteDeferredReason=null, quoteAttempts=0;
   // Process the selected rotation in order, including across the list boundary.
   for (const account of [...selected,...allAccounts.filter(a=>!selected.has(a))]) {
