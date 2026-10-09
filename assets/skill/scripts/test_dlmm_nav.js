@@ -215,12 +215,12 @@ global.fetch=async url=>{if(url.includes('/quote?'))throw new Error('no route');
  signatureStatus=null;await collect({...args,historyOnly:true});
  const expired=JSON.parse(fs.readFileSync(path.join(dir,'dlmm_wallet_transactions.jsonl'),'utf8').trim().split('\n').at(-1));
  assert.equal(expired.classification,'expired_unlanded');assert.equal(expired.landed,false);
- // More than thirty unpriced accounts rotate within the measured snapshot budget.
+ // More than twenty unpriced accounts rotate across bounded, paced snapshots.
  const quoted=[];
  connection.getParsedTokenAccountsByOwner=async(_,o)=>({value:o.programId.toString().startsWith('Tokenkeg') ? Array.from({length:36},(_,i)=>({account:{lamports:2039280,data:{parsed:{info:{mint:'unknown'+i,tokenAmount:{amount:'1',decimals:9}}}}}})) : []});
  global.fetch=async url=>{if(url.includes('/quote?')){quoted.push(new URL(url).searchParams.get('inputMint'));throw new Error('no route');}return{ok:true,json:async()=>({totalPositions:0,pools:[],hasNext:false})}};
  await collect(args);
- assert.equal(new Set(quoted).size,30);
+ assert.equal(new Set(quoted).size,20);
  await collect(args);
  assert.equal(new Set(quoted).size,36);
  fs.writeFileSync(path.join(dir,'dlmm_quote_marks.json'),JSON.stringify({unknown0:{schema_version:2,in_amount:'1',out_lamports:'2000000',observed_at:Math.floor(Date.now()/1000),slot:100}}));
