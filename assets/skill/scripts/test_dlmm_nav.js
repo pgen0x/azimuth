@@ -164,11 +164,11 @@ for(const alter of [
 const dir=fs.mkdtempSync(path.join(os.tmpdir(),'nav-check-'));
 const originalTimer=global.setTimeout;
 global.setTimeout=callback=>{callback();}; // Mock HTTP fixtures need no real pacing waits.
-let unknown=false, height=101, signatureStatus=null;
+let unknown=false, height=101, currentSlot=101, signatureStatus=null;
 const connection={
  getSignaturesForAddress:async(_,options)=>options.before ? [] : [{signature:'sig',slot:100,blockTime:tx.blockTime}],
  getBlockHeight:async()=>height,getSignatureStatuses:async signatures=>({value:signatures.map(()=>signatureStatus)}),
- getParsedTransaction:async()=>tx,getSlot:async()=>101,getBalance:async()=>1000000000,
+ getParsedTransaction:async()=>tx,getSlot:async()=>currentSlot,getBalance:async()=>1000000000,
  getParsedTokenAccountsByOwner:async(_,options)=>({value:options.programId.toString().startsWith('Tokenkeg') ? [{account:{lamports:1002039280,data:{parsed:{info:{mint:unknown?'unknown':'So11111111111111111111111111111111111111112',tokenAmount:{amount:'1000000000'}}}}}}]:[]}),
 };
 global.fetch=async url=>{if(url.includes('/quote?'))throw new Error('no route');return{ok:true,json:async()=>({totalPositions:0,pools:[],hasNext:false})}};
@@ -215,12 +215,35 @@ global.fetch=async url=>{if(url.includes('/quote?'))throw new Error('no route');
  signatureStatus=null;await collect({...args,historyOnly:true});
  const expired=JSON.parse(fs.readFileSync(path.join(dir,'dlmm_wallet_transactions.jsonl'),'utf8').trim().split('\n').at(-1));
  assert.equal(expired.classification,'expired_unlanded');assert.equal(expired.landed,false);
- // More than ten unpriced accounts rotate; unavailable assets retain null value.
+ // The observed 65–74 quote-dependent balances need two bounded rotations.
  const quoted=[];
- connection.getParsedTokenAccountsByOwner=async(_,o)=>({value:o.programId.toString().startsWith('Tokenkeg') ? Array.from({length:12},(_,i)=>({account:{lamports:2039280,data:{parsed:{info:{mint:'unknown'+i,tokenAmount:{amount:'1',decimals:9}}}}}})) : []});
+ connection.getParsedTokenAccountsByOwner=async(_,o)=>({value:o.programId.toString().startsWith('Tokenkeg') ? Array.from({length:75},(_,i)=>({account:{lamports:2039280,data:{parsed:{info:{mint:'unknown'+i,tokenAmount:{amount:'1',decimals:9}}}}}})) : []});
  global.fetch=async url=>{if(url.includes('/quote?')){quoted.push(new URL(url).searchParams.get('inputMint'));throw new Error('no route');}return{ok:true,json:async()=>({totalPositions:0,pools:[],hasNext:false})}};
- await collect(args);await collect(args);
- assert.equal(new Set(quoted).size,12);
+ await collect(args);
+ assert.equal(new Set(quoted).size,40);
+ await collect(args);
+ assert.equal(new Set(quoted).size,75);
+ // Successful quotes stay cached while the remaining balances finish the rotation.
+ fs.writeFileSync(path.join(dir,'dlmm_quote_marks.json'),'{}');
+ fs.writeFileSync(path.join(dir,'dlmm_quote_cursor.json'),JSON.stringify({offset:0}));
+ const successfulQuotes=[];
+ global.fetch=async url=>{if(url.includes('/quote?')){
+   const mint=new URL(url).searchParams.get('inputMint');successfulQuotes.push(mint);
+   return {ok:true,json:async()=>({inputMint:mint,outputMint:'So11111111111111111111111111111111111111112',swapMode:'ExactIn',inAmount:'1',outAmount:'2000000',contextSlot:currentSlot})};
+ }return{ok:true,json:async()=>({totalPositions:0,pools:[],hasNext:false})}};
+ const partial=await collect(args);
+ assert.equal(successfulQuotes.length,40);assert.equal(partial.nav_sol,null);
+ // Simulate roughly 500 seconds / 1,250 slots between scheduled snapshots.
+ const priorQuotes=JSON.parse(fs.readFileSync(path.join(dir,'dlmm_quote_marks.json')));
+ for(const quote of Object.values(priorQuotes)) quote.observed_at-=500;
+ fs.writeFileSync(path.join(dir,'dlmm_quote_marks.json'),JSON.stringify(priorQuotes));
+ currentSlot+=1250;
+ const complete=await collect(args);
+ assert.equal(successfulQuotes.length,75);assert.equal(new Set(successfulQuotes).size,75);
+ assert.equal(complete.issues.length,0);assert.ok(Number.isFinite(complete.nav_sol));
+ const completeSnapshot=JSON.parse(fs.readFileSync(path.join(dir,'dlmm_nav.jsonl'),'utf8').trim().split('\n').at(-1));
+ assert.equal(completeSnapshot.tokens.filter(t=>t.basis==='cached_quote').length,40);
+ currentSlot=101;
  fs.writeFileSync(path.join(dir,'dlmm_quote_marks.json'),JSON.stringify({unknown0:{schema_version:2,in_amount:'1',out_lamports:'2000000',observed_at:Math.floor(Date.now()/1000),slot:100}}));
  let rateLimitedRequests=0;
  global.fetch=async url=>{if(url.includes('/quote?')){rateLimitedRequests++;return {ok:false,status:429};}return{ok:true,json:async()=>({totalPositions:0,pools:[],hasNext:false})}};
@@ -247,14 +270,22 @@ global.fetch=async url=>{if(url.includes('/quote?'))throw new Error('no route');
  connection.getParsedTokenAccountsByOwner=async(_,o)=>({value:o.programId.toString().startsWith('Tokenkeg') ? [{account:{lamports:2039280,data:{parsed:{info:{mint:'six-decimal',tokenAmount:{amount:'1000000',decimals:6}}}}}}] : []});
  let quoteCalls=0;
  global.fetch=async url=>{if(url.includes('/quote?')){quoteCalls++;return {ok:true,json:async()=>({inputMint:'six-decimal',outputMint:'So11111111111111111111111111111111111111112',swapMode:'ExactIn',inAmount:'1000000',outAmount:'2000000',contextSlot:115})};}return{ok:true,json:async()=>({totalPositions:0,pools:[],hasNext:false})}};
- await collect(args);await collect(args);
+ await collect(args);currentSlot=2615;await collect(args);
  const cached=JSON.parse(fs.readFileSync(path.join(dir,'dlmm_nav.jsonl'),'utf8').trim().split('\n').at(-1));
  assert.equal(quoteCalls,1);assert.equal(cached.tokens[0].basis,'cached_quote');assert.equal(cached.tokens[0].mark_sol,0.002);assert.equal(cached.tokens[0].price_context_slot,115);
+ currentSlot=2616;await collect(args);
+ const staleBySlot=JSON.parse(fs.readFileSync(path.join(dir,'dlmm_nav.jsonl'),'utf8').trim().split('\n').at(-1));
+ assert.equal(staleBySlot.tokens[0].mark_sol,null);
+ assert.equal(quoteCalls,2); // An expired cache triggers a fresh request, whose old provider slot is rejected.
+ assert.match(staleBySlot.tokens[0].mark_error,/quote evidence/);
+ currentSlot=101;
  connection.getParsedTokenAccountsByOwner=previousAccounts;
  // Preserve the provider slot, including a processed slot ahead of finalized RPC.
  assert.equal(JSON.parse(fs.readFileSync(path.join(dir,'dlmm_quote_marks.json')))["six-decimal"].slot,115);
  const goodQuote={inputMint:'mint',outputMint:'So11111111111111111111111111111111111111112',inAmount:'1',outAmount:'2000',swapMode:'ExactIn',contextSlot:2000};
  assert.equal(navQuoteMark(goodQuote,'mint','1',2001).slot,2000);
+ assert.equal(navQuoteMark(goodQuote,'mint','1',3500).slot,2000);
+ assert.throws(()=>navQuoteMark(goodQuote,'mint','1',3501),/quote evidence/);
  for(const slot of [undefined,null,0,NaN,2000.5]) assert.throws(()=>navQuoteMark(goodQuote,'mint','1',slot),/quote evidence/);
  for(const bad of [{inputMint:'wrong'},{outputMint:'wrong'},{inAmount:'2'},{swapMode:'ExactOut'},
    {outAmount:'0'},{outAmount:'-1'},{outAmount:'1e6'},{outAmount:2000},
@@ -262,7 +293,7 @@ global.fetch=async url=>{if(url.includes('/quote?'))throw new Error('no route');
    assert.throws(()=>navQuoteMark({...goodQuote,...bad},'mint','1',2001),/quote evidence/);
  }
  // A 429 on the first selected account advances only one place, even at wraparound.
- connection.getParsedTokenAccountsByOwner=previousAccounts;
+ connection.getParsedTokenAccountsByOwner=async(_,o)=>({value:o.programId.toString().startsWith('Tokenkeg') ? Array.from({length:12},(_,i)=>({account:{lamports:2039280,data:{parsed:{info:{mint:'unknown'+i,tokenAmount:{amount:'1',decimals:9}}}}}})) : []});
  fs.writeFileSync(path.join(dir,'dlmm_quote_marks.json'),'{}');
  fs.writeFileSync(path.join(dir,'dlmm_quote_cursor.json'),JSON.stringify({offset:11}));
  const attempted=[];
