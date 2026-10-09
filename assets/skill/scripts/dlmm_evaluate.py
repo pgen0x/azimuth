@@ -165,6 +165,47 @@ def matched_refund_cash_cohort(accounting, start, end):
                 basis='full_life_root_cash_plus_proved_funding_refunds; shared_fees_once; not_portfolio_NAV_or_position_win_rate')
 
 
+def matched_refund_cash_by_mode(accounting, profile, start, end, cohort):
+    """Group measured root cash by the mode on each root's earliest entry."""
+    memories = Path(profile) / 'memories'
+    entries = {}
+    for file in (memories / 'dlmm_entries').glob('*.json'):
+        entry = json.loads(file.read_text())
+        deployed = entry.get('deployed_at')
+        if isinstance(deployed, bool) or not isinstance(deployed, (int, float)) or not start <= deployed <= end:
+            continue
+        root = entry.get('root_chain_id') or entry.get('recenter_of') or entry.get('position')
+        if not isinstance(root, str) or not root:
+            continue
+        mode = entry.get('mode')
+        mode = mode if mode in ('pulse', 'turnover', 'casual', 'multiday') else 'unknown'
+        if root not in entries or deployed < entries[root][0]:
+            entries[root] = (deployed, mode)
+
+    by_root = {row['root']: row for row in cohort['roots']}
+    groups = collections.defaultdict(list)
+    for chain in accounting['chains']:
+        if (not chain.get('positions') or chain.get('first_activity') is None
+                or not start <= chain['first_activity'] <= chain['last_activity'] <= end):
+            continue
+        mode = entries.get(chain['root_chain_id'], (None, 'unknown'))[1]
+        groups[mode].append(by_root.get(chain['root_chain_id']))
+
+    result = {}
+    for mode, roots in groups.items():
+        measured = [row for row in roots if row is not None]
+        counts = collections.Counter(row['outcome'] for row in measured)
+        resolved = counts['positive'] + counts['negative'] + counts['zero']
+        result[mode] = dict(window_roots=len(roots), measured_roots=len(measured),
+            unmeasured_roots=len(roots)-len(measured), cash_positive_roots=counts['positive'],
+            cash_negative_roots=counts['negative'], cash_zero_roots=counts['zero'],
+            ambiguous_roots=counts['ambiguous'], cash_positive_rate=counts['positive']/resolved if resolved else None,
+            cash_lower_sol=round(sum(row['cash_lower_sol'] for row in measured), 9) if measured else None,
+            cash_upper_sol=round(sum(row['cash_upper_sol'] for row in measured), 9) if measured else None)
+    return dict(modes=result,
+        basis='full_life_root_cash_plus_proved_refunds; earliest_root_entry_mode; per_root_conservative_bounds; not_NAV_or_position_win_rate')
+
+
 def swap_execution(events, facts, start, end):
     """Compare recorded SOL exit quotes with finalized cash, undoing fees/rent."""
     results = {}
@@ -310,12 +351,14 @@ def evaluate(profile, start, end, rejects):
     price_coverage=dict(collection_status=last_nav.get('price_sources',{}),
         token_counts=dict(collections.Counter(t.get('basis','unknown') if t.get('mark_sol') is not None else 'unpriced' for t in last_nav.get('tokens',[]))))
     live=[r for r in rows(memory/'dlmm_root_decisions.jsonl') if start<=r['ts']<=end]
+    matched_cash = matched_refund_cash_cohort(accounting,start,end)
     return dict(start=start,end=end,generated_at=int(time.time()),close_count=len(closes),close_account_proofs=close_proofs,accounting=accounting,
                 swap_execution=swap_execution(events,facts,start,end),
                 liquidation_observations=[r for r in rows(memory/'dlmm_liquidation_quotes.jsonl')
                                           if start <= r.get('observed_at', end+1) <= end],
                 root_cash_cohort=root_cash_cohort(accounting,start,end),
-                matched_refund_cash_cohort=matched_refund_cash_cohort(accounting,start,end),
+                matched_refund_cash_cohort=matched_cash,
+                matched_refund_cash_by_mode=matched_refund_cash_by_mode(accounting,profile,start,end,matched_cash),
                 rent_refund_groups=[g for g in accounting.get('rent_refund_groups', [])
                                     if start <= g['first_activity'] <= g['last_activity'] <= end],
                 wealth_change=wealth,native_cash_change=native_cash,unvalued_external_token_inflows=unvalued_inflows,price_coverage=price_coverage,nav_samples=len(snapshots),complete_nav_samples=len(valid),
@@ -419,6 +462,9 @@ def main():
         '## Root cash after proved rent refunds (measured subset)',
         json.dumps(data['matched_refund_cash_cohort']),
         'Each refund goes to its proved funder. Carry-in roots are excluded from the selected cohort even when they share a refund batch. Cohort bounds charge shared fees once; do not add individual root bounds or overlapping report subtotals. Positive rate uses only roots whose cash sign is proved and is not a position win rate or complete wallet profit. Missing refund evidence stays unmeasured.',
+        '## Root cash by entry mode (measured refund subset)',
+        json.dumps(data['matched_refund_cash_by_mode']),
+        'Mode is taken from each root’s earliest recorded entry. Per-root bounds are conservative and may not sum to the full cohort bounds when refunds share fees. This breakdown is descriptive, not a causal strategy comparison.',
         '## Pooled settlement cash (full-life groups; no per-root allocation)',
         json.dumps([g for g in data['accounting'].get('pooled_settlements',[]) if a.start <= g['first_activity'] and g['last_activity'] <= a.end]),
         '## Cash including matched rent refunds (full-life groups)',

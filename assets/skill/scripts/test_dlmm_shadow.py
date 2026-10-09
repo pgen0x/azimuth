@@ -140,7 +140,27 @@ with tempfile.TemporaryDirectory() as root:
     with patch.object(evaluation_module,"report",return_value=dict(chains=[],rent_refund_groups=[inside,carry,late])):
         result=evaluation_module.evaluate(profile,100,200,profile/"rejects.jsonl")
     assert result["rent_refund_groups"]==[inside]
+    assert result["matched_refund_cash_by_mode"]["modes"]=={}
 print("Refund groups exclude carry-in roots and refunds after the evaluation window")
+
+from dlmm_evaluate import matched_refund_cash_by_mode
+with tempfile.TemporaryDirectory() as directory:
+    profile=Path(directory); entries=profile/'memories'/'dlmm_entries'; entries.mkdir(parents=True)
+    chains=[]
+    for root,mode in [('pulse-win','pulse'),('pulse-unmeasured','pulse'),('turnover-loss','turnover')]:
+        (entries/f'{root}.json').write_text(json.dumps(dict(position=root,root_chain_id=root,
+            mode=mode,deployed_at=110)))
+        chains.append(dict(root_chain_id=root,positions=[root],first_activity=110,
+            last_activity=190,accounting_status='settled_cash'))
+    cash=dict(roots=[dict(root='pulse-win',outcome='positive',cash_lower_sol=.001,cash_upper_sol=.001),
+                     dict(root='turnover-loss',outcome='negative',cash_lower_sol=-.002,cash_upper_sol=-.002)])
+    modes=matched_refund_cash_by_mode({'chains':chains},profile,100,200,cash)['modes']
+    assert modes['pulse']['window_roots']==2 and modes['pulse']['measured_roots']==1
+    assert modes['pulse']['unmeasured_roots']==1 and modes['pulse']['cash_positive_roots']==1
+    assert modes['pulse']['cash_lower_sol']==.001 and modes['pulse']['cash_upper_sol']==.001
+    assert modes['turnover']['window_roots']==1 and modes['turnover']['cash_negative_roots']==1
+    assert modes['turnover']['cash_lower_sol']==-.002
+print('Measured refund cash is grouped by earliest root entry mode; unmeasured roots remain visible')
 
 # Fixed mode horizons use the first terminal observation, not later outcomes.
 import dlmm_shadow as shadow_module
