@@ -1025,13 +1025,25 @@ def apply_batch_conviction(candidates, mode="multiday"):
             w = float(weights.get(sig, 1.0))
             if abs(w - 1.0) < 0.05:
                 continue
-            present = [c for c in survivors if c.get(sig) is not None]
+            present = [c for c in survivors if type(c.get(sig)) in (int, float)
+                       and math.isfinite(c[sig])]
             if len(present) < 2:
                 continue
             ranked = sorted(present, key=lambda c: float(c[sig]))
+            if ranked[0][sig] == ranked[-1][sig]:
+                continue  # A constant signal provides no ordering evidence.
             denom = len(ranked) - 1
-            for i, c in enumerate(ranked):
-                weight_adj[id(c)] += (w - 1.0) * (i / denom) * 10
+            i = 0
+            while i < len(ranked):
+                end = i + 1
+                while end < len(ranked) and ranked[end][sig] == ranked[i][sig]:
+                    end += 1
+                # Equal observations share their mean rank, independent of
+                # discovery order. Unique observations keep the prior score.
+                rank = (i + end - 1) / 2 / denom
+                for c in ranked[i:end]:
+                    weight_adj[id(c)] += (w - 1.0) * rank * 10
+                i = end
         for c in survivors:
             wa = max(-15.0, min(15.0, weight_adj[id(c)]))
             if wa:
