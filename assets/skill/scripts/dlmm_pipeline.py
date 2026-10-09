@@ -2065,7 +2065,7 @@ Entry Bin | {active_bin}
 Bins Below | {bins_below}
 Bins Above | {bins_above}
 Entry Price | {active_price:.8f}
-Fee/TVL (24h) | {winner['fee_tvl_ratio']:.2f}% ({timeframe})
+Fee/TVL ({timeframe}) | {winner['fee_tvl_ratio']:.2f}%
 TVL | ${winner['tvl']:,.0f}
 Volatility | {winner['volatility']:.2f}
 Organic Score | {winner['organic_score']:.0f}
