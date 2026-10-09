@@ -998,7 +998,7 @@ func (s *Scanner) pollMode(ctx context.Context, mp meteora.ModeParams) {
 		// audit on-screen instead of re-fetching it.
 		if s.cfg.EnableAuditGate {
 			if a, ok := meteora.FetchAudit(cand.BaseMint); ok {
-				if r := meteora.AuditReject(a); r != "" {
+				if r := meteora.AuditReject(a, mp.Mode); r != "" {
 					auditRejected++
 					recordSolanaReject(mp.Mode, p, cand, "audit", r, a)
 					log.Printf("scanner[%s]: %s (%s) rejected on audit: %s", mp.Mode, cand.BaseSymbol, cand.Pool[:8], r)
