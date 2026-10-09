@@ -448,6 +448,18 @@ missing evidence are explicit, not zero losses or wins. This measured subset
 is root cash after fees and matched refunds, not position win rate or full NAV.
 No trading rule, risk limit or historical decision is changed.
 
+### Signal learning by entry mode
+
+Cash-proved single-position roots train each entry mode independently. Pulse's
+five-minute fee signals no longer train turnover's thirty-minute preferences or
+vice versa. Each mode retains the existing ten-sample minimum, both outcome
+classes, six-hour recalc guard, smoothing and weight limits. New mode weights
+start at neutral; insufficient mode evidence produces neutral ranking rather
+than borrowing another mode's weights. Unknown modes are excluded from mode fits.
+The top-level pooled weights remain for legacy readers; current AI context,
+deterministic ranking and proposal reports select the matching `by_mode` bucket.
+Historical correlations and the resulting rankings do not prove prospective profit.
+
 ### Quote collection pacing
 
 NAV quote collection uses keyless Jupiter pacing (at least 2.1 seconds between

@@ -193,12 +193,56 @@ def main():
         assert json.loads(shlex.split(publish.call_args.args[0])[-1])["outcome_basis"]==weights_module.OUTCOME_BASIS
         assert closes.read_text()=="".join(json.dumps(r)+"\n" for r in records)
     # Re-label once on migration; the six-hour guard still applies afterwards.
-    for basis, called in [(None,True),(weights_module.OUTCOME_BASIS,False)]:
+    for basis, scope, called in [(None,None,True),(weights_module.OUTCOME_BASIS,None,True),
+                                (weights_module.OUTCOME_BASIS,weights_module.WEIGHT_SCOPE,False)]:
         with patch.object(sys,"argv",["dlmm_weights.py","--quiet"]), \
-                patch.object(weights_module,"load_weights",return_value={"last_recalc_ts":time.time(),"outcome_basis":basis}), \
+                patch.object(weights_module,"load_weights",return_value={"last_recalc_ts":time.time(),"outcome_basis":basis,"weight_scope":scope}), \
                 patch.object(weights_module,"recalculate") as recalc:
             weights_module.main()
             assert recalc.called == called
+    # Opposite fee relationships must remain opposite after publication and
+    # selection by both pickers; the larger turnover cohort cannot train pulse.
+    independent=[]
+    for mode, count in [("pulse",10),("turnover",30)]:
+        for i in range(count):
+            win=i%2==0
+            value=10 if win == (mode=="turnover") else 1
+            independent.append({**(cash(.001,.001) if win else cash(-.001,-.001)),
+                                "mode":mode,"signal":{"fee_tvl_ratio":value}})
+    grouped=weights_module.mode_weights(independent,{})
+    assert grouped["pulse"]["weights"]["fee_tvl_ratio"] < 1
+    assert grouped["turnover"]["weights"]["fee_tvl_ratio"] > 1
+    assert grouped["casual"]["status"] == "insufficient_samples"
+    pulse_only=[r for r in independent if r["mode"]=="pulse"]
+    assert weights_module.mode_weights(pulse_only,{})["pulse"]==grouped["pulse"]
+    scarce=weights_module.mode_weights(pulse_only[:9],grouped)
+    assert scarce["pulse"]["status"]=="insufficient_samples" and not scarce["pulse"]["weights"]
+    one_class=[dict(r,**cash(.001,.001)) for r in pulse_only]
+    assert weights_module.mode_weights(one_class,{})["pulse"]["status"]=="insufficient_samples"
+    assert weights_module.mode_weights(independent,grouped)["pulse"]["weights"]["fee_tvl_ratio"] < grouped["pulse"]["weights"]["fee_tvl_ratio"]
+    # Malformed numeric values cannot poison a mode's finite weight envelope.
+    for invalid in [True,float("nan"),float("inf")]:
+        bad={**cash(.001,.001),"mode":"pulse","signal":{"fee_tvl_ratio":invalid}}
+        assert weights_module.mode_weights(independent+[bad],{})["pulse"]["weights"] == grouped["pulse"]["weights"]
+    envelope={"weights":{"fee_tvl_ratio":2.5},"weight_scope":weights_module.WEIGHT_SCOPE,
+              "outcome_basis":weights_module.OUTCOME_BASIS,"by_mode":grouped}
+    for mode in weights_module.MODES:
+        with patch.object(pipeline,"run_command",return_value=(json.dumps(envelope),"",0)):
+            selected=pipeline.load_signal_weights(mode)
+            assert selected==grouped[mode]["weights"]
+            candidates=[{"name":"low","score":70,"fee_tvl_ratio":1},
+                        {"name":"high","score":70,"fee_tvl_ratio":10}]
+            ranked=pipeline.apply_batch_conviction(candidates,mode)
+            if mode=="pulse": assert ranked[1]["score"] < ranked[0]["score"]
+            if mode=="turnover": assert ranked[1]["score"] > ranked[0]["score"]
+        with patch.object(pipeline,"run_command_json",side_effect=[([],None),([json.dumps(envelope)],None)]):
+            assert pipeline.ai_pick_context(mode)["signal_weights"]["weights"]==selected
+    with patch.object(weights_module,"run_command",return_value="OK") as published, \
+            tempfile.TemporaryDirectory() as directory, \
+            patch.object(weights_module,"WEIGHTS_PATH",str(Path(directory)/"weights.json")):
+        weights_module.save_weights(dict(envelope,last_recalc="now"))
+        payload=json.loads(shlex.split(published.call_args.args[0])[-1])
+        assert payload["by_mode"]==grouped and payload["weight_scope"]==weights_module.WEIGHT_SCOPE
     # Proved cash can disagree with the mark; legacy/unresolved marks retain
     # the existing conservative ranking penalty without being called cash.
     with patch.object(pipeline, "load_signal_weights", return_value={}):
