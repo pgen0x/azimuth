@@ -40,6 +40,14 @@ def tail(path, limit=500, budget=2*1024*1024):
 def event_time(row):
     return next((row[k] for k in ('ts','block_time','observed_at','closed_at','deployed_at','created_at','fetched_at') if isinstance(row.get(k),(int,float))),0)
 
+def route_evidence(message):
+    match=re.search(r'scanner\[([a-z]+)\]: entry_route=(hermes_ai|deterministic_fallback)(?: reason=([a-z_]+))?(?: http_status=(\d+))?(?: probe_cached=(true|false))?',message)
+    if not match: return None
+    return {'mode':match[1],'route':match[2],'fallback_reason':match[3] or None,
+            'http_status':int(match[4]) if match[4] else None,
+            'probe_cached':match[5]=='true' if match[5] else None,
+            'execution_verified':False}
+
 def select(d, keys): return {k:d.get(k) for k in keys.split()}
 
 def read_json(path):
@@ -116,9 +124,9 @@ def collect(profile, state):
         for line in route_log.stdout.splitlines():
             try: log=json.loads(line)
             except ValueError: continue
-            match=re.search(r'scanner\[([a-z]+)\]: entry_route=(hermes_ai|deterministic_fallback)(?: reason=([a-z_]+))?',log.get('MESSAGE',''))
-            if match:
-                events.append({'stage':'AI / fallback','time':int(log.get('__REALTIME_TIMESTAMP',0))/1e6,'source':'journalctl --user -u azimuth.service; last 100 route markers / 48 hours', 'evidence':{'mode':match[1],'route':match[2],'fallback_reason':match[3], 'execution_verified':False},'note':'Route observation only; no candidate or execution correlation is implied.'})
+            evidence=route_evidence(log.get('MESSAGE',''))
+            if evidence:
+                events.append({'stage':'AI / fallback','time':int(log.get('__REALTIME_TIMESTAMP',0))/1e6,'source':'journalctl --user -u azimuth.service; last 100 route markers / 48 hours', 'evidence':evidence,'note':'Route observation only; no candidate or execution correlation is implied.'})
     except (OSError,subprocess.TimeoutExpired): pass
     # Entry files supply explicit entry -> root -> position links; never infer links by time.
     entries=sorted((memory/'dlmm_entries').glob('*.json'),key=lambda p:p.stat().st_mtime,reverse=True)[:100]

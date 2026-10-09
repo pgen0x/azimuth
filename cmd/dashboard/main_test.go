@@ -48,6 +48,9 @@ func TestCollectorEvidenceBoundaries(t *testing.T) {
 	// Run the actual collector helpers with local synthetic evidence, without runtime probes.
 	code := strings.Split(collector, "if __name__=='__main__':")[0] + `
 import tempfile
+assert route_evidence('scanner[pulse]: entry_route=deterministic_fallback reason=http_error http_status=503 probe_cached=true; batch not sent to Hermes') == {'mode':'pulse','route':'deterministic_fallback','fallback_reason':'http_error','http_status':503,'probe_cached':True,'execution_verified':False}
+assert route_evidence('scanner[turnover]: entry_route=hermes_ai probe_cached=false; AI probe passed') == {'mode':'turnover','route':'hermes_ai','fallback_reason':None,'http_status':None,'probe_cached':False,'execution_verified':False}
+assert route_evidence('scanner[pulse]: cycle done') is None
 with tempfile.TemporaryDirectory() as tmp:
     path=Path(tmp)/'journal.jsonl'
     path.write_bytes(b'{"nav_sol":null}\ninvalid\n{"native_sol":0}\n{"partial":')

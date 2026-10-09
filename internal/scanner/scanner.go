@@ -160,6 +160,46 @@ type Scanner struct {
 	dep     *deploy.Runner
 	rhDep   rhRunner // uni_executor.js (v3)
 	rhDepV4 rhRunner // uni_v4_executor.js; disabled when unset
+	// pollAll runs modes sequentially, so one health probe can serve every mode
+	// within the configured poll interval without a lock.
+	aiProbeCheckedAt time.Time
+	aiProbeOutput    []byte
+	aiProbeErr       error
+	aiProbeTimedOut  bool
+}
+
+func (s *Scanner) probeAI(ctx context.Context) ([]byte, error, bool, bool) {
+	ttl := s.cfg.PollInterval
+	if ttl <= 0 {
+		ttl = time.Minute
+	}
+	if !s.aiProbeCheckedAt.IsZero() && time.Since(s.aiProbeCheckedAt) < ttl {
+		return s.aiProbeOutput, s.aiProbeErr, s.aiProbeTimedOut, true
+	}
+	args := strings.Fields(s.cfg.AIHealthCmd)
+	var output []byte
+	var err error
+	s.aiProbeTimedOut = false
+	if len(args) == 0 {
+		err = fmt.Errorf("empty AI health command")
+	} else {
+		// Include Python/config startup above the probe's 60s HTTP deadline.
+		probeCtx, cancel := context.WithTimeout(ctx, 65*time.Second)
+		output, err = exec.CommandContext(probeCtx, args[0], args[1:]...).CombinedOutput()
+		probeTimedOut := probeCtx.Err() == context.DeadlineExceeded
+		cancel()
+		if ctx.Err() != nil {
+			return output, err, probeTimedOut, false
+		}
+		s.aiProbeTimedOut = probeTimedOut
+	}
+	if ctx.Err() != nil {
+		return output, err, false, false
+	}
+	s.aiProbeCheckedAt = time.Now()
+	s.aiProbeOutput = append(s.aiProbeOutput[:0], output...)
+	s.aiProbeErr = err
+	return s.aiProbeOutput, s.aiProbeErr, s.aiProbeTimedOut, false
 }
 
 // rhRunner is the slice of *robinhood.Runner the deploy path uses, narrowed to an
@@ -1104,18 +1144,7 @@ func (s *Scanner) pollMode(ctx context.Context, mp meteora.ModeParams) {
 				log.Printf("scanner[%s]: entry_route=deterministic_fallback reason=webhook_unavailable; Hermes listener is not ready", mp.Mode)
 				useDirect = true
 			} else {
-				args := strings.Fields(s.cfg.AIHealthCmd)
-				// Include Python/config startup above the probe's 60s HTTP deadline.
-				probeCtx, cancel := context.WithTimeout(ctx, 65*time.Second)
-				var output []byte
-				var err error
-				if len(args) == 0 {
-					err = fmt.Errorf("empty AI health command")
-				} else {
-					output, err = exec.CommandContext(probeCtx, args[0], args[1:]...).CombinedOutput()
-				}
-				probeTimedOut := probeCtx.Err() == context.DeadlineExceeded
-				cancel()
+				output, err, probeTimedOut, probeCached := s.probeAI(ctx)
 				if ctx.Err() != nil {
 					return
 				}
@@ -1132,12 +1161,12 @@ func (s *Scanner) pollMode(ctx context.Context, mp meteora.ModeParams) {
 						reason = "command_timeout"
 					}
 					if status, ok := aiProbeHTTPStatus(output); ok {
-						log.Printf("scanner[%s]: entry_route=deterministic_fallback reason=%s http_status=%d; batch not sent to Hermes", mp.Mode, reason, status)
+						log.Printf("scanner[%s]: entry_route=deterministic_fallback reason=%s http_status=%d probe_cached=%t; batch not sent to Hermes", mp.Mode, reason, status, probeCached)
 					} else {
-						log.Printf("scanner[%s]: entry_route=deterministic_fallback reason=%s; batch not sent to Hermes", mp.Mode, reason)
+						log.Printf("scanner[%s]: entry_route=deterministic_fallback reason=%s probe_cached=%t; batch not sent to Hermes", mp.Mode, reason, probeCached)
 					}
 				} else {
-					log.Printf("scanner[%s]: entry_route=hermes_ai AI probe passed", mp.Mode)
+					log.Printf("scanner[%s]: entry_route=hermes_ai probe_cached=%t; AI probe passed", mp.Mode, probeCached)
 				}
 			}
 		}

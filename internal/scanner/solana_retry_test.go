@@ -107,6 +107,47 @@ func TestAIPrimaryFallbackBeforeDispatch(t *testing.T) {
 	}
 }
 
+func TestAIHealthProbeCachedForPollInterval(t *testing.T) {
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "probe-runs")
+	script := filepath.Join(dir, "probe.sh")
+	writeProbe := func(body string) {
+		t.Helper()
+		content := fmt.Sprintf("#!/bin/sh\nprintf x >> %q\n%s\n", marker, body)
+		if err := os.WriteFile(script, []byte(content), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runCount := func() int {
+		t.Helper()
+		data, err := os.ReadFile(marker)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return len(data)
+	}
+	s := &Scanner{cfg: config.Config{AIHealthCmd: script, PollInterval: time.Minute}}
+
+	writeProbe("echo healthy")
+	if _, err, timedOut, cached := s.probeAI(context.Background()); err != nil || timedOut || cached {
+		t.Fatalf("first successful probe = err %v, timedOut %v, cached %v", err, timedOut, cached)
+	}
+	if _, err, _, cached := s.probeAI(context.Background()); err != nil || !cached || runCount() != 1 {
+		t.Fatalf("second probe = err %v, cached %v, runs %d; want cached result after one run", err, cached, runCount())
+	}
+
+	writeProbe("echo 'AI probe HTTP status: 503'; exit 11")
+	s.aiProbeCheckedAt = time.Now().Add(-2 * time.Minute)
+	out, err, _, cached := s.probeAI(context.Background())
+	status, statusOK := aiProbeHTTPStatus(out)
+	if err == nil || cached || !statusOK || status != 503 {
+		t.Fatalf("failed probe = status %q, err %v, cached %v", out, err, cached)
+	}
+	if _, err, _, cached := s.probeAI(context.Background()); err == nil || !cached || runCount() != 2 {
+		t.Fatalf("cached failure = err %v, cached %v, runs %d; want same failure without rerun", err, cached, runCount())
+	}
+}
+
 func testEntryRouting(t *testing.T, healthCmd string, status int, wantWebhook, wantDirect bool) {
 	t.Setenv("SOLANA_DELIVERY_PATH", filepath.Join(t.TempDir(), "deliveries.jsonl"))
 	t.Helper()
@@ -151,6 +192,7 @@ func testEntryRouting(t *testing.T, healthCmd string, status int, wantWebhook, w
 	if wantWebhook && status >= 400 {
 		// Model failure on the next poll must not replay an ambiguous delivery.
 		s.cfg.AIHealthCmd = "/bin/false"
+		s.aiProbeCheckedAt = time.Time{} // Simulate the next poll interval.
 		s.pollMode(context.Background(), meteora.ModeParams{Mode: "turnover", Timeframe: "30m", TfMinutes: 30})
 		if _, err := os.Stat(marker); !os.IsNotExist(err) {
 			t.Fatal("ambiguous webhook was replayed through direct deploy")
