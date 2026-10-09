@@ -191,26 +191,25 @@ def section_weights():
     except (OSError, json.JSONDecodeError) as exc:
         print(f"Unreadable ({exc}). Treat signal weighting as unknown; propose nothing about it.")
         return
-    weights = data.get("weights") or {}
-    lifts = data.get("lifts") or {}
     print(f"last recalc {data.get('last_recalc') or 'never'} "
           f"(recalc_count {data.get('recalc_count') or 0}); "
           f"outcomes: {data.get('outcome_basis') or 'legacy LP outcomes'}\n")
-    print("| signal | weight | lift |")
-    print("|---|---|---|")
-    for name in sorted(weights):
-        lift = lifts.get(name)
-        shown = "no read" if lift is None else f"{lift:+.4f}"
-        print(f"| {name} | {weights[name]:.3f} | {shown} |")
-    measured = [abs(v) for v in lifts.values() if v is not None]
-    if not measured:
-        print("\nNo lift was measurable this window. Propose nothing about entry signals.")
-    elif max(measured) < LIFT_NOISE_FLOOR:
-        print(f"\n**Every |lift| is below {LIFT_NOISE_FLOOR} — no entry signal separates winners from")
-        print("losers in this window.** The weights are converging toward 1.0 by design, and")
-        print("dlmm_pipeline.py skips any weight within 0.05 of 1.0. Do NOT propose entry-gate")
-        print("changes justified by these weights: they say the screen's inputs carry no")
-        print("predictive information, not that any particular one should move.")
+    groups = data.get("by_mode", {}) if data.get("weight_scope") == "entry_mode" else {"legacy global": data}
+    for mode, group in groups.items():
+        print(f"\nMode: {mode}; status: {group.get('status', 'legacy')}\n")
+        weights, lifts = group.get("weights") or {}, group.get("lifts") or {}
+        print("| signal | weight | lift |")
+        print("|---|---|---|")
+        for name in sorted(weights):
+            lift = lifts.get(name)
+            shown = "no read" if lift is None else f"{lift:+.4f}"
+            print(f"| {name} | {weights[name]:.3f} | {shown} |")
+        measured = [abs(v) for v in lifts.values() if v is not None]
+        if not measured:
+            print("\nNo lift was measurable for this mode. Propose nothing about its entry signals.")
+        elif max(measured) < LIFT_NOISE_FLOOR:
+            print(f"\nEvery |lift| for {mode} is below {LIFT_NOISE_FLOOR}. Do NOT propose entry-gate")
+            print("changes justified by these weights. The ranker skips weights within 0.05 of neutral.")
 
 
 def section_holds(closes):
