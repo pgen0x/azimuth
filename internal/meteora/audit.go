@@ -20,7 +20,11 @@ const jupAssetSearchURL = "https://datapi.jup.ag/v1/assets/search"
 // but Jupiter's `fees` figure runs slightly off the accurate (GMGN) number, so
 // the daemon only SHIPS global_fees_sol in the payload and leaves that reject
 // to the agent prompt, where the value is visible next to the decision.
-const maxBotHoldersPct = 30.0
+const (
+	maxBotHoldersPct = 30.0
+	// Pulse cap is provisional: 30d marks worsen above 25%; verify matched cash before relaxing.
+	maxPulseBotHoldersPct = 25.0
+)
 
 // AuditInfo is the subset of the Jupiter asset audit the screen uses.
 // Pointers distinguish "absent from the API" (nil, fail-open) from zero.
@@ -90,12 +94,16 @@ func FetchAudit(mint string) (*AuditInfo, bool) {
 
 // AuditReject returns a non-empty reason when the audit hard-fails a token.
 // nil fields pass (fail-open).
-func AuditReject(a *AuditInfo) string {
+func AuditReject(a *AuditInfo, mode string) string {
 	if a == nil {
 		return ""
 	}
-	if a.BotHoldersPct != nil && *a.BotHoldersPct > maxBotHoldersPct {
-		return fmt.Sprintf("bot holders %.1f%% > %.0f%%", *a.BotHoldersPct, maxBotHoldersPct)
+	limit := maxBotHoldersPct
+	if mode == "pulse" {
+		limit = maxPulseBotHoldersPct
+	}
+	if a.BotHoldersPct != nil && *a.BotHoldersPct > limit {
+		return fmt.Sprintf("bot holders %.1f%% > %.0f%%", *a.BotHoldersPct, limit)
 	}
 	return ""
 }
