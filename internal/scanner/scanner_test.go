@@ -43,6 +43,28 @@ func TestWebhookListenerReady(t *testing.T) {
 	}
 }
 
+func TestAIProbeHTTPStatus(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		out  string
+		want int
+		ok   bool
+	}{
+		{name: "server error", out: "AI probe HTTP status: 502\n", want: 502, ok: true},
+		{name: "rate limit", out: "AI probe HTTP status: 429\n", want: 429, ok: true},
+		{name: "missing", out: "AI probe unavailable: HTTPError\n"},
+		{name: "malformed", out: "AI probe HTTP status: secret\n"},
+		{name: "out of range", out: "AI probe HTTP status: 999\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := aiProbeHTTPStatus([]byte(tc.out))
+			if got != tc.want || ok != tc.ok {
+				t.Fatalf("aiProbeHTTPStatus(%q) = (%d, %v), want (%d, %v)", tc.out, got, ok, tc.want, tc.ok)
+			}
+		})
+	}
+}
+
 func (f *fakeRunner) Enabled() bool { return f.enabled }
 
 func (f *fakeRunner) Inventory(context.Context) (robinhood.Inventory, error) {

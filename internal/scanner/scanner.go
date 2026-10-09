@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os/exec"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -133,6 +134,21 @@ func rejectSummary(rejects map[string]int) string {
 		parts = append(parts, fmt.Sprintf("%s=%d", k, rejects[k]))
 	}
 	return strings.Join(parts, " ")
+}
+
+func aiProbeHTTPStatus(output []byte) (int, bool) {
+	const prefix = "AI probe HTTP status: "
+	for _, line := range strings.Split(string(output), "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, prefix) {
+			continue
+		}
+		status, err := strconv.Atoi(strings.TrimSpace(strings.TrimPrefix(line, prefix)))
+		if err == nil && status >= 100 && status <= 599 {
+			return status, true
+		}
+	}
+	return 0, false
 }
 
 // Scanner polls the Meteora discovery API for each enabled mode, screens pools,
@@ -1091,11 +1107,12 @@ func (s *Scanner) pollMode(ctx context.Context, mp meteora.ModeParams) {
 				args := strings.Fields(s.cfg.AIHealthCmd)
 				// Include Python/config startup above the probe's 60s HTTP deadline.
 				probeCtx, cancel := context.WithTimeout(ctx, 65*time.Second)
+				var output []byte
 				var err error
 				if len(args) == 0 {
 					err = fmt.Errorf("empty AI health command")
 				} else {
-					err = exec.CommandContext(probeCtx, args[0], args[1:]...).Run()
+					output, err = exec.CommandContext(probeCtx, args[0], args[1:]...).CombinedOutput()
 				}
 				probeTimedOut := probeCtx.Err() == context.DeadlineExceeded
 				cancel()
@@ -1114,7 +1131,11 @@ func (s *Scanner) pollMode(ctx context.Context, mp meteora.ModeParams) {
 					if probeTimedOut {
 						reason = "command_timeout"
 					}
-					log.Printf("scanner[%s]: entry_route=deterministic_fallback reason=%s; batch not sent to Hermes", mp.Mode, reason)
+					if status, ok := aiProbeHTTPStatus(output); ok {
+						log.Printf("scanner[%s]: entry_route=deterministic_fallback reason=%s http_status=%d; batch not sent to Hermes", mp.Mode, reason, status)
+					} else {
+						log.Printf("scanner[%s]: entry_route=deterministic_fallback reason=%s; batch not sent to Hermes", mp.Mode, reason)
+					}
 				} else {
 					log.Printf("scanner[%s]: entry_route=hermes_ai AI probe passed", mp.Mode)
 				}
