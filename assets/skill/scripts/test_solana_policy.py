@@ -151,6 +151,27 @@ def main():
             "global_fees_sol": .2, "ignored": 1.4}}]:
         with patch.object(pipeline, "run_command", return_value=(json.dumps(stored), "", 0)):
             assert pipeline.load_signal_weights() == {}
+    # Equal evidence cannot favor whichever pool happens to arrive later.
+    # Compare every input permutation, with both rewards and penalties.
+    import itertools
+    for weight in [1.4, .6]:
+        with patch.object(pipeline,"load_signal_weights",return_value={"holders":weight}):
+            records=[{"name":name,"score":70,"holders":holders}
+                     for name,holders in [("low",100),("tie-a",200),("tie-b",200),("high",300)]]
+            expected=None
+            for order in itertools.permutations(records):
+                result=pipeline.apply_batch_conviction([dict(c) for c in order],"turnover")
+                scores={c["name"]:c["score"] for c in result}
+                if expected is None: expected=scores
+                assert scores==expected
+                assert scores["tie-a"]==scores["tie-b"]
+                assert abs(scores["tie-a"]-(70+(weight-1)*5))<1e-9
+                assert scores["low"]==70 and abs(scores["high"]-(70+(weight-1)*10))<1e-9
+            # Constant and unavailable values must not move conviction floors.
+            for values in [[100,100,100],[100,None,True,float("nan"),float("inf"),"100"]]:
+                result=pipeline.apply_batch_conviction([{"name":str(i),"score":70,"holders":v}
+                                                       for i,v in enumerate(values)],"turnover")
+                assert len(result)==len(values) and all(c["score"]==70 for c in result)
     with tempfile.TemporaryDirectory() as directory:
         root=Path(directory);(root/"memories").mkdir()
         closes=root/"memories/dlmm_closes.jsonl"
