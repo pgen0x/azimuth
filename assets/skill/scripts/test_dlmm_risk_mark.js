@@ -96,6 +96,9 @@ const rejects = callback => assert.throws(callback, /Native risk mark unavailabl
   assert.equal(mark.source, SOURCE); assert.equal(mark.pnl_sol, -.008); assert.equal(mark.pnl_pct, -8);
   assert.equal(mark.current_value_sol, .09); assert.equal(mark.unclaimed_fees_sol, .002);
   assert.equal(mark.value_lamports_upper, "92000000");
+  assert.deepEqual(mark.bin_observation, {version: 1, bin_step: 100, sol_is_x: false, bins: [
+    {id: -1, liquidity_raw: "100", x_raw: "10000000", y_raw: "0", fee_x_raw: "1000000", fee_y_raw: "0"},
+    {id: 0, liquidity_raw: "200", x_raw: "0", y_raw: "80000000", fee_x_raw: "0", fee_y_raw: "1000000"}]});
   mark = markInventory(context, native, data, {activeId: -2, binStep: 125}, 100000000n);
   assert.equal(mark.value_lamports_upper, ((81000000n*6561n + 11000000n*6400n + 6560n)/6561n).toString());
   assert.equal(mark.in_range, false);
@@ -141,6 +144,7 @@ const rejects = callback => assert.throws(callback, /Native risk mark unavailabl
   const run = sandbox.module.exports.getPositionRiskMark;
   mark = await run(entry.pool, entry.position); assert.equal(mark.success, true); assert.equal(mark.pnl_pct, -7.999983439997019);
   assert.equal(mark.pool_price, .00125);
+  assert.equal(mark.bin_observation.bins.length, 2);
   assert.equal(signerCalls, 0); assert.equal(rpcCalls, 2);
   sandbox.process.env.SOLANA_PUBLIC_KEY = "foreign-profile-wallet";
   assert.equal((await run(entry.pool, entry.position)).success, false); assert.equal(rpcCalls, 2);

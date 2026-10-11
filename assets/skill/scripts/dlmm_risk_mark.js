@@ -147,6 +147,7 @@ function markInventory(context, native, data, lbPair, deposit) {
     && Array.isArray(data.positionBinData) && data.positionBinData.length === upper-lower+1,
     "incomplete position bin coverage");
   let x = 0n, y = 0n, fx = 0n, fy = 0n, fundedBins = 0;
+  const observedBins = [];
   for (const [index, bin] of data.positionBinData.entries()) {
     const share = raw(native.liquidityShares[index], 128);
     check(bin.binId === lower + index && raw(bin.positionLiquidity, 128) === share,
@@ -157,6 +158,9 @@ function markInventory(context, native, data, lbPair, deposit) {
     if (share > 0n) fundedBins++;
     x += raw(bin.positionXAmount); y += raw(bin.positionYAmount);
     fx += raw(bin.positionFeeXAmount); fy += raw(bin.positionFeeYAmount);
+    observedBins.push({id: bin.binId, liquidity_raw: share.toString(),
+      x_raw: raw(bin.positionXAmount).toString(), y_raw: raw(bin.positionYAmount).toString(),
+      fee_x_raw: raw(bin.positionFeeXAmount).toString(), fee_y_raw: raw(bin.positionFeeYAmount).toString()});
   }
   check(fundedBins > 0 && raw(data.totalXAmount) === x && raw(data.totalYAmount) === y
     && raw(data.feeX) === fx && raw(data.feeY) === fy, "inventory totals disagree");
@@ -187,6 +191,7 @@ function markInventory(context, native, data, lbPair, deposit) {
     deposit_lamports: deposit.toString(), value_lamports_upper: totalUpper.toString(),
     active_bin: active, lower_bin: lower, upper_bin: upper, in_range: active >= lower && active <= upper,
     funding_signature: submission.signature, funded_bins: fundedBins,
+    bin_observation: {version: 1, bin_step: step, sol_is_x: entry.sol_is_x, bins: observedBins},
     basis: "native inventory and unclaimed fees at active-bin spot, rounded up; actual initial SOL transfer; excludes rent, network and exit costs"};
 }
 
