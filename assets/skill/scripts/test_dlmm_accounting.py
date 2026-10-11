@@ -443,3 +443,83 @@ empty=matched_refund_cash_cohort(dict(chains=ledger["chains"],rent_refund_groups
 assert empty["cohort_cash_lower_sol"] is None and empty["cash_positive_rate"] is None
 assert empty["unmeasured_roots"]==5
 print("Evaluation matched refunds, cohort boundaries, fee conservation and unknown denominators passed")
+
+# A swap may return an account's rent inside its already-recorded wallet cash.
+# Prove the entire funded lifecycle; never add its rent to that cash again.
+inline_item=dict(account="inline-ata",mint="TOKEN",lamports=200)
+inline_facts={
+    "fund":dict(signature="fund",wallet="wallet",schema_version=11,slot=10,block_time=100,
+                observed_at=105,failed=False,wallet_delta_lamports=-1210,fee_lamports=10,
+                token_rent_evidence=dict(version=1,funded=[inline_item],refunded=[])),
+    "failed":dict(signature="failed",wallet="wallet",slot=20,block_time=150,
+                  observed_at=151,failed=True,wallet_delta_lamports=-5,fee_lamports=5),
+    "inline-close":dict(signature="inline-close",wallet="wallet",schema_version=12,slot=30,
+                        block_time=180,observed_at=181,failed=False,wallet_delta_lamports=1190,
+                        fee_lamports=10,token_rent_evidence=dict(version=1,funded=[],refunded=[],
+                        refunds_unmeasured=True,inline_closed=[dict(account="inline-ata",mint="TOKEN",pre_lamports=200)])),
+}
+inline_chain=dict(root_chain_id="inline",positions=["inline"],recorded_signatures=list(inline_facts),
+                  accounting_status="settled_cash",first_activity=100,last_activity=180,
+                  wallet_delta_lamports=-25,network_fee_lamports=25,lp_pnl_sol=.00001)
+inline_history=dict(version=1,wallet="wallet",complete=True,observed_at=220,**inline_item,
+                    refund_signature="inline-close",funding_signature="fund",history_signatures=["failed","fund"])
+inline_args=[[inline_chain],inline_facts,[inline_history]]
+inline_before=deepcopy(inline_args)
+inline_group,=rent_refund_groups(*inline_args,220)
+assert inline_args==inline_before
+assert inline_group["cash_with_matched_refunds_sol"]==-25/1e9
+assert inline_group["network_fee_sol"]==25/1e9
+assert inline_group["refund_signatures"]==inline_group["refund_components"]==[]
+assert refund_cash_bounds(inline_group,{"inline":inline_chain},{"inline"})==(-25,-25)
+inline_ledger=dict(chains=[inline_chain],rent_refund_groups=[inline_group])
+inline_view=matched_refund_cash_cohort(inline_ledger,100,220)
+assert inline_view["measured_roots"]==inline_view["cash_negative_roots"]==1
+assert inline_view["cohort_cash_lower_sol"]==inline_view["cohort_cash_upper_sol"]==-25/1e9
+assert pool_cash_history([dict(position="inline",pool="P",ts=180)],inline_ledger,220)["P"]["prior_net_pnl_sol"]==-25/1e9
+assert rent_refund_groups(*inline_args,219)==[]
+for mutate in (
+    lambda a:a[0][0].update(accounting_status="incomplete"),
+    lambda a:a[0][0].update(last_activity=221),
+    lambda a:a[0][0].update(wallet_delta_lamports=-24),
+    lambda a:a[0][0].update(network_fee_lamports=20),
+    lambda a:a[0].append(dict(root_chain_id="other",recorded_signatures=["fund"])),
+    lambda a:a[1]["fund"].update(wallet="other"),
+    lambda a:a[1]["fund"].update(observed_at=221),
+    lambda a:a[1]["inline-close"].update(slot=10),
+    lambda a:a[1]["inline-close"].update(schema_version=11),
+    lambda a:a[1]["inline-close"].update(landed=False),
+    lambda a:a[1]["inline-close"].update(block_time=float("nan")),
+    lambda a:a[1]["inline-close"].update(token_rent_evidence=None),
+    lambda a:a[1]["inline-close"]["token_rent_evidence"].update(refunds_unmeasured=False),
+    lambda a:a[1]["inline-close"]["token_rent_evidence"].update(inline_closed=[]),
+    lambda a:a[1]["fund"]["token_rent_evidence"]["funded"][0].update(lamports=201),
+    lambda a:a[1]["fund"]["token_rent_evidence"]["funded"].append(dict(account="unclosed",mint="TOKEN",lamports=200)),
+    lambda a:a[2][0].update(complete=False),
+    lambda a:a[2][0].update(funding_signature="unknown"),
+    lambda a:a[2][0].update(history_signatures=["unknown","fund"]),
+    lambda a:a[2][0].update(history_signatures=["fund","fund"]),
+):
+    invalid=deepcopy(inline_args);mutate(invalid)
+    assert rent_refund_groups(*invalid,220)==[]
+for mutate in (
+    lambda g:g.pop("inline_rent_pairs"),
+    lambda g:g.update(cash_with_matched_refunds_sol=175/1e9),
+    lambda g:g["inline_rent_pairs"][0].update(close_signature="outside"),
+    lambda g:g["inline_rent_pairs"][0].update(funding_signature=[]),
+    lambda g:g["inline_rent_pairs"][0].update(lamports=True),
+    lambda g:g["inline_rent_pairs"].append(g["inline_rent_pairs"][0]),
+):
+    invalid=deepcopy(inline_group);mutate(invalid)
+    assert refund_cash_bounds(invalid,{"inline":inline_chain},{"inline"}) is None
+
+# The learner must see the negative wallet result despite a positive LP valuation.
+from unittest.mock import patch
+import dlmm_weights
+with TemporaryDirectory() as root:
+    file=Path(root)/"closes.jsonl"
+    file.write_text(json.dumps(dict(position="inline",ts=180,signal=dict(volume_m5=1),pnl_sol=.00001))+"\n")
+    with patch.object(dlmm_weights,"CLOSES_PATH",str(file)), patch.object(dlmm_weights,"report",return_value=inline_ledger), patch.object(dlmm_weights.time,"time",return_value=220):
+        learned,=dlmm_weights.load_recent_closes()
+        assert dlmm_weights.outcome_sol(learned)==-25/1e9
+        assert learned["cash_pnl_lower_sol"]==learned["cash_pnl_upper_sol"]==-25/1e9
+print("Owned inline rent lifecycle, exact cash conservation, hindsight guards and negative learner labels passed")

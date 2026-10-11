@@ -301,7 +301,8 @@ These LP valuations still exclude wallet transaction costs and later rent refund
 
 When wallet coverage is complete and classified, the collector records at most
 one account-history lookup per cycle in `dlmm_rent_history.jsonl`. Candidates
-require existing finalized funding and pure-close refund evidence for the same
+require existing finalized funding and pure-close refund or final outer token-account
+closure evidence for the same
 account, mint and rent amount. The bounded history must reach a funding signature,
 and every intervening signature must match a cached wallet fact and failure status.
 Completed evidence is cached; incomplete attempts rotate for retry. RPC failover
@@ -331,6 +332,25 @@ both. Individual root cash, re-entry decisions and per-root win rates are
 unchanged. Groups are not full NAV or proof all historical refunds are measured.
 Evaluation includes only groups whose whole activity lies within its window;
 history evidence observed later cannot alter earlier reports or decisions.
+
+A root can also close its own funded token account in the final instruction of
+a swap. Schema 12 records this as `inline_closed` lifecycle evidence while
+retaining `refunds_unmeasured`: the aggregate swap credit is not a measured rent
+refund or pure swap proceeds. The same bounded finalized account history must
+reach the proved funding transaction, with every intervening signature owned
+uniquely by that root. Every funded non-native account must match a closure with
+the same mint and lamports; shared users, missing histories and unmatched accounts
+leave this path unmeasured. WSOL closures are excluded.
+
+Such a settled root produces a group with `inline_rent_pairs` and empty external
+refund components. Its cash equals the recorded wallet delta exactly, including
+failed transaction fees. No rent credit or additional fee subtraction is applied.
+Evaluation, advisory pool history and the signal learner can consume this exact
+cash outcome, including negative outcomes with positive LP PnL. New evidence keeps
+its observation time and does not retroactively change earlier decisions.
+Schema 11 mixed-close facts are optionally refreshed within the existing
+60-transaction budget, after missing cash facts; unavailable optional metadata
+does not invalidate already-proved wallet coverage.
 
 ### Signal learner outcomes
 

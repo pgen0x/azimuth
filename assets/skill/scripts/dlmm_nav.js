@@ -213,14 +213,27 @@ function tokenRentEvidence(tx, wallet) {
   // Mixed closes can contain rent in the wallet delta without proving its amount.
   const closes=instructions.filter(i=>TOKEN_PROGRAMS.includes(i.programId?.toString())
     && i.parsed?.type==='closeAccount' && i.parsed.info?.destination===wallet);
-  if (closes.some(i=>{
+  const nonNativeCloses=closes.filter(i=>{
     const account=i.parsed.info.account, n=keys.indexOf(account);
     const token=(meta.preTokenBalances || []).find(t=>t.accountIndex===n);
     return token ? token.mint!==SOL : !(meta.preBalances[n]===0 && instructions.some(x=>
       x.programId?.toString()===i.programId?.toString()
       && ['initializeAccount','initializeAccount2','initializeAccount3'].includes(x.parsed?.type)
       && x.parsed.info?.account===account && x.parsed.info.mint===SOL));
-  })) evidence.refunds_unmeasured=true;
+  });
+  if (nonNativeCloses.length) evidence.refunds_unmeasured=true;
+  // An executor-appended final close proves this account was closed, even
+  // though a mixed swap's aggregate wallet credit cannot isolate its rent.
+  // Keep refunds_unmeasured: this is lifecycle evidence, never extra income.
+  const last=message.instructions.at(-1), info=last?.parsed?.info;
+  const n=keys.indexOf(info?.account), token=(meta.preTokenBalances || []).find(t=>t.accountIndex===n);
+  if (nonNativeCloses.length===1 && nonNativeCloses[0]===last
+      && keys[0]===wallet && message.accountKeys[0].signer===true
+      && info.owner===wallet && n>0 && token?.owner===wallet && token.mint!==SOL
+      && Number.isSafeInteger(meta.preBalances[n]) && meta.preBalances[n]>0
+      && meta.postBalances[n]===0 && !(meta.postTokenBalances || []).some(t=>t.accountIndex===n)) {
+    evidence.inline_closed=[{account:keys[n],mint:token.mint,pre_lamports:meta.preBalances[n]}];
+  }
   // Accept refunds only for pure empty-token-account closes with every native
   // balance change explained. Combined swaps/LP closes stay unmeasured here.
   if (keys[0]!==wallet || message.accountKeys[0].signer!==true
@@ -245,6 +258,7 @@ function tokenRentEvidence(tx, wallet) {
       && changes.every((n,i)=>Number.isSafeInteger(n)&&meta.postBalances[i]-meta.preBalances[i]===n)) {
     evidence.refunded=refunds;
     delete evidence.refunds_unmeasured;
+    delete evidence.inline_closed;
   }
   return evidence;
 }
@@ -355,7 +369,7 @@ function transactionFact(tx, wallet, signature, event) {
         || TOKEN_PROGRAMS.includes(id) && ['transfer','transferChecked','getAccountDataSize','initializeImmutableOwner','initializeAccount','initializeAccount2','initializeAccount3'].includes(type);
     });
   const maintenance=!event ? (rentMaintenance(tx,wallet) || pumpMaintenance(tx,wallet)) : null;
-  return {schema_version:11,event_position:event?.position,signature, wallet, slot: tx.slot, block_time: tx.blockTime, observed_at: now(), failed: !!meta.err,
+  return {schema_version:12,event_position:event?.position,signature, wallet, slot: tx.slot, block_time: tx.blockTime, observed_at: now(), failed: !!meta.err,
     wallet_delta_lamports: meta.postBalances[index]-meta.preBalances[index], fee_lamports: index === 0 ? meta.fee : 0,
     token_deltas_raw: Object.fromEntries(Object.entries(tokenDeltas).map(([m,a]) => [m,a.toString()])),
     token_pre_balances_raw: Object.fromEntries(Object.entries(tokenPre).map(([m,a]) => [m,a.toString()])),
@@ -374,7 +388,10 @@ async function collectRentHistory({dir, wallet, PublicKey, rpc, cache}) {
   const candidates=[];
   for (const refund of cache.values()) {
     if (refund.wallet!==wallet || refund.failed || refund.landed===false) continue;
-    for (const item of refund.token_rent_evidence?.refunded || []) {
+    const evidence=refund.token_rent_evidence;
+    const items=evidence?.refunded?.length ? evidence.refunded
+      : (evidence?.inline_closed || []).map(i=>({account:i.account,mint:i.mint,lamports:i.pre_lamports}));
+    for (const item of items) {
       const prior=previous.get(`${refund.signature}:${item.account}`);
       if (prior?.complete) continue;
       const funded=[...cache.values()].filter(f=>f.wallet===wallet && !f.failed && f.landed!==false
@@ -440,8 +457,13 @@ async function collect({dir, wallet, PublicKey, rpc, historyOnly=false}) {
     && (!(events.get(r.signature)?.kind==='swap' && !events.get(r.signature)?.position) || f.token_pre_balances_raw!=null)
     && f.event_position===events.get(r.signature)?.position;};
   let fetched = 0;
-  for (const r of signatures) {
-    if (currentFact(r)) continue;
+  // Optional lifecycle evidence must not invalidate already proved balances
+  // or starve missing transactions. Both queues share the existing 60-fetch cap.
+  const needsInline=f=>f?.schema_version===11 && f.classification==='recorded_bot'
+    && f.token_rent_evidence?.refunds_unmeasured===true;
+  const pending=[...signatures.filter(r=>!currentFact(r)),
+    ...signatures.filter(r=>currentFact(r)&&needsInline(cache.get(r.signature)))];
+  for (const r of pending) {
     if (fetched++ >= 60) break; // Each invocation resumes from the durable cache.
     try {
       const tx = await rpc(c => parsedAccountingTransaction(c,r.signature));
