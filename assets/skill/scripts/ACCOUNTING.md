@@ -137,7 +137,9 @@ exit policy are unknown, so a modeled fee or IL advantage is not deployable prof
 
 The evaluator also reports `bin_width_holding_replay`. It requires a recorded
 close plus account-deletion evidence observed by the evaluation cutoff, then
-compares both allocations at the last bin observation at or before that close.
+compares both allocations at the last bin observation at or before the finalized
+transaction's block time. A delayed close journal cannot extend the holding
+period; repeated proof uses the earliest valid finalized close time.
 The observation must be no more than 600 seconds old; post-close samples and the
 normal fixed-horizon terminal grace cannot enter this view. Missing close proof
 or a missing/stale pre-close observation remains unmeasured. Both diagnostics use
