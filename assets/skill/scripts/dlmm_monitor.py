@@ -59,6 +59,33 @@ def position_bin_bounds(pos_addr, pool, pnl_data=None):
     return None, None
 
 
+def verified_risk_mark(data, pool, position, now):
+    """Accept only a fresh, self-consistent native mark for this exact position."""
+    if not isinstance(data, dict) or data.get("success") is not True:
+        return False
+    if (data.get("source") != "onchain_sol_inventory" or data.get("pool") != pool
+            or data.get("position") != position or data.get("pnl_currency") != "SOL"):
+        return False
+    for key in ("pnl_pct", "pnl_sol", "observed_at"):
+        value = data.get(key)
+        if type(value) not in (int, float) or not math.isfinite(value):
+            return False
+    if not -5 <= now - data["observed_at"] <= 30:
+        return False
+    amounts = [data.get(key) for key in ("deposit_lamports", "value_lamports_upper")]
+    if not all(isinstance(v, str) and re.fullmatch(r"[0-9]{1,16}", v) for v in amounts):
+        return False
+    deposit, value = map(int, amounts)
+    if not 0 < deposit <= 2**53-1 or not 0 <= value <= 2**53-1:
+        return False
+    if (not math.isclose(data["pnl_sol"], (value-deposit)/1e9, abs_tol=1e-12)
+            or not math.isclose(data["pnl_pct"], (value-deposit)/deposit*100, abs_tol=1e-9)):
+        return False
+    active, lower, upper = (data.get(key) for key in ("active_bin", "lower_bin", "upper_bin"))
+    return (all(type(v) is int for v in (active, lower, upper)) and lower <= upper
+            and type(data.get("in_range")) is bool and data["in_range"] == (lower <= active <= upper))
+
+
 def get_meteora_portfolio_positions(wallet_address):
     """Returns dict keyed by position address using Meteora Portfolio HTTP API.
     More reliable than DLMM SDK getAllLbPairPositionsByUser which requires fully initialized bin arrays."""
@@ -268,20 +295,19 @@ EMERGENCY_SL_BUFFER_PCT = 3.0
 # API returns pnlPctChange=-100 for positions it hasn't indexed yet (fresh deploy or
 # same-pool re-entry) — observed live as healthy positions force-closed and booked
 # as total losses while their on-chain close txs returned full funds. A suspect read
-# must be confirmed by the on-chain executor `pnl` before any close rule may act on
+# must be confirmed by the independent executor `pnl-onchain` before close rules act on
 # it; if the executor can't answer either, the position is skipped for one tick and
 # only a second consecutive suspect tick is allowed through.
 SUSPECT_PNL_PCT = -90.0
 SUSPECT_PNL_RETRY_TTL_SECS = 300
-# ...and the executor's own confirmation is worth nothing while the position is this
-# young: `pnl` reads the same not-yet-indexed state the Portfolio API does, so both
+# The legacy executor `pnl` reads the same not-yet-indexed API, so both
 # sides agreed on -100.00% three times in 48h (2026-08-17..18) and the EMERGENCY SL
 # closed three healthy positions at age 0.0-0.1m. Every one returned its full deposit
 # on-chain (deposit == withdrawal, 0.0000 SOL realized) while the journal booked
 # -1.41 SOL of loss that never happened — money the stats, the weight learner and the
-# daily book all then treated as real. Under this age a catastrophic read is a skipped
-# tick, never a close. A genuine collapse is still covered: the rug-velocity rule
-# reads 5m PRICE candles, not a position mark, so the indexing gap cannot mask it.
+# daily book all then treated as real. Under this age an unverified catastrophic
+# read remains a skipped tick. A complete native inventory/funding proof can now
+# confirm a genuine loss even during this grace period.
 SUSPECT_PNL_MIN_AGE_MINUTES = 3.0
 # Trailing TP must lock at least this much (≈ round-trip swap cost) to count as a
 # take-profit. Below it, a floor breach gets one-tick gap-through grace first.
@@ -2059,28 +2085,26 @@ def main():
         suspect_trigger_pct = SUSPECT_PNL_PCT
         if suspect_age_min < SUSPECT_PNL_MIN_AGE_MINUTES:
             suspect_trigger_pct = max(SUSPECT_PNL_PCT, stop_loss_pct - EMERGENCY_SL_BUFFER_PCT)
-        if api_available and bp and pnl_pct <= suspect_trigger_pct:
-            verify_data, verify_err = run_command_json(f"node {EXECUTOR_PATH} pnl {pool} {pos_addr}")
-            if verify_data and verify_data.get("success") != False:
-                v_pct = float(verify_data.get("pnl_pct", pnl_pct))
-                if v_pct <= suspect_trigger_pct and suspect_age_min < SUSPECT_PNL_MIN_AGE_MINUTES:
-                    print(f"🛡️ SUSPECT PnL: both sources read {v_pct:.2f}% but {pair} is only "
-                          f"{suspect_age_min:.1f}m old (< {SUSPECT_PNL_MIN_AGE_MINUTES:.0f}m) — "
-                          f"indexing gap, not a loss; skipping this tick")
-                    run_command(f"redis-cli set \"{suspect_key}\" {int(now)} ex {SUSPECT_PNL_RETRY_TTL_SECS}")
-                    continue
+        if not is_dry_run_stored and pnl_pct <= suspect_trigger_pct:
+            verify_data, verify_err = run_command_json(
+                f"node {shlex.quote(EXECUTOR_PATH)} pnl-onchain {shlex.quote(pool)} {shlex.quote(pos_addr)}",
+                timeout=8)
+            if verified_risk_mark(verify_data, pool, pos_addr, time.time()):
+                v_pct = verify_data["pnl_pct"]
                 if v_pct > suspect_trigger_pct:
-                    print(f"🛡️ SUSPECT PnL: Portfolio API says {pnl_pct:.2f}% but on-chain executor says {v_pct:+.2f}% — using on-chain read")
-                    pnl_pct = v_pct
-                    pnl_sol_actual = None  # API SOL figure is equally suspect
-                    in_range = verify_data.get("in_range", in_range)
-                    if float(verify_data.get("fee_per_tvl_24h", 0.0)) > 0:
-                        fee_per_tvl_24h = float(verify_data.get("fee_per_tvl_24h", 0.0))
-                    run_command(f"redis-cli del \"{suspect_key}\"")
+                    print(f"🛡️ SUSPECT PnL: Portfolio API says {pnl_pct:.2f}% but native inventory says {v_pct:+.2f}% — using native spot mark")
                 else:
-                    print(f"⚠️ SUSPECT PnL CONFIRMED on-chain: executor also reads {v_pct:.2f}% — treating as real")
-                    run_command(f"redis-cli del \"{suspect_key}\"")
+                    print(f"⚠️ SUSPECT PnL CONFIRMED by native inventory: {v_pct:.2f}% — letting rules act")
+                pnl_pct = v_pct
+                pnl_sol_actual = verify_data["pnl_sol"]
+                in_range = verify_data["in_range"]
+                active_bin = verify_data["active_bin"]
+                pnl_data = verify_data
+                run_command(f"redis-cli del \"{suspect_key}\"")
             else:
+                if isinstance(verify_data, dict):
+                    verify_err = verify_err or verify_data.get("reason")
+                verify_err = verify_err or "native funding/inventory proof unavailable"
                 prev_suspect, _, _ = run_command(f"redis-cli get \"{suspect_key}\"")
                 if suspect_age_min < SUSPECT_PNL_MIN_AGE_MINUTES:
                     print(f"🛡️ SUSPECT PnL {pnl_pct:.2f}% unverifiable (executor error: {verify_err}) "
@@ -2094,7 +2118,7 @@ def main():
                     print(f"🛡️ SUSPECT PnL: {pnl_pct:.2f}% from Portfolio API, on-chain verify unavailable ({verify_err}) — skipping {pair} this tick, will confirm next tick")
                     run_command(f"redis-cli set \"{suspect_key}\" {int(now)} ex {SUSPECT_PNL_RETRY_TTL_SECS}")
                     continue
-        elif api_available and bp:
+        elif not is_dry_run_stored:
             run_command(f"redis-cli del \"{suspect_key}\"")
 
         # Pool aggregates do not include position bounds. Resolve exact-position
