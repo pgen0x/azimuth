@@ -187,6 +187,26 @@ systemctl --user status azimuth-sol-monitor   # verify it's running
 Without user systemd (e.g. macOS), run the loop some other persistent way:
 `nohup bash <profile>/skills/solana-dlmm/scripts/dlmm_monitor_loop.sh &`
 
+The AI exit-review cron follows the profile model and its fallback chain. Its
+momentum command prints only the exact Solana pool's address and `m5`/`h1`
+changes; the full API response can exhaust a smaller model's context.
+`install.sh` preserves existing jobs, so a reinstall does not migrate an old
+model pin or prompt. For an existing profile, release the old pin with:
+
+```bash
+hermes -p <your-profile> cron edit sol_dlmm_ai_exit_review --unpin
+hermes -p <your-profile> cron runs sol_dlmm_ai_exit_review --limit 5
+```
+
+Use the compact prompt in `assets/hermes/cron_jobs_template.json` when editing
+an existing job, replacing `__PROFILE__` with its absolute profile path.
+Hermes includes system instructions and tool schemas in addition to this prompt.
+Keep every fallback and any separately configured `auxiliary.compression` model
+within Hermes' supported context limits (currently at least 64K tokens); do not
+inflate a model's configured context length to hide its actual limit. A completed
+run with `wakeAgent=false` means the gate skipped AI; verify a review that woke
+the agent before declaring a model error resolved.
+
 ### Configuration
 
 `install.sh` prints the exact next steps for your profile path, but in short,
