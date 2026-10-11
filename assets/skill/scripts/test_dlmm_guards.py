@@ -20,13 +20,41 @@ def main():
              patch.object(monitor, "queue_settlement") as queue, \
              patch.object(monitor, "position_live_onchain", return_value=live), \
              patch.object(monitor, "position_residual_sol", return_value=0.12):
-            res, err = monitor.close_position("position", empty_only=True)
+            res, err = monitor.close_position("position", empty_only=True, emergency_exit=True)
             assert not res["success"]
             assert "--empty-only" in cmd.call_args.args[0]
             queue.assert_not_called()
 
     # Replay production eligibility and both profitable-exit cooldown shortcuts.
     tree = ast.parse(Path(monitor.__file__).read_text())
+    # Exercise the real risk classifiers and the normal close call: an ordinary
+    # close must not acquire an emergency fill allowance just because it loses.
+    risk_checks = [next(n for n in ast.walk(tree) if isinstance(n, ast.If)
+                        and ast.unparse(n.test) == predicate) for predicate in (
+        "pnl_pct <= emergency_floor_pct",
+        "price_change_m5 is not None and price_change_m5 <= RUG_M5_PCT",
+        "pool_liquidity_usd is not None")]
+    close_call = next(stmt for n in ast.walk(tree) if isinstance(n, ast.If)
+                      and ast.unparse(n.test) == "close_reason" for stmt in n.body
+                      if isinstance(stmt, ast.Assign) and isinstance(stmt.value, ast.Call)
+                      and isinstance(stmt.value.func, ast.Name)
+                      and stmt.value.func.id == "close_position")
+    for pnl, m5, liquidity, expected in [(-1.19, -24.3, 13979, True),
+                                         (-16, None, 10000, True),
+                                         (0, None, 6985, True),
+                                         (-9, None, 10000, False),
+                                         (0, None, None, False)]:
+        with patch.object(monitor, "close_position", return_value=({"success": False}, None)) as close:
+            scope = dict(vars(monitor), pnl_pct=pnl, price_change_m5=m5,
+                         pool_liquidity_usd=liquidity, min_exit_liquidity_usd=7000,
+                         stop_loss_pct=-8, emergency_floor_pct=-15, age_minutes_sl=30,
+                         close_reason=None, emergency_close=False, emergency_reason=None,
+                         pair="STRKT-SOL", pos_addr="position", env_prefix="",
+                         wallet_address="wallet", is_dry_run_stored=False)
+            with contextlib.redirect_stdout(io.StringIO()):
+                exec(compile(ast.Module(body=[*risk_checks, close_call], type_ignores=[]),
+                             "emergency-settlement-replay", "exec"), scope)
+            assert close.call_args.kwargs["emergency_exit"] is expected
     reconciliation = next(n for n in ast.walk(tree) if isinstance(n, ast.If)
                           and ast.unparse(n.test) == "api_available and blockchain_positions")
     for verdict, adopted in [({"success":False,"funded":True}, True),
@@ -179,6 +207,43 @@ def main():
         assert not path.exists()
         capacity.assert_called_once_with("redis-cli DEL sol:dlmm:capacity:wallet", timeout=2)
         capacity.reset_mock()
+
+        # Emergency classification survives close/subprocess boundaries and
+        # starts at the existing 300 bps ceiling, including after a restart.
+        with patch.object(monitor, "run_command_json", return_value=({"success": True}, None)):
+            monitor.close_position("position", emergency_exit=True)
+        assert json.loads(path.read_text())["emergency_exit"] is True
+        with patch.object(monitor, "run_command_json", side_effect=[({"success": True, "amount_raw": "10"}, None), ({"success": False, "pending": True}, "timeout")]) as emergency:
+            monitor.settle_pending()
+        assert emergency.call_args_list[1].args[0].endswith(" 15 300 1")
+        assert path.exists()
+        capacity.assert_not_called()
+        marker = json.loads(path.read_text())
+        monitor.queue_settlement("position")  # ordinary retry cannot demote it
+        assert json.loads(path.read_text()) == marker
+        path.unlink()
+
+        # Escalation preserves retry state; corrupt/mismatched markers are never
+        # replaced. Legacy markers without a flag still begin at 100 bps.
+        marker = dict(position="position", mint="TOKEN", last_attempt=0, provenance="kept")
+        for queued in (marker, dict(marker, last_attempt=123, state="pending")):
+            path.write_text(json.dumps(queued))
+            monitor.queue_settlement("position", emergency_exit=True)
+            assert json.loads(path.read_text()) == dict(queued, emergency_exit=True)
+        for contents in ('{broken', '[]', json.dumps(dict(marker, mint="OTHER"))):
+            path.write_text(contents)
+            monitor.queue_settlement("position", emergency_exit=True)
+            assert path.read_text() == contents
+        path.write_text(json.dumps(marker))
+        with patch.object(monitor, "run_command_json", side_effect=[({"success": True, "amount_raw": "10"}, None), ({"success": False}, "slippage")]) as legacy:
+            monitor.settle_pending()
+        assert legacy.call_args_list[1].args[0].endswith(" 15 100 1")
+        path.unlink()
+
+        # Dry runs cannot create or promote settlement state.
+        with patch.object(monitor, "run_command_json", return_value=({"success": True}, None)):
+            monitor.close_position("position", is_dry_run=True, emergency_exit=True)
+        assert not path.exists()
         # Wallet-zero or unknown provenance never completes a settlement.
         monitor.queue_settlement("position")
         with patch.object(monitor, "run_command_json", return_value=({"success": False, "reason": "settlement_inventory_unproven", "amount_raw": "0"}, None)) as unknown:
