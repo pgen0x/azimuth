@@ -52,7 +52,7 @@ def rejected_outcome(row, price, observed_at):
                 estimated_false_reject_proxy=change > 0.01, hurdle_pct=1)
 
 
-def bin_replay(entry, samples, cost_sol=None):
+def bin_replay(entry, samples, cost_sol=None, *, end_ts=None):
     """Infinitesimal fixed-share replay using observed per-share fee growth.
 
     Does not claim to predict the market impact of adding liquidity. No invented
@@ -62,9 +62,14 @@ def bin_replay(entry, samples, cost_sol=None):
     if not initial or not samples:
         return {'status': 'unmeasured', 'reason': 'missing_entry_or_followup_bins'}
     target = initial['ts'] + HORIZONS.get(entry.get('mode'), 86400)
-    ordered = sorted([s for s in samples if initial['ts'] < s['ts'] <= target+600], key=lambda s: s['ts'])
+    if end_ts is not None:
+        if type(end_ts) not in (int, float) or not math.isfinite(end_ts) or end_ts <= initial['ts']:
+            return {'status':'unmeasured','reason':'invalid_observation_cutoff'}
+        target = end_ts
+    limit = target+600 if end_ts is None else target
+    ordered = sorted([s for s in samples if initial['ts'] < s['ts'] <= limit], key=lambda s: s['ts'])
     if not ordered:
-        return {'status': 'unmeasured' if any(s['ts'] > target+600 for s in samples) else 'pending',
+        return {'status': 'unmeasured' if end_ts is not None or any(s['ts'] > target+600 for s in samples) else 'pending',
                 'reason': 'no_followup_within_mode_horizon', 'horizon_target_ts': target}
     terminal = next((i for i,s in enumerate(ordered) if s['ts'] >= target), None)
     if terminal is not None:
@@ -132,10 +137,10 @@ def bin_replay(entry, samples, cost_sol=None):
             'horizon_complete':ordered[-1]['ts'] >= target,
             'hodl_basis':'recorded_SOL_only_input' if sol_only else 'modeled_initial_bin_inventory',
             'expected_bidask_reference_scheme':reference,
-            'basis':'infinitesimal_fixed_shares; fixed_mode_horizon_with_600s_terminal_grace; sampled_OOR; observed_costs_only; no_slippage_or_recenter_counterfactual', 'schemes':results}
+            'basis':'infinitesimal_fixed_shares; '+('fixed_mode_horizon_with_600s_terminal_grace' if end_ts is None else 'explicit_observation_cutoff_without_terminal_grace')+'; sampled_OOR; observed_costs_only; no_slippage_or_recenter_counterfactual', 'schemes':results}
 
 
-def bin_width_replay(entry, samples):
+def bin_width_replay(entry, samples, *, end_ts=None):
     """Paired fixed-capital gross comparison; wider rent/execution costs unknown."""
     study = entry.get('width_study')
     if not isinstance(study, dict) or not study.get('snapshot'):
@@ -154,10 +159,10 @@ def bin_width_replay(entry, samples):
                    ('active_bin', 'price', 'decimals_x', 'decimals_y', 'sol_is_x'))
             or [b for b in snapshot['bins'] if b['id'] in base_ids] != initial.get('bins')):
         return dict(status='unmeasured', reason='inconsistent_width_snapshot')
-    baseline = bin_replay(entry, samples)
+    baseline = bin_replay(entry, samples, end_ts=end_ts)
     wider_entry = dict(entry, bin_snapshot=snapshot,
                        bins_below=entry['entry_bin']-lower, bins_above=upper-entry['entry_bin'])
-    wider = bin_replay(wider_entry, samples)
+    wider = bin_replay(wider_entry, samples, end_ts=end_ts)
     if baseline.get('status') != 'modeled' or wider.get('status') != 'modeled':
         return dict(status='pending' if 'pending' in (baseline['status'], wider['status']) else 'unmeasured',
                     reason='paired_bin_replay_unavailable', baseline=baseline, wider=wider)
@@ -169,6 +174,32 @@ def bin_width_replay(entry, samples):
                 deltas={k:new[k]-old[k] for k in ('gross_pnl_sol', 'il_vs_hodl_sol', 'fee_capture_sol')},
                 basis='paired_infinitesimal_far_active; same_capital_and_observations; gross_before_costs',
                 limitation='Not executed returns; wider range rent, market impact, slippage and actual exit policy are unmodeled.')
+
+
+def bin_width_holding_replay(entry, samples, closed_at):
+    """Compare allocations at the last observation before a proved actual close.
+
+    This isolates allocation over the observed holding period. It does not
+    simulate the alternative strategy's exit policy or value the sample gap.
+    """
+    started = (entry.get('bin_snapshot') or {}).get('ts')
+    if (type(started) not in (int, float) or not math.isfinite(started)
+            or type(closed_at) not in (int, float) or not math.isfinite(closed_at)
+            or closed_at <= started):
+        return dict(status='unmeasured',reason='actual_close_time_unavailable')
+    observations = [s for s in samples if started < s['ts'] <= closed_at]
+    if not observations:
+        return dict(status='unmeasured',reason='no_followup_before_actual_close')
+    terminal = max(s['ts'] for s in observations)
+    gap = closed_at-terminal
+    if gap > 600:
+        return dict(status='unmeasured',reason='last_preclose_observation_too_old',
+                    actual_close_ts=closed_at,seconds_before_close=gap)
+    result = bin_width_replay(entry, observations, end_ts=terminal)
+    return dict(result,actual_close_ts=closed_at,seconds_before_close=gap,
+                cutoff_basis='last_observed_bin_state_before_actual_close; no_postclose_samples',
+                limitation='Gross allocation comparison at an outcome-defined holding-period cutoff; '
+                           'not net cash, executed IL, the unobserved close gap or an alternative exit policy.')
 
 
 def width_study_summary(results):

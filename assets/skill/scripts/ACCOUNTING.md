@@ -135,6 +135,16 @@ entries without a pre-entry wider snapshot are not backfilled with today's bins.
 The comparison is gross: additional rent, market impact, slippage and the live
 exit policy are unknown, so a modeled fee or IL advantage is not deployable profit.
 
+The evaluator also reports `bin_width_holding_replay`. It requires a recorded
+close plus account-deletion evidence observed by the evaluation cutoff, then
+compares both allocations at the last bin observation at or before that close.
+The observation must be no more than 600 seconds old; post-close samples and the
+normal fixed-horizon terminal grace cannot enter this view. Missing close proof
+or a missing/stale pre-close observation remains unmeasured. Both diagnostics use
+the same pre-entry capital and bin snapshots. The holding-period comparison is
+gross and has an outcome-defined duration; it does not simulate the alternative
+exit policy, fill the unobserved gap, or establish executed IL or net profit.
+
 ## Operations
 
 `azimuth-sol-accounting.timer` and `azimuth-sol-shadow.timer` collect outside the
