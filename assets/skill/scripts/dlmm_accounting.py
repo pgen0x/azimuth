@@ -99,6 +99,91 @@ def pooled_settlements(chains):
     return sorted(groups, key=lambda g: g["root_chain_ids"])
 
 
+def inline_rent_group(chain, facts, owners, histories, as_of):
+    """Exact root cash when every funded token account closed inside that root.
+
+    Lifecycle proof cancels owned reserves already present in wallet deltas;
+    it does not isolate swap proceeds or credit rent a second time.
+    """
+    root = chain["root_chain_id"]
+    if (chain.get("accounting_status") != "settled_cash" or not chain.get("positions")
+            or chain.get("last_activity", float("inf")) > as_of):
+        return None
+    signatures = chain.get("recorded_signatures", [])
+    records = [facts.get(s, {}) for s in signatures]
+    if (not records or any(owners.get(s) != {root} for s in signatures)
+            or not isinstance(records[0].get("wallet"), str) or not records[0]["wallet"]
+            or any(f.get("wallet") != records[0]["wallet"] for f in records)
+            or any(type(f.get("wallet_delta_lamports")) is not int
+                   or type(f.get("fee_lamports")) is not int or f["fee_lamports"] < 0
+                   or type(f.get("slot")) is not int or f["slot"] < 0
+                   or any(type(f.get(k)) not in (int, float) or not math.isfinite(f[k])
+                          or f[k] > as_of for k in ("block_time", "observed_at"))
+                   or f.get("landed") is False for f in records)
+            or sum(f["wallet_delta_lamports"] for f in records) != chain["wallet_delta_lamports"]
+            or sum(f["fee_lamports"] for f in records) != chain["network_fee_lamports"]):
+        return None
+    funded, closed = {}, {}
+    for signature, fact in zip(signatures, records):
+        if fact.get("failed"):
+            continue  # Its network fee remains in exact root cash.
+        evidence = fact.get("token_rent_evidence", {})
+        if (not isinstance(evidence, dict) or evidence.get("version") != 1
+                or not isinstance(evidence.get("funded"), list)
+                or not isinstance(evidence.get("refunded"), list)):
+            return None
+        inline = evidence.get("inline_closed", [])
+        if (not isinstance(inline, list) or (evidence.get("refunds_unmeasured") or inline)
+                and (type(fact.get("schema_version")) is not int or fact["schema_version"] < 12
+                     or evidence.get("refunds_unmeasured") is not True or len(inline) != 1
+                     or evidence["refunded"])):
+            return None
+        # A pure-close proof and mixed-close metadata describe the same account;
+        # prefer the former rather than counting the account twice.
+        refunds = evidence["refunded"] or inline
+        for values, target, key in ((evidence["funded"], funded, "lamports"),
+                                     (refunds, closed, "lamports" if evidence["refunded"] else "pre_lamports")):
+            for item in values:
+                if (not isinstance(item, dict) or not isinstance(item.get("account"), str)
+                        or not item["account"] or not isinstance(item.get("mint"), str) or not item["mint"]
+                        or item["mint"] == "So11111111111111111111111111111111111111112"
+                        or type(item.get(key)) is not int or not 0 < item[key] <= 2**53-1
+                        or item["account"] in target):
+                    return None
+                target[item["account"]] = (item["mint"], item[key], signature, fact["slot"])
+    if not funded or funded.keys() != closed.keys():
+        return None
+    pairs = []
+    for account, (mint, lamports, signature, slot) in funded.items():
+        close_mint, before, close_signature, close_slot = closed[account]
+        if (close_mint != mint or before != lamports or close_slot <= slot
+                or close_signature == signature):
+            return None
+        proof = histories.get((close_signature, account), {})
+        history = proof.get("history_signatures")
+        if (proof.get("complete") is not True or proof.get("version") != 1
+                or proof.get("wallet") != records[0]["wallet"]
+                or proof.get("funding_signature") != signature
+                or any(proof.get(k) != v for k, v in
+                       (("account", account), ("mint", mint), ("lamports", lamports)))
+                or not isinstance(history, list) or not history
+                or any(not isinstance(s, str) for s in history)
+                or len(set(history)) != len(history) or history[-1] != signature
+                or close_signature in history
+                or any(s not in signatures or owners.get(s) != {root}
+                       or not slot <= facts[s]["slot"] <= close_slot for s in history)):
+            return None
+        pairs.append(dict(account=account, mint=mint, lamports=lamports,
+                          funding_signature=signature, funding_slot=slot,
+                          close_signature=close_signature, close_slot=close_slot))
+    return dict(root_chain_ids=[root], refund_signatures=[], refund_components=[],
+                inline_rent_pairs=pairs, first_activity=chain["first_activity"],
+                last_activity=max(chain["last_activity"], *(f["block_time"] for f in records)),
+                cash_with_matched_refunds_sol=chain["wallet_delta_lamports"]/1e9,
+                network_fee_sol=chain["network_fee_lamports"]/1e9,
+                basis="root_cash_with_owned_inline_rent; no_additional_refund_credit; not_NAV")
+
+
 def rent_refund_groups(chains, facts, histories, as_of):
     """Combine settled account users and proved funding refunds; charge fees once."""
     by_root = {c["root_chain_id"]: c for c in chains}
@@ -110,7 +195,8 @@ def rent_refund_groups(chains, facts, histories, as_of):
                 if r.get("observed_at", float("inf")) <= as_of}
     groups, components = [], {}
     for signature, refund in facts.items():
-        items = refund.get("token_rent_evidence", {}).get("refunded", [])
+        rent = refund.get("token_rent_evidence")
+        items = rent.get("refunded", []) if isinstance(rent, dict) else []
         if (not items or refund.get("failed") or refund.get("landed") is False
                 or owners.get(signature) != {"unattributed"}
                 or not isinstance(refund.get("block_time"), (int, float))
@@ -162,7 +248,7 @@ def rent_refund_groups(chains, facts, histories, as_of):
                 group["refunds"].update(g["refunds"])
                 groups.remove(g)
             groups.append(group)
-    return [dict(root_chain_ids=sorted(g["roots"]), refund_signatures=sorted(g["refunds"]),
+    result = [dict(root_chain_ids=sorted(g["roots"]), refund_signatures=sorted(g["refunds"]),
                  refund_components=[components[s] for s in sorted(g["refunds"])],
                  first_activity=min(by_root[r]["first_activity"] for r in g["roots"]),
                  last_activity=max([facts[s]["block_time"] for s in g["refunds"]]
@@ -173,6 +259,13 @@ def rent_refund_groups(chains, facts, histories, as_of):
                      + sum(facts[s]["fee_lamports"] for s in g["refunds"]))/1e9,
                  basis="root_cash_plus_matched_refunds; shared_fees_once; overlaps_root_cash; not_NAV_or_per_root_win_rate")
             for g in groups]
+    covered = {root for group in result for root in group["root_chain_ids"]}
+    for chain in chains:
+        if chain["root_chain_id"] not in covered:
+            group = inline_rent_group(chain, facts, owners, evidence, as_of)
+            if group is not None:
+                result.append(group)
+    return result
 
 
 def report(profile, as_of=None):
@@ -400,10 +493,39 @@ def refund_cash_bounds(group, chains, selected):
     """
     ids = set(group["root_chain_ids"])
     pieces = group.get("refund_components")
-    if (not selected or not selected <= ids or not isinstance(pieces, list) or not pieces
+    if (not selected or not selected <= ids or not isinstance(pieces, list)
             or any(r not in chains or chains[r].get("accounting_status") != "settled_cash"
                    or type(chains[r].get("wallet_delta_lamports")) is not int for r in ids)):
         return None
+    if not pieces:
+        pairs = group.get("inline_rent_pairs")
+        if (len(ids) != 1 or group.get("refund_signatures") != []
+                or group.get("basis") != "root_cash_with_owned_inline_rent; no_additional_refund_credit; not_NAV"
+                or not isinstance(pairs, list) or not pairs):
+            return None
+        chain = chains[next(iter(ids))]
+        signatures = set(chain.get("recorded_signatures", []))
+        accounts = set()
+        for pair in pairs:
+            if (not isinstance(pair, dict) or not isinstance(pair.get("account"), str)
+                    or not pair["account"] or pair["account"] in accounts
+                    or not isinstance(pair.get("mint"), str) or not pair["mint"]
+                    or pair["mint"] == "So11111111111111111111111111111111111111112"
+                    or type(pair.get("lamports")) is not int or not 0 < pair["lamports"] <= 2**53-1
+                    or any(type(pair.get(k)) is not int for k in ("funding_slot", "close_slot"))
+                    or not 0 <= pair["funding_slot"] < pair["close_slot"]
+                    or not isinstance(pair.get("funding_signature"), str)
+                    or not isinstance(pair.get("close_signature"), str)
+                    or pair.get("funding_signature") not in signatures
+                    or pair.get("close_signature") not in signatures
+                    or pair["funding_signature"] == pair["close_signature"]):
+                return None
+            accounts.add(pair["account"])
+        value = group.get("cash_with_matched_refunds_sol")
+        cash = chain["wallet_delta_lamports"]
+        if type(value) not in (int, float) or not math.isfinite(value) or round(value*1e9) != cash:
+            return None
+        return cash, cash
     seen, touched = set(), set()
     total = sum(chains[r]["wallet_delta_lamports"] for r in ids)
     lower = upper = sum(chains[r]["wallet_delta_lamports"] for r in selected)

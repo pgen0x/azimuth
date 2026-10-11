@@ -54,6 +54,21 @@ for (const inner of [false,true]) {
  assert.equal(f.wallet_delta_lamports,265);
  assert.equal(f.token_rent_evidence.refunds_unmeasured,true);
  assert.deepEqual(f.token_rent_evidence.refunded,[]);
+ assert.deepEqual(f.token_rent_evidence.inline_closed,inner ? undefined
+   : [{account:'ata',mint:'mint',pre_lamports:200}]);
+}
+for(const alter of [t=>{t.meta.err='failed'},
+ t=>{t.transaction.message.accountKeys[0].signer=false},
+ t=>{t.transaction.message.instructions.at(-1).parsed.info.owner='other'},
+ t=>{t.transaction.message.instructions.at(-1).parsed.info.destination='other'},
+ t=>{t.meta.preTokenBalances[0].owner='other'},
+ t=>{t.meta.postBalances[1]=1},
+ t=>{t.meta.preBalances[1]=Number.MAX_SAFE_INTEGER+1},
+ t=>{t.meta.postTokenBalances=t.meta.preTokenBalances},
+ t=>{t.transaction.message.instructions.push({programId:'later'})},
+ t=>{t.transaction.message.instructions.push(t.transaction.message.instructions.at(-1))}]) {
+ const t=JSON.parse(JSON.stringify(mixedClose));alter(t);
+ assert.equal(transactionFact(t,wallet,'bad-inline').token_rent_evidence.inline_closed,undefined);
 }
 // Existing and newly initialized WSOL closes are native proceeds, not ATA rent proof.
 for (const temporary of [false,true]) {
@@ -63,6 +78,7 @@ for (const temporary of [false,true]) {
   t.transaction.message.instructions.unshift({programId:rentToken,parsed:{type:'initializeAccount3',info:{account:'ata',mint:'So11111111111111111111111111111111111111112'}}});
  } else t.meta.preTokenBalances[0].mint='So11111111111111111111111111111111111111112';
  assert.equal(transactionFact(t,wallet,'wsol').token_rent_evidence.refunds_unmeasured,undefined);
+ assert.equal(transactionFact(t,wallet,'wsol').token_rent_evidence.inline_closed,undefined);
 }
 
 const closed={...tx,meta:{...tx.meta,preBalances:[1000,100],postBalances:[1095,0]}};
@@ -348,12 +364,33 @@ global.fetch=async url=>{if(url.includes('/quote?'))throw new Error('no route');
  connection.getParsedTransaction=async()=>{refreshed++;return {...cleaning,slot:100,blockTime:tx.blockTime}};
  await collect({...args,historyOnly:true}); await collect({...args,historyOnly:true});
  const upgraded=fs.readFileSync(path.join(dir,'dlmm_wallet_transactions.jsonl'),'utf8').trim().split('\n').map(JSON.parse).filter(f=>f.signature==='sig').at(-1);
- assert.equal(upgraded.schema_version,11);assert.equal(upgraded.classification,'rent_maintenance');assert.equal(refreshed,1);
+ assert.equal(upgraded.schema_version,12);assert.equal(upgraded.classification,'rent_maintenance');assert.equal(refreshed,1);
  const recordedEvent={signature:'sig',wallet,position:'p'};
  fs.writeFileSync(path.join(dir,'dlmm_transactions.jsonl'),JSON.stringify(recordedEvent)+'\n');
  fs.writeFileSync(path.join(dir,'dlmm_wallet_transactions.jsonl'),JSON.stringify({...transactionFact(tx,wallet,'sig',recordedEvent),schema_version:7})+'\n');
  await collect({...args,historyOnly:true});
  assert.equal(refreshed,1); // No broad schema migration of already-recorded transactions.
+
+ // Missing cash facts precede optional metadata upgrades under the same 60-fetch budget.
+ const optional=Array.from({length:61},(_,i)=>'optional-'+i), missingSignature='new-cash';
+ const allSignatures=[...optional,missingSignature];
+ fs.writeFileSync(path.join(dir,'dlmm_transactions.jsonl'),allSignatures.map(signature=>
+   JSON.stringify({signature,wallet,position:'p'})).join('\n')+'\n');
+ fs.writeFileSync(path.join(dir,'dlmm_wallet_transactions.jsonl'),optional.map(signature=>
+   JSON.stringify({...transactionFact(mixedClose,wallet,signature,{position:'p'}),schema_version:11})).join('\n')+'\n');
+ connection.getSignaturesForAddress=async(_,options)=>options.before ? []
+   : allSignatures.slice(0,options.limit).map(signature=>({signature,slot:100,blockTime:tx.blockTime}));
+ const fetchOrder=[];
+ connection.getParsedTransaction=async signature=>{fetchOrder.push(signature);return {...mixedClose,slot:100,blockTime:tx.blockTime}};
+ const migration=await collect({...args,historyOnly:true});
+ assert.equal(fetchOrder.length,60);assert.equal(fetchOrder[0],missingSignature);
+ assert.equal(migration.wallet_history_complete,true);assert.equal(migration.missing_transactions,0);
+ connection.getParsedTransaction=async()=>{throw new Error('optional unavailable')};
+ const unavailable=await collect({...args,historyOnly:true});
+ assert.equal(unavailable.wallet_history_complete,true);assert.equal(unavailable.missing_transactions,0);
+ connection.getParsedTransaction=async signature=>{fetchOrder.push(signature);return {...mixedClose,slot:100,blockTime:tx.blockTime}};
+ await collect({...args,historyOnly:true});await collect({...args,historyOnly:true});
+ assert.equal(fetchOrder.length,62); // Successful upgrades are not fetched again.
 
  console.log('NAV includes reserves once, classifies external flows, keeps failed fees and rejects unpriced assets');
 })().catch(e=>{console.error(e);process.exitCode=1}).finally(()=>{global.setTimeout=originalTimer;fs.rmSync(dir,{recursive:true,force:true});});
@@ -405,6 +442,13 @@ console.log('Allocated account funding classification passed');
     assert.equal(latest().funding_signature,'fund');
     const done=calls;await collectRentHistory(args);assert.equal(calls,done);
     assert.equal(cache.get('refund').wallet_delta_lamports,undefined); // evidence cannot allocate cash
+    // Mixed-close lifecycle evidence uses the same bounded history proof.
+    fs.unlinkSync(path.join(rentDir,'dlmm_rent_history.jsonl'));
+    refund.token_rent_evidence={refunded:[],inline_closed:[{account:'ata',mint:'mint',pre_lamports:1513840}],refunds_unmeasured:true};
+    await collectRentHistory(args);
+    assert.equal(latest().complete,true);assert.equal(latest().lamports,1513840);
+    assert.deepEqual(latest().history_signatures,['swap','fund']);
+    assert.equal(cache.get('refund').wallet_delta_lamports,undefined);
     console.log('Bounded rent account history, retry, cache completeness and no cash mutation passed');
   } finally {fs.rmSync(rentDir,{recursive:true,force:true});}
 })().catch(e=>{console.error(e);process.exitCode=1});
