@@ -521,12 +521,16 @@ async function deployPosition(poolAddressStr, amountX, amountY, binsBelow, binsA
         // Persist provenance BEFORE submission, so timeout adoption keeps the
         // caller's mode and re-center root. No wallet secret is recorded.
         const context = JSON.parse(process.env.DLMM_ENTRY_CONTEXT || "{}");
-        let bin_snapshot = null;
-        try { bin_snapshot = await binSnapshot(pool, minBinId, maxBinId); }
+        let snapshots = { bin_snapshot: null, width_study: null };
+        const solMint = "So11111111111111111111111111111111111111112";
+        const studySide = strategyTypeStr !== "bid_ask" ? null
+          : pool.lbPair.tokenYMint.toString() === solMint && amountX === 0 && binsAbove === 0 ? "below"
+          : pool.lbPair.tokenXMint.toString() === solMint && amountY === 0 && binsBelow === 0 ? "above" : null;
+        try { snapshots = await entryBinSnapshots(pool, minBinId, maxBinId, studySide); }
         catch { console.warn("[SHADOW] Entry bin snapshot unavailable"); }
 
         const persistEntry = () => fs.writeFileSync(path.join(entryDir, `${newPosition.publicKey}.json`), JSON.stringify({
-          ...context, bin_snapshot, root_chain_id: context.root_chain_id || context.recenter_of || newPosition.publicKey.toString(),
+          ...context, ...snapshots, root_chain_id: context.root_chain_id || context.recenter_of || newPosition.publicKey.toString(),
           pool: poolAddressStr, position: newPosition.publicKey.toString(),
           entry_bin: activeBin.binId, entry_price: pool.fromPricePerLamport(Number(activeBin.price)),
           bins_below: binsBelow, bins_above: binsAbove, bin_step: Number(pool.lbPair.binStep),
@@ -1300,6 +1304,26 @@ async function swapToken(inputMintStr, outputMintStr, amountFloat, maxPriceImpac
     });
   } finally {
     await release();
+  }
+}
+
+async function entryBinSnapshots(pool, lower, upper, studySide) {
+  // Observe a fixed 70-bin alternative alongside the actual mint range. This
+  // changes only the read bounds; transaction construction retains lower/upper.
+  const studyLower = studySide === "below" ? Math.min(lower, upper - 69) : lower;
+  const studyUpper = studySide === "above" ? Math.max(upper, lower + 69) : upper;
+  if (studyLower === lower && studyUpper === upper) {
+    return { bin_snapshot: await binSnapshot(pool, lower, upper), width_study: null };
+  }
+  try {
+    const snapshot = await binSnapshot(pool, studyLower, studyUpper);
+    return {
+      bin_snapshot: { ...snapshot, bins: snapshot.bins.filter(b => b.id >= lower && b.id <= upper) },
+      width_study: { target_bins: 70, lower_bin: studyLower, upper_bin: studyUpper, snapshot },
+    };
+  } catch (_) {
+    // An unavailable wider observation must not erase the original baseline.
+    return { bin_snapshot: await binSnapshot(pool, lower, upper), width_study: null };
   }
 }
 
