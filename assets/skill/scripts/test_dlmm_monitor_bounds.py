@@ -2,6 +2,7 @@
 import contextlib
 import io
 import json
+import time
 from pathlib import Path
 import tempfile
 import textwrap
@@ -112,6 +113,87 @@ class PositionBoundsTests(unittest.TestCase):
             self.assertFalse(state["in_range"])
             self.assertIsNone(state["active_bin"])
             self.assertIsNone(state["close_reason"])
+
+
+class SuspectRiskTests(unittest.TestCase):
+    def mark(self, *, pct=-20.0, **changes):
+        deposit = 100000000
+        value = round(deposit * (1 + pct/100))
+        return dict(success=True, source="onchain_sol_inventory", pool=POOL, position=POSITION,
+                    pnl_currency="SOL", observed_at=time.time(), pnl_pct=pct, pnl_sol=(value-deposit)/1e9,
+                    deposit_lamports=str(deposit), value_lamports_upper=str(value),
+                    active_bin=-470, lower_bin=-465, upper_bin=-430, in_range=False, **changes)
+
+    def replay(self, verify, *, age=1, prior=False, indexed=-100, portfolio=True, adopted=False):
+        source = Path(monitor.__file__).read_text()
+        code = textwrap.dedent(source[source.index("        # SUSPECT-READ GUARD"):
+                                      source.index("        # Pool aggregates do not include")])
+        calls = []
+        scope = dict(vars(monitor), now=time.time(), meta=dict(deployed_at=time.time()-age*60,
+                     adopted=adopted), pair="TEST-SOL", pool=POOL, pos_addr=POSITION,
+                     is_dry_run_stored=False, api_available=portfolio, bp={} if not portfolio else {"pnl_pct": indexed},
+                     pnl_pct=indexed, pnl_sol_actual=-.1, in_range=True, active_bin=-430,
+                     pnl_data=None, stop_loss_pct=-8, fee_per_tvl_24h=1)
+        def read(command, *, timeout):
+            self.assertIn(" pnl-onchain ", command)
+            self.assertEqual(timeout, 8)
+            calls.append(command)
+            return verify, "RPC timeout" if verify is None else None
+        def redis(command):
+            calls.append(command)
+            return ("100" if prior else "", "", 0)
+        scope.update(run_command_json=read, run_command=redis)
+        with contextlib.redirect_stdout(io.StringIO()):
+            exec(compile("for _ in [None]:\n" + textwrap.indent(code + "guard_passed = True\n", "    "),
+                         monitor.__file__, "exec"), scope)
+            if scope.get("guard_passed"):
+                scope.update(close_reason=None, emergency_close=False, emergency_reason=None)
+                risk = textwrap.dedent(source[source.index("        # 2. Hard Stop-Loss Check"):
+                                              source.index("        # 3. Pumped Far Above")])
+                exec(compile(risk, monitor.__file__, "exec"), scope)
+        return scope, calls
+
+    def test_real_native_young_loss_reaches_risk_rules(self):
+        for portfolio in (True, False):
+            state, _ = self.replay(self.mark(), portfolio=portfolio)
+            self.assertTrue(state.get("guard_passed"))
+            self.assertEqual(state["pnl_pct"], -20)
+            self.assertEqual(state["pnl_sol_actual"], -.02)
+            self.assertEqual(state["active_bin"], -470)
+            self.assertFalse(state["in_range"])
+            self.assertTrue(state["emergency_close"])
+            self.assertIn("EMERGENCY Stop-Loss", state["close_reason"])
+
+    def test_indexer_false_loss_uses_native_sol_mark_and_bounds(self):
+        state, calls = self.replay(self.mark(pct=2))
+        self.assertTrue(state.get("guard_passed"))
+        self.assertEqual(state["pnl_pct"], 2)
+        self.assertEqual(state["pnl_sol_actual"], .002)
+        self.assertEqual(state["pnl_data"]["lower_bin"], -465)
+        self.assertIsNone(state["close_reason"])
+        self.assertTrue(any("redis-cli del" in call for call in calls))
+
+    def test_unavailable_young_and_mature_retry_behavior(self):
+        for age, prior, passed in [(1, False, False), (1, True, False), (5, False, False),
+                                   (5, True, True)]:
+            state, _ = self.replay(None, age=age, prior=prior)
+            self.assertEqual(bool(state.get("guard_passed")), passed)
+        state, _ = self.replay(None, adopted=True, prior=True)
+        self.assertTrue(state.get("guard_passed"))  # unknown adoption age is not newborn
+
+    def test_malformed_or_stale_native_proof_never_becomes_zero(self):
+        for changes in [dict(source="indexed_pnl"), dict(success=False), dict(position="other"),
+                        dict(pool="other"), dict(pnl_sol=None), dict(pnl_pct=float("nan")),
+                        dict(pnl_pct=True), dict(value_lamports_upper="0"), dict(deposit_lamports="0"),
+                        dict(observed_at=time.time()-60), dict(in_range=True), dict(active_bin=None)]:
+            proof = self.mark(); proof.update(changes)
+            self.assertFalse(monitor.verified_risk_mark(proof, POOL, POSITION, time.time()))
+            state, _ = self.replay(proof)
+            self.assertFalse(state.get("guard_passed"))
+            self.assertEqual(state["pnl_sol_actual"], -.1)
+        for malformed in ([], "bad", None):
+            state, _ = self.replay(malformed)
+            self.assertFalse(state.get("guard_passed"))
 
 
 if __name__ == "__main__":

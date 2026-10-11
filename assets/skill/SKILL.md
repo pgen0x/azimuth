@@ -76,6 +76,16 @@ gate (bin-array rent, entry timing) rejects the top pick. Used by the daemon's
 *   Every deploy snapshots the winning candidate's entry signals into the position record (`signal` field) — feeds the darwinian weights (see `dlmm_weights.py`).
 
 ### 2. `dlmm_monitor.py` — Position Monitor
+
+Extreme indexed PnL is checked with `dlmm_executor.js pnl-onchain <POOL> <POSITION>`.
+This read-only command values native inventory and unclaimed fees at active-bin
+spot against the actual initial SOL transfer. It accepts only a SOL-only entry
+with complete funded-bin coverage and no later position transactions. A native
+confirmed loss can reach exit rules even before age three minutes; an unavailable
+proof keeps the existing young-position protection and mature-position retry.
+The mark excludes rent, network and exit costs and is not realized profit or NAV.
+Pool and position reads are sequential confirmed RPC reads, not an atomic snapshot.
+
 **Purpose**: Monitors all open positions in Redis and checks SL/TP or Out-of-Range limits.
 **Command**: `python3 ~/.hermes/profiles/<profile>/skills/solana-dlmm/scripts/dlmm_monitor.py`
 **Exits managed**:
