@@ -109,9 +109,13 @@ def inline_rent_group(chain, facts, owners, histories, as_of):
     if (chain.get("accounting_status") != "settled_cash" or not chain.get("positions")
             or chain.get("last_activity", float("inf")) > as_of):
         return None
-    signatures = chain.get("recorded_signatures", [])
+    recorded = chain.get("recorded_signatures", [])
+    expired = set(chain.get("expired_unlanded_signatures", []))
+    if not expired <= set(recorded):
+        return None
+    signatures = [s for s in recorded if s not in expired]
     records = [facts.get(s, {}) for s in signatures]
-    if (not records or any(owners.get(s) != {root} for s in signatures)
+    if (not records or any(owners.get(s) != {root} for s in recorded)
             or not isinstance(records[0].get("wallet"), str) or not records[0]["wallet"]
             or any(f.get("wallet") != records[0]["wallet"] for f in records)
             or any(type(f.get("wallet_delta_lamports")) is not int
@@ -123,6 +127,20 @@ def inline_rent_group(chain, facts, owners, histories, as_of):
             or sum(f["wallet_delta_lamports"] for f in records) != chain["wallet_delta_lamports"]
             or sum(f["fee_lamports"] for f in records) != chain["network_fee_lamports"]):
         return None
+    for signature in expired:
+        fact = facts.get(signature, {})
+        # The collector proves absence using finalized wallet history, expiry
+        # and a history-enabled null status. Never skip a landed failure's fee.
+        if (fact.get("wallet") != records[0]["wallet"] or fact.get("landed") is not False
+                or fact.get("classification") != "expired_unlanded"
+                or fact.get("basis") != "finalized_wallet_history_and_expiry"
+                or type(fact.get("observed_at")) not in (int, float)
+                or not math.isfinite(fact["observed_at"]) or fact["observed_at"] > as_of
+                or any(type(fact.get(k)) is not int or fact[k] < 0
+                       for k in ("last_valid_block_height", "finalized_block_height"))
+                or fact["finalized_block_height"] <= fact["last_valid_block_height"]
+                or fact.get("wallet_delta_lamports", 0) != 0 or fact.get("fee_lamports", 0) != 0):
+            return None
     funded, closed = {}, {}
     for signature, fact in zip(signatures, records):
         if fact.get("failed"):
