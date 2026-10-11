@@ -2040,9 +2040,6 @@ def main():
             run_command(f"redis-cli del \"sol:dlmm:position:{pos_addr}:ai_hold_until\"")
             continue
             
-        if not is_dry_run_stored and observe_root_fee_pace(meta, bp, now):
-            run_command(f"redis-cli set \"sol:dlmm:position:{pos_addr}\" '{json.dumps(meta)}'")
-
         # Get current pool price and active bin, preferring proved native LP value.
         active_price = entry_price
         active_bin = None  # Entry-time bin is not a current observation after an RPC failure.
@@ -2110,7 +2107,10 @@ def main():
                 if bp:
                     bp = {**bp, "pnl_pct": pnl_pct, "pnl_sol": pnl_sol_actual,
                           "is_out_of_range": not in_range,
-                          "unclaimed_fees_sol": native_mark["unclaimed_fees_sol"]}
+                          "unclaimed_fees_sol": native_mark["unclaimed_fees_sol"],
+                          "balances_sol": max(0.0, int(native_mark["value_lamports_upper"])/1e9
+                                              - native_mark["unclaimed_fees_sol"]),
+                          "updated_at": native_mark["observed_at"]}
                 print(f"Native LP mark: {pnl_pct:+.4f}% PnL | {pnl_sol_actual:+.9f} SOL | current bin {native_mark['active_bin']}")
             if not native_mark_valid or not native_price_available:
                 ab_data, ab_err = run_command_json(f"node {EXECUTOR_PATH} active-bin {pool}")
@@ -2119,6 +2119,12 @@ def main():
                         active_bin = ab_data.get("binId")
                     if native_mark_valid or not (api_available and bp and bp.get("pool_price")):
                         active_price = float(ab_data.get("price", entry_price))
+
+        # Fee growth, principal and timestamp must describe the same observation.
+        # A fresh native read also proves a stalled fee counter when the indexer
+        # has stopped updating. Use the clock after the read, not the tick start.
+        if not is_dry_run_stored and observe_root_fee_pace(meta, bp, time.time()):
+            run_command(f"redis-cli set \"sol:dlmm:position:{pos_addr}\" '{json.dumps(meta)}'")
 
         # SUSPECT-READ GUARD — a catastrophic Portfolio-API PnL must be confirmed
         # on-chain before any close rule may act on it (see SUSPECT_PNL_PCT).
@@ -2546,7 +2552,7 @@ def main():
         # ground truth's 40 churn closes earned < 0.01 SOL in fees). Snapshot
         # unclaimed fees in meta; if growth across the window is below
         # FEE_STALL_MIN_PCT of position value (~1%/day pace), rotate the
-        # capital out. Requires live Portfolio-API fee data (fail-open),
+        # capital out. Requires live position fee data (fail-open),
         # a settled position (age >= FEE_STALL_MIN_AGE_MINUTES), and skips
         # armed winners — the trailing ratchet owns those.
         if (not close_reason and bp and not trailing_active

@@ -163,6 +163,78 @@ class PositionBoundsTests(unittest.TestCase):
             self.assertIsNone(state["close_reason"])
 
 
+class NativeFeeObservationTests(unittest.TestCase):
+    def mark(self, **changes):
+        deposit, value = 119999981, 119429877
+        result = dict(success=True, source="onchain_sol_inventory", pool=POOL, position=POSITION,
+                      pnl_currency="SOL", observed_at=2001, pnl_sol=(value-deposit)/1e9,
+                      pnl_pct=(value-deposit)/deposit*100, deposit_lamports=str(deposit),
+                      value_lamports_upper=str(value), unclaimed_fees_sol=.000889575,
+                      active_bin=-523, lower_bin=-548, upper_bin=-504, in_range=True, pool_price=1)
+        return result | changes
+
+    def replay(self, mark, indexed, meta=None):
+        source = Path(monitor.__file__).read_text()
+        start = min(source.index("        # Get current pool price"),
+                    source.index("        if not is_dry_run_stored and observe_root_fee_pace"))
+        code = textwrap.dedent(source[start:
+                                      source.index("        # SUSPECT-READ GUARD")])
+        calls = []
+        scope = dict(vars(monitor), now=1999, entry_price=1, api_available=True,
+                     is_dry_run_stored=False, pos_addr=POSITION, pool=POOL, bp=indexed,
+                     meta=meta if meta is not None else dict(root_fee_baseline=dict(fees=0, ts=201)))
+        scope['run_command_json'] = lambda command, **kwargs: (
+            calls.append(command) or ((mark, None) if " pnl-onchain " in command
+                                     else (dict(binId=-523, price=1), None)))
+        scope['run_command'] = lambda command: (calls.append(command) or ('', '', 0))
+        with patch.object(monitor.time, 'time', return_value=2001), contextlib.redirect_stdout(io.StringIO()):
+            exec(compile("for _ in [None]:\n" + textwrap.indent(code, "    "),
+                         monitor.__file__, "exec"), scope)
+        return scope, calls
+
+    def indexed(self, **changes):
+        return dict(pnl_pct=-1.1753, pnl_sol=-.001410375, pool_price=1,
+                    fee_per_tvl_24h=24.44, balances_sol=.117700031,
+                    unclaimed_fees_sol=.000889575, updated_at=1696) | changes
+
+    def test_fresh_native_fees_replace_stale_indexed_time_and_value(self):
+        state, calls = self.replay(self.mark(), self.indexed())
+        self.assertAlmostEqual(state['bp']['balances_sol'], .118540302)
+        self.assertEqual(state['bp']['updated_at'], 2001)
+        self.assertEqual(state['meta']['fee_pace_observed_at'], 2001)
+        self.assertAlmostEqual(state['meta']['fee_pace_pct_30m'], .000889575/.118540302*100)
+        self.assertEqual(state['bp']['fee_per_tvl_24h'], 24.44)
+        self.assertEqual(sum(' pnl-onchain ' in c for c in calls), 1)
+        self.assertFalse(any(' active-bin ' in c for c in calls))
+
+    def test_unverified_native_never_refreshes_stale_indexed_fees(self):
+        for mark in (None, self.mark(observed_at=1900), self.mark(pool='foreign')):
+            state, _ = self.replay(mark, self.indexed())
+            self.assertNotIn('fee_pace_observed_at', state['meta'])
+            self.assertEqual(state['meta']['root_fee_baseline']['ts'], 201)
+            self.assertEqual(state['bp']['updated_at'], 1696)
+
+    def test_fresh_indexed_fallback_still_measures_full_window(self):
+        state, _ = self.replay(None, self.indexed(updated_at=2000),
+                               dict(root_fee_baseline=dict(fees=0, ts=200)))
+        self.assertEqual(state['meta']['fee_pace_observed_at'], 2000)
+        self.assertAlmostEqual(state['meta']['fee_pace_pct_30m'],
+                               .000889575/.117700031*100)
+        # At least 30 minutes are required before a pace is published.
+        self.assertNotIn('fee_pace_observed_at', self.replay(None, self.indexed(updated_at=2000))[0]['meta'])
+
+    def test_fee_stall_uses_verified_principal_when_indexed_value_is_missing(self):
+        source = Path(monitor.__file__).read_text()
+        code = textwrap.dedent(source[source.index('        # 5e. Fee-pace-death exit'):
+                                      source.index('        # 5f. Stale-ticket re-pin')])
+        for growth, stalled in ((.00001, True), (.0001, False)):
+            meta = dict(fee_snap_at=2001-1800, fee_snap_sol=.000889575-growth)
+            state, _ = self.replay(self.mark(), self.indexed(balances_sol=0), meta)
+            state.update(now=2001, age_minutes=75, trailing_active=False, close_reason=None)
+            exec(code, state)
+            self.assertEqual(bool(state['close_reason']), stalled)
+
+
 class SuspectRiskTests(unittest.TestCase):
     def mark(self, *, pct=-20.0, **changes):
         deposit = 100000000
