@@ -73,7 +73,8 @@ class PositionBoundsTests(unittest.TestCase):
         # None represents the active-bin RPC failing; stale Redis entry_bin=999
         # must never masquerade as the current bin or a position boundary.
         result = None if active_bin is None else dict(binId=active_bin, price=1.0)
-        scope["run_command_json"] = lambda _: (result, None)
+        scope["run_command_json"] = lambda command, **_: ((None, "unavailable")
+            if " pnl-onchain " in command else (result, None))
         with contextlib.redirect_stdout(io.StringIO()):
             for code in (market, geometry, pump, direction, gap):
                 exec(compile("for _ in [None]:\n" + textwrap.indent(code, "    "),
@@ -122,23 +123,32 @@ class SuspectRiskTests(unittest.TestCase):
         return dict(success=True, source="onchain_sol_inventory", pool=POOL, position=POSITION,
                     pnl_currency="SOL", observed_at=time.time(), pnl_pct=pct, pnl_sol=(value-deposit)/1e9,
                     deposit_lamports=str(deposit), value_lamports_upper=str(value),
-                    active_bin=-470, lower_bin=-465, upper_bin=-430, in_range=False, **changes)
+                    active_bin=-470, lower_bin=-465, upper_bin=-430, in_range=False,
+                    unclaimed_fees_sol=.001, pool_price=.9, **changes)
 
     def replay(self, verify, *, age=1, prior=False, indexed=-100, portfolio=True, adopted=False):
         source = Path(monitor.__file__).read_text()
-        code = textwrap.dedent(source[source.index("        # SUSPECT-READ GUARD"):
+        code = textwrap.dedent(source[source.index("        # Get current pool price"):
                                       source.index("        # Pool aggregates do not include")])
         calls = []
         scope = dict(vars(monitor), now=time.time(), meta=dict(deployed_at=time.time()-age*60,
                      adopted=adopted), pair="TEST-SOL", pool=POOL, pos_addr=POSITION,
-                     is_dry_run_stored=False, api_available=portfolio, bp={} if not portfolio else {"pnl_pct": indexed},
+                     is_dry_run_stored=False, api_available=portfolio,
+                     bp={} if not portfolio else {"pnl_pct": indexed, "pnl_sol": indexed*.001,
+                         "fee_per_tvl_24h":10.0, "unclaimed_fees_sol":.02, "pool_price":1.0},
+                     entry_price=1.0, bins_below=35,
                      pnl_pct=indexed, pnl_sol_actual=-.1, in_range=True, active_bin=-430,
                      pnl_data=None, stop_loss_pct=-8, fee_per_tvl_24h=1)
-        def read(command, *, timeout):
-            self.assertIn(" pnl-onchain ", command)
-            self.assertEqual(timeout, 8)
+        def read(command, **kwargs):
             calls.append(command)
-            return verify, "RPC timeout" if verify is None else None
+            if " pnl-onchain " in command:
+                self.assertEqual(kwargs["timeout"], 3)
+                return verify, "RPC timeout" if verify is None else None
+            if " active-bin " in command:
+                return {"binId":-430,"price":1.0},None
+            self.assertIn(" pnl ", command)
+            return {"success":True,"pnl_pct":indexed,"pnl_sol":indexed*.001,
+                    "fee_per_tvl_24h":10.0,"in_range":True},None
         def redis(command):
             calls.append(command)
             return ("100" if prior else "", "", 0)
@@ -185,6 +195,8 @@ class SuspectRiskTests(unittest.TestCase):
         for changes in [dict(source="indexed_pnl"), dict(success=False), dict(position="other"),
                         dict(pool="other"), dict(pnl_sol=None), dict(pnl_pct=float("nan")),
                         dict(pnl_pct=True), dict(value_lamports_upper="0"), dict(deposit_lamports="0"),
+                        dict(unclaimed_fees_sol=None), dict(unclaimed_fees_sol=-.001),
+                        dict(unclaimed_fees_sol=float("nan")), dict(unclaimed_fees_sol=1),
                         dict(observed_at=time.time()-60), dict(in_range=True), dict(active_bin=None)]:
             proof = self.mark(); proof.update(changes)
             self.assertFalse(monitor.verified_risk_mark(proof, POOL, POSITION, time.time()))
@@ -194,6 +206,65 @@ class SuspectRiskTests(unittest.TestCase):
         for malformed in ([], "bad", None):
             state, _ = self.replay(malformed)
             self.assertFalse(state.get("guard_passed"))
+
+    def test_ordinary_hidden_loss_reaches_existing_tight_floor(self):
+        for portfolio in (True, False):
+            state, calls = self.replay(self.mark(pct=-4), indexed=-1, age=10, portfolio=portfolio)
+            self.assertTrue(state.get("guard_passed"))
+            self.assertEqual(state["pnl_pct"], -4)
+            self.assertEqual(state["pnl_sol_actual"], -.004)
+            self.assertEqual(state["active_price"], .9)
+            reason, protected = monitor.protect_tight_exit(None,"turnover",state["pnl_pct"],None)
+            self.assertTrue(protected)
+            self.assertIn("risk floor", reason)
+            self.assertFalse(state["emergency_close"])
+            self.assertEqual(sum(" pnl-onchain " in c for c in calls),1)
+            self.assertFalse(any(" active-bin " in c for c in calls))
+            if portfolio:
+                self.assertEqual(state["bp"]["unclaimed_fees_sol"],.001)
+                self.assertEqual(state["fee_per_tvl_24h"],10.0)
+
+    def test_hidden_young_emergency_uses_native_mark_once(self):
+        state, calls = self.replay(self.mark(pct=-12), indexed=.5)
+        self.assertTrue(state.get("guard_passed"))
+        self.assertTrue(state["emergency_close"])
+        self.assertEqual(sum(" pnl-onchain " in c for c in calls),1)
+        self.assertFalse(any(" active-bin " in c for c in calls))
+
+    def test_native_gain_avoids_indexed_floor_and_false_peak(self):
+        state,_ = self.replay(self.mark(pct=.1),indexed=-3)
+        reason,protected=monitor.protect_tight_exit(None,"pulse",state["pnl_pct"],None)
+        self.assertIsNone(reason)
+        self.assertFalse(protected)
+        state,_ = self.replay(self.mark(pct=.1),indexed=2)
+        source=Path(monitor.__file__).read_text()
+        peak=textwrap.dedent(source[source.index("        # Old peaks can be USD returns"):
+                                    source.index("        close_reason = None",source.index("        # Old peaks can be USD returns"))])
+        state.update(turnover_trailing_trigger_pct=1.2,turnover_trailing_drop_pct=.6,
+                     trailing_drop_pct=1.5,trailing_trigger_pct=3.0)
+        state["meta"].update(mode="turnover",pnl_currency="SOL",peak_pnl=0)
+        with contextlib.redirect_stdout(io.StringIO()):
+            exec(compile(peak,monitor.__file__,"exec"),state)
+        self.assertEqual(state["peak_pnl"],.1)
+        self.assertFalse(state["trailing_active"])
+
+    def test_unavailable_native_retains_indexed_mark_and_current_bin(self):
+        for verify in (None,{"success":False},self.mark(pct=-4)|{"observed_at":time.time()-60}):
+            state,calls=self.replay(verify,indexed=-1)
+            self.assertTrue(state.get("guard_passed"))
+            self.assertEqual(state["pnl_pct"],-1)
+            self.assertEqual(state["pnl_sol_actual"],-.001)
+            self.assertEqual(state["active_bin"],-430)
+            self.assertEqual(sum(" pnl-onchain " in c for c in calls),1)
+            self.assertEqual(sum(" active-bin " in c for c in calls),1)
+
+    def test_old_executor_without_price_preserves_native_risk_bin(self):
+        proof=self.mark(pct=-4);proof.pop("pool_price")
+        state,calls=self.replay(proof,indexed=-1)
+        self.assertEqual(state["pnl_pct"],-4)
+        self.assertEqual(state["active_bin"],-470)
+        self.assertEqual(state["active_price"],1)
+        self.assertEqual(sum(" active-bin " in c for c in calls),1)
 
 
 if __name__ == "__main__":
