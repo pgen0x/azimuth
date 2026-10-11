@@ -31,6 +31,34 @@ def get_wallet_address():
         pass
     return None
 
+def position_bin_bounds(pos_addr, pool, pnl_data=None):
+    """Resolve this position's range without treating Redis entry guesses as bounds.
+
+    Portfolio pool aggregates omit position bounds. Prefer the per-position
+    response when available, otherwise use the executor's exact-position entry
+    record: it persists the same bin limits passed to the mint transaction.
+    Re-centering creates a new position, so its old parent's limits cannot apply.
+    """
+    if isinstance(pnl_data, dict) and pnl_data.get("success") is not False:
+        lower, upper = pnl_data.get("lower_bin"), pnl_data.get("upper_bin")
+        if type(lower) is int and type(upper) is int and lower <= upper:
+            return lower, upper
+    if not re.fullmatch(r"[1-9A-HJ-NP-Za-km-z]{32,44}", pos_addr):
+        return None, None
+    try:
+        with open(os.path.join(PROFILE_DIR, "memories", "dlmm_entries", pos_addr + ".json"),
+                  encoding="utf-8") as entry_file:
+            entry = json.load(entry_file)
+        if not isinstance(entry, dict) or entry.get("position") != pos_addr or entry.get("pool") != pool:
+            return None, None
+        center, below, above = (entry.get(key) for key in ("entry_bin", "bins_below", "bins_above"))
+        if all(type(value) is int for value in (center, below, above)) and below >= 0 and above >= 0:
+            return center - below, center + above
+    except (OSError, ValueError):
+        pass
+    return None, None
+
+
 def get_meteora_portfolio_positions(wallet_address):
     """Returns dict keyed by position address using Meteora Portfolio HTTP API.
     More reliable than DLMM SDK getAllLbPairPositionsByUser which requires fully initialized bin arrays."""
@@ -1932,7 +1960,7 @@ def main():
 
         # Get current pool price and active bin (executor active-bin still used for binId)
         active_price = entry_price
-        active_bin = meta.get("entry_bin")
+        active_bin = None  # Entry-time bin is not a current observation after an RPC failure.
         in_range = True
         pnl_pct = 0.0
         pnl_data = None
@@ -1940,7 +1968,7 @@ def main():
 
         pnl_sol_actual = None  # Meteora-exact SOL P&L; used at close-booking instead of size*pct
         if api_available and bp and bp.get("pnl_pct") is not None:
-            # Use Meteora Portfolio API data (reliable, real-time)
+            # Indexed position valuation; active-bin supplies the current pool bin.
             in_range = not bp.get("is_out_of_range", False)
             pnl_pct = bp.get("pnl_pct", 0.0)
             pnl_sol_actual = bp.get("pnl_sol")  # exact SOL P&L from Meteora
@@ -1980,7 +2008,7 @@ def main():
                 pnl_pct = ((active_price - entry_price) / entry_price) * 100.0
             if active_bin is not None:
                 lower_bin = meta.get("entry_bin", 0) - bins_below
-                upper_bin = meta.get("entry_bin", 0)
+                upper_bin = meta.get("entry_bin", 0) + meta.get("bins_above", 0)
                 in_range = (active_bin >= lower_bin) and (active_bin <= upper_bin)
             print(f"Dry Run Price Proxy: {pnl_pct:+.2f}% PnL | Range: {'🟢 In' if in_range else '🔴 Out'}")
 
@@ -2049,6 +2077,20 @@ def main():
                     continue
         elif api_available and bp:
             run_command(f"redis-cli del \"{suspect_key}\"")
+
+        # Pool aggregates do not include position bounds. Resolve exact-position
+        # geometry before SL grace and OOR rules, using the already-fetched live
+        # bin instead of an indexer's potentially stale in/out-of-range flag.
+        if is_dry_run_stored:
+            lower_bin = meta.get("entry_bin", 0) - bins_below
+            upper_bin = meta.get("entry_bin", 0) + meta.get("bins_above", 0)
+        else:
+            lower_bin, upper_bin = position_bin_bounds(pos_addr, pool, pnl_data)
+        if type(active_bin) is not int:
+            active_bin = None
+        if active_bin is not None and lower_bin is not None and upper_bin is not None:
+            in_range = lower_bin <= active_bin <= upper_bin
+            print(f"Position bins: active={active_bin}, range=[{lower_bin}, {upper_bin}], in_range={in_range}")
 
         # Old peaks can be USD returns. Start a new SOL peak once; never compare
         # a legacy USD high-water mark with a SOL-denominated exit threshold.
@@ -2158,15 +2200,6 @@ def main():
                 close_reason = f"Hard Stop-Loss hit ({pnl_pct:.2f}% <= {stop_loss_pct}%)"
 
         # 3. Pumped Far Above Range Check
-        lower_bin = None
-        upper_bin = None
-        if bp:
-            lower_bin = bp.get("lower_bin")
-            upper_bin = bp.get("upper_bin")
-        else:
-            lower_bin = meta.get("entry_bin", 0) - bins_below
-            upper_bin = meta.get("entry_bin", 0)
-            
         if active_bin is not None and upper_bin is not None:
             if active_bin > upper_bin + max_bins_pumped_above:
                 close_reason = f"Pumped far above range (Active bin {active_bin} > Upper bin {upper_bin} + {max_bins_pumped_above})"
