@@ -33,6 +33,18 @@ Missing transactions are unresolved; duplicate signatures count once. External
 native transfers are classified only when all instructions prove a simple transfer.
 Unrecognized/manual operations block flow-adjusted performance and root promotion.
 
+Signed transaction confirmation polls HTTP `getSignatureStatuses` with history
+search enabled, at one-second intervals over an eight-second polling window.
+The existing per-request HTTP timeout still applies, so an in-flight request may
+finish after that window. Only `confirmed`/`finalized` with explicit `err: null`
+proves success. A confirmed chain error is definitive; null/processed status,
+missing error evidence, an unavailable RPC or an elapsed polling window cannot
+authorize a replacement transaction. Durable markers and finalized block-height
+expiry remain authoritative, and RPC failover resends the same signed bytes.
+No WebSocket subscription is created: a denied handshake can otherwise leave
+the installed SDK reconnecting after HTTP confirmation, keeping the one-shot
+executor alive until the monitor timeout and delaying SOL settlement.
+
 Marked NAV = native SOL + current SPL marks/quotes + Meteora open LP balance and
 unclaimed fees + recoverable token/position account reserves. SPL marks use batched
 Jupiter prices bounded by observed timestamp and price slot; at most ten missing
