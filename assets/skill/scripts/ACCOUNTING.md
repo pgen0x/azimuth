@@ -112,6 +112,16 @@ is explicitly separate from Azimuth wallet NAV. No reports are automatically sen
 
 Use an isolated checkout for development: the live profile scripts are symlinks.
 
+The monitor resolves position bin limits from a per-position PnL response or the
+executor's matching `dlmm_entries/<position>.json` record. Portfolio pool aggregates
+omit these limits; Redis entry estimates and parent positions are not substitutes.
+The executor records the bin limits used by the mint, and re-centering creates a
+new position. With valid limits and the already-fetched current active bin, range
+checks use that geometry, including ranges above spot for SOL=X. Missing geometry
+or an unavailable current bin retains the indexed range flag and leaves directional
+checks unmeasured. This restores existing range guards; it does not turn indexed
+PnL into executable cash value or prove that historical losses were preventable.
+
 Signed deploy, close, claim, swap and rent transactions reconcile their own signature
 after broadcast errors as well as confirmation timeouts. RPC acknowledgement is not
 proof of execution. Confirmation is bounded to eight seconds; its fallback uses
