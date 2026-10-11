@@ -191,6 +191,11 @@ function markInventory(context, native, data, lbPair, deposit) {
     deposit_lamports: deposit.toString(), value_lamports_upper: totalUpper.toString(),
     active_bin: active, lower_bin: lower, upper_bin: upper, in_range: active >= lower && active <= upper,
     funding_signature: submission.signature, funded_bins: fundedBins,
+    inventory: {version: 1, wallet: submission.wallet,
+      token_x_mint: entry.sol_is_x ? SOL : entry.base_mint,
+      token_y_mint: entry.sol_is_x ? entry.base_mint : SOL,
+      net_x_raw: netX.toString(), net_y_raw: netY.toString(),
+      net_fee_x_raw: feeX.toString(), net_fee_y_raw: feeY.toString()},
     bin_observation: {version: 1, bin_step: step, sol_is_x: entry.sol_is_x, bins: observedBins},
     basis: "native inventory and unclaimed fees at active-bin spot, rounded up; actual initial SOL transfer; excludes rent, network and exit costs"};
 }

@@ -4,6 +4,7 @@ import argparse
 import json
 import math
 import os
+import re
 from pathlib import Path
 import subprocess
 import time
@@ -11,6 +12,7 @@ import urllib.parse
 import urllib.request
 from decimal import Decimal, getcontext
 from dlmm_accounting import rows
+from dlmm_monitor import verified_risk_mark
 
 getcontext().prec = 60
 HORIZONS = {'turnover': 3600, 'pulse': 1800, 'casual': 14400, 'multiday': 86400}
@@ -224,8 +226,48 @@ def width_study_summary(results):
     return groups
 
 
-def liquidation_observation(entry, wallet, fetch):
-    """Indexed inventory plus a sell quote; excludes network fees and rent."""
+def native_liquidation_inventory(entry, wallet, mark):
+    """Validate the exact withdrawal inventory already proved by the executor."""
+    if not verified_risk_mark(mark, entry['pool'], entry['position'], time.time()):
+        raise ValueError('native_inventory_proof_unavailable')
+    inventory = mark.get('inventory')
+    sol = 'So11111111111111111111111111111111111111112'
+    if (not isinstance(inventory, dict) or type(inventory.get('version')) is not int
+            or inventory['version'] != 1 or inventory.get('wallet') != wallet
+            or inventory.get('token_x_mint') != entry['base_mint']
+            or inventory.get('token_y_mint') != sol
+            or not isinstance(mark.get('funding_signature'), str) or not mark['funding_signature']):
+        raise ValueError('native_inventory_identity_mismatch')
+    amounts = []
+    for key in ('net_x_raw', 'net_y_raw', 'net_fee_x_raw', 'net_fee_y_raw'):
+        value = inventory.get(key)
+        if not isinstance(value, str) or not re.fullmatch(r'[0-9]{1,20}', value) or int(value) >= 2**64:
+            raise ValueError('invalid_native_inventory_amount')
+        amounts.append(int(value))
+    token, native = amounts[0]+amounts[2], amounts[1]+amounts[3]
+    if token >= 2**64 or native >= 2**64:
+        raise ValueError('native_inventory_sum_overflow')
+    return dict(raw=token, native=Decimal(native)/10**9,
+                deposit=Decimal(mark['deposit_lamports'])/10**9,
+                mark=Decimal(str(mark['pnl_sol'])), updated=Decimal(str(mark['observed_at'])))
+
+
+def read_native_risk_mark(profile, entry, wallet, deadline):
+    """One bounded read-only executor probe; unsupported positions keep indexed fallback."""
+    try:
+        output = subprocess.check_output(
+            ['node', str(profile/'skills/solana-dlmm/scripts/dlmm_executor.js'),
+             'pnl-onchain', entry['pool'], entry['position']],
+            stderr=subprocess.DEVNULL, timeout=request_timeout(deadline, 3))
+        mark = json.loads(output)
+        native_liquidation_inventory(entry, wallet, mark)
+        return mark
+    except (OSError, subprocess.SubprocessError, ValueError, TypeError, KeyError):
+        return None
+
+
+def liquidation_observation(entry, wallet, fetch, native_mark=None):
+    """Fresh position inventory plus a sell quote; excludes network fees and rent."""
     sol = 'So11111111111111111111111111111111111111112'
     initial = entry['bin_snapshot']
     decimals = initial['decimals_x']
@@ -238,32 +280,44 @@ def liquidation_observation(entry, wallet, fetch):
             raise ValueError('invalid_amount')
         return n
 
-    query = urllib.parse.urlencode(dict(user=wallet, status='open', pageSize=100, page=1))
-    data = fetch('https://dlmm.datapi.meteora.ag/positions/'
-                 + urllib.parse.quote(entry['pool'], safe='') + '/pnl?' + query)
-    if data['tokenX'] != entry['base_mint'] or data['tokenY'] != sol:
-        raise ValueError('mint_mismatch')
-    position = next(p for p in data['positions'] if p['positionAddress'] == entry['position'])
-    updated = number(position['updatedAt'])
-    if position['isClosed'] is not False or not -5 <= time.time() - float(updated) <= 180:
-        raise ValueError('closed_or_stale_position')
-    deposit = number(position['allTimeDeposits']['total']['sol'])
-    if (deposit <= 0 or number(position['allTimeWithdrawals']['total']['sol']) != 0
-            or number(position['allTimeFees']['total']['sol']) != 0):
-        raise ValueError('unsupported_prior_position_flows')
-    inventory = position['unrealizedPnl']
-    for side in ('X', 'Y'):
-        if number(inventory['unclaimedRewardToken' + side]['amount']) != 0:
-            raise ValueError('unvalued_rewards')
-    amounts = [number(inventory[k]['amount']) for k in
-               ('balanceTokenX', 'unclaimedFeeTokenX', 'balanceTokenY', 'unclaimedFeeTokenY')]
-    if any(n < 0 for n in amounts):
-        raise ValueError('negative_inventory')
-    raw = int((amounts[0] + amounts[1]) * 10**decimals)
-    if not 0 <= raw < 2**64:
-        raise ValueError('invalid_token_quantity')
-    native = amounts[2] + amounts[3]
-    mark = number(position['pnlSol'])
+    metadata = {}
+    if native_mark is not None:
+        proved = native_liquidation_inventory(entry, wallet, native_mark)
+        raw, native, deposit, mark, updated = (proved[k] for k in ('raw','native','deposit','mark','updated'))
+        maximum_age = 30
+        metadata = dict(inventory_source='onchain_sol_inventory',
+                        lp_mark_basis='native_active_bin_spot',
+                        funding_signature=native_mark['funding_signature'],
+                        native_inventory=native_mark['inventory'])
+    else:
+        query = urllib.parse.urlencode(dict(user=wallet, status='open', pageSize=100, page=1))
+        data = fetch('https://dlmm.datapi.meteora.ag/positions/'
+                     + urllib.parse.quote(entry['pool'], safe='') + '/pnl?' + query)
+        if data['tokenX'] != entry['base_mint'] or data['tokenY'] != sol:
+            raise ValueError('mint_mismatch')
+        position = next(p for p in data['positions'] if p['positionAddress'] == entry['position'])
+        updated = number(position['updatedAt'])
+        if position['isClosed'] is not False or not -5 <= time.time() - float(updated) <= 180:
+            raise ValueError('closed_or_stale_position')
+        deposit = number(position['allTimeDeposits']['total']['sol'])
+        if (deposit <= 0 or number(position['allTimeWithdrawals']['total']['sol']) != 0
+                or number(position['allTimeFees']['total']['sol']) != 0):
+            raise ValueError('unsupported_prior_position_flows')
+        inventory = position['unrealizedPnl']
+        for side in ('X', 'Y'):
+            if number(inventory['unclaimedRewardToken' + side]['amount']) != 0:
+                raise ValueError('unvalued_rewards')
+        amounts = [number(inventory[k]['amount']) for k in
+                   ('balanceTokenX', 'unclaimedFeeTokenX', 'balanceTokenY', 'unclaimedFeeTokenY')]
+        if any(n < 0 for n in amounts):
+            raise ValueError('negative_inventory')
+        raw = int((amounts[0] + amounts[1]) * 10**decimals)
+        if not 0 <= raw < 2**64:
+            raise ValueError('invalid_token_quantity')
+        native = amounts[2] + amounts[3]
+        mark = number(position['pnlSol'])
+        maximum_age = 180
+        metadata = dict(inventory_source='indexed_position', lp_mark_basis='meteora_indexed_lp')
     quote = None
     out = minimum = 0
     if raw:
@@ -280,7 +334,7 @@ def liquidation_observation(entry, wallet, fetch):
         if incoming != raw or not 0 < minimum <= out < 2**64:
             raise ValueError('quote_amount_mismatch')
     observed = time.time()
-    if not -5 <= observed - float(updated) <= 180:
+    if not -5 <= observed - float(updated) <= maximum_age:
         raise ValueError('inventory_expired_during_quote')
     return dict(status='measured', position_updated_at=float(updated), observed_at=observed,
                 deposit_sol=float(deposit), lp_mark_pnl_sol=float(mark),
@@ -288,13 +342,15 @@ def liquidation_observation(entry, wallet, fetch):
                 quote=quote,
                 quoted_assets_change_before_network_fees_sol=float(native + Decimal(out)/10**9 - deposit),
                 minimum_quoted_assets_change_before_network_fees_sol=float(native + Decimal(minimum)/10**9 - deposit),
-                basis='indexed_inventory_plus_sell_quote_before_network_fees_not_net_cash',
+                **metadata,
+                basis=('native' if native_mark is not None else 'indexed')
+                      + '_inventory_plus_sell_quote_before_network_fees_not_net_cash',
                 limitation='Inventory and quote differ in time; withdrawal can change liquidity. '
                            'Excludes network fees, rent, prior flows and rewards; quote is not an executed exit.')
 
 
 def collect_liquidation(profile, deadline=None):
-    """At most one position and two public HTTP reads per scheduled cycle."""
+    """One position, one bounded native probe, then a quote or indexed fallback."""
     deadline = min(deadline if deadline is not None else float('inf'),
                    time.monotonic() + LIQUIDATION_BUDGET_SECONDS)
     memory = profile / 'memories'
@@ -325,7 +381,8 @@ def collect_liquidation(profile, deadline=None):
             continue
         sample = dict(position=position, pool=entry['pool'], observed_at=time.time())
         try:
-            sample.update(liquidation_observation(entry, wallets[position], fetch))
+            native_mark = read_native_risk_mark(profile, entry, wallets[position], deadline)
+            sample.update(liquidation_observation(entry, wallets[position], fetch, native_mark=native_mark))
         except Exception as error:
             # HTTP errors can contain URLs; persist only their type, never credentials.
             sample.update(status='unmeasured', reason=type(error).__name__, observed_at=time.time())
