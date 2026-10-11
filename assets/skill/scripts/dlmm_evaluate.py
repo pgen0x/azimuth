@@ -255,8 +255,12 @@ def evaluate(profile, start, end, rejects):
                 and fact.get('landed') is not False and isinstance(fact.get('wallet'),str)
                 and bool(fact['wallet']) and fact['wallet']==event.get('wallet')
                 and type(fact.get('block_time')) in (int,float) and math.isfinite(fact['block_time'])
-                and fact['block_time'] <= closes[position]['ts'])
-    holding_closed={e['position'] for e in events if proved_holding_close(e)}
+                and 0 < fact['block_time'] <= closes[position]['ts'])
+    holding_closes={}
+    for event in events:
+        if proved_holding_close(event):
+            position=event['position'];closed_at=facts[event['signature']]['block_time']
+            holding_closes[position]=min(holding_closes.get(position,closed_at),closed_at)
     decisions=[r for r in rows(memory/'dlmm_recenter_decisions.jsonl') if start <= r['ts'] <= end]
     comparisons=[]
     for decision in decisions:
@@ -297,7 +301,7 @@ def evaluate(profile, start, end, rejects):
         result=bin_replay(entry,position_samples,cost)
         bins.append(dict(position=entry['position'],**result))
         widths.append(dict(position=entry['position'],mode=entry.get('mode'),**bin_width_replay(entry,position_samples)))
-        closed_at = closes[entry['position']]['ts'] if entry['position'] in holding_closed else None
+        closed_at = holding_closes.get(entry['position'])
         holding_widths.append(dict(position=entry['position'],mode=entry.get('mode'),
                                   **bin_width_holding_replay(entry,position_samples,closed_at)))
     snapshots=[s for s in rows(memory/'dlmm_nav.jsonl') if start<=s['ts']<=end]
@@ -453,7 +457,7 @@ def main():
         'Completed width pairs by mode (wider minus baseline): '+json.dumps(width_study_summary(data.get('bin_width_replay', []))),
         'Pre-close width observations: '+str(dict(collections.Counter(r['status'] for r in data.get('bin_width_holding_replay', [])))),
         'Pre-close width pairs by mode (wider minus baseline): '+json.dumps(width_study_summary(data.get('bin_width_holding_replay', []))),
-        'Pre-close comparisons require observed account-deletion proof and use the last bin sample at or before the actual close, at most 600s old. They exclude post-close market changes and do not simulate alternative exit decisions or the unobserved gap.',
+        'Pre-close comparisons require observed account-deletion proof and use the last bin sample at or before its finalized block time, at most 600s old. Delayed journal timestamps cannot extend the holding period. They exclude post-close market changes and do not simulate alternative exit decisions or the unobserved gap.',
         'Width comparisons use the same capital and observations, before wider rent, execution costs and live exit decisions; missing wider bins remain unmeasured.',
         'Modeled HODL benchmarks: '+str(dict(collections.Counter(r.get('hodl_basis') for r in data['bin_replay'] if r['status']=='modeled'))),
         f"Expected pre-broadcast SDK BidAsk references: {sum(r.get('expected_bidask_reference_scheme') == 'far_active' for r in data['bin_replay'])}; modeled references do not prove executed shares or live IL.",
