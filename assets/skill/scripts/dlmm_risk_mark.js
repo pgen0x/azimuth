@@ -131,6 +131,82 @@ function onlyInitialSignature(history, context) {
     && ["confirmed", "finalized"].includes(history[0].confirmationStatus), "position has additional or unknown transactions");
 }
 
+// Optional allocation evidence, using the funding transaction already verified
+// above. A decode failure must not disable the independent native risk mark.
+function initialFundingAllocation(tx, context, binding, deposit) {
+  try {
+    const {entry, submission} = context;
+    check(entry.sol_is_x === false && entry.bins_above === 0, "unsupported allocation orientation");
+    check(Number.isSafeInteger(entry.entry_bin) && Number.isSafeInteger(entry.bins_below)
+      && entry.bins_below >= 0 && entry.bins_below < 70, "unsupported allocation bounds");
+    check(tx.meta.err === null && tx.transaction.signatures[0] === submission.signature
+      && Number.isSafeInteger(tx.blockTime) && tx.blockTime > 0, "allocation funding unavailable");
+    const instructions = tx.transaction.message.instructions;
+    const adds = instructions.map((ix, index) => ({ix, index})).filter(({ix}) =>
+      address(ix.programId) === binding.programId
+      && Buffer.from(binding.decode(ix.data)).subarray(0, 8).equals(Buffer.from(binding.definition.discriminator)));
+    check(adds.length === 1, "ambiguous allocation instruction");
+    const {ix, index} = adds[0], decoded = binding.decodeInstruction(ix.data);
+    const p = decoded?.data?.liquidityParameter, s = p?.strategyParameters;
+    const lower = entry.entry_bin-entry.bins_below, upper = entry.entry_bin;
+    check(decoded?.name === "addLiquidityByStrategy2" && raw(p.amountX) === 0n
+      && raw(p.amountY) === BigInt(Math.floor(entry.size_sol*1e9))
+      && p.activeId === entry.entry_bin && Number.isSafeInteger(p.maxActiveBinSlippage)
+      && p.maxActiveBinSlippage >= 0 && p.maxActiveBinSlippage <= 10000
+      && s.minBinId === lower && s.maxBinId === upper
+      && Object.keys(s.strategyType).join() === "bidAskImBalanced"
+      && Array.isArray(s.parameteres) && s.parameteres.length === 64
+      && s.parameteres.every(v => v === 0), "unsupported allocation strategy");
+    const groups = tx.meta.innerInstructions.filter(g => g.index === index);
+    check(groups.length === 1, "allocation event group unavailable");
+    const events = [];
+    for (const inner of groups[0].instructions) {
+      if (address(inner.programId) !== binding.programId || typeof inner.data !== "string") continue;
+      const bytes = Buffer.from(binding.decode(inner.data));
+      // Anchor's EVENT_IX_TAG, encoded as a little-endian u64 for emit_cpi!.
+      check(inner.stackHeight === 2 && bytes.subarray(0, 8).equals(Buffer.from("e445a52e51cb9a1d", "hex")),
+        "unsupported allocation self-CPI");
+      const event = binding.decodeEvent(bytes.subarray(8).toString("base64"));
+      check(event && ["addLiquidity", "compositionFee"].includes(event.name), "unknown allocation event");
+      events.push(event);
+    }
+    const additions = events.filter(e => e.name === "addLiquidity");
+    check(additions.length === 1, "allocation event missing or repeated");
+    const add = additions[0].data, active = add.activeBinId;
+    check(address(add.position) === entry.position && address(add.lbPair) === entry.pool
+      && address(add.from) === submission.wallet && Number.isSafeInteger(active)
+      && Math.abs(active-entry.entry_bin) <= p.maxActiveBinSlippage
+      && active >= lower
+      && Array.isArray(add.amounts) && add.amounts.length === 2
+      && raw(add.amounts[0]) === 0n && raw(add.amounts[1]) === deposit, "allocation event mismatch");
+    const anchor = Math.min(active, upper);
+    const budget = raw(p.amountY), count = BigInt(anchor-lower+1), totalWeight = count*(count+1n)/2n;
+    const bins = [];
+    let total = 0n, feeTotal = 0n, protocolTotal = 0n;
+    for (let id = lower; id <= upper; id++) {
+      const amount = id <= anchor ? budget*BigInt(anchor-id+1)/totalWeight : 0n;
+      bins.push({id, sol_deposit_lamports: amount.toString(), composition_fee_lamports: "0", protocol_fee_lamports: "0"});
+      total += amount;
+    }
+    check(total === deposit && bins.length <= 70, "allocation total disagrees with transfer");
+    const charged = new Set();
+    for (const {data: fee} of events.filter(e => e.name === "compositionFee")) {
+      check(address(fee.from) === submission.wallet && fee.binId === active && !charged.has(fee.binId)
+        && raw(fee.tokenXFeeAmount) === 0n && raw(fee.protocolTokenXFeeAmount) === 0n,
+        "composition event mismatch");
+      const amount = raw(fee.tokenYFeeAmount), protocol = raw(fee.protocolTokenYFeeAmount), bin = bins[fee.binId-lower];
+      check(protocol <= amount && amount <= BigInt(bin.sol_deposit_lamports), "invalid composition cost");
+      bin.composition_fee_lamports = amount.toString(); bin.protocol_fee_lamports = protocol.toString();
+      feeTotal += amount; protocolTotal += protocol; charged.add(fee.binId);
+    }
+    return {version: 1, wallet: submission.wallet, signature: submission.signature, block_time: tx.blockTime,
+      requested_lamports: budget.toString(), deposit_lamports: deposit.toString(), executed_active_bin: active,
+      max_active_bin_slippage: p.maxActiveBinSlippage,
+      composition_fee_lamports: feeTotal.toString(), protocol_fee_lamports: protocolTotal.toString(), bins,
+      basis: "decoded_SOL_only_BidAsk_funding; inferred_integer_bin_allocations; protocol_fee_is_subset"};
+  } catch { return null; }
+}
+
 function markInventory(context, native, data, lbPair, deposit) {
   const {entry, submission} = context;
   check(address(native.lbPair) === entry.pool && address(native.owner) === submission.wallet
@@ -200,4 +276,4 @@ function markInventory(context, native, data, lbPair, deposit) {
     basis: "native inventory and unclaimed fees at active-bin spot, rounded up; actual initial SOL transfer; excludes rent, network and exit costs"};
 }
 
-module.exports = {SOL, SOURCE, check, loadInitialContext, initialDeposit, onlyInitialSignature, markInventory};
+module.exports = {SOL, SOURCE, check, loadInitialContext, initialDeposit, initialFundingAllocation, onlyInitialSignature, markInventory};

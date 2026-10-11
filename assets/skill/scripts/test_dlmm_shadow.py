@@ -440,3 +440,94 @@ with tempfile.TemporaryDirectory() as directory:
     assert recovered['bin_snapshots_attempted']==12
     assert len((memory/'dlmm_bin_samples.jsonl').read_text().splitlines())==12
 print('Slow shadow phases retain bin/probe time and resume without fabricated or duplicate outcomes')
+
+# A position can finish entirely in SOL and still lose its entry composition
+# cost. Reweighting its earned fees alone must not turn that cost into profit.
+from copy import deepcopy
+from dlmm_shadow import native_allocation_replay
+allocation_entry=dict(position='position',pool='pool',strategy='sol_bidask',sol_is_x=False,
+    amount_x=0,amount_y=.1,size_sol=.1,entry_bin=0,bins_below=1,bins_above=0,bin_step=100,deployed_at=45)
+initial_allocation=dict(version=1,wallet='wallet',signature='funding',block_time=50,
+    requested_lamports='100000000',deposit_lamports='99999999',executed_active_bin=0,max_active_bin_slippage=10,
+    composition_fee_lamports='1652',protocol_fee_lamports='165',bins=[
+        dict(id=-1,sol_deposit_lamports='66666666',composition_fee_lamports='0',protocol_fee_lamports='0'),
+        dict(id=0,sol_deposit_lamports='33333333',composition_fee_lamports='1652',protocol_fee_lamports='165')])
+allocation_observation=dict(version=1,position='position',pool='pool',source='onchain_sol_inventory',
+    funding_signature='funding',observed_at=149.5,decision_at=149.6,recorded_at=151,
+    lower_bin=-1,upper_bin=0,active_bin=1,deposit_lamports='99999999',value_lamports_upper='99999785',pnl_sol=-214e-9,
+    bin_observation=dict(version=1,bin_step=100,sol_is_x=False,initial_funding=initial_allocation,bins=[
+        dict(id=-1,liquidity_raw='100',x_raw='0',y_raw='66666666',fee_x_raw='0',fee_y_raw='0'),
+        dict(id=0,liquidity_raw='200',x_raw='0',y_raw='33331681',fee_x_raw='0',fee_y_raw='1438')]))
+allocation_funding=dict(signature='funding',wallet='wallet',failed=False,slot=1,block_time=50,observed_at=60)
+allocation_close=dict(signature='close',wallet='wallet',failed=False,slot=2,block_time=150,
+                      observed_at=160,position_account_closed=True)
+def replay_allocation(e=allocation_entry,o=allocation_observation,f=allocation_funding,c=allocation_close,end=200):
+    return native_allocation_replay(e,o,f,c,end_ts=end)
+allocation_result=replay_allocation()
+assert allocation_result['status']=='modeled'
+assert allocation_result['native_baseline_reconciliation_lamports']==0
+assert abs(allocation_result['schemes']['far_active']['gross_pnl_sol']+214e-9)<1e-15
+assert allocation_result['actual_entry_composition_fee_sol']==1652e-9
+assert allocation_result['schemes']['near_active']['fee_capture_sol']==2876e-9
+assert abs(allocation_result['schemes']['near_active']['gross_pnl_sol']+428e-9)<1e-15
+assert all(v['gross_pnl_sol']<0 for v in allocation_result['schemes'].values())
+assert replay_allocation(o=None)['status']=='unmeasured'
+legacy_observation=deepcopy(allocation_observation);del legacy_observation['bin_observation']['initial_funding']
+assert replay_allocation(o=legacy_observation)['reason']=='missing_decoded_initial_bin_allocation'
+for mutation in [
+    lambda o:o.update(recorded_at=201),lambda o:o.update(observed_at=150.1,decision_at=150.2),
+    lambda o:o.update(observed_at=119),lambda o:o.update(value_lamports_upper='99999786'),
+    lambda o:o.update(pnl_sol=0),lambda o:o.update(version=True),
+    lambda o:o['bin_observation']['initial_funding'].update(wallet='foreign'),
+    lambda o:o['bin_observation']['initial_funding'].update(signature='other'),
+    lambda o:o['bin_observation']['initial_funding'].update(deposit_lamports='100000000'),
+    lambda o:o['bin_observation']['initial_funding'].update(executed_active_bin=11),
+    lambda o:o['bin_observation']['initial_funding'].update(composition_fee_lamports='1817'),
+    lambda o:o['bin_observation']['initial_funding']['bins'][1].update(protocol_fee_lamports='1653'),
+    lambda o:o['bin_observation']['initial_funding']['bins'].reverse(),
+    lambda o:o['bin_observation']['bins'][0].update(liquidity_raw='0'),
+    lambda o:o['bin_observation']['bins'][0].update(y_raw=str(2**64)),
+    lambda o:o['bin_observation']['bins'][0].update(fee_y_raw='-1'),
+]:
+    bad=deepcopy(allocation_observation);mutation(bad)
+    assert replay_allocation(o=bad)['status']=='unmeasured'
+for change in [dict(observed_at=201),dict(failed=True),dict(landed=False),dict(slot=True),dict(wallet='foreign')]:
+    assert replay_allocation(f=dict(allocation_funding,**change))['status']=='unmeasured'
+    assert replay_allocation(c=dict(allocation_close,**change))['status']=='unmeasured'
+assert replay_allocation(c=dict(allocation_close,position_account_closed=False))['status']=='unmeasured'
+
+# Execution moved down one bin: SOL never funded the old active bin. Keep that
+# bin empty and compare only the actually funded support without dividing by 0.
+shifted_observation=deepcopy(allocation_observation)
+shifted_initial=shifted_observation['bin_observation']['initial_funding']
+shifted_initial.update(executed_active_bin=-1,deposit_lamports='100000000',composition_fee_lamports='100',protocol_fee_lamports='10')
+shifted_initial['bins'][0].update(sol_deposit_lamports='100000000',composition_fee_lamports='100',protocol_fee_lamports='10')
+shifted_initial['bins'][1].update(sol_deposit_lamports='0',composition_fee_lamports='0',protocol_fee_lamports='0')
+shifted_observation.update(deposit_lamports='100000000',value_lamports_upper='99999900',pnl_sol=-100e-9)
+shifted_observation['bin_observation']['bins'][0].update(y_raw='99999900')
+shifted_observation['bin_observation']['bins'][1].update(liquidity_raw='0',y_raw='0',fee_y_raw='0')
+shifted_result=replay_allocation(o=shifted_observation)
+assert shifted_result['status']=='modeled' and shifted_result['funded_bins']==1 and shifted_result['position_bins']==2
+assert shifted_result['schemes']['near_active']['paired_gross_delta_sol']==0
+
+# Verify the actual scheduled evaluator joins the funding/close facts and
+# obeys journal recording time, rather than testing only the pure helper.
+import dlmm_evaluate as native_evaluation
+with tempfile.TemporaryDirectory() as directory:
+    profile=Path(directory);memory=profile/'memories';(memory/'dlmm_entries').mkdir(parents=True)
+    (memory/'dlmm_entries/position.json').write_text(json.dumps(allocation_entry))
+    (memory/'dlmm_closes.jsonl').write_text(json.dumps(dict(position='position',ts=155,dry_run=False))+'\n')
+    events=[dict(kind='deploy',position='position',signature='funding',wallet='wallet',ts=50),
+            dict(kind='close',position='position',signature='close',wallet='wallet',ts=155)]
+    (memory/'dlmm_transactions.jsonl').write_text(''.join(json.dumps(e)+'\n' for e in events))
+    (memory/'dlmm_wallet_transactions.jsonl').write_text(''.join(json.dumps(f)+'\n' for f in [allocation_funding,allocation_close]))
+    journal=memory/'dlmm_close_bin_observations.jsonl';journal.write_text(json.dumps(allocation_observation)+'\n')
+    with patch.object(native_evaluation,'report',return_value={'chains':[],'rent_refund_groups':[]}):
+        measured=native_evaluation.evaluate(profile,1,200,profile/'rejects.jsonl')['native_bin_replay']
+        assert len(measured)==1 and measured[0]['status']=='modeled'
+        journal.write_text(json.dumps(dict(allocation_observation,recorded_at=201))+'\n')
+        assert native_evaluation.evaluate(profile,1,200,profile/'rejects.jsonl')['native_bin_replay'][0]['status']=='unmeasured'
+        journal.write_text(json.dumps(allocation_observation)+'\n')
+        (memory/'dlmm_wallet_transactions.jsonl').write_text(''.join(json.dumps(f)+'\n' for f in [allocation_funding,dict(allocation_close,failed=True)]))
+        assert native_evaluation.evaluate(profile,1,200,profile/'rejects.jsonl')['native_bin_replay'][0]['status']=='unmeasured'
+print('Native bin replay preserves composition cost, executed support and finalized observation cutoffs')
