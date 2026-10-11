@@ -11,6 +11,7 @@ import time
 import urllib.parse
 import urllib.request
 from decimal import Decimal, getcontext
+from fractions import Fraction
 from dlmm_accounting import rows
 from dlmm_monitor import verified_risk_mark
 
@@ -140,6 +141,136 @@ def bin_replay(entry, samples, cost_sol=None, *, end_ts=None):
             'hodl_basis':'recorded_SOL_only_input' if sol_only else 'modeled_initial_bin_inventory',
             'expected_bidask_reference_scheme':reference,
             'basis':'infinitesimal_fixed_shares; '+('fixed_mode_horizon_with_600s_terminal_grace' if end_ts is None else 'explicit_observation_cutoff_without_terminal_grace')+'; sampled_OOR; observed_costs_only; no_slippage_or_recenter_counterfactual', 'schemes':results}
+
+
+def native_allocation_replay(entry, observation, funding, close, *, end_ts):
+    """Reweight realized bin returns, preserving composition costs in principal.
+
+    This is an execution-conditioned sensitivity, never an executable return.
+    Both funding and deletion must have finalized facts observed by the cutoff.
+    """
+    def require(condition):
+        if not condition:
+            raise ValueError('invalid_native_allocation_evidence')
+
+    def uint(value, bits=64):
+        require(isinstance(value, str) and re.fullmatch(r'0|[1-9][0-9]{0,38}', value))
+        result = int(value)
+        require(result < 2**bits)
+        return result
+
+    def timestamp(value):
+        require(type(value) in (int, float) and math.isfinite(value) and value > 0)
+        return value
+
+    def integer(value):
+        require(type(value) is int)
+        return value
+
+    try:
+        if not observation:
+            return dict(status='unmeasured', reason='missing_native_close_observation')
+        bins_observation = observation.get('bin_observation') or {}
+        initial = bins_observation.get('initial_funding')
+        if not initial:
+            return dict(status='unmeasured', reason='missing_decoded_initial_bin_allocation')
+        cutoff = timestamp(end_ts)
+        position, pool = entry['position'], entry['pool']
+        require(all(type(entry[k]) in (int,float) and math.isfinite(entry[k])
+                    for k in ('size_sol','amount_x','amount_y')) and entry['size_sol'] > 0)
+        require(observation['position'] == position and observation['pool'] == pool
+                and observation['source'] == 'onchain_sol_inventory'
+                and integer(observation['version']) == integer(bins_observation['version']) == integer(initial['version']) == 1
+                and entry['strategy'] == 'sol_bidask' and entry['sol_is_x'] is False
+                and bins_observation['sol_is_x'] is False
+                and entry['amount_x'] == 0 and entry['amount_y'] == entry['size_sol'])
+        lower, upper, active = (integer(observation[k]) for k in ('lower_bin', 'upper_bin', 'active_bin'))
+        require(integer(entry['entry_bin']) == upper and integer(entry['bins_above']) == 0
+                and lower == upper-integer(entry['bins_below']) and 0 < upper-lower+1 <= 70 and abs(active) <= 100000)
+        step = integer(bins_observation['bin_step'])
+        require(0 < step <= 10000 and step == integer(entry['bin_step']))
+        observed = timestamp(observation['observed_at'])
+        require(observed <= timestamp(observation['decision_at']) <= timestamp(observation['recorded_at']) <= cutoff)
+        require(isinstance(initial['signature'], str) and bool(initial['signature'])
+                and initial['signature'] == observation['funding_signature'] == funding['signature']
+                and isinstance(initial['wallet'], str) and bool(initial['wallet'])
+                and initial['wallet'] == funding['wallet'] == close['wallet'])
+        for fact in (funding, close):
+            require(fact['failed'] is False and fact.get('landed') is not False
+                    and integer(fact['slot']) > 0
+                    and timestamp(fact['block_time']) <= timestamp(fact['observed_at']) <= cutoff)
+        require(integer(initial['block_time']) == funding['block_time']
+                and timestamp(funding['block_time']) <= observed
+                and close['position_account_closed'] is True
+                and 0 <= timestamp(close['block_time'])-observed <= 30)
+        capital, budget = uint(initial['deposit_lamports']), uint(initial['requested_lamports'])
+        require(capital == uint(observation['deposit_lamports']) and 0 < capital <= budget
+                and budget == int(entry['size_sol']*10**9))
+        execution_active = integer(initial['executed_active_bin'])
+        slippage = integer(initial['max_active_bin_slippage'])
+        require(execution_active >= lower and 0 <= slippage <= 10000 and abs(execution_active-upper) <= slippage)
+        anchor = min(execution_active, upper)
+        all_ids = list(range(lower, upper+1))
+        funded_ids = list(range(lower, anchor+1))
+        paid_bins, actual_bins = initial['bins'], bins_observation['bins']
+        require(isinstance(paid_bins, list) and isinstance(actual_bins, list)
+                and len(paid_bins) == len(actual_bins) == len(all_ids)
+                and [integer(b['id']) for b in paid_bins] == [integer(b['id']) for b in actual_bins] == all_ids)
+        paid, actual, composition = {}, {}, {}
+        weight_sum = len(funded_ids)*(len(funded_ids)+1)//2
+        protocol_total = 0
+        for i, pay, own in zip(all_ids, paid_bins, actual_bins):
+            paid[i] = uint(pay['sol_deposit_lamports'])
+            require(paid[i] == (budget*(anchor-i+1)//weight_sum if i <= anchor else 0))
+            share = uint(own['liquidity_raw'], 128)
+            composition[i] = uint(pay['composition_fee_lamports'])
+            protocol = uint(pay['protocol_fee_lamports'])
+            require(protocol <= composition[i] <= paid[i]
+                    and (composition[i] == 0 or i == execution_active))
+            protocol_total += protocol
+            actual[i] = {k: uint(own[k]) for k in ('x_raw','y_raw','fee_x_raw','fee_y_raw')}
+            require((share > 0) == (paid[i] > 0))
+            require(paid[i] > 0 or not any(actual[i].values()))
+        require(sum(paid.values()) == capital
+                and sum(composition.values()) == uint(initial['composition_fee_lamports'])
+                and protocol_total == uint(initial['protocol_fee_lamports']))
+        price = Fraction(10000+step, 10000)**active
+        principal = sum(b['x_raw']*price+b['y_raw'] for b in actual.values())
+        fees = sum(b['fee_x_raw']*price+b['fee_y_raw'] for b in actual.values())
+        total = principal+fees
+        upper_value = -(-total.numerator//total.denominator)
+        require(upper_value == uint(observation['value_lamports_upper'])
+                and type(observation['pnl_sol']) in (int,float)
+                and math.isfinite(observation['pnl_sol'])
+                and abs((upper_value-capital)/10**9-observation['pnl_sol']) <= 1e-12)
+        schemes = {}
+        for scheme in ('far_active','uniform','near_active'):
+            weights = {i: Fraction(anchor-i+1) if scheme == 'far_active' else
+                       Fraction(1) if scheme == 'uniform' else Fraction(1,anchor-i+1) for i in funded_ids}
+            denominator = sum(weights.values())
+            allocated = {i: int(budget*weights[i]/denominator) for i in funded_ids}
+            p = f = charged = Fraction(0)
+            for i in funded_ids:
+                ratio = Fraction(allocated[i],paid[i])
+                b = actual[i]
+                p += (b['x_raw']*price+b['y_raw'])*ratio
+                f += (b['fee_x_raw']*price+b['fee_y_raw'])*ratio
+                charged += composition[i]*ratio  # Already inside principal; never subtract twice.
+            amount = sum(allocated.values())
+            schemes[scheme] = dict(gross_pnl_sol=float((p+f-amount)/10**9),
+                                  principal_change_vs_SOL_hodl_sol=float((p-amount)/10**9),
+                                  fee_capture_sol=float(f/10**9), unspent_budget_lamports=budget-amount,
+                                  scaled_observed_composition_fee_sol=float(charged/10**9))
+        for values in schemes.values():
+            values['paired_gross_delta_sol'] = values['gross_pnl_sol']-schemes['far_active']['gross_pnl_sol']
+        return dict(status='modeled', funded_bins=len(funded_ids), position_bins=len(all_ids),
+                    executed_entry_active_bin=execution_active,
+                    actual_entry_composition_fee_sol=sum(composition.values())/10**9,
+                    native_baseline_reconciliation_lamports=0, schemes=schemes,
+                    basis='inferred_integer_funding_payments; fixed_realized_per_bin_return_rates; observed_composition_cost_in_principal; '
+                          'integer_funding_allocations; SOL_only_HODL; not_executed_counterfactual_profit_or_IL')
+    except (ValueError, TypeError, KeyError, AttributeError, OverflowError, ZeroDivisionError):
+        return dict(status='unmeasured', reason='invalid_native_allocation_evidence')
 
 
 def bin_width_replay(entry, samples, *, end_ts=None):

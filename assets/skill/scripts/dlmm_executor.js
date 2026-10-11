@@ -980,13 +980,16 @@ async function getPositionRiskMark(poolAddressStr, positionAddressStr) {
       riskMark.check(account && account.owner.toString() === idl.address
         && account.data.subarray(0, 8).equals(Buffer.from(discriminator)), "native position account mismatch");
       const native = pool.program.coder.accounts.decode("positionV2", account.data);
-      const deposit = riskMark.initialDeposit(transaction, context, {
+      const fundingBinding = {
         definition: idl.instructions.find(i => i.name === "add_liquidity_by_strategy2"),
         initializeDefinitions: idl.instructions.filter(i => ["initialize_position", "initialize_position2"].includes(i.name)),
         decode: bs58.decode, programId: idl.address,
         tokenX: pool.lbPair.tokenXMint.toString(), tokenY: pool.lbPair.tokenYMint.toString(),
         reserveX: pool.lbPair.reserveX.toString(), reserveY: pool.lbPair.reserveY.toString(),
-      });
+        decodeInstruction: data => pool.program.coder.instruction.decode(data, "base58"),
+        decodeEvent: data => pool.program.coder.events.decode(data),
+      };
+      const deposit = riskMark.initialDeposit(transaction, context, fundingBinding);
       const position = await pool.getPosition(positionKey);
       // Check after inventory reads: extra add/withdraw/claim transactions make
       // an initial-deposit-only denominator invalid, including unjournaled ones.
@@ -996,6 +999,8 @@ async function getPositionRiskMark(poolAddressStr, positionAddressStr) {
       const latest = riskMark.loadInitialContext(PROFILE_DIR, poolAddressStr, positionAddressStr);
       riskMark.check(latest.submission.signature === context.submission.signature, "funding changed during read");
       const mark = riskMark.markInventory(context, native, position.positionData, pool.lbPair, deposit);
+      const allocation = riskMark.initialFundingAllocation(transaction, context, fundingBinding, deposit);
+      if (allocation) mark.bin_observation.initial_funding = allocation;
       // Display/entry metadata only: risk valuation above retains exact rational
       // lamport arithmetic. Reuse the fetched pool instead of another RPC read.
       const price = Number(pool.fromPricePerLamport(Number(DLMM.getPriceOfBinByBinId(pool.lbPair.activeId, pool.lbPair.binStep))));

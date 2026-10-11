@@ -1,5 +1,32 @@
 # Solana accounting and review
 
+### Native allocation execution evidence
+
+Native risk marking can attach `bin_observation.initial_funding` using the
+funding transaction it already reads. This optional evidence supports SOL-only
+BidAsk deposits with supported strategy parameters. It decodes the executed
+active bin and composition fees from program-scoped Anchor self-CPI events,
+checks inferred integer bin allocations against the actual SOL transfer, and keeps
+protocol fees as a subset of composition fees. Unsupported or incomplete
+execution evidence leaves this field absent and does not disable native risk
+marking. No additional RPC or signer is used.
+
+The existing pre-close journal carries this evidence into `native_bin_replay`
+in scheduled evaluation. Funding and account-deletion facts must be finalized
+and observed by the report cutoff. The native observation must precede the
+earliest proved close block by no more than 30 seconds; its recording time must
+also be within the report. Historical rows without execution evidence remain
+unmeasured.
+
+This comparison scales actual bin principal and earned fees under three fixed
+allocation schemes. Composition costs stay inside principal; the displayed
+scaled cost is explanatory and is never subtracted again. The native baseline
+must reproduce its recorded lamport mark. This is a fixed realized return-rate
+sensitivity, not an executed trade or demonstrated improvement in IL. Different
+allocations can change fee dilution, composition rates, transfer fees, price
+impact, exit decisions and settlement costs. Pre-broadcast reserve models do
+not account for those execution composition costs or a changed active bin.
+
 Unlinked cleanup swaps can be attributed to a root only when finalized transaction
 balances show an exact sale of its entire residual inventory, one closed root is
 the sole recorded owner, and wallet coverage is complete and fresh. Shared mint
