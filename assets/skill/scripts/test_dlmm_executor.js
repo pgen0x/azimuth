@@ -40,7 +40,11 @@ class Connection {
   async getBlockHeight() { return height; }
   async getSignatureStatuses(signatures, options) {
     assert.equal(options.searchTransactionHistory, true);
-    return { value: [signatureStatus] };
+    // Confirmation reads can observe a successful mock broadcast immediately;
+    // durable-marker reads use the explicitly configured historical status.
+    const status = this.testConfirming && signatureStatus === null && !confirmTimeout && !sendFailed
+      ? {confirmationStatus:"confirmed",err:confirmationError ? "chain error" : null} : signatureStatus;
+    return { value: [status] };
   }
   async getLatestBlockhash() { return { blockhash: "exact-blockhash", lastValidBlockHeight: 150 }; }
   async sendRawTransaction(raw, options) {
@@ -53,8 +57,9 @@ class Connection {
     }
     sends++; closeBytes.push(raw.toString("hex")); sendFailed = failNextSend || sendError; if (failNextSend) { failNextSend = false; throw new Error("429 max usage reached"); } lastMaxRetries = options.maxRetries; assert.equal(raw.toString(), "exact-blockhash"); if (sendError) throw new Error("timeout after send"); return "sig";
   }
-  async confirmTransaction(strategy) { if (confirmTimeout || sendFailed) throw new Error("confirmation timeout"); assert.equal(strategy.blockhash, "exact-blockhash"); return { value: { err: confirmationError ? "chain error" : null } }; }
+  async confirmTransaction() { throw new Error("WebSocket confirmation must not be called"); }
 }
+const signatureStatusQuery = Connection.prototype.getSignatureStatuses;
 const rentInstructions = [];
 class RentTransaction {
   constructor() { Object.assign(this, transaction()); }
@@ -92,7 +97,13 @@ const sandbox = { require: (name) => deps[name] || require(name), module: { expo
       : { swapTransaction: "AA==" } };
   },
   console: { log() {}, warn() {}, error() {} }, Buffer, AbortSignal, setTimeout, clearTimeout };
-vm.runInNewContext(source + "\nmodule.exports.sdkFindPool = findPoolForPosition; module.exports.sdkPositions = getPositions; assertRootBudget = async () => {}; getWallet = () => testWallet; getTokenDecimals = async () => 9; assertRangeDoesNotRequireBinArrayInitialization = async () => {};", Object.assign(sandbox, { testWallet: wallet }));
+// Advance the clock for confirmation polling without sleeping eight real seconds
+// per pending fixture. Expiry must still depend on finalized block height.
+const fixtureEpoch = Date.now();
+let fixtureClock = 0;
+sandbox.Date = class extends Date { static now() { return fixtureEpoch + fixtureClock; } };
+sandbox.setTimeout = (callback, delay) => setTimeout(() => {fixtureClock += delay;callback();}, 0);
+vm.runInNewContext(source + "\nmodule.exports.sdkFindPool = findPoolForPosition; module.exports.sdkPositions = getPositions; assertRootBudget = async () => {}; getWallet = () => testWallet; getTokenDecimals = async () => 9; assertRangeDoesNotRequireBinArrayInitialization = async () => {}; const productionConfirmSignedTransaction = confirmSignedTransaction; confirmSignedTransaction = async (connection, ...args) => { connection.testConfirming = true; try { return await productionConfirmSignedTransaction(connection, ...args); } finally { connection.testConfirming = false; } }; module.exports.confirmSignedTransaction = confirmSignedTransaction;", Object.assign(sandbox, { testWallet: wallet }));
 const { swapAmountRaw, closePosition, swapToken, confirmSignedTransaction, deployPosition, acquireDeployLock, reconcilePendingSwap, assertNoTokenExposure,
   positionIsEmpty, slippageBpsToPercent } = sandbox.module.exports;
 const marker = path.join(root, "memories/dlmm_pending_deploys", `${wallet.publicKey}.json`);
@@ -455,20 +466,34 @@ const clearMarker = () => fs.rmSync(marker, { force: true });
   await assert.rejects(confirmSignedTransaction(new Connection(), { signature: "signature" }), /timeout/);
   confirmTimeout = false;
   vm.runInNewContext("findPoolForPosition = async () => ({pool: testPool, positionData: {publicKey: testWallet.publicKey, positionData: {lowerBinId: 0, upperBinId: 1}}});", Object.assign(sandbox, {testPool: pool}));
-  const originalConfirm = Connection.prototype.confirmTransaction;
-  const originalAbort = sandbox.AbortSignal;
+  // A failed HTTP status query rotates RPCs with the SAME signed bytes. No
+  // WebSocket method is available on this connection fixture.
   let confirmationAttempts = 0;
-  sandbox.AbortSignal = { timeout: () => AbortSignal.timeout(5) };
-  Connection.prototype.confirmTransaction = async strategy => {
-    if (++confirmationAttempts === 1) return new Promise((_, reject) => strategy.abortSignal.addEventListener("abort", () => reject(new Error("timeout"))));
-    return { value: { err: null } };
+  Connection.prototype.getSignatureStatuses = async () => {
+    if (++confirmationAttempts === 1) throw new Error("HTTP timeout");
+    return { value: [{confirmationStatus:"confirmed",err:null}] };
   };
-  const keepAlive = setTimeout(() => {}, 200);
   assert.equal((await closePosition("deadline-position")).success, true);
-  clearTimeout(keepAlive);
   assert.equal(confirmationAttempts, 2);
-  Connection.prototype.confirmTransaction = originalConfirm;
-  sandbox.AbortSignal = originalAbort;
+  // Null/processed responses are pending, even when they have err:null. Poll
+  // the original signature until confirmed, without another broadcast.
+  const observedStatuses = [null,{confirmationStatus:"processed",err:null},{confirmationStatus:"confirmed",err:null}];
+  let statusReads=0;
+  Connection.prototype.getSignatureStatuses=async(signatures,options)=>{
+    assert.deepEqual(Array.from(signatures),["read-only-signature"]);
+    assert.equal(options.searchTransactionHistory,true);
+    return {value:[observedStatuses[statusReads++]]};
+  };
+  const confirmationSends=sends;
+  await confirmSignedTransaction(new Connection(),{signature:"read-only-signature"},null);
+  assert.equal(statusReads,3);assert.equal(sends,confirmationSends);
+  // A bounded observation window cannot prove expiry or success. Existing
+  // pending-marker tests below still require finalized height for expiry.
+  statusReads=0;const pendingClock=fixtureClock;
+  Connection.prototype.getSignatureStatuses=async()=>{statusReads++;return {value:[null]};};
+  await assert.rejects(confirmSignedTransaction(new Connection(),{signature:"unknown"},null),/confirmation timeout/);
+  assert.ok(fixtureClock-pendingClock>=7900);assert.ok(statusReads<=10);assert.equal(sends,confirmationSends);
+  Connection.prototype.getSignatureStatuses = signatureStatusQuery;
   sendError = true;
   const beforeClose = sends;
   assert.equal((await closePosition("position")).pending, true);
@@ -638,11 +663,7 @@ const clearMarker = () => fs.rmSync(marker, { force: true });
   }
   Connection.prototype.getSignatureStatuses = async () => { throw new Error("status offline"); };
   await assert.rejects(confirmSignedTransaction(new Connection(), signed, Buffer.from("exact-blockhash")), /status offline/);
-  Connection.prototype.getSignatureStatuses = async (signatures, options) => {
-    assert.deepEqual(Array.from(signatures), ["signature"]);
-    assert.equal(options.searchTransactionHistory, true);
-    return {value:[signatureStatus]};
-  };
+  Connection.prototype.getSignatureStatuses = signatureStatusQuery;
   signatureStatus = null; sendError = false;
   confirmationError = true;
   const failedSwap = await swapToken("So11111111111111111111111111111111111111112", "TOKEN", 0.1);

@@ -115,28 +115,36 @@ async function recordedClaim(connection, tx, wallet, position) {
 // Reconcile the exact signed signature after either broadcast or confirmation errors.
 async function confirmSignedTransaction(connection, strategy, raw, options = CONFIRM_OPTIONS) {
   console.warn(`[TX] ${JSON.stringify({stage: "confirm", ...strategy})}`);
-  let confirmation;
-  try {
-    if (raw) {
-      try { await connection.sendRawTransaction(raw, options); }
-      catch { console.warn("[TX] Broadcast error; reconciling the signed signature"); }
-    }
-    confirmation = await connection.confirmTransaction({ ...strategy, abortSignal: AbortSignal.timeout(8000) }, "confirmed");
-  } catch (err) {
+  if (raw) {
+    try { await connection.sendRawTransaction(raw, options); }
+    catch { console.warn("[TX] Broadcast error; reconciling the signed signature"); }
+  }
+  // A denied WebSocket handshake leaves the SDK reconnecting even after its
+  // confirmation promise aborts and HTTP proves success. That keeps this
+  // one-shot process alive until the monitor kills it, delaying SOL recovery.
+  // Use bounded HTTP status polling without creating a subscription at all.
+  const deadline = Date.now() + 8000;
+  let previousStatus;
+  while (true) {
     const status = (await connection.getSignatureStatuses(
       [strategy.signature], { searchTransactionHistory: true }
     )).value[0];
-    console.warn(`[TX] ${JSON.stringify({stage: "reconcile", signature: strategy.signature,
-      status: status?.confirmationStatus || "unknown", chainError: status?.err || null})}`);
-    if (!status || !["confirmed", "finalized"].includes(status.confirmationStatus)
-        || (status.err !== null && !status.err)) throw err;
-    confirmation = { value: { err: status.err } };
-  }
-  if (confirmation.value.err !== null) {
-    if (!confirmation.value.err) throw new Error("Transaction confirmation unmeasured");
-    const error = new Error(`Transaction failed: ${JSON.stringify(confirmation.value.err)}`);
-    error.transactionFailed = true;
-    throw error;
+    const label = status?.confirmationStatus || "unknown";
+    if (label !== previousStatus) {
+      console.warn(`[TX] ${JSON.stringify({stage: "reconcile", signature: strategy.signature,
+        status: label, chainError: status?.err || null})}`);
+      previousStatus = label;
+    }
+    if (status && ["confirmed", "finalized"].includes(status.confirmationStatus)) {
+      if (status.err === null) return;
+      if (!status.err) throw new Error("Transaction confirmation unmeasured");
+      const error = new Error(`Transaction failed: ${JSON.stringify(status.err)}`);
+      error.transactionFailed = true;
+      throw error;
+    }
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) throw new Error("Transaction confirmation timeout; signed status remains pending");
+    await new Promise(resolve => setTimeout(resolve, Math.min(1000, remaining)));
   }
 }
 
