@@ -194,7 +194,7 @@ def main():
         path = Path(tmp) / "position.json"
         with patch.object(monitor, "run_command_json", side_effect=[({"success": True, "amount_raw": "10"}, None), ({"success": False}, "slippage")]) as first:
             monitor.settle_pending()
-        assert first.call_args_list[1].args[0].endswith(" 15 100 1")
+        assert first.call_args_list[1].args[0].endswith(" 15 100 1 --small-settlement")
         assert path.exists()
         capacity.assert_not_called()
         # Even a successful swap cannot resume scanning while balance is unknown.
@@ -238,7 +238,7 @@ def main():
         path.write_text(json.dumps(marker))
         with patch.object(monitor, "run_command_json", side_effect=[({"success": True, "amount_raw": "10"}, None), ({"success": False}, "slippage")]) as legacy:
             monitor.settle_pending()
-        assert legacy.call_args_list[1].args[0].endswith(" 15 100 1")
+        assert legacy.call_args_list[1].args[0].endswith(" 15 100 1 --small-settlement")
         path.unlink()
 
         # Dry runs cannot create or promote settlement state.
@@ -259,7 +259,7 @@ def main():
             monitor.queue_settlement("position")
             with patch.object(monitor, "run_command_json", side_effect=[({"success": True, "amount_raw": "1"}, None), ({"success": False, "reason": reason}, None)]) as run:
                 monitor.settle_pending()
-            assert run.call_args_list[1].args[0].endswith(" 15 100 1")
+            assert run.call_args_list[1].args[0].endswith(" 15 100 1 --small-settlement")
             capacity.assert_not_called()
             item = json.loads(path.read_text())
             assert item["state"] == ("pending" if reason == "net_recovery_unmeasured" else "deferred")

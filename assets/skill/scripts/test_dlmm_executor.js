@@ -313,6 +313,96 @@ const clearMarker = () => fs.rmSync(marker, { force: true });
   assert.equal((await recover(1)).success, true); assert.equal(sends,beforeAtomic+1);
   const recordedAtomic=fs.readFileSync(path.join(root,'memories/dlmm_transactions.jsonl'),'utf8').trim().split('\n').map(JSON.parse).at(-1);
   assert.equal(recordedAtomic.swap_quote.token_rent_close_included,true);
+  // First ordinary recoveries may spend another 200 bps only when the fresh
+  // owned-inventory quote is <=250,000 lamports. Exercise the actual swap path,
+  // including the selected quote sent to /swap and journaled before broadcast.
+  const atomicFetch = sandbox.fetch, atomicSimulation = Connection.prototype.simulateTransaction;
+  const originalTimer = sandbox.setTimeout;
+  const quoteCalls = [], quoteDelays = [], swapRequests = [];
+  let quotedOutputs = ["250000", "250000"], quoteAlter = null, quoteFailure = null;
+  sandbox.setTimeout = (callback, delay) => { quoteDelays.push(delay); return setTimeout(callback, 0); };
+  sandbox.fetch = async (url, options) => {
+    if (url.includes("/quote?")) {
+      const bps = Number(new URL(url).searchParams.get("slippageBps"));
+      const i = quoteCalls.length; quoteCalls.push(bps);
+      if (quoteFailure && i === 1) return {ok:false,status:quoteFailure,text:async()=>JSON.stringify({errorCode:"NO_ROUTES_FOUND"})};
+      const out = quotedOutputs[Math.min(i, quotedOutputs.length-1)];
+      const q = {inputMint:"TOKEN",outputMint:"So11111111111111111111111111111111111111112",
+        inAmount:"100000000",outAmount:out,swapMode:"ExactIn",slippageBps:bps,
+        otherAmountThreshold:/^[0-9]+$/.test(out) ? (BigInt(out)*BigInt(10000-bps)/10000n).toString() : "0",priceImpactPct:"0"};
+      if (quoteAlter) quoteAlter(q, i);
+      return {ok:true,json:async()=>q};
+    }
+    swapRequests.push(JSON.parse(options.body));
+    return {ok:true,json:async()=>({swapTransaction:"AA=="})};
+  };
+  Connection.prototype.simulateTransaction = async () => ({context:{slot:10},value:{err:null,accounts:[{lamports:300000}]}});
+  const settlementSol = "So11111111111111111111111111111111111111112";
+  const smallRecovery = () => swapToken("TOKEN",settlementSol,"raw:100000000",15,100,1,true);
+  const resetSmall = (outputs=["250000","250000"]) => {
+    quotedOutputs=outputs;quoteCalls.length=0;quoteDelays.length=0;swapRequests.length=0;quoteAlter=null;quoteFailure=null;
+  };
+  let smallResult = await smallRecovery();
+  assert.equal(smallResult.success,true);assert.deepEqual(quoteCalls,[100,300]);assert.deepEqual(quoteDelays,[2100]);
+  assert.equal(swapRequests[0].quoteResponse.slippageBps,300);
+  assert.equal(swapRequests[0].quoteResponse.otherAmountThreshold,"242500");
+  const smallEvent = JSON.parse(fs.readFileSync(journalPath,"utf8").trim().split("\n").at(-1));
+  assert.equal(smallEvent.swap_quote.authorized_slippage_bps,300);
+  assert.equal(smallEvent.swap_quote.small_settlement_requote,true);
+  resetSmall(["250001"]);
+  assert.equal((await smallRecovery()).success,true);assert.deepEqual(quoteCalls,[100]);assert.deepEqual(quoteDelays,[]);
+  assert.equal(swapRequests[0].quoteResponse.slippageBps,100);
+  resetSmall(["249999","249000"]);
+  assert.equal((await smallRecovery()).success,true);assert.equal(swapRequests[0].quoteResponse.outAmount,"249000");
+  const smallSends = sends;
+  resetSmall(["250000","250001"]);
+  assert.equal((await smallRecovery()).reason,"small_settlement_value_changed");assert.equal(swapRequests.length,0);
+  for (const alter of [q=>q.otherAmountThreshold="242499",q=>q.otherAmountThreshold="250001",
+      q=>q.otherAmountThreshold="0",q=>delete q.otherAmountThreshold,q=>q.slippageBps=500,
+      q=>q.swapMode="ExactOut",q=>q.inAmount="100000001",q=>q.inputMint="OTHER",q=>q.outputMint="OTHER"]) {
+    resetSmall();quoteAlter=(q,i)=>{if(i===1)alter(q);};
+    assert.equal((await smallRecovery()).success,false);assert.equal(swapRequests.length,0);
+  }
+  for (const value of ["invalid", "-1", "1.5", "0"]) {
+    resetSmall([value]);
+    if(value==="0") await assert.rejects(smallRecovery(),/empty quote/);
+    else assert.equal((await smallRecovery()).reason,"net_recovery_invalid_quote");
+    assert.deepEqual(quoteCalls,[100]);assert.equal(swapRequests.length,0);
+  }
+  resetSmall();quoteFailure=400;
+  assert.equal((await smallRecovery()).reason,"swap_no_route");assert.equal(swapRequests.length,0);
+  resetSmall();quoteFailure=429;
+  await assert.rejects(smallRecovery(),/429/);assert.equal(swapRequests.length,0);
+  resetSmall();quoteAlter=q=>q.priceImpactPct="0.16";
+  assert.equal((await smallRecovery()).reason,"price_impact_exceeded");assert.equal(swapRequests.length,0);
+  resetSmall();accountExists=true;
+  assert.equal((await smallRecovery()).reason,"settlement_position_still_open");assert.equal(swapRequests.length,0);accountExists=false;
+  resetSmall();inventoryProof={success:false,reason:"settlement_inventory_unproven"};
+  assert.equal((await smallRecovery()).reason,"settlement_inventory_unproven");assert.deepEqual(quoteCalls,[]);
+  inventoryProof={success:true,amount_raw:"100000000",wallet_balance_raw:"100000000",slot:10};
+  resetSmall();Connection.prototype.simulateTransaction=async()=>({context:{slot:10},value:{err:null,accounts:[{lamports:10000}]}});
+  assert.equal((await smallRecovery()).reason,"net_recovery_below_floor");
+  assert.equal(sends,smallSends); // Every invalid/under-floor case stayed unsigned.
+  Connection.prototype.simulateTransaction=async()=>({context:{slot:10},value:{err:null,accounts:[{lamports:300000}]}});
+  resetSmall();
+  const pendingSmall = path.join(root,"memories/dlmm_pending_swaps",`${wallet.publicKey}-TOKEN-${settlementSol}.json`);
+  fs.writeFileSync(pendingSmall,JSON.stringify({signature:"pending-small",lastValidBlockHeight:150}));
+  signatureStatus={confirmationStatus:"processed",err:null};
+  assert.equal((await smallRecovery()).pending,true);assert.deepEqual(quoteCalls,[]);assert.equal(sends,smallSends);
+  fs.rmSync(pendingSmall);signatureStatus=null;
+  await assert.rejects(swapToken("TOKEN","SOL","raw:100000000",15,300,1,true),/Small-settlement allowance/);
+  await assert.rejects(swapToken("TOKEN","SOL","raw:100000000",15,100,null,true),/Small-settlement allowance/);
+  delete env.DLMM_SETTLEMENT_POSITION;
+  await assert.rejects(smallRecovery(),/Small-settlement allowance/);
+  env.DLMM_SETTLEMENT_POSITION=settlementPosition;
+  resetSmall();
+  assert.equal((await swapToken("TOKEN","SOL","raw:100000000",15,100,1)).success,true);
+  assert.deepEqual(quoteCalls,[100]); // No caller opt-in means no widening.
+  resetSmall();
+  assert.equal((await swapToken("TOKEN","SOL","raw:100000000",15,300,1)).success,true);
+  assert.deepEqual(quoteCalls,[300]);assert.deepEqual(quoteDelays,[]); // Emergency/retry ceiling is unchanged.
+  sandbox.fetch=atomicFetch;Connection.prototype.simulateTransaction=atomicSimulation;sandbox.setTimeout=originalTimer;
+  const afterSmallSends = sends;
   for(const alter of [a=>a.account.data.parsed.info.owner="other",a=>a.account.data.parsed.info.closeAuthority="other",
     a=>a.account.data.parsed.info.tokenAmount.amount="100000001",a=>a.account.data.parsed.info.state="frozen",
     a=>a.account.data.parsed.info.delegate="other",a=>a.account.data.parsed.info.isNative=true]){
@@ -343,7 +433,7 @@ const clearMarker = () => fs.rmSync(marker, { force: true });
   sandbox.fetch=async()=>({ok:true,json:async()=>({inputMint:"TOKEN",outputMint:"So11111111111111111111111111111111111111112",inAmount:"100000000",outAmount:"5000"})});
   assert.equal((await swapToken("TOKEN","So11111111111111111111111111111111111111112","raw:50000000",5,100,1)).reason,"settlement_quote_mismatch");
   sandbox.fetch=legacyFetch;
-  assert.equal(sends,beforeAtomic+1);
+  assert.equal(sends,afterSmallSends);
   delete deps["child_process"];
   fs.rmSync(settlementMarker);delete env.DLMM_SETTLEMENT_POSITION;accountExists=true;
   // Healthy swap-only recovery never spends account/lookup RPCs for optional rent.
@@ -733,5 +823,18 @@ const clearMarker = () => fs.rmSync(marker, { force: true });
   fs.appendFileSync = () => { throw new Error("disk full"); };
   try { await assert.rejects(reclaimEmptyAccounts(true), /disk full/); assert.equal(sends, beforeRent + 2); }
   finally { fs.appendFileSync = append; }
+  // Exercise the real CLI parser, not a copy of its option handling.
+  let cliSwapArgs;
+  sandbox.captureCLISwap = async (...args) => {cliSwapArgs=args;return {success:true};};
+  vm.runInNewContext("swapToken = captureCLISwap; module.exports.runCLI = main;",sandbox);
+  const originalArgv=sandbox.process.argv;
+  sandbox.process.argv=originalArgv.concat(["swap","TOKEN","SOL","raw:100000000","15","100","1","--small-settlement"]);
+  await sandbox.module.exports.runCLI();assert.equal(cliSwapArgs[6],true);assert.equal(cliSwapArgs[4],100);
+  sandbox.process.exit=code=>{throw new Error(`exit ${code}`);};
+  for(const option of ["--unknown","--small-settlement --extra"]){
+    cliSwapArgs=null;sandbox.process.argv=originalArgv.concat(["swap","TOKEN","SOL","raw:1","15","100","1",...option.split(" ")]);
+    await assert.rejects(sandbox.module.exports.runCLI(),/exit 1/);assert.equal(cliSwapArgs,null);
+  }
+  sandbox.process.argv=originalArgv;
   console.log("Cross-process lock, concurrent mint, chain exposure, signed expiry and uncertain-send checks passed");
 })().catch((err) => { console.error(err); process.exitCode = 1; }).finally(() => { if (!worker) fs.rmSync(root, { recursive: true, force: true }); });
