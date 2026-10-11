@@ -128,9 +128,10 @@ const rejects = callback => assert.throws(callback, /Native risk mark unavailabl
     async sendRawTransaction() {throw Error("must never send");}
   }
   const pool = {lbPair: {...pair, tokenXMint: key(entry.base_mint), tokenYMint: key(SOL), reserveX: key("vault-x"), reserveY: key("vault-y")},
-    program: {coder: {accounts: {decode: () => nativeAccount}}}, getPosition: async () => ({positionData: sdkData})};
+    program: {coder: {accounts: {decode: () => nativeAccount}}}, getPosition: async () => ({positionData: sdkData}),
+    fromPricePerLamport: value => String(value/1000)};
   const deps = {"@solana/web3.js": {Connection, PublicKey: function(v) {return key(v);}, Keypair: {fromSecretKey() {signerCalls++; throw Error("must never sign");}}},
-    "@meteora-ag/dlmm": {create: async () => pool, IDL: {address: programId, accounts: [{name: "PositionV2", discriminator: [1,2,3,4,5,6,7,8]}], instructions: [definition, initializeDefinition]}},
+    "@meteora-ag/dlmm": {create: async () => pool, getPriceOfBinByBinId: () => "1.25", IDL: {address: programId, accounts: [{name: "PositionV2", discriminator: [1,2,3,4,5,6,7,8]}], instructions: [definition, initializeDefinition]}},
     "bn.js": {}, "bs58": {decode: binding.decode}, "dotenv": {config() {}, parse: () => ({})}};
   const sandbox = {require: name => deps[name] || require(name), module: {exports: {}}, Buffer,
     process: {argv: ["node", path.join(root, "skills/solana-dlmm/scripts/dlmm_executor.js")],
@@ -139,6 +140,7 @@ const rejects = callback => assert.throws(callback, /Native risk mark unavailabl
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, "dlmm_executor.js"), "utf8"), sandbox);
   const run = sandbox.module.exports.getPositionRiskMark;
   mark = await run(entry.pool, entry.position); assert.equal(mark.success, true); assert.equal(mark.pnl_pct, -7.999983439997019);
+  assert.equal(mark.pool_price, .00125);
   assert.equal(signerCalls, 0); assert.equal(rpcCalls, 2);
   sandbox.process.env.SOLANA_PUBLIC_KEY = "foreign-profile-wallet";
   assert.equal((await run(entry.pool, entry.position)).success, false); assert.equal(rpcCalls, 2);

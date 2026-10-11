@@ -66,7 +66,7 @@ def verified_risk_mark(data, pool, position, now):
     if (data.get("source") != "onchain_sol_inventory" or data.get("pool") != pool
             or data.get("position") != position or data.get("pnl_currency") != "SOL"):
         return False
-    for key in ("pnl_pct", "pnl_sol", "observed_at"):
+    for key in ("pnl_pct", "pnl_sol", "observed_at", "unclaimed_fees_sol"):
         value = data.get(key)
         if type(value) not in (int, float) or not math.isfinite(value):
             return False
@@ -77,6 +77,8 @@ def verified_risk_mark(data, pool, position, now):
         return False
     deposit, value = map(int, amounts)
     if not 0 < deposit <= 2**53-1 or not 0 <= value <= 2**53-1:
+        return False
+    if not 0 <= data["unclaimed_fees_sol"] <= value/1e9 + 1e-9:
         return False
     if (not math.isclose(data["pnl_sol"], (value-deposit)/1e9, abs_tol=1e-12)
             or not math.isclose(data["pnl_pct"], (value-deposit)/deposit*100, abs_tol=1e-9)):
@@ -2003,7 +2005,7 @@ def main():
         if not is_dry_run_stored and observe_root_fee_pace(meta, bp, now):
             run_command(f"redis-cli set \"sol:dlmm:position:{pos_addr}\" '{json.dumps(meta)}'")
 
-        # Get current pool price and active bin (executor active-bin still used for binId)
+        # Get current pool price and active bin, preferring proved native LP value.
         active_price = entry_price
         active_bin = None  # Entry-time bin is not a current observation after an RPC failure.
         in_range = True
@@ -2013,26 +2015,16 @@ def main():
 
         pnl_sol_actual = None  # Meteora-exact SOL P&L; used at close-booking instead of size*pct
         if api_available and bp and bp.get("pnl_pct") is not None:
-            # Indexed position valuation; active-bin supplies the current pool bin.
+            # Indexed metrics remain the fallback and supply the 24h fee rate.
             in_range = not bp.get("is_out_of_range", False)
             pnl_pct = bp.get("pnl_pct", 0.0)
             pnl_sol_actual = bp.get("pnl_sol")  # exact SOL P&L from Meteora
             fee_per_tvl_24h = bp.get("fee_per_tvl_24h", 0.0)
             if bp.get("pool_price", 0.0) > 0:
                 active_price = bp["pool_price"]
-            # Still call active-bin for binId (needed for pumped-above check)
-            ab_data, ab_err = run_command_json(f"node {EXECUTOR_PATH} active-bin {pool}")
-            if ab_data:
-                active_bin = ab_data.get("binId")
-                if not bp.get("pool_price"):
-                    active_price = float(ab_data.get("price", entry_price))
             print(f"Meteora Portfolio API: {pnl_pct:+.2f}% PnL | Fee/TVL 24h: {fee_per_tvl_24h:.2f}% | Range: {'🟢 In' if in_range else '🔴 Out'}")
         elif not is_dry_run_stored:
-            # Fallback: executor active-bin + pnl command
-            ab_data, ab_err = run_command_json(f"node {EXECUTOR_PATH} active-bin {pool}")
-            if ab_data:
-                active_price = float(ab_data.get("price", entry_price))
-                active_bin = ab_data.get("binId")
+            # Per-position indexed metrics when the portfolio fast path failed.
             pnl_data, pnl_err = run_command_json(f"node {EXECUTOR_PATH} pnl {pool} {pos_addr}")
             if pnl_data and pnl_data.get("success") != False:
                 pnl_pct = float(pnl_data.get("pnl_pct", 0.0))
@@ -2056,6 +2048,39 @@ def main():
                 upper_bin = meta.get("entry_bin", 0) + meta.get("bins_above", 0)
                 in_range = (active_bin >= lower_bin) and (active_bin <= upper_bin)
             print(f"Dry Run Price Proxy: {pnl_pct:+.2f}% PnL | Range: {'🟢 In' if in_range else '🔴 Out'}")
+
+        # A moderate indexed loss can differ substantially from native value:
+        # JPAD showed -3.21% before close; its withdrawal inventory marked -7.77%.
+        # Those different-time observations do not prove earlier-exit savings.
+        # Read once per real tick. A verified mark also supplies current bounds,
+        # bin and price, replacing the otherwise necessary active-bin command.
+        native_mark, native_mark_err = None, None
+        if not is_dry_run_stored:
+            native_mark, native_mark_err = run_command_json(
+                f"node {shlex.quote(EXECUTOR_PATH)} pnl-onchain {shlex.quote(pool)} {shlex.quote(pos_addr)}",
+                timeout=3)
+            native_mark_valid = verified_risk_mark(native_mark, pool, pos_addr, time.time())
+            native_price_available = False
+            if native_mark_valid:
+                pnl_pct, pnl_sol_actual = native_mark["pnl_pct"], native_mark["pnl_sol"]
+                in_range, active_bin = native_mark["in_range"], native_mark["active_bin"]
+                pnl_data = native_mark
+                price = native_mark.get("pool_price")
+                if type(price) in (int, float) and math.isfinite(price) and price > 0:
+                    active_price = price
+                    native_price_available = True
+                if bp:
+                    bp = {**bp, "pnl_pct": pnl_pct, "pnl_sol": pnl_sol_actual,
+                          "is_out_of_range": not in_range,
+                          "unclaimed_fees_sol": native_mark["unclaimed_fees_sol"]}
+                print(f"Native LP mark: {pnl_pct:+.4f}% PnL | {pnl_sol_actual:+.9f} SOL | current bin {native_mark['active_bin']}")
+            if not native_mark_valid or not native_price_available:
+                ab_data, ab_err = run_command_json(f"node {EXECUTOR_PATH} active-bin {pool}")
+                if ab_data:
+                    if not native_mark_valid:
+                        active_bin = ab_data.get("binId")
+                    if native_mark_valid or not (api_available and bp and bp.get("pool_price")):
+                        active_price = float(ab_data.get("price", entry_price))
 
         # SUSPECT-READ GUARD — a catastrophic Portfolio-API PnL must be confirmed
         # on-chain before any close rule may act on it (see SUSPECT_PNL_PCT).
@@ -2086,9 +2111,9 @@ def main():
         if suspect_age_min < SUSPECT_PNL_MIN_AGE_MINUTES:
             suspect_trigger_pct = max(SUSPECT_PNL_PCT, stop_loss_pct - EMERGENCY_SL_BUFFER_PCT)
         if not is_dry_run_stored and pnl_pct <= suspect_trigger_pct:
-            verify_data, verify_err = run_command_json(
-                f"node {shlex.quote(EXECUTOR_PATH)} pnl-onchain {shlex.quote(pool)} {shlex.quote(pos_addr)}",
-                timeout=8)
+            # Reuse this tick's proof/error; a second read would add latency
+            # during a crash or RPC outage without independent funding evidence.
+            verify_data, verify_err = native_mark, native_mark_err
             if verified_risk_mark(verify_data, pool, pos_addr, time.time()):
                 v_pct = verify_data["pnl_pct"]
                 if v_pct > suspect_trigger_pct:
