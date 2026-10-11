@@ -100,6 +100,51 @@ class WidthStudyTests(unittest.TestCase):
         self.assertEqual(summary['turnover']['gross_delta_sol'], complete['deltas']['gross_pnl_sol'])
         self.assertIsNone(summary['pulse']['gross_delta_sol'])
 
+    def test_holding_period_excludes_postclose_loss_and_terminal_grace(self):
+        before = dict(self.sample, ts=200, price=1, active_bin=0, bins=self.bins)
+        later = dict(self.sample, ts=251)
+        original = copy.deepcopy([self.entry, before, later])
+        result = shadow.bin_width_holding_replay(self.entry, [later, before], 250)
+        self.assertEqual(result['status'], 'modeled')
+        self.assertEqual(result['observed_until_ts'], 200)
+        self.assertEqual(result['seconds_before_close'], 50)
+        self.assertEqual(result['deltas']['gross_pnl_sol'], 0)
+        self.assertGreater(shadow.bin_width_replay(self.entry, [later])['deltas']['gross_pnl_sol'], 0)
+        self.assertEqual(shadow.bin_width_replay(self.entry, [later], end_ts=250)['status'], 'unmeasured')
+        self.assertEqual([self.entry, before, later], original)
+        self.assertEqual(shadow.HORIZONS['turnover'], 3600)
+        at_close = shadow.bin_width_holding_replay(self.entry, [dict(before, ts=250), later], 250)
+        self.assertEqual(at_close['seconds_before_close'], 0)
+
+    def test_holding_period_requires_known_close_and_fresh_preclose_sample(self):
+        for closed_at in (None, True, float('nan'), float('inf'), 100):
+            self.assertEqual(shadow.bin_width_holding_replay(self.entry, [self.sample], closed_at)['status'], 'unmeasured')
+        self.assertEqual(shadow.bin_width_holding_replay(self.entry, [self.sample], 200)['reason'],
+                         'no_followup_before_actual_close')
+        stale = shadow.bin_width_holding_replay(self.entry, [dict(self.sample, ts=200)], 801)
+        self.assertEqual(stale['reason'], 'last_preclose_observation_too_old')
+        self.assertEqual(shadow.bin_width_holding_replay(self.entry, [dict(self.sample, ts=200)], 800)['status'], 'modeled')
+
+    def test_evaluator_requires_close_proof_observed_by_its_cutoff(self):
+        with tempfile.TemporaryDirectory() as directory:
+            profile = Path(directory); memory = profile/'memories'
+            (memory/'dlmm_entries').mkdir(parents=True)
+            (memory/'dlmm_entries/position.json').write_text(json.dumps(self.entry))
+            (memory/'dlmm_closes.jsonl').write_text(json.dumps(dict(position='position', ts=250))+'\n')
+            (memory/'dlmm_bin_samples.jsonl').write_text(json.dumps(dict(self.sample, position='position', ts=200))+'\n'+json.dumps(dict(self.sample, position='position'))+'\n')
+            (memory/'dlmm_transactions.jsonl').write_text(json.dumps(dict(position='position',kind='close',signature='close',wallet='wallet',ts=250))+'\n')
+            fact=dict(signature='close',wallet='wallet',observed_at=270,block_time=250,position_account_closed=True,
+                      failed=False,wallet_delta_lamports=0,fee_lamports=0,token_deltas_raw={})
+            (memory/'dlmm_wallet_transactions.jsonl').write_text(json.dumps(fact)+'\n')
+            self.assertEqual(evaluate(profile,50,260,profile/'rejects.jsonl')['bin_width_holding_replay'][0]['status'], 'unmeasured')
+            result=evaluate(profile,50,3800,profile/'rejects.jsonl')['bin_width_holding_replay'][0]
+            self.assertEqual(result['status'], 'modeled'); self.assertEqual(result['observed_until_ts'], 200)
+            self.assertEqual(result['actual_close_ts'], 250)
+            for change in [dict(failed=True),dict(landed=False),dict(wallet='other'),dict(block_time=251),
+                           dict(position_account_closed=False)]:
+                (memory/'dlmm_wallet_transactions.jsonl').write_text(json.dumps(dict(fact,**change))+'\n')
+                self.assertEqual(evaluate(profile,50,3800,profile/'rejects.jsonl')['bin_width_holding_replay'][0]['status'], 'unmeasured')
+
 
 if __name__ == '__main__':
     unittest.main()

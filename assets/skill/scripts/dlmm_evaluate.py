@@ -13,7 +13,7 @@ import subprocess
 import sqlite3
 import time
 from dlmm_accounting import report, root_decision, rows, unvalued_token_inflows, refund_cash_bounds
-from dlmm_shadow import bin_replay, bin_width_replay, width_study_summary, HORIZONS
+from dlmm_shadow import bin_replay, bin_width_replay, bin_width_holding_replay, width_study_summary, HORIZONS
 from dlmm_realized import fetch_pools, fetch_closed_positions
 
 
@@ -248,6 +248,15 @@ def evaluate(profile, start, end, rejects):
     close_proofs={position:[e['signature'] for e in events if e.get('position')==position
                             and facts.get(e['signature'],{}).get('position_account_closed')]
                   for position in closes}
+    def proved_holding_close(event):
+        position=event.get('position');fact=facts.get(event.get('signature'),{})
+        return (event.get('kind')=='close' and position in closes
+                and fact.get('position_account_closed') is True and fact.get('failed') is False
+                and fact.get('landed') is not False and isinstance(fact.get('wallet'),str)
+                and bool(fact['wallet']) and fact['wallet']==event.get('wallet')
+                and type(fact.get('block_time')) in (int,float) and math.isfinite(fact['block_time'])
+                and fact['block_time'] <= closes[position]['ts'])
+    holding_closed={e['position'] for e in events if proved_holding_close(e)}
     decisions=[r for r in rows(memory/'dlmm_recenter_decisions.jsonl') if start <= r['ts'] <= end]
     comparisons=[]
     for decision in decisions:
@@ -276,7 +285,7 @@ def evaluate(profile, start, end, rejects):
         if outcome.get('estimated_false_reject_proxy'):group['positive_proxy']+=1
     for g in groups.values():
         g['estimated_false_reject_proxy_rate']=g['positive_proxy']/g['measured'] if g['measured'] else None
-    samples=rows(memory/'dlmm_bin_samples.jsonl');bins=[];widths=[]
+    samples=rows(memory/'dlmm_bin_samples.jsonl');bins=[];widths=[];holding_widths=[]
     for file in (memory/'dlmm_entries').glob('*.json'):
         entry=json.loads(file.read_text())
         if not start <= entry.get('deployed_at',0) <= end:continue
@@ -288,6 +297,9 @@ def evaluate(profile, start, end, rejects):
         result=bin_replay(entry,position_samples,cost)
         bins.append(dict(position=entry['position'],**result))
         widths.append(dict(position=entry['position'],mode=entry.get('mode'),**bin_width_replay(entry,position_samples)))
+        closed_at = closes[entry['position']]['ts'] if entry['position'] in holding_closed else None
+        holding_widths.append(dict(position=entry['position'],mode=entry.get('mode'),
+                                  **bin_width_holding_replay(entry,position_samples,closed_at)))
     snapshots=[s for s in rows(memory/'dlmm_nav.jsonl') if start<=s['ts']<=end]
     cash_samples=sorted((s for s in snapshots if isinstance(s.get('native_sol'),(int,float))
                          and math.isfinite(s['native_sol'])),key=lambda s:s['ts'])
@@ -323,6 +335,7 @@ def evaluate(profile, start, end, rejects):
                 wealth_change=wealth,native_cash_change=native_cash,unvalued_external_token_inflows=unvalued_inflows,price_coverage=price_coverage,nav_samples=len(snapshots),complete_nav_samples=len(valid),
                 root_replay=[replay_root_decision(r) for r in live],eligibility_replay=comparisons,root_live_decisions=live,
                 rejected_candidates=groups,bin_replay=bins,bin_width_replay=widths,
+                bin_width_holding_replay=holding_widths,
                 limits=['Native SOL changes include deployments, withdrawals, swaps, fees, rent and external transfers; they are not trading profit. Rent and incomplete token marks are shown separately, never treated as complete NAV.',
                         'LP PnL is a position valuation before wallet settlement, not net wallet profit.',
                         'Rejected-candidate rate is a price proxy above a fixed 1% hurdle, not realized LP profit.',
@@ -438,6 +451,9 @@ def main():
         '## Bin replay',str(dict(collections.Counter(r['status'] for r in data['bin_replay']))),
         '70-bin width study: '+str(dict(collections.Counter(r['status'] for r in data.get('bin_width_replay', [])))),
         'Completed width pairs by mode (wider minus baseline): '+json.dumps(width_study_summary(data.get('bin_width_replay', []))),
+        'Pre-close width observations: '+str(dict(collections.Counter(r['status'] for r in data.get('bin_width_holding_replay', [])))),
+        'Pre-close width pairs by mode (wider minus baseline): '+json.dumps(width_study_summary(data.get('bin_width_holding_replay', []))),
+        'Pre-close comparisons require observed account-deletion proof and use the last bin sample at or before the actual close, at most 600s old. They exclude post-close market changes and do not simulate alternative exit decisions or the unobserved gap.',
         'Width comparisons use the same capital and observations, before wider rent, execution costs and live exit decisions; missing wider bins remain unmeasured.',
         'Modeled HODL benchmarks: '+str(dict(collections.Counter(r.get('hodl_basis') for r in data['bin_replay'] if r['status']=='modeled'))),
         f"Expected pre-broadcast SDK BidAsk references: {sum(r.get('expected_bidask_reference_scheme') == 'far_active' for r in data['bin_replay'])}; modeled references do not prove executed shares or live IL.",
