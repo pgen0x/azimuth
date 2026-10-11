@@ -124,6 +124,64 @@ def bin_replay(entry, samples, cost_sol=None):
             'basis':'infinitesimal_fixed_shares; fixed_mode_horizon_with_600s_terminal_grace; sampled_OOR; observed_costs_only; no_slippage_or_recenter_counterfactual', 'schemes':results}
 
 
+def bin_width_replay(entry, samples):
+    """Paired fixed-capital gross comparison; wider rent/execution costs unknown."""
+    study = entry.get('width_study')
+    if not isinstance(study, dict) or not study.get('snapshot'):
+        return dict(status='unmeasured', reason='missing_pre_entry_width_snapshot')
+    initial = entry.get('bin_snapshot') or {}
+    snapshot = study['snapshot']
+    lower, upper = study.get('lower_bin'), study.get('upper_bin')
+    ids = [b['id'] for b in snapshot.get('bins', [])]
+    base_ids = [b['id'] for b in initial.get('bins', [])]
+    if (type(entry.get('entry_bin')) is not int
+            or type(lower) is not int or type(upper) is not int or upper-lower != 69
+            or not lower <= entry['entry_bin'] <= upper
+            or sorted(ids) != list(range(lower, upper+1)) or not base_ids
+            or not set(base_ids) < set(ids) or initial.get('ts') != snapshot.get('ts')
+            or any(initial.get(k) != snapshot.get(k) for k in
+                   ('active_bin', 'price', 'decimals_x', 'decimals_y', 'sol_is_x'))
+            or [b for b in snapshot['bins'] if b['id'] in base_ids] != initial.get('bins')):
+        return dict(status='unmeasured', reason='inconsistent_width_snapshot')
+    baseline = bin_replay(entry, samples)
+    wider_entry = dict(entry, bin_snapshot=snapshot,
+                       bins_below=entry['entry_bin']-lower, bins_above=upper-entry['entry_bin'])
+    wider = bin_replay(wider_entry, samples)
+    if baseline.get('status') != 'modeled' or wider.get('status') != 'modeled':
+        return dict(status='pending' if 'pending' in (baseline['status'], wider['status']) else 'unmeasured',
+                    reason='paired_bin_replay_unavailable', baseline=baseline, wider=wider)
+    old, new = baseline['schemes']['far_active'], wider['schemes']['far_active']
+    return dict(status='modeled', baseline_bins=len(base_ids), wider_bins=len(ids),
+                capital_sol=entry['size_sol'],
+                horizon_complete=baseline['horizon_complete'] and wider['horizon_complete'],
+                observed_until_ts=wider['observed_until_ts'], baseline=old, wider=new,
+                deltas={k:new[k]-old[k] for k in ('gross_pnl_sol', 'il_vs_hodl_sol', 'fee_capture_sol')},
+                basis='paired_infinitesimal_far_active; same_capital_and_observations; gross_before_costs',
+                limitation='Not executed returns; wider range rent, market impact, slippage and actual exit policy are unmodeled.')
+
+
+def width_study_summary(results):
+    """Aggregate only paired, completed horizons and keep the entry modes apart."""
+    groups = {}
+    for row in results:
+        mode = row.get('mode') or 'unknown'
+        group = groups.setdefault(mode, dict(total=0, complete_pairs=0, capital_sol=0.0,
+                                            gross_delta_sol=0.0, il_delta_sol=0.0, fee_delta_sol=0.0))
+        group['total'] += 1
+        if row.get('status') != 'modeled' or row.get('horizon_complete') is not True:
+            continue
+        group['complete_pairs'] += 1
+        group['capital_sol'] += row['capital_sol']
+        for dest, source in (('gross_delta_sol', 'gross_pnl_sol'),
+                             ('il_delta_sol', 'il_vs_hodl_sol'), ('fee_delta_sol', 'fee_capture_sol')):
+            group[dest] += row['deltas'][source]
+    for group in groups.values():
+        if not group['complete_pairs']:
+            for key in ('capital_sol', 'gross_delta_sol', 'il_delta_sol', 'fee_delta_sol'):
+                group[key] = None
+    return groups
+
+
 def liquidation_observation(entry, wallet, fetch):
     """Indexed inventory plus a sell quote; excludes network fees and rent."""
     sol = 'So11111111111111111111111111111111111111112'
@@ -267,7 +325,8 @@ def collect(profile, reject_file):
         if count>=12: break
         count+=1
         try:
-            ids=[b['id'] for b in initial['bins']]
+            study = entry.get('width_study') or {}
+            ids=[b['id'] for b in (study.get('snapshot') or initial)['bins']]
             output=subprocess.check_output(['node',str(executor),'bin-snapshot',entry['pool'],str(min(ids)),str(max(ids))],stderr=subprocess.DEVNULL,timeout=25)
             sample=json.loads(output);sample['position']=position
             append(memory/'dlmm_bin_samples.jsonl',sample)

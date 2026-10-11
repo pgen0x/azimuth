@@ -102,6 +102,19 @@ expected SDK BidAsk reference only for a SOL=Y, contiguous below-to-active range
 matching the recorded entry. This is a pre-broadcast allocation reference, not
 proof of executed shares, fills or live IL; other geometries remain unlabeled.
 
+New SOL-only BidAsk entries narrower than 70 bins also observe a fixed 70-bin
+alternative on the SOL side. One wider snapshot is cropped for the original
+`bin_snapshot` and retained as `width_study`; mint geometry is unchanged. If that
+read fails, the original snapshot is attempted without a width study. The existing
+shadow timer follows the union of the two ranges in its normal bounded collection.
+
+`bin_width_replay` compares far-active allocations at the same capital and sampled
+mode horizon. The daily report separates modes and totals only complete pairs.
+Extra empty, missing or reset bins make the comparison unmeasured; historical
+entries without a pre-entry wider snapshot are not backfilled with today's bins.
+The comparison is gross: additional rent, market impact, slippage and the live
+exit policy are unknown, so a modeled fee or IL advantage is not deployable profit.
+
 ## Operations
 
 `azimuth-sol-accounting.timer` and `azimuth-sol-shadow.timer` collect outside the
