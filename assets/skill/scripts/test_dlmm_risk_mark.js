@@ -96,6 +96,14 @@ const rejects = callback => assert.throws(callback, /Native risk mark unavailabl
   assert.equal(mark.source, SOURCE); assert.equal(mark.pnl_sol, -.008); assert.equal(mark.pnl_pct, -8);
   assert.equal(mark.current_value_sol, .09); assert.equal(mark.unclaimed_fees_sol, .002);
   assert.equal(mark.value_lamports_upper, "92000000");
+  assert.deepEqual(mark.inventory, {version: 1, wallet: submission.wallet,
+    token_x_mint: entry.base_mint, token_y_mint: SOL, net_x_raw: "10000000", net_y_raw: "80000000",
+    net_fee_x_raw: "1000000", net_fee_y_raw: "1000000"});
+  const transferAdjusted = markInventory(context, native, {...data,
+    totalXAmountExcludeTransferFee: "9000000", feeXExcludeTransferFee: "900000"}, pair, 100000000n);
+  assert.equal(transferAdjusted.inventory.net_x_raw, "9000000");
+  assert.equal(transferAdjusted.inventory.net_fee_x_raw, "900000");
+  assert.equal(transferAdjusted.value_lamports_upper, "90900000");
   assert.deepEqual(mark.bin_observation, {version: 1, bin_step: 100, sol_is_x: false, bins: [
     {id: -1, liquidity_raw: "100", x_raw: "10000000", y_raw: "0", fee_x_raw: "1000000", fee_y_raw: "0"},
     {id: 0, liquidity_raw: "200", x_raw: "0", y_raw: "80000000", fee_x_raw: "0", fee_y_raw: "1000000"}]});
