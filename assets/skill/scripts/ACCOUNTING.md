@@ -531,9 +531,15 @@ or relax the scanner's accepted/ambiguous-delivery deduplication protection.
 ### Forward liquidation observations
 
 The existing shadow job samples at most one recent, unclosed position per cycle
-in `dlmm_liquidation_quotes.jsonl`. It performs one Meteora position HTTP read
-and, if token inventory is nonzero, one Jupiter quote read; no Helius calls,
-retries or transactions. Attempts are spaced at least 240 seconds per position
+in `dlmm_liquidation_quotes.jsonl`. It first makes one read-only native risk probe
+with a three-second timeout. A verified mark supplies transfer-adjusted token
+principal plus fees directly to the Jupiter quote, with a 30-second freshness
+limit checked again after the quote. `inventory_source`, `lp_mark_basis`, funding
+signature and raw inventory identify this basis separately from older observations.
+Unsupported or unavailable native proof retains the indexed position HTTP fallback
+and its 180-second freshness limit. The existing 20-second overall budget applies;
+there are no Helius calls, retries or transactions. Attempts are spaced at least
+240 seconds per position
 and rotate oldest observations first. Existing mode horizons bound collection.
 
 Initial support covers SOL as token Y, recorded mint decimals, and positions

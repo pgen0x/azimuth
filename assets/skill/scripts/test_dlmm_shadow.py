@@ -292,6 +292,55 @@ with patch.object(shadow_module.time, 'time', return_value=10000):
         try: liquidation_observation(liquid_entry, 'wallet', Mock(side_effect=[api, dict(quote, **{key:value})]))
         except ValueError: pass
         else: raise AssertionError(key)
+# Native quotes use exact transfer-adjusted withdrawal amounts, without reading
+# indexed inventory. Expiry during the quote cannot become a risk observation.
+native_mark = dict(success=True, source='onchain_sol_inventory', position='p', pool='pool',
+    pnl_currency='SOL', observed_at=10000, pnl_pct=1, pnl_sol=.001,
+    unclaimed_fees_sol=.002, deposit_lamports='100000000', value_lamports_upper='101000000',
+    active_bin=0, lower_bin=-1, upper_bin=1, in_range=True, funding_signature='funding',
+    inventory=dict(version=1, wallet='wallet', token_x_mint='TOKEN', token_y_mint=sol,
+        net_x_raw='9000000', net_y_raw='90000000', net_fee_x_raw='1000000', net_fee_y_raw='1000000'))
+with patch.object(shadow_module.time, 'time', return_value=10000):
+    fetch = Mock(return_value=quote)
+    observed = liquidation_observation(liquid_entry, 'wallet', fetch, native_mark=native_mark)
+    assert fetch.call_count == 1 and 'api.jup.ag' in fetch.call_args.args[0]
+    assert observed['inventory_source'] == 'onchain_sol_inventory'
+    assert observed['lp_mark_basis'] == 'native_active_bin_spot'
+    assert observed['token_sell_raw'] == '10000000'
+    assert observed['native_lp_assets_including_fees_sol'] == .091
+    assert observed['quoted_assets_change_before_network_fees_sol'] == -.001
+    assert observed['native_inventory'] == native_mark['inventory']
+    for mutate in (
+        lambda m:m.update(observed_at=9969), lambda m:m.update(position='other'),
+        lambda m:m.update(pool='other'), lambda m:m.update(funding_signature=''),
+        lambda m:m.update(inventory=None), lambda m:m['inventory'].update(wallet='other'),
+        lambda m:m['inventory'].update(token_y_mint='OTHER'),
+        lambda m:m['inventory'].update(net_x_raw=True),
+        lambda m:m['inventory'].update(net_fee_x_raw='-1'),
+        lambda m:m['inventory'].update(net_x_raw=str(2**64)),
+        lambda m:m['inventory'].update(net_x_raw=str(2**64-1)),
+    ):
+        bad=deepcopy(native_mark);mutate(bad);fetch=Mock()
+        try:liquidation_observation(liquid_entry,'wallet',fetch,native_mark=bad)
+        except ValueError:pass
+        else:raise AssertionError('invalid native inventory accepted')
+        assert not fetch.called
+    from dlmm_shadow import read_native_risk_mark
+    with patch.object(shadow_module.subprocess, 'check_output', return_value=json.dumps(native_mark).encode()) as probe:
+        assert read_native_risk_mark(Path('/profile'), liquid_entry, 'wallet', shadow_module.time.monotonic()+20) == native_mark
+        assert probe.call_count == 1 and probe.call_args.args[0][-3:] == ['pnl-onchain','pool','p']
+        assert 0 < probe.call_args.kwargs['timeout'] <= 3
+    for output in (b'bad json', b'{}', json.dumps(dict(native_mark,inventory=None)).encode()):
+        with patch.object(shadow_module.subprocess, 'check_output', return_value=output):
+            assert read_native_risk_mark(Path('/profile'),liquid_entry,'wallet',shadow_module.time.monotonic()+20) is None
+    with patch.object(shadow_module.subprocess, 'check_output', side_effect=shadow_module.subprocess.TimeoutExpired('read',3)):
+        assert read_native_risk_mark(Path('/profile'),liquid_entry,'wallet',shadow_module.time.monotonic()+20) is None
+with patch.object(shadow_module.time, 'time', side_effect=[10000,10031]):
+    try:liquidation_observation(liquid_entry,'wallet',Mock(return_value=quote),native_mark=native_mark)
+    except ValueError:pass
+    else:raise AssertionError('expired native inventory accepted after quote')
+print('Native liquidation quotes preserve exact inventory, provenance, freshness and bounded fallback')
+
 with tempfile.TemporaryDirectory() as directory:
     profile = Path(directory); memory = profile/'memories'; (memory/'dlmm_entries').mkdir(parents=True)
     for ident in ['p', 'q', 'closed']:
@@ -299,6 +348,7 @@ with tempfile.TemporaryDirectory() as directory:
     (memory/'dlmm_transactions.jsonl').write_text(''.join(json.dumps(dict(kind='deploy', position=i, wallet='wallet', signature=i, ts=9900))+'\n' for i in ['p','q','closed']))
     (memory/'dlmm_closes.jsonl').write_text(json.dumps(dict(position='closed'))+'\n')
     with patch.object(shadow_module.time, 'time', return_value=10000), \
+         patch.object(shadow_module, 'read_native_risk_mark', return_value=None), \
          patch.object(shadow_module, 'liquidation_observation', side_effect=TimeoutError) as observe:
         assert collect_liquidation(profile) == 1 and observe.call_count == 1
         assert collect_liquidation(profile) == 1 and observe.call_count == 2
