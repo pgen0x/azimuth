@@ -16,6 +16,53 @@ POSITION = "AeEqD9BwdPtYt7fpvo8q6U7KBvyEaMUZAnhTmZZc5CB8"
 POOL = "3BCeknAQpHELGfKhUb9mnKuLC3Eg3qjJrZ5B7fqC1xSW"
 
 
+class CloseBinObservationTests(unittest.TestCase):
+    def mark(self):
+        return dict(success=True, source="onchain_sol_inventory", pool=POOL, position=POSITION,
+                    pnl_currency="SOL", observed_at=100, pnl_pct=-8, pnl_sol=-.008,
+                    deposit_lamports="100000000", value_lamports_upper="92000000", funding_signature="funding",
+                    active_bin=0, lower_bin=0, upper_bin=0, in_range=True, unclaimed_fees_sol=.002,
+                    bin_observation=dict(version=1, bin_step=100, sol_is_x=False,
+                        bins=[dict(id=0,liquidity_raw="100",x_raw="10000000",y_raw="80000000",
+                                   fee_x_raw="1000000",fee_y_raw="1000000")]))
+
+    def test_observation_preserves_raw_bins_and_both_times_after_slow_close(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(monitor,"PROFILE_DIR",directory), \
+             patch.object(monitor.time,"time",return_value=200):
+            self.assertTrue(monitor.record_close_bin_observation(self.mark(),POOL,POSITION,"risk exit",101))
+            row=json.loads((Path(directory)/'memories/dlmm_close_bin_observations.jsonl').read_text())
+            self.assertEqual((row['observed_at'],row['decision_at'],row['recorded_at']),(100,101,200))
+            self.assertEqual(row['bin_observation'],self.mark()['bin_observation'])
+            self.assertIn('not_finalized_exit',row['basis'])
+
+    def test_missing_stale_foreign_or_malformed_data_and_disk_failure_are_nonfatal(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(monitor,"PROFILE_DIR",directory):
+            for mark in [None,dict(self.mark(),pool='foreign'),dict(self.mark(),observed_at=50),
+                         dict(self.mark(),bin_observation={}),dict(self.mark(),funding_signature=None)]:
+                if isinstance(mark,dict) and mark.get('funding_signature') is None:
+                    mark.pop('funding_signature',None)
+                self.assertFalse(monitor.record_close_bin_observation(mark,POOL,POSITION,'exit',101))
+            malformed=self.mark();malformed['bin_observation']['bins'][0]['x_raw']='NaN'
+            self.assertFalse(monitor.record_close_bin_observation(malformed,POOL,POSITION,'exit',101))
+            self.assertFalse((Path(directory)/'memories/dlmm_close_bin_observations.jsonl').exists())
+            with patch('builtins.open',side_effect=OSError('disk unavailable')):
+                self.assertFalse(monitor.record_close_bin_observation(self.mark(),POOL,POSITION,'exit',101))
+
+    def test_production_records_after_close_attempt_and_skips_dry_run(self):
+        source=Path(monitor.__file__).read_text()
+        code=textwrap.dedent(source[source.index('        # Execute close if triggered'):
+                                  source.index('            if close_res and close_res.get("success"):',
+                                               source.index('        # Execute close if triggered'))])
+        for dry in (True,False):
+            calls=[]
+            scope=dict(vars(monitor),close_reason='risk exit',pair='TEST-SOL',is_dry_run_stored=dry,
+                       pos_addr=POSITION,pool=POOL,native_mark=self.mark(),wallet_address='wallet',emergency_close=True)
+            scope['close_position']=lambda *a,**k:(calls.append('close') or (dict(success=False),None))
+            scope['record_close_bin_observation']=lambda *a:calls.append('observation')
+            with contextlib.redirect_stdout(io.StringIO()):exec(code,scope)
+            self.assertEqual(calls,['close'] if dry else ['close','observation'])
+
+
 class PositionBoundsTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
