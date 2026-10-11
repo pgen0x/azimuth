@@ -25,7 +25,10 @@ const pool = {
   claimSwapFee: async () => [],
   removeLiquidity: async () => transaction(),
   getActiveBin: async () => ({ binId: 0, price: "1" }), fromPricePerLamport: (x) => x,
-  initializePositionAndAddLiquidityByStrategy: async (args) => { lastSlippage = args.slippage; builds++; if (buildError) throw new Error("build failed"); return transaction(); },
+  initializePositionAndAddLiquidityByStrategy: async (args) => {
+    assert.equal(args.strategy.minBinId, -20); assert.equal(args.strategy.maxBinId, 0);
+    lastSlippage = args.slippage; builds++; if (buildError) throw new Error("build failed"); return transaction();
+  },
   createExtendedEmptyPosition: async () => [transaction()],
   addLiquidityByStrategyChunkable: async () => { throw new Error("wide add failed"); },
 };
@@ -97,6 +100,35 @@ const deploy = () => deployPosition("pool", 0, 0.1, 20, 0, "bid_ask", 1000);
 const clearMarker = () => fs.rmSync(marker, { force: true });
 
 (async () => {
+  // Wider observation shares one snapshot with the baseline; it never changes
+  // the mint bounds. Keep the original baseline when the wider read fails.
+  const snapshotReads = [];
+  sandbox.snapshotStub = async (_pool, lower, upper) => {
+    snapshotReads.push([lower, upper]);
+    return { ts: 100, bins: Array.from({length: upper-lower+1}, (_, i) => ({id: lower+i})) };
+  };
+  vm.runInNewContext("const originalSnapshot = binSnapshot; binSnapshot = snapshotStub; module.exports.entryBinSnapshots = entryBinSnapshots;", sandbox);
+  const capture = sandbox.module.exports.entryBinSnapshots;
+  let captured = await capture(pool, -44, 0, "below");
+  assert.deepEqual(snapshotReads, [[-69, 0]]);
+  assert.equal(captured.bin_snapshot.bins.length, 45);
+  assert.equal(captured.width_study.snapshot.bins.length, 70);
+  assert.equal(captured.bin_snapshot.bins[0].id, -44);
+  captured = await capture(pool, 0, 44, "above");
+  assert.equal(captured.bin_snapshot.bins.at(-1).id, 44);
+  assert.equal(captured.width_study.upper_bin, 69);
+  assert.equal((await capture(pool, -80, 0, "below")).width_study, null);
+  assert.equal((await capture(pool, -20, 20, null)).width_study, null);
+  sandbox.snapshotStub = async (_pool, lower, upper) => {
+    if (lower === -69) throw new Error("unavailable wider bins");
+    return {ts: 100, bins: [{id: lower}, {id: upper}]};
+  };
+  vm.runInNewContext("binSnapshot = snapshotStub;", sandbox);
+  captured = await capture(pool, -44, 0, "below");
+  assert.equal(captured.width_study, null);
+  assert.equal(captured.bin_snapshot.bins[0].id, -44);
+  vm.runInNewContext("binSnapshot = originalSnapshot;", sandbox);
+
   if (worker && worker.startsWith("reclaim-")) {
     const shares = worker === "reclaim-unknown" ? undefined : [{binId:0,positionLiquidity:worker === "reclaim-funded" ? "100000000000000000000000000" : "0"}];
     vm.runInNewContext("findPoolForPosition = async () => ({pool: testPool, positionData: {publicKey: testWallet.publicKey, positionData: {lowerBinId:0,upperBinId:0,positionBinData: testShares}}});", Object.assign(sandbox, {testPool:pool,testShares:shares}));
@@ -469,6 +501,9 @@ const clearMarker = () => fs.rmSync(marker, { force: true });
   Connection.prototype.simulateTransaction=defaultSimulation;
   clearMarker();
   const beforeRetry = { sends, builds, bytes: closeBytes.length };
+  sandbox.snapshotStub = async (_pool, lower, upper) => ({ts: 100,
+    bins: Array.from({length: upper-lower+1}, (_, i) => ({id: lower+i}))});
+  vm.runInNewContext("binSnapshot = snapshotStub;", sandbox);
   failNextSend = true;
   const recoveredDeploy = await deploy();
   assert.equal(recoveredDeploy.success, true);
@@ -478,6 +513,12 @@ const clearMarker = () => fs.rmSync(marker, { force: true });
   const deployMarker = JSON.parse(fs.readFileSync(marker));
   assert.equal(deployMarker.position, recoveredDeploy.position);
   assert.equal(deployMarker.signature, recoveredDeploy.txHashes[0]);
+  const recordedEntry = JSON.parse(fs.readFileSync(path.join(root, "memories/dlmm_entries", recoveredDeploy.position + ".json")));
+  assert.equal(recordedEntry.bins_below, 20);
+  assert.equal(recordedEntry.bin_snapshot.bins.length, 21);
+  assert.equal(recordedEntry.width_study.snapshot.bins.length, 70);
+  assert.equal(recordedEntry.width_study.lower_bin, -69);
+  vm.runInNewContext("binSnapshot = originalSnapshot;", sandbox);
   clearMarker();
   // A broadcast error can follow a landed transaction. Reconcile its signed
   // signature before trying another RPC, keeping exactly one build and send.

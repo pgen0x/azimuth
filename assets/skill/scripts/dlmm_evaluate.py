@@ -13,7 +13,7 @@ import subprocess
 import sqlite3
 import time
 from dlmm_accounting import report, root_decision, rows, unvalued_token_inflows, refund_cash_bounds
-from dlmm_shadow import bin_replay, HORIZONS
+from dlmm_shadow import bin_replay, bin_width_replay, width_study_summary, HORIZONS
 from dlmm_realized import fetch_pools, fetch_closed_positions
 
 
@@ -317,7 +317,7 @@ def evaluate(profile, start, end, rejects):
         if outcome.get('estimated_false_reject_proxy'):group['positive_proxy']+=1
     for g in groups.values():
         g['estimated_false_reject_proxy_rate']=g['positive_proxy']/g['measured'] if g['measured'] else None
-    samples=rows(memory/'dlmm_bin_samples.jsonl');bins=[]
+    samples=rows(memory/'dlmm_bin_samples.jsonl');bins=[];widths=[]
     for file in (memory/'dlmm_entries').glob('*.json'):
         entry=json.loads(file.read_text())
         if not start <= entry.get('deployed_at',0) <= end:continue
@@ -325,8 +325,10 @@ def evaluate(profile, start, end, rejects):
         cost=None
         if chain and chain.get('accounting_status')=='settled_cash':
             cost=(chain['network_fee_lamports']+chain.get('nonrefundable_account_cost_lamports',0))/1e9/max(1,len(chain['positions']))
-        result=bin_replay(entry,[s for s in samples if s['position']==entry['position'] and s['ts']<=end],cost)
+        position_samples=[s for s in samples if s['position']==entry['position'] and s['ts']<=end]
+        result=bin_replay(entry,position_samples,cost)
         bins.append(dict(position=entry['position'],**result))
+        widths.append(dict(position=entry['position'],mode=entry.get('mode'),**bin_width_replay(entry,position_samples)))
     snapshots=[s for s in rows(memory/'dlmm_nav.jsonl') if start<=s['ts']<=end]
     cash_samples=sorted((s for s in snapshots if isinstance(s.get('native_sol'),(int,float))
                          and math.isfinite(s['native_sol'])),key=lambda s:s['ts'])
@@ -363,7 +365,7 @@ def evaluate(profile, start, end, rejects):
                                     if start <= g['first_activity'] <= g['last_activity'] <= end],
                 wealth_change=wealth,native_cash_change=native_cash,unvalued_external_token_inflows=unvalued_inflows,price_coverage=price_coverage,nav_samples=len(snapshots),complete_nav_samples=len(valid),
                 root_replay=[replay_root_decision(r) for r in live],eligibility_replay=comparisons,root_live_decisions=live,
-                rejected_candidates=groups,bin_replay=bins,
+                rejected_candidates=groups,bin_replay=bins,bin_width_replay=widths,
                 limits=['Native SOL changes include deployments, withdrawals, swaps, fees, rent and external transfers; they are not trading profit. Rent and incomplete token marks are shown separately, never treated as complete NAV.',
                         'LP PnL is a position valuation before wallet settlement, not net wallet profit.',
                         'Rejected-candidate rate is a price proxy above a fixed 1% hurdle, not realized LP profit.',
@@ -480,6 +482,9 @@ def main():
         str(dict(collections.Counter(r['status'] for r in data['liquidation_observations']))),
         'Per-position observations are in evaluation JSON. Quote-based asset change excludes network fees and rent; it is not net cash or a guaranteed exit price.',
         '## Bin replay',str(dict(collections.Counter(r['status'] for r in data['bin_replay']))),
+        '70-bin width study: '+str(dict(collections.Counter(r['status'] for r in data.get('bin_width_replay', [])))),
+        'Completed width pairs by mode (wider minus baseline): '+json.dumps(width_study_summary(data.get('bin_width_replay', []))),
+        'Width comparisons use the same capital and observations, before wider rent, execution costs and live exit decisions; missing wider bins remain unmeasured.',
         'Modeled HODL benchmarks: '+str(dict(collections.Counter(r.get('hodl_basis') for r in data['bin_replay'] if r['status']=='modeled'))),
         f"Expected pre-broadcast SDK BidAsk references: {sum(r.get('expected_bidask_reference_scheme') == 'far_active' for r in data['bin_replay'])}; modeled references do not prove executed shares or live IL.",
         f"Modeled full horizons: {sum(r.get('horizon_complete') is True for r in data['bin_replay'])}; partial horizons: {sum(r['status']=='modeled' and r.get('horizon_complete') is False for r in data['bin_replay'])}.",
