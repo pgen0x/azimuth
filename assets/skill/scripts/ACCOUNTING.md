@@ -192,8 +192,12 @@ in place. Normal successful sends add no status lookup.
 
 - Executor authorization replay uses its persisted post-refresh evidence; the earlier
   pre-settlement eligibility replay is reported separately. Historical facts are not backdated.
-- Root fee pace starts observing at the first fresh portfolio sample, independently
-  of exit triggers, and still requires a full 30-minute window. Missing opportunity
+- Root fee pace starts observing at the first fresh position sample, independently
+  of exit triggers, and still requires a full 30-minute window. When this tick's
+  native risk mark is verified, fee growth and fee-stall checks use its fees,
+  principal value and observation time together; a stale indexer timestamp cannot
+  hide an observed fee stall. Otherwise the indexed sample retains its own
+  freshness requirement. This reuses the existing native read. Missing opportunity
   has its own reason, separate from insufficient measured fees.
 - Missing finalized transaction responses remain pending without declaring an RPC
   outage. Expired submissions are excluded from cash flows only with complete
