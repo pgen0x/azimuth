@@ -75,7 +75,7 @@ const deps = {
   "dotenv": { config() {}, parse: () => ({}) },
 };
 const entryGates = { observed_at: 1, checked_deploy_sol: .1, fee_timeframe: "30m", m5_pct: 0, h1_pct: null, live_fee_tvl_ratio: 1.4, price_impact_pct: .1 };
-const env = { SOLANA_RPC_URLS: "fake-rpc-1,fake-rpc-2", DLMM_ENTRY_CONTEXT: JSON.stringify({ mode: "turnover", recenter_of: "root", pair: "TEST-SOL", signal: { entry_live_gates: entryGates } }) };
+const env = { SOLANA_RPC_URLS: "fake-rpc-1,fake-rpc-2", DLMM_ENTRY_CONTEXT: JSON.stringify({ mode: "turnover", recenter_of: "root", pair: "TEST-SOL", dev: "developer", signal: { holders: 0, unique_traders: 100, entry_live_gates: entryGates } }) };
 const sandbox = { require: (name) => deps[name] || require(name), module: { exports: {} },
   process: { argv: ["node", path.join(root, "skills/solana-dlmm/scripts/dlmm_executor.js")], env },
   fetch: async (url, options) => {
@@ -446,6 +446,8 @@ const clearMarker = () => fs.rmSync(marker, { force: true });
   assert.equal(sends, 1);
   const provenance = JSON.parse(fs.readFileSync(path.join(root, "memories/dlmm_entries/position-1.json")));
   assert.deepEqual(provenance.signal.entry_live_gates, entryGates);
+  assert.equal(provenance.dev, "developer");
+  assert.equal(provenance.signal.holders, 0); assert.equal(provenance.signal.unique_traders, 100);
   assert.equal(provenance.mode, "turnover"); assert.equal(provenance.recenter_of, "root");
   assert.equal(provenance.pool, "pool");
   assert.equal(provenance.bin_step, 100);
@@ -458,6 +460,9 @@ const clearMarker = () => fs.rmSync(marker, { force: true });
   sendError = true;
   const uncertain = await deploy();
   assert.equal(uncertain.pending, true); assert.equal(sends, 3); // same bytes via both RPCs, no second mint
+  const pendingEntry = JSON.parse(fs.readFileSync(path.join(root, `memories/dlmm_entries/${uncertain.position}.json`)));
+  assert.equal(pendingEntry.dev, "developer");
+  assert.equal(pendingEntry.signal.unique_traders, 100);
   height = 100;
   assert.equal((await deploy()).pending, true); assert.equal(sends, 3);
   clearMarker(); sendError = false;
