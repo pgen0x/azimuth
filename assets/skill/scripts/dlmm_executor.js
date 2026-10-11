@@ -995,7 +995,12 @@ async function getPositionRiskMark(poolAddressStr, positionAddressStr) {
       // A concurrent local close/claim must not leave an apparently usable mark.
       const latest = riskMark.loadInitialContext(PROFILE_DIR, poolAddressStr, positionAddressStr);
       riskMark.check(latest.submission.signature === context.submission.signature, "funding changed during read");
-      return riskMark.markInventory(context, native, position.positionData, pool.lbPair, deposit);
+      const mark = riskMark.markInventory(context, native, position.positionData, pool.lbPair, deposit);
+      // Display/entry metadata only: risk valuation above retains exact rational
+      // lamport arithmetic. Reuse the fetched pool instead of another RPC read.
+      const price = Number(pool.fromPricePerLamport(Number(DLMM.getPriceOfBinByBinId(pool.lbPair.activeId, pool.lbPair.binStep))));
+      if (Number.isFinite(price) && price > 0) mark.pool_price = price;
+      return mark;
     });
   } catch (error) {
     return {success: false, source: riskMark.SOURCE, position: positionAddressStr, pool: poolAddressStr,

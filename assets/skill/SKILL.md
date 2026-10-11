@@ -77,10 +77,14 @@ gate (bin-array rent, entry timing) rejects the top pick. Used by the daemon's
 
 ### 2. `dlmm_monitor.py` — Position Monitor
 
-Extreme indexed PnL is checked with `dlmm_executor.js pnl-onchain <POOL> <POSITION>`.
+Each real monitor tick checks PnL with `dlmm_executor.js pnl-onchain <POOL> <POSITION>`.
 This read-only command values native inventory and unclaimed fees at active-bin
 spot against the actual initial SOL transfer. It accepts only a SOL-only entry
-with complete funded-bin coverage and no later position transactions. A native
+with complete funded-bin coverage and no later position transactions. A fresh
+verified mark supplies ordinary stops, trailing peaks, range and unclaimed fees,
+replacing the separate active-bin command. The read has a three-second deadline;
+unsupported or unavailable proofs retain indexed PnL and active-bin fallback.
+Catastrophic-read protection reuses that result rather than querying twice. A native
 confirmed loss can reach exit rules even before age three minutes; an unavailable
 proof keeps the existing young-position protection and mature-position retry.
 The mark excludes rent, network and exit costs and is not realized profit or NAV.
