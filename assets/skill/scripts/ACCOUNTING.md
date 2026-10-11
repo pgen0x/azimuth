@@ -349,6 +349,17 @@ remain explicit. Negative shortfall means the fill improved on the quote. These
 groups are execution evidence, not trading profit or causal savings; failures
 before a signed submission are outside their attempt counts.
 
+Automatic settlement starts ordinary exits at 100 bps and retries at 300 bps.
+The monitor's existing emergency flag (rug velocity, emergency stop-loss or
+thin liquidity) is persisted in the settlement marker and starts at 300 bps.
+It can promote a queued ordinary close that later becomes an emergency;
+existing retry fields and legacy markers remain valid. This avoids requiring
+a tight first attempt during an emergency: STRKT's 2026-10-11 rug exit failed
+at 100 bps, and its successful 300 bps retry 42 seconds later had a quote
+2,400,680 lamports lower. This does not establish what an earlier fill would
+have received. The 300 bps ceiling, pending-signature reconciliation, owned
+inventory proof, impact guard and positive-net recovery floor still apply.
+
 Atomic settlement sales record `token_rent_close_included` before broadcast.
 Finalized mixed token-account closes set `token_rent_evidence.refunds_unmeasured`
 when the pure refund proof cannot separate rent from sale proceeds. These rows
