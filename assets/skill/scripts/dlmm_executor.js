@@ -7,6 +7,7 @@ const dotenv = require("dotenv");
 const fs = require("fs");
 const path = require("path");
 const net = require("net");
+const riskMark = require("./dlmm_risk_mark");
 
 // Resolved from the invoked path (process.argv[1]), NOT __dirname — Node always
 // realpaths __dirname/__filename through symlinks, which would resolve to this repo
@@ -67,7 +68,7 @@ async function runWithFailover(fn) {
         fetch: (url, options) => fetch(url, { ...options, signal: AbortSignal.timeout(8000) }) });
       return await fn(connection);
     } catch (err) {
-      if (err.message?.startsWith("ENTRY REFUSED:") || err.message?.startsWith("Rent reclaim refused:")) throw err;
+      if (err.riskMarkUnavailable || err.message?.startsWith("ENTRY REFUSED:") || err.message?.startsWith("Rent reclaim refused:")) throw err;
       console.warn(`[RPC WARN] Failed execution on RPC #${currentRpcIndex}: ${err.message}`);
       currentRpcIndex = (currentRpcIndex + 1) % RPC_URLS.length;
       attempts++;
@@ -960,6 +961,48 @@ async function getPositionPnl(poolAddressStr, positionAddressStr) {
   };
 }
 
+async function getPositionRiskMark(poolAddressStr, positionAddressStr) {
+  try {
+    const context = riskMark.loadInitialContext(PROFILE_DIR, poolAddressStr, positionAddressStr);
+    riskMark.check(context.submission.wallet === process.env.SOLANA_PUBLIC_KEY, "profile wallet mismatch");
+    return await runWithFailover(async connection => {
+      // This path needs a public identity and confirmed transfers, never a signer
+      // or the indexed PnL API that it is meant to independently verify.
+      const positionKey = new PublicKey(positionAddressStr);
+      const [pool, account, transaction] = await Promise.all([
+        DLMM.create(connection, new PublicKey(poolAddressStr)),
+        connection.getAccountInfo(positionKey, "confirmed"),
+        connection.getParsedTransaction(context.submission.signature,
+          {commitment: "confirmed", maxSupportedTransactionVersion: 0}),
+      ]);
+      const idl = DLMM.IDL;
+      const discriminator = idl.accounts.find(a => a.name === "PositionV2").discriminator;
+      riskMark.check(account && account.owner.toString() === idl.address
+        && account.data.subarray(0, 8).equals(Buffer.from(discriminator)), "native position account mismatch");
+      const native = pool.program.coder.accounts.decode("positionV2", account.data);
+      const deposit = riskMark.initialDeposit(transaction, context, {
+        definition: idl.instructions.find(i => i.name === "add_liquidity_by_strategy2"),
+        initializeDefinitions: idl.instructions.filter(i => ["initialize_position", "initialize_position2"].includes(i.name)),
+        decode: bs58.decode, programId: idl.address,
+        tokenX: pool.lbPair.tokenXMint.toString(), tokenY: pool.lbPair.tokenYMint.toString(),
+        reserveX: pool.lbPair.reserveX.toString(), reserveY: pool.lbPair.reserveY.toString(),
+      });
+      const position = await pool.getPosition(positionKey);
+      // Check after inventory reads: extra add/withdraw/claim transactions make
+      // an initial-deposit-only denominator invalid, including unjournaled ones.
+      riskMark.onlyInitialSignature(await connection.getSignaturesForAddress(positionKey,
+        {limit: 2}, "confirmed"), context);
+      // A concurrent local close/claim must not leave an apparently usable mark.
+      const latest = riskMark.loadInitialContext(PROFILE_DIR, poolAddressStr, positionAddressStr);
+      riskMark.check(latest.submission.signature === context.submission.signature, "funding changed during read");
+      return riskMark.markInventory(context, native, position.positionData, pool.lbPair, deposit);
+    });
+  } catch (error) {
+    return {success: false, source: riskMark.SOURCE, position: positionAddressStr, pool: poolAddressStr,
+      reason: error.riskMarkUnavailable ? error.message : "Native risk mark unavailable: incomplete read or funding evidence"};
+  }
+}
+
 async function getSplBalance(tokenMintStr) {
   return await runWithFailover(async (connection) => {
     const wallet = getWallet();
@@ -1415,7 +1458,7 @@ async function main() {
   const command = args[0];
   
   if (!command) {
-    console.error("No command provided. Exposing: active-bin, deploy, check-bins, claim, close, position-exists, positions, pnl, spl-balance, swap");
+    console.error("No command provided. Exposing: active-bin, deploy, check-bins, claim, close, position-exists, positions, pnl, pnl-onchain, spl-balance, swap");
     process.exit(1);
   }
   
@@ -1533,6 +1576,9 @@ async function main() {
       if (!pool || !position) throw new Error("Usage: pnl <pool_address> <position_address>");
       const res = await getPositionPnl(pool, position);
       console.log(JSON.stringify(res));
+    } else if (command === "pnl-onchain") {
+      if (args.length !== 3) throw new Error("Usage: pnl-onchain <pool_address> <position_address>");
+      console.log(JSON.stringify(await getPositionRiskMark(args[1], args[2])));
     } else if (command === "spl-balance") {
       const token = args[1];
       if (!token) throw new Error("Usage: spl-balance <token_mint>");
@@ -1587,4 +1633,4 @@ async function main() {
 
 if (require.main === module) main();
 module.exports = { settlementInventory, swapAmountRaw, reclaimEmptyAccounts, assertRootBudget, reconcileAccounting, recordSubmission, closePosition, swapToken, confirmSignedTransaction, deployPosition, acquireDeployLock, acquireSwapLock, reconcilePendingSwap,
-  assertNoTokenExposure, positionIsEmpty, positionAccountExists, slippageBpsToPercent, settlementRentClose, tokenAccountCanClose };
+  assertNoTokenExposure, positionIsEmpty, positionAccountExists, slippageBpsToPercent, settlementRentClose, tokenAccountCanClose, getPositionRiskMark };
