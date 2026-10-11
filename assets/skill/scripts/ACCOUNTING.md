@@ -100,6 +100,14 @@ hours. Outcomes collected more than ten minutes late are censored. The reported
 false-rejection *proxy* is a pool-price gain above a fixed 1% hurdle, with measured,
 pending, unmeasured and censored denominators. It is not simulated LP profit.
 
+Collection uses a monotonic 240-second budget inside the five-minute service
+timeout. Rejected-candidate HTTP reads have a 45-second phase budget; bin
+subprocesses have 150 seconds, leaving time for one 20-second liquidation probe.
+Each request uses the remaining phase time. Exhausted phases are reported and
+unattempted records remain pending for the next run; missing bin observations
+are never filled from later prices. This prevents slow discovery requests from
+consuming the entire run before the IL snapshots can be collected.
+
 Entry bin state is captured before broadcast; subsequent bin states retain reserves,
 supply and fee-growth counters. Fixed uniform, near-active and far-active allocations
 are replayed under an infinitesimal fixed-share assumption. Results show fees,

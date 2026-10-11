@@ -14,6 +14,17 @@ from dlmm_accounting import rows
 
 getcontext().prec = 60
 HORIZONS = {'turnover': 3600, 'pulse': 1800, 'casual': 14400, 'multiday': 86400}
+COLLECTION_BUDGET_SECONDS = 240
+REJECT_BUDGET_SECONDS = 45
+BIN_BUDGET_SECONDS = 150
+LIQUIDATION_BUDGET_SECONDS = 20
+
+
+def request_timeout(deadline, maximum):
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError('shadow_collection_budget_exhausted')
+    return min(maximum, remaining)
 
 
 def append(file, row):
@@ -251,8 +262,10 @@ def liquidation_observation(entry, wallet, fetch):
                            'Excludes network fees, rent, prior flows and rewards; quote is not an executed exit.')
 
 
-def collect_liquidation(profile):
+def collect_liquidation(profile, deadline=None):
     """At most one position and two public HTTP reads per scheduled cycle."""
+    deadline = min(deadline if deadline is not None else float('inf'),
+                   time.monotonic() + LIQUIDATION_BUDGET_SECONDS)
     memory = profile / 'memories'
     file = memory / 'dlmm_liquidation_quotes.jsonl'
     latest = {r['position']: r['observed_at'] for r in rows(file)}
@@ -263,11 +276,13 @@ def collect_liquidation(profile):
 
     def fetch(url):
         request = urllib.request.Request(url, headers={'User-Agent': 'dlmm-lp/1.0'})
-        with urllib.request.urlopen(request, timeout=10) as response:
+        with urllib.request.urlopen(request, timeout=request_timeout(deadline, 10)) as response:
             return json.load(response)
 
     for entry_file in sorted((memory / 'dlmm_entries').glob('*.json'),
                              key=lambda p: latest.get(p.stem, 0)):
+        if time.monotonic() >= deadline:
+            return 0
         entry = json.loads(entry_file.read_text())
         position = entry['position']
         initial = entry.get('bin_snapshot')
@@ -289,14 +304,20 @@ def collect_liquidation(profile):
 
 
 def collect(profile, reject_file):
+    deadline = time.monotonic() + COLLECTION_BUDGET_SECONDS
     memory=profile/'memories'; executor=profile/'skills/solana-dlmm/scripts/dlmm_executor.js'
     rejected={}
     for row in rows(reject_file):
         rejected.setdefault(row['id'],row)
     done={r['id'] for r in rows(memory/'dlmm_reject_outcomes.jsonl')}
     prices={}; processed=0
+    reject_deadline = min(deadline, time.monotonic() + REJECT_BUDGET_SECONDS)
+    reject_budget_exhausted = False
     for ident,row in rejected.items():
         if ident in done or time.time()<row['ts']+HORIZONS.get(row['mode'],86400): continue
+        if time.monotonic() >= reject_deadline:
+            reject_budget_exhausted = True
+            break
         if processed>=100: break
         processed+=1
         price=None
@@ -306,7 +327,7 @@ def collect(profile, reject_file):
                 if mint not in prices:
                     query=urllib.parse.urlencode({'query':mint,'page_size':100,'filter_by':'pool_type=dlmm','timeframe':'30m'})
                     request=urllib.request.Request('https://pool-discovery-api.datapi.meteora.ag/pools?'+query,headers={'User-Agent':'curl/8.5.0'})
-                    with urllib.request.urlopen(request,timeout=10) as response:
+                    with urllib.request.urlopen(request,timeout=request_timeout(reject_deadline,10)) as response:
                         prices[mint]={p['pool_address']:p.get('pool_price') for p in json.load(response)['data']}
                 price=prices[mint].get(row['pool'])
             except Exception: pass
@@ -315,6 +336,9 @@ def collect(profile, reject_file):
     latest={}
     for sample in existing: latest[sample['position']]=sample['ts']
     count=0
+    bin_deadline = min(deadline - LIQUIDATION_BUDGET_SECONDS,
+                       time.monotonic() + BIN_BUDGET_SECONDS)
+    bin_budget_exhausted = False
     for file in sorted((memory/'dlmm_entries').glob('*.json'),key=lambda p:latest.get(p.stem,0)):
         entry=json.loads(file.read_text()); initial=entry.get('bin_snapshot')
         if not initial: continue
@@ -322,17 +346,22 @@ def collect(profile, reject_file):
         target=initial['ts']+HORIZONS.get(entry.get('mode'),86400)
         if time.time()>target+600 or latest.get(position,0)>=target: continue
         if time.time()-latest.get(position,0)<240: continue
+        if time.monotonic() >= bin_deadline:
+            bin_budget_exhausted = True
+            break
         if count>=12: break
         count+=1
         try:
             study = entry.get('width_study') or {}
             ids=[b['id'] for b in (study.get('snapshot') or initial)['bins']]
-            output=subprocess.check_output(['node',str(executor),'bin-snapshot',entry['pool'],str(min(ids)),str(max(ids))],stderr=subprocess.DEVNULL,timeout=25)
+            output=subprocess.check_output(['node',str(executor),'bin-snapshot',entry['pool'],str(min(ids)),str(max(ids))],stderr=subprocess.DEVNULL,timeout=request_timeout(bin_deadline,25))
             sample=json.loads(output);sample['position']=position
             append(memory/'dlmm_bin_samples.jsonl',sample)
         except Exception: pass
     return {'rejects_total':len(rejected),'outcomes_attempted':processed,'bin_snapshots_attempted':count,
-            'liquidation_observations_attempted':collect_liquidation(profile)}
+            'reject_budget_exhausted':reject_budget_exhausted,
+            'bin_budget_exhausted':bin_budget_exhausted,
+            'liquidation_observations_attempted':collect_liquidation(profile,deadline)}
 
 
 def main():

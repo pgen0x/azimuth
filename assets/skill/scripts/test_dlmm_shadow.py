@@ -315,3 +315,58 @@ with patch.object(evaluation_module, 'fetch_pools', return_value=[dict(poolAddre
         with patch.object(evaluation_module, 'fetch_closed_positions', return_value=[bad]):
             assert compare_lp({'azimuth':'wallet'}, 100, 200)['azimuth']['status'] == 'unmeasured'
 print('LP cohorts exclude empty positions and float-noise wins; missing valuations stay unmeasured')
+
+# Exercise the collector with slow providers: it must preserve time for bin/IL
+# observations and resume unattempted records rather than inventing outcomes.
+with tempfile.TemporaryDirectory() as directory:
+    profile=Path(directory); memory=profile/'memories'; entry_dir=memory/'dlmm_entries'
+    entry_dir.mkdir(parents=True)
+    epoch=10000; clock=[0.0]; requests=[]; bin_calls=[]
+    rejects=[dict(id=str(i),ts=epoch-1900,mode='pulse',gate='momentum',pool='pool',
+                  snapshot={'pool_price':1},candidate={'base_mint':str(i),'sol_is_x':False}) for i in range(100)]
+    reject_file=profile/'rejects.jsonl'
+    reject_file.write_text(''.join(json.dumps(r)+'\n' for r in rejects))
+    for i in range(12):
+        entry=dict(position='p'+str(i),pool='pool',mode='pulse',
+                   bin_snapshot=dict(ts=epoch-1800,bins=[dict(id=0)]))
+        (entry_dir/(entry['position']+'.json')).write_text(json.dumps(entry))
+    def slow_http(request,timeout):
+        requests.append(timeout); clock[0]+=timeout
+        raise OSError('provider unavailable')
+    def slow_bins(command,stderr,timeout):
+        bin_calls.append(timeout); clock[0]+=timeout
+        raise shadow_module.subprocess.TimeoutExpired(command,timeout)
+    def liquidation_probe(profile,deadline=None):
+        if deadline is not None: assert deadline-clock[0]>=20
+        return 1
+    with patch.object(shadow_module.time,'time',side_effect=lambda:epoch+clock[0]), \
+         patch.object(shadow_module.time,'monotonic',side_effect=lambda:clock[0]), \
+         patch.object(shadow_module.urllib.request,'urlopen',side_effect=slow_http), \
+         patch.object(shadow_module.subprocess,'check_output',side_effect=slow_bins), \
+         patch.object(shadow_module,'collect_liquidation',side_effect=liquidation_probe):
+        result=shadow_module.collect(profile,reject_file)
+    assert clock[0]<240, (clock[0],result)
+    assert result['reject_budget_exhausted'] and result['bin_budget_exhausted']
+    assert result['liquidation_observations_attempted']==1
+    assert 0<result['outcomes_attempted']<100 and 0<result['bin_snapshots_attempted']<12
+    first_outcomes=[json.loads(line) for line in (memory/'dlmm_reject_outcomes.jsonl').read_text().splitlines()]
+    assert len(first_outcomes)==len(requests)==result['outcomes_attempted']
+    assert all(r['status']=='unmeasured' for r in first_outcomes)
+    assert not (memory/'dlmm_bin_samples.jsonl').exists()
+    class HealthyResponse:
+        def __enter__(self): return self
+        def __exit__(self,*args): pass
+        def read(self): return json.dumps({'data':[{'pool_address':'pool','pool_price':1.02}]}).encode()
+    with patch.object(shadow_module.time,'time',side_effect=lambda:epoch+clock[0]), \
+         patch.object(shadow_module.time,'monotonic',side_effect=lambda:clock[0]), \
+         patch.object(shadow_module.urllib.request,'urlopen',return_value=HealthyResponse()), \
+         patch.object(shadow_module.subprocess,'check_output',return_value=json.dumps({'ts':epoch+clock[0]}).encode()), \
+         patch.object(shadow_module,'collect_liquidation',return_value=0):
+        recovered=shadow_module.collect(profile,reject_file)
+    outcomes=[json.loads(line) for line in (memory/'dlmm_reject_outcomes.jsonl').read_text().splitlines()]
+    assert len(outcomes)==len({r['id'] for r in outcomes})==100
+    assert recovered['outcomes_attempted']==100-len(first_outcomes)
+    assert all(r['status']=='measured' for r in outcomes[len(first_outcomes):])
+    assert recovered['bin_snapshots_attempted']==12
+    assert len((memory/'dlmm_bin_samples.jsonl').read_text().splitlines())==12
+print('Slow shadow phases retain bin/probe time and resume without fabricated or duplicate outcomes')
