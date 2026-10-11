@@ -88,6 +88,44 @@ def verified_risk_mark(data, pool, position, now):
             and type(data.get("in_range")) is bool and data["in_range"] == (lower <= active <= upper))
 
 
+def record_close_bin_observation(mark, pool, position, reason, decision_at):
+    """Save existing native inventory after a close attempt, without delaying signing.
+
+    This is a decision-time observation, never proof of a landed close. A reader
+    must join finalized close evidence and respect both observation/record times.
+    """
+    try:
+        if not verified_risk_mark(mark, pool, position, decision_at):
+            return False
+        observation = mark.get("bin_observation") or {}
+        bins = observation.get("bins")
+        if (type(observation.get("version")) is not int or observation["version"] != 1
+                or not isinstance(mark.get("funding_signature"), str) or not mark["funding_signature"]
+                or type(observation.get("sol_is_x")) is not bool
+                or type(observation.get("bin_step")) is not int or not 0 < observation["bin_step"] <= 10000
+                or not isinstance(bins, list) or not 0 < len(bins) <= 70
+                or len(bins) != mark["upper_bin"]-mark["lower_bin"]+1):
+            return False
+        for index, item in enumerate(bins):
+            if (type(item.get("id")) is not int or item["id"] != mark["lower_bin"]+index
+                    or any(not isinstance(item.get(k), str) or not re.fullmatch(r"[0-9]{1,39}", item[k])
+                           for k in ("liquidity_raw", "x_raw", "y_raw", "fee_x_raw", "fee_y_raw"))):
+                return False
+        row = {k: mark[k] for k in ("position", "pool", "source", "observed_at", "funding_signature",
+               "deposit_lamports", "value_lamports_upper", "active_bin", "lower_bin", "upper_bin",
+               "pnl_sol", "pnl_pct", "bin_observation")}
+        row.update(version=1, recorded_at=time.time(), decision_at=decision_at,
+                   close_reason=str(reason)[:500], basis="native_position_inventory_before_close_attempt; not_finalized_exit")
+        serialized = json.dumps(row, allow_nan=False)+"\n"
+        directory = os.path.join(PROFILE_DIR, "memories")
+        os.makedirs(directory, exist_ok=True)
+        with open(os.path.join(directory, "dlmm_close_bin_observations.jsonl"), "a", encoding="utf-8") as out:
+            out.write(serialized)
+        return True
+    except (OSError, ValueError, TypeError, KeyError, AttributeError):
+        return False  # Telemetry must not change close handling or its verdict.
+
+
 def get_meteora_portfolio_positions(wallet_address):
     """Returns dict keyed by position address using Meteora Portfolio HTTP API.
     More reliable than DLMM SDK getAllLbPairPositionsByUser which requires fully initialized bin arrays."""
@@ -2805,9 +2843,12 @@ def main():
         if close_reason:
             print(f"🚨 Exiting Position {pair} - Reason: {close_reason}")
             env_prefix = "DRY_RUN=true " if is_dry_run_stored else ""
+            close_decision_at = time.time()
             close_res, close_err = close_position(pos_addr, env_prefix,
                                                  wallet_address, is_dry_run_stored,
                                                  emergency_exit=emergency_close)
+            if not is_dry_run_stored and not (close_res or {}).get("dryRun"):
+                record_close_bin_observation(native_mark, pool, pos_addr, close_reason, close_decision_at)
 
             if close_res and close_res.get("success"):
                 position_closed_this_cycle = True

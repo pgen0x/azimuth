@@ -147,6 +147,18 @@ the same pre-entry capital and bin snapshots. The holding-period comparison is
 gross and has an outcome-defined duration; it does not simulate the alternative
 exit policy, fill the unobserved gap, or establish executed IL or net profit.
 
+Native risk marks also expose the already-read per-bin position shares, raw
+inventory and unclaimed fees. After a normal rule-driven close attempt, the
+monitor appends that decision-time observation to
+`memories/dlmm_close_bin_observations.jsonl`. It adds no RPC or inference request;
+file writes happen after close execution and failures cannot change its verdict.
+Unavailable native marks and dry runs produce no observation. This journal covers
+the ordinary close branch, not override, compounding or reseed branches.
+An observation is not a landed close or a full pool-bin snapshot. Consumers must
+respect both `observed_at` and `recorded_at`, join finalized account-deletion proof,
+and measure the remaining gap. Alternative allocation costs and exits remain
+unmodeled; the existing bin replay does not automatically consume this journal.
+
 ## Operations
 
 `azimuth-sol-accounting.timer` and `azimuth-sol-shadow.timer` collect outside the
