@@ -1912,7 +1912,7 @@ def main():
             }
             for key in ("entry_price", "entry_bin", "bins_below", "bins_above",
                         "size_sol", "amount_x", "amount_y", "sol_is_x", "signal",
-                        "root_chain_id", "parent_position"):
+                        "root_chain_id", "parent_position", "dev"):
                 if prov.get(key) is not None:
                     adopt_meta[key] = prov[key]
             # Only ever set a mode we actually recovered. An absent mode makes
@@ -2558,6 +2558,8 @@ def main():
                         new_deploy_sol = meta.get("size_sol", DEFAULT_DEPLOY_SOL) + unclaimed_fees_sol
                         compound_shape = "bid_ask" if is_turnover_compound else "spot"
                         context = dict(pair=pair, base_mint=meta.get("base_mint"), mode=meta.get("mode"),
+                                       base_symbol=meta.get("base_symbol"), sol_is_x=meta.get("sol_is_x"),
+                                       dev=meta.get("dev"),
                                        strategy=strategy, recenter_of=meta.get("root_chain_id") or meta.get("recenter_of") or pos_addr,
                                        parent_position=pos_addr, size_sol=new_deploy_sol,
                                        fee_opportunity_observed_at=meta.get("fee_pace_observed_at"),
@@ -3021,6 +3023,8 @@ def main():
                             active_price = float(ab_data.get("price", entry_price))
                             active_bin = ab_data.get("binId")
                             context = dict(pair=pair, base_mint=base_mint, mode=meta.get("mode"),
+                                           base_symbol=meta.get("base_symbol"), sol_is_x=meta.get("sol_is_x"),
+                                           dev=meta.get("dev"),
                                            strategy=strategy, recenter_of=meta.get("root_chain_id") or meta.get("recenter_of") or pos_addr,
                                            parent_position=pos_addr, size_sol=size_sol,
                                            fee_opportunity_observed_at=meta.get("fee_pace_observed_at"),
@@ -3078,7 +3082,7 @@ def main():
                     run_command(f"redis-cli incrbyfloat \"{rebalance_pnl_key}\" {realized_sol:.6f}")
                     run_command(f"redis-cli expire \"{rebalance_pnl_key}\" 86400")
                     entry_context = {key: meta.get(key) for key in (
-                        "pair", "base_mint", "base_symbol", "sol_is_x")}
+                        "pair", "base_mint", "base_symbol", "sol_is_x", "dev")}
                     # A re-center is a new entry. Keep only values measured now;
                     # inherited score/volatility/holder data would falsely look
                     # like a fresh entry-time signal in the learning journal.

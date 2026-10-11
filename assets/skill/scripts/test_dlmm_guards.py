@@ -74,6 +74,7 @@ def main():
         if adopted:
             assert scope["adopt_meta"]["size_sol"] == 0.12
             assert scope["adopt_meta"]["mode"] == "turnover"
+            assert "dev" not in scope["adopt_meta"]
 
     churn = next(n.value for n in ast.walk(tree) if isinstance(n, ast.Assign)
                  and any(isinstance(t, ast.Name) and t.id == "is_turnover_churn" for t in n.targets))
@@ -334,6 +335,7 @@ def main():
                     get_meteora_portfolio_positions=lambda _:({"position": {
                         "pool":"pool", "balances_sol":0.11}}, None),
                     recover_position_metadata=lambda *_:{"pair":"TOKEN-SOL", "mode":"turnover",
+                        "base_mint":"TOKEN", "dev":"developer", "signal":{"holders":0},
                         "deployed_at":1,"size_sol":0.1,"entry_price":2},
                     run_command=commands.append, cli=SimpleNamespace(report_only=report_only),
                     print=lambda *a:None, time=SimpleNamespace(time=lambda:10000), json=json)
@@ -344,6 +346,29 @@ def main():
                 assert bool(adds) is (not report_only and (not initial or existing is None))
                 if sets:
                     assert '"deployed_at": 1' in sets[0] and '"size_sol": 0.1' in sets[0]
+                    assert ns["adopt_meta"]["dev"]=="developer"
+                    assert ns["adopt_meta"]["signal"]=={"holders":0}
+                    # An adopted repeat offender must reach the existing dev
+                    # ban; missing provenance used to bypass that guard.
+                    with patch.object(monitor,"run_command",return_value=(str(monitor.RUG_DEV_MIN_OFFENSES),"",0)) as redis, \
+                         contextlib.redirect_stdout(io.StringIO()):
+                        monitor.maybe_blacklist_rug(ns["adopt_meta"],monitor.RUG_BLACKLIST_PNL_PCT)
+                    assert any('setex "sol:dlmm:blocklist:dev:developer"' in c.args[0]
+                               for c in redis.call_args_list)
+
+    # Every monitor redeploy retains known token identity in its pre-broadcast
+    # context. The re-center signal itself is still measured separately now.
+    contexts=[n for n in ast.walk(tree) if isinstance(n,ast.Assign)
+              and any(isinstance(t,ast.Name) and t.id in ("context","entry_context") for t in n.targets)]
+    assert len(contexts)==3
+    scope=dict(meta={"dev":"developer","base_symbol":"TOKEN","sol_is_x":False},
+               pair="TOKEN-SOL",base_mint="TOKEN",strategy="sol_bidask",pos_addr="parent",
+               new_deploy_sol=.1,size_sol=.1)
+    for statement in contexts:
+        exec(compile(ast.Module(body=[statement],type_ignores=[]),"redeploy-provenance","exec"),scope)
+        context=scope[statement.targets[0].id]
+        assert context["dev"]=="developer" and context["base_symbol"]=="TOKEN"
+        assert context["sol_is_x"] is False
 
     out, error, code = monitor.run_command("sleep 5", timeout=0.02)
     assert code == -1 and "process group terminated" in error
@@ -391,7 +416,8 @@ def main():
         folder = Path(tmp) / "memories/dlmm_entries"
         folder.mkdir(parents=True)
         context = dict(position=pos, pool="pool", mode="turnover", strategy="turnover_rebalance",
-                       recenter_of="root", deployed_at=100, size_sol=0.1)
+                       recenter_of="root", deployed_at=100, size_sol=0.1,
+                       dev="developer", signal={"holders":0,"unique_traders":100})
         (folder / (pos + ".json")).write_text(json.dumps(context))
         with patch.object(monitor, "PROFILE_DIR", tmp):
             assert monitor.recover_position_metadata(pos, "pool") == context

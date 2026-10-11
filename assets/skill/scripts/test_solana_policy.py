@@ -497,17 +497,27 @@ def main():
         assert momentum.call_count==fees.call_count==impact.call_count==1
     # Run the real context/Redis serialization, without invoking any executor.
     source=Path(pipeline.__file__).read_text()
+    winner.update(dev="developer", holders=0, unique_traders=100,
+                  fee_active_tvl_ratio=2.2, bot_holders_pct=12, global_fees_sol=0,
+                  mcap=None)
     ns=dict(vars(pipeline),winner=winner,entry_id="entry",mode="pulse",strategy="sol_bidask",
             deploy_sol=.12,amount_x=0,amount_y=.12,bins_below=44,bins_above=0,
             strategy_type="bid_ask",slippage_bps=1000)
     start=source.index("    entry_context =");end=source.index('    print(f"Running deploy:',start)
     exec(compile(textwrap.dedent(source[start:end]),pipeline.__file__,"exec"),ns)
     encoded=shlex.split(ns["deploy_cmd"])[0].split("=",1)[1]
-    assert json.loads(encoded)["signal"]["entry_live_gates"]==checks
+    persisted=json.loads(encoded)
+    assert persisted["signal"]["entry_live_gates"]==checks
+    assert persisted["dev"]=="developer"
+    assert persisted["signal"]["holders"]==0 and persisted["signal"]["global_fees_sol"]==0
+    assert persisted["signal"]["unique_traders"]==100 and persisted["signal"]["fee_active_tvl_ratio"]==2.2
+    assert "mcap" not in persisted["signal"]
     ns.update(active_price=1,active_bin=0,bin_step=100,sol_is_x=False,ts=1,tx_hash="tx")
     start=source.index("    tracking_data =");end=source.index("    if not is_dry_run:",start)
     exec(compile(textwrap.dedent(source[start:end]),pipeline.__file__,"exec"),ns)
     assert json.loads(json.dumps(ns["tracking_data"],allow_nan=False))["signal"]["entry_live_gates"]==checks
+    assert ns["tracking_data"]["signal"]==persisted["signal"]
+    assert ns["tracking_data"]["dev"]==persisted["dev"]
     with patch.dict(os.environ,DRY_RUN="true"),patch.object(pipeline,"get_momentum",side_effect=AssertionError("dry run fetched market")):
         dry=dict(candidate,entry_live_gates={"forged":True})
         assert pipeline.predeploy_live_gate_reject(dry,.1,"5m") is None
