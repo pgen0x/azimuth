@@ -1278,6 +1278,9 @@ def settle_pending():
         # existing retry ceiling rather than first imposing the tighter bound.
         # The executor reconciles any pending signature before another send.
         slippage_bps = 300 if item.get("emergency_exit") is True or item.get("last_attempt", 0) else 100
+        # The executor may requote <=250,000 lamports at 300 bps. Its extra
+        # allowance is at most one base fee; larger ordinary quotes stay tight.
+        small_settlement_option = " --small-settlement" if slippage_bps == 100 else ""
         item.update(last_attempt=time.time(), state="pending")
         with open(path + ".tmp", "w") as out:
             json.dump(item, out)
@@ -1288,7 +1291,7 @@ def settle_pending():
             return
         if bal["amount_raw"] != "0":
             result, err = run_command_json(
-                f"DLMM_SETTLEMENT_POSITION={shlex.quote(pos)} node {EXECUTOR_PATH} swap {shlex.quote(mint)} SOL {shlex.quote('raw:' + bal['amount_raw'])} 15 {slippage_bps} 1", timeout=90)
+                f"DLMM_SETTLEMENT_POSITION={shlex.quote(pos)} node {EXECUTOR_PATH} swap {shlex.quote(mint)} SOL {shlex.quote('raw:' + bal['amount_raw'])} 15 {slippage_bps} 1{small_settlement_option}", timeout=90)
             if not result or not result.get("success"):
                 reason = (result or {}).get("reason")
                 if reason in ("swap_no_route", "net_recovery_below_floor") and not result.get("pending"):
