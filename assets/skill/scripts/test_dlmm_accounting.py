@@ -477,6 +477,41 @@ assert inline_view["measured_roots"]==inline_view["cash_negative_roots"]==1
 assert inline_view["cohort_cash_lower_sol"]==inline_view["cohort_cash_upper_sol"]==-25/1e9
 assert pool_cash_history([dict(position="inline",pool="P",ts=180)],inline_ledger,220)["P"]["prior_net_pnl_sol"]==-25/1e9
 assert rent_refund_groups(*inline_args,219)==[]
+
+# A proved expired submission has neither a landed slot nor a network fee.
+# Keep the actual failed transaction's fee and every account-lifecycle check.
+inline_expired=deepcopy(inline_args)
+inline_expired[0][0]['recorded_signatures'].append('expired')
+inline_expired[0][0]['expired_unlanded_signatures']=['expired']
+inline_expired[1]['expired']=dict(signature='expired',wallet='wallet',schema_version=3,
+    observed_at=210,landed=False,classification='expired_unlanded',
+    last_valid_block_height=100,finalized_block_height=101,
+    basis='finalized_wallet_history_and_expiry')
+expired_group,=rent_refund_groups(*inline_expired,220)
+assert expired_group['cash_with_matched_refunds_sol']==-25/1e9
+assert expired_group['network_fee_sol']==25/1e9
+assert expired_group['inline_rent_pairs']==inline_group['inline_rent_pairs']
+for mutate in (
+    lambda a:a[0][0].update(expired_unlanded_signatures=[]),
+    lambda a:a[0][0]['expired_unlanded_signatures'].append('unknown'),
+    lambda a:a[0][0]['expired_unlanded_signatures'].append('failed'),
+    lambda a:a[0].append(dict(root_chain_id='other',recorded_signatures=['expired'])),
+    lambda a:a[1]['expired'].update(wallet='other'),
+    lambda a:a[1]['expired'].update(landed=True),
+    lambda a:a[1]['expired'].update(classification='recorded_bot'),
+    lambda a:a[1]['expired'].update(observed_at=221),
+    lambda a:a[1]['expired'].update(observed_at=float('nan')),
+    lambda a:a[1]['expired'].update(finalized_block_height=100),
+    lambda a:a[1]['expired'].update(last_valid_block_height=True),
+    lambda a:a[1]['expired'].update(basis='unknown'),
+    lambda a:a[1]['expired'].update(fee_lamports=5),
+    lambda a:a[1]['expired'].update(wallet_delta_lamports=-5),
+    lambda a:a[2][0]['history_signatures'].insert(0,'expired'),
+):
+    invalid=deepcopy(inline_expired);mutate(invalid)
+    assert rent_refund_groups(*invalid,220)==[]
+print('Inline rent preserves failed fees and excludes only proved expired submissions')
+
 for mutate in (
     lambda a:a[0][0].update(accounting_status="incomplete"),
     lambda a:a[0][0].update(last_activity=221),

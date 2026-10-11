@@ -373,6 +373,10 @@ leave this path unmeasured. WSOL closures are excluded.
 Such a settled root produces a group with `inline_rent_pairs` and empty external
 refund components. Its cash equals the recorded wallet delta exactly, including
 failed transaction fees. No rent credit or additional fee subtraction is applied.
+Proved expired, unlanded submissions have no slot or fee and are excluded from
+the landed lifecycle records only when the settled chain and collector expiry
+proof agree. Their wallet, observation time and expired finalized height must
+match the proof contract. Unknown submissions and landed failures are not excluded.
 Evaluation, advisory pool history and the signal learner can consume this exact
 cash outcome, including negative outcomes with positive LP PnL. New evidence keeps
 its observation time and does not retroactively change earlier decisions.
