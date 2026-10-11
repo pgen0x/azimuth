@@ -314,6 +314,15 @@ history evidence observed later cannot alter earlier reports or decisions.
 
 ### Signal learner outcomes
 
+The pre-broadcast entry record retains the same entry signal fields as normal
+Redis registration, including measured zeros, and the known developer address.
+Timeout adoption copies these fields from the exact position record. Without
+the developer address, the existing repeated-rug developer ban cannot count an
+adopted position's offense; losing holder/fee/trader fields also drops learner
+inputs. Monitor redeploy contexts retain developer identity too, while re-center
+signals continue to describe only their newly measured conditions. Unknown
+developer addresses remain unknown; older records are not reconstructed.
+
 `dlmm_weights.py` learns win/non-win labels from `refund_cash_bounds`, using
 cached finalized cash and complete account histories. Only roots containing
 one position can label that position's entry signals. Recenter chains, missing

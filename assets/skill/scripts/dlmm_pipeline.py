@@ -1938,10 +1938,16 @@ def main():
             amount_x, amount_y = base_bal, half_sol
         print(f"balanced_tight: deploying {half_sol} SOL + {base_bal} {winner['base_symbol']} two-sided.")
 
-    entry_context = {key: winner.get(key) for key in ("pair", "base_mint", "base_symbol", "sol_is_x")}
+    # A timed-out sender can still land. Adoption must retain the same risk
+    # identity and learner inputs as normal registration after confirmation.
+    entry_context = {key: winner.get(key) for key in ("pair", "base_mint", "base_symbol", "sol_is_x", "dev")}
     entry_context.update(entry_id=entry_id, pair=winner["name"], mode=mode, strategy=strategy, size_sol=deploy_sol,
                          signal={key: winner.get(key) for key in (
-                             "score", "organic_score", "fee_tvl_ratio", "volatility", "tvl", "entry_live_gates")})
+                             "score", "organic_score", "fee_tvl_ratio", "fee_active_tvl_ratio",
+                             "volatility", "mcap", "holders", "tvl", "fee_pct",
+                             "volume_tvl_ratio", "swap_count", "unique_traders",
+                             "bot_holders_pct", "global_fees_sol", "bin_step",
+                             "entry_live_gates") if winner.get(key) is not None})
     context_env = "DLMM_ENTRY_CONTEXT=" + shlex.quote(json.dumps(entry_context))
     deploy_cmd = f"{context_env} node {EXECUTOR_PATH} deploy {winner['pool']} {amount_x} {amount_y} {bins_below} {bins_above} {strategy_type} {slippage_bps}"
     print(f"Running deploy: {deploy_cmd}")
@@ -2032,13 +2038,7 @@ def main():
         "dev": winner.get("dev", ""),
         # Entry-time signal snapshot — the monitor copies this into the close
         # journal so dlmm_weights.py can learn which signals predict winners.
-        "signal": {k: winner.get(k) for k in (
-            "score", "organic_score", "fee_tvl_ratio", "fee_active_tvl_ratio",
-            "volatility", "mcap", "holders", "tvl", "fee_pct",
-            "volume_tvl_ratio", "swap_count", "unique_traders",
-            "bot_holders_pct", "global_fees_sol", "bin_step",
-            "entry_live_gates",
-        ) if winner.get(k) is not None},
+        "signal": entry_context["signal"],
     }
 
     if not is_dry_run:
