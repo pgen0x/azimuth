@@ -1156,7 +1156,8 @@ def position_live_onchain(pos_addr):
     return data["exists"]
 
 
-def close_position(pos_addr, env_prefix="", wallet_address=None, is_dry_run=False, empty_only=False):
+def close_position(pos_addr, env_prefix="", wallet_address=None, is_dry_run=False, empty_only=False,
+                   emergency_exit=False):
     """Execute a close, reconciling BOTH verdicts against the chain.
 
     Same (result, error) shape as run_command_json. A close the subprocess gave
@@ -1180,7 +1181,7 @@ def close_position(pos_addr, env_prefix="", wallet_address=None, is_dry_run=Fals
     account read confirms that the position account is gone.
     """
     if not is_dry_run and not empty_only:
-        queue_settlement(pos_addr)
+        queue_settlement(pos_addr, emergency_exit=emergency_exit)
     cmd = f"{env_prefix}DLMM_CLOSE_AUTH=1 node {EXECUTOR_PATH} close {pos_addr}"
     if empty_only:
         cmd += " --empty-only"
@@ -1209,7 +1210,7 @@ def close_position(pos_addr, env_prefix="", wallet_address=None, is_dry_run=Fals
 
 SETTLEMENT_DIR = os.path.join(PROFILE_DIR, "memories", "dlmm_settlements")
 
-def queue_settlement(position):
+def queue_settlement(position, emergency_exit=False):
     if os.path.basename(position) != position:
         raise ValueError("Invalid settlement position")
     meta = get_position_metadata(position) or {}
@@ -1219,13 +1220,26 @@ def queue_settlement(position):
     try:
         os.makedirs(SETTLEMENT_DIR, exist_ok=True)
         path = os.path.join(SETTLEMENT_DIR, position + ".json")
-        if not os.path.exists(path):
-            with open(path + ".tmp", "w") as out:
-                json.dump({"position": position, "mint": mint, "last_attempt": 0}, out)
-                out.flush()
-                os.fsync(out.fileno())
-            os.replace(path + ".tmp", path)
-    except OSError as exc:
+        item = {"position": position, "mint": mint, "last_attempt": 0}
+        if os.path.exists(path):
+            if emergency_exit is not True:
+                return
+            with open(path) as src:
+                item = json.load(src)
+            if (not isinstance(item, dict) or item.get("position") != position
+                    or item.get("mint") != mint):
+                raise ValueError("Settlement marker mismatch")
+            if item.get("emergency_exit") is True:
+                return
+        # A failed ordinary close can escalate to an emergency on a later tick.
+        # Preserve retry/provenance fields when promoting that existing marker.
+        item["emergency_exit"] = emergency_exit is True
+        with open(path + ".tmp", "w") as out:
+            json.dump(item, out)
+            out.flush()
+            os.fsync(out.fileno())
+        os.replace(path + ".tmp", path)
+    except (OSError, ValueError) as exc:
         print(f"⚠️ Settlement recording failed for {position}: {exc}")
 
 def settle_pending():
@@ -1259,9 +1273,11 @@ def settle_pending():
             return
         if any(meta["base_mint"] == mint for meta in open_meta):
             continue
-        # Start with a tighter fill bound; retries retain the existing 3% ceiling.
+        # Keep ordinary exits tight. STRKT's emergency dump failed at 1%, then
+        # retried 42s later with a 4.6% lower quote. Start emergencies at the
+        # existing retry ceiling rather than first imposing the tighter bound.
         # The executor reconciles any pending signature before another send.
-        slippage_bps = 100 if not item.get("last_attempt", 0) else 300
+        slippage_bps = 300 if item.get("emergency_exit") is True or item.get("last_attempt", 0) else 100
         item.update(last_attempt=time.time(), state="pending")
         with open(path + ".tmp", "w") as out:
             json.dump(item, out)
@@ -2736,7 +2752,8 @@ def main():
             print(f"🚨 Exiting Position {pair} - Reason: {close_reason}")
             env_prefix = "DRY_RUN=true " if is_dry_run_stored else ""
             close_res, close_err = close_position(pos_addr, env_prefix,
-                                                 wallet_address, is_dry_run_stored)
+                                                 wallet_address, is_dry_run_stored,
+                                                 emergency_exit=emergency_close)
 
             if close_res and close_res.get("success"):
                 position_closed_this_cycle = True
