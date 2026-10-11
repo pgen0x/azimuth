@@ -358,7 +358,26 @@ remain explicit. Negative shortfall means the fill improved on the quote. These
 groups are execution evidence, not trading profit or causal savings; failures
 before a signed submission are outside their attempt counts.
 
-Automatic settlement starts ordinary exits at 100 bps and retries at 300 bps.
+Automatic settlement quotes ordinary exits at 100 bps and retries at 300 bps.
+On a first ordinary attempt, the monitor also passes `--small-settlement`:
+only an owned, closed-position token-to-SOL recovery with a positive net floor
+may requote at 300 bps when output is at most 250,000 lamports (0.00025 SOL).
+The additional 200 bps allowance is at most 5,000 lamports, one base transaction
+fee. The executor waits 2.1 seconds before the fresh quote, validates its exact
+input, ExactIn mode and 300 bps minimum, and refuses to send if the fresh output
+crosses that size ceiling. A quote/API failure sends nothing. Larger first
+ordinary settlements keep the original 100 bps quote; other callers must
+explicitly opt in, and both quotes still precede any build/sign/send.
+
+The October 5–11 signed-attempt audit contained 37 first ordinary 100 bps
+settlements at or below this size, with five failures costing 88,611 lamports.
+The cohort's total additional 200 bps allowance would have been about 31,837
+lamports. These are observed failure costs and an allowance comparison, not
+proof that 300 bps would have landed or saved money. Pre-broadcast failures are
+excluded. The extra quote adds latency and may be unavailable. Journaled
+`authorized_slippage_bps` records the selected fresh quote's limit, and
+`small_settlement_requote` distinguishes this policy from emergency/retry swaps.
+
 The monitor's existing emergency flag (rug velocity, emergency stop-loss or
 thin liquidity) is persisted in the settlement marker and starts at 300 bps.
 It can promote a queued ordinary close that later becomes an emergency;

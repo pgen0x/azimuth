@@ -1045,12 +1045,16 @@ async function settlementInventory(position, mint, wallet) {
   return proof;
 }
 
-async function swapToken(inputMintStr, outputMintStr, amountFloat, maxPriceImpactPct = 5, slippageBps = 100, minNetLamports = null) {
+async function swapToken(inputMintStr, outputMintStr, amountFloat, maxPriceImpactPct = 5, slippageBps = 100, minNetLamports = null, smallSettlement = false) {
   const input_mint = normalizeMint(inputMintStr);
   const output_mint = normalizeMint(outputMintStr);
   if (minNetLamports !== null && (!Number.isSafeInteger(minNetLamports) || minNetLamports < 1
       || output_mint !== "So11111111111111111111111111111111111111112" || input_mint === output_mint)) {
     throw new Error("Net recovery requires token-to-SOL and a positive integer lamport floor");
+  }
+  if (smallSettlement && (slippageBps !== 100 || minNetLamports === null
+      || !process.env.DLMM_SETTLEMENT_POSITION)) {
+    throw new Error("Small-settlement allowance requires an owned settlement, 100 bps and a net recovery floor");
   }
 
   if (process.env.DRY_RUN === "true") {
@@ -1083,7 +1087,7 @@ async function swapToken(inputMintStr, outputMintStr, amountFloat, maxPriceImpac
     }
 
     // Fetch quote outside runWithFailover as it's a HTTP call to Jupiter, then execute/send via standard RPC rotation
-    let quoteResponse, quoteObservedAt, inputRaw;
+    let quoteResponse, quoteObservedAt, inputRaw, selectedSlippageBps = slippageBps;
     try {
     // 1. Get input decimals
     let decimals = 9;
@@ -1101,7 +1105,10 @@ async function swapToken(inputMintStr, outputMintStr, amountFloat, maxPriceImpac
     inputRaw = amountRaw;
 
     // 2. Fetch a quote within the authorized slippage limit.
-    const slippageLadder = [slippageBps]; // Retry later with a fresh quote; never widen the authorized slippage.
+    // The explicit small-settlement allowance caps another 200 bps at the
+    // 5,000-lamport base transaction fee. Larger ordinary exits stay at 100.
+    const smallOutLimit = 250000n;
+    const slippageLadder = [slippageBps];
     let lastErr = null;
     for (const bps of slippageLadder) {
       try {
@@ -1125,10 +1132,34 @@ async function swapToken(inputMintStr, outputMintStr, amountFloat, maxPriceImpac
           lastErr = `Jupiter returned empty quote at slippage ${bps}bps (no route/liquidity)`;
           continue;
         }
+        if (smallSettlement) {
+          if (typeof q.outAmount !== "string" || !/^[0-9]+$/.test(q.outAmount) || BigInt(q.outAmount) <= 0n) {
+            return { success: false, aborted: true, reason: "net_recovery_invalid_quote" };
+          }
+          if (bps === 100 && BigInt(q.outAmount) <= smallOutLimit) {
+            // Never rewrite a saved quote's threshold. Requote the same owned
+            // input at the allowed ceiling, paced for the keyless quote route.
+            await new Promise(resolve => setTimeout(resolve, 2100));
+            slippageLadder.push(300);
+            continue;
+          }
+          if (bps === 300) {
+            if (BigInt(q.outAmount) > smallOutLimit) {
+              return { success: false, aborted: true, reason: "small_settlement_value_changed" };
+            }
+            if (q.swapMode !== "ExactIn" || q.slippageBps !== 300
+                || typeof q.otherAmountThreshold !== "string" || !/^[0-9]+$/.test(q.otherAmountThreshold)
+                || BigInt(q.otherAmountThreshold) <= 0n || BigInt(q.otherAmountThreshold) > BigInt(q.outAmount)
+                || BigInt(q.otherAmountThreshold) < BigInt(q.outAmount) * 9700n / 10000n) {
+              return { success: false, aborted: true, reason: "small_settlement_quote_limit_mismatch" };
+            }
+          }
+        }
         quoteResponse = q;
+        selectedSlippageBps = bps;
         quoteObservedAt = Math.floor(Date.now() / 1000);
         if (bps !== slippageBps) {
-          console.warn(`[DLMM] Swap quote required elevated slippage ${bps}bps (thin liquidity)`);
+          console.warn(`[DLMM] Small settlement requoted at ${bps}bps; output <= ${smallOutLimit} lamports`);
         }
         break;
       } catch (e) {
@@ -1259,7 +1290,8 @@ async function swapToken(inputMintStr, outputMintStr, amountFloat, maxPriceImpac
       observed_at: quoteObservedAt, input_mint, output_mint,
       in_amount: quoteResponse.inAmount, out_amount: quoteResponse.outAmount,
       minimum_out_amount: quoteResponse.otherAmountThreshold ?? null,
-      authorized_slippage_bps: slippageBps, context_slot: quoteResponse.contextSlot ?? null,
+      authorized_slippage_bps: selectedSlippageBps, context_slot: quoteResponse.contextSlot ?? null,
+      small_settlement_requote: smallSettlement && selectedSlippageBps === 300,
       token_rent_close_included: tokenRentCloseIncluded,
       price_impact_pct: quoteResponse.priceImpactPct ?? null,
       basis: "provider_quote_before_broadcast; raw_token_units; not_realized_proceeds",
@@ -1528,10 +1560,13 @@ async function main() {
       const maxImpact = args[4] != null ? parseFloat(args[4]) : 5;
       const slipBps = args[5] != null ? parseInt(args[5]) : 100;
       if (!input || !output || amount == null) {
-        throw new Error("Usage: swap <input_mint> <output_mint> <amount> [max_price_impact_pct] [slippage_bps] [min_net_lamports]");
+        throw new Error("Usage: swap <input_mint> <output_mint> <amount> [max_price_impact_pct] [slippage_bps] [min_net_lamports] [--small-settlement]");
       }
       const minNetLamports = args[6] != null ? Number(args[6]) : null;
-      const res = await swapToken(input, output, amount, maxImpact, slipBps, minNetLamports);
+      if (args[7] != null && args[7] !== "--small-settlement" || args.length > 8) {
+        throw new Error("Unknown swap option");
+      }
+      const res = await swapToken(input, output, amount, maxImpact, slipBps, minNetLamports, args[7] === "--small-settlement");
       console.log(JSON.stringify(res));
     } else {
       throw new Error(`Unknown command: ${command}`);
