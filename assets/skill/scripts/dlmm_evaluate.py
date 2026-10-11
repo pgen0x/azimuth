@@ -13,7 +13,7 @@ import subprocess
 import sqlite3
 import time
 from dlmm_accounting import report, root_decision, rows, unvalued_token_inflows, refund_cash_bounds
-from dlmm_shadow import bin_replay, bin_width_replay, bin_width_holding_replay, width_study_summary, HORIZONS
+from dlmm_shadow import bin_replay, native_allocation_replay, bin_width_replay, bin_width_holding_replay, width_study_summary, HORIZONS
 from dlmm_realized import fetch_pools, fetch_closed_positions
 
 
@@ -256,11 +256,13 @@ def evaluate(profile, start, end, rejects):
                 and bool(fact['wallet']) and fact['wallet']==event.get('wallet')
                 and type(fact.get('block_time')) in (int,float) and math.isfinite(fact['block_time'])
                 and 0 < fact['block_time'] <= closes[position]['ts'])
-    holding_closes={}
+    holding_closes={}; holding_close_facts={}
     for event in events:
         if proved_holding_close(event):
             position=event['position'];closed_at=facts[event['signature']]['block_time']
-            holding_closes[position]=min(holding_closes.get(position,closed_at),closed_at)
+            if position not in holding_closes or closed_at < holding_closes[position]:
+                holding_closes[position]=closed_at
+                holding_close_facts[position]=facts[event['signature']]
     decisions=[r for r in rows(memory/'dlmm_recenter_decisions.jsonl') if start <= r['ts'] <= end]
     comparisons=[]
     for decision in decisions:
@@ -289,7 +291,8 @@ def evaluate(profile, start, end, rejects):
         if outcome.get('estimated_false_reject_proxy'):group['positive_proxy']+=1
     for g in groups.values():
         g['estimated_false_reject_proxy_rate']=g['positive_proxy']/g['measured'] if g['measured'] else None
-    samples=rows(memory/'dlmm_bin_samples.jsonl');bins=[];widths=[];holding_widths=[]
+    samples=rows(memory/'dlmm_bin_samples.jsonl');bins=[];widths=[];holding_widths=[];native_bins=[]
+    native_observations=rows(memory/'dlmm_close_bin_observations.jsonl')
     for file in (memory/'dlmm_entries').glob('*.json'):
         entry=json.loads(file.read_text())
         if not start <= entry.get('deployed_at',0) <= end:continue
@@ -304,6 +307,18 @@ def evaluate(profile, start, end, rejects):
         closed_at = holding_closes.get(entry['position'])
         holding_widths.append(dict(position=entry['position'],mode=entry.get('mode'),
                                   **bin_width_holding_replay(entry,position_samples,closed_at)))
+        eligible=[r for r in native_observations if r.get('position') == entry['position']
+                  and type(r.get('observed_at')) in (int,float) and math.isfinite(r['observed_at'])
+                  and type(r.get('recorded_at')) in (int,float) and math.isfinite(r['recorded_at'])
+                  and r['recorded_at'] <= end and closed_at is not None and r['observed_at'] <= closed_at]
+        observation=max(eligible,key=lambda r:r['observed_at'],default=None)
+        deposits={r['signature']:r for r in events if r.get('kind') == 'deploy'
+                  and r.get('position') == entry['position']}
+        funding=facts.get(next(iter(deposits)),{}) if len(deposits) == 1 else {}
+        if len(deposits) == 1 and funding.get('wallet') != next(iter(deposits.values())).get('wallet'):
+            funding={}
+        native_bins.append(dict(position=entry['position'],mode=entry.get('mode'),
+            **native_allocation_replay(entry,observation,funding,holding_close_facts.get(entry['position'],{}),end_ts=end)))
     snapshots=[s for s in rows(memory/'dlmm_nav.jsonl') if start<=s['ts']<=end]
     cash_samples=sorted((s for s in snapshots if isinstance(s.get('native_sol'),(int,float))
                          and math.isfinite(s['native_sol'])),key=lambda s:s['ts'])
@@ -340,6 +355,7 @@ def evaluate(profile, start, end, rejects):
                 root_replay=[replay_root_decision(r) for r in live],eligibility_replay=comparisons,root_live_decisions=live,
                 rejected_candidates=groups,bin_replay=bins,bin_width_replay=widths,
                 bin_width_holding_replay=holding_widths,
+                native_bin_replay=native_bins,
                 limits=['Native SOL changes include deployments, withdrawals, swaps, fees, rent and external transfers; they are not trading profit. Rent and incomplete token marks are shown separately, never treated as complete NAV.',
                         'LP PnL is a position valuation before wallet settlement, not net wallet profit.',
                         'Rejected-candidate rate is a price proxy above a fixed 1% hurdle, not realized LP profit.',
@@ -461,6 +477,10 @@ def main():
         'Width comparisons use the same capital and observations, before wider rent, execution costs and live exit decisions; missing wider bins remain unmeasured.',
         'Modeled HODL benchmarks: '+str(dict(collections.Counter(r.get('hodl_basis') for r in data['bin_replay'] if r['status']=='modeled'))),
         f"Expected pre-broadcast SDK BidAsk references: {sum(r.get('expected_bidask_reference_scheme') == 'far_active' for r in data['bin_replay'])}; modeled references do not prove executed shares or live IL.",
+        '## Native pre-close bin reweighting',
+        str(dict(collections.Counter(r['status'] for r in data['native_bin_replay']))),
+        'Requires decoded initial SOL-only BidAsk allocations and finalized funding/close facts observed by the cutoff. Reweights actual bin principal and earned fees, preserving composition costs inside principal. Protocol fees are a subset, not an additional charge. Missing execution evidence stays unmeasured; pre-broadcast snapshots cannot substitute for it.',
+        'These are fixed realized per-bin return-rate sensitivities. Alternative fee dilution, composition rates, transfer fees, market impact, holding duration, exit route and execution costs can differ. They are not executed counterfactual profit or IL. Older ideal entry-share models omit execution composition costs and changes in the active bin.',
         f"Modeled full horizons: {sum(r.get('horizon_complete') is True for r in data['bin_replay'])}; partial horizons: {sum(r['status']=='modeled' and r.get('horizon_complete') is False for r in data['bin_replay'])}.",
         '## Runtime',json.dumps(data['runtime']), '## Limits',*['- '+s for s in data['limits']],
         'Full evidence: evaluation.json and runtime.log. No trading parameters were changed by this evaluation.']

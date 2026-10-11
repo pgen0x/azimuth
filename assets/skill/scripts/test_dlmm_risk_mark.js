@@ -1,7 +1,7 @@
 // Offline native-risk proofs, including the executor wiring. No SDK/RPC required.
 const assert = require("node:assert/strict");
 const fs = require("node:fs"), os = require("node:os"), path = require("node:path"), vm = require("node:vm");
-const {SOL, SOURCE, loadInitialContext, initialDeposit, onlyInitialSignature, markInventory} = require("./dlmm_risk_mark");
+const {SOL, SOURCE, loadInitialContext, initialDeposit, initialFundingAllocation, onlyInitialSignature, markInventory} = require("./dlmm_risk_mark");
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "dlmm-native-risk-"));
 const key = value => ({toString: () => value});
 const copy = value => structuredClone(value);
@@ -92,6 +92,55 @@ const rejects = callback => assert.throws(callback, /Native risk mark unavailabl
   onlyInitialSignature(history, context);
   for (const bad of [[], [...history, {...history[0], signature: "manual-add"}], [{...history[0], err: "failed"}],
     [{...history[0], signature: "other"}], [{...history[0], confirmationStatus: "processed"}]]) rejects(() => onlyInitialSignature(bad, context));
+  const allocationTx = copy(tx); allocationTx.blockTime = 50;
+  allocationTx.meta.innerInstructions[0].instructions[1].parsed.info.tokenAmount.amount = "99999999";
+  const allocationInstruction = {name: "addLiquidityByStrategy2", data: {liquidityParameter: {
+    amountX: "0", amountY: "100000000", activeId: 0, maxActiveBinSlippage: 10,
+    strategyParameters: {minBinId: -1, maxBinId: 0, strategyType: {bidAskImBalanced: {}}, parameteres: Array(64).fill(0)}}}};
+  const addEvent = {name: "addLiquidity", data: {position: entry.position, lbPair: entry.pool,
+    from: submission.wallet, activeBinId: 0, amounts: ["0", "99999999"]}};
+  const feeEvent = {name: "compositionFee", data: {from: submission.wallet, binId: 0,
+    tokenXFeeAmount: "0", tokenYFeeAmount: "1652", protocolTokenXFeeAmount: "0", protocolTokenYFeeAmount: "165"}};
+  const eventIx = event => ({programId, stackHeight: 2,
+    data: Buffer.concat([Buffer.from("e445a52e51cb9a1d", "hex"), Buffer.from(JSON.stringify(event))]).toString("hex")});
+  allocationTx.meta.innerInstructions[0].instructions.push(eventIx(feeEvent), eventIx(addEvent));
+  const allocationBinding = {...binding, decodeInstruction: () => allocationInstruction,
+    decodeEvent: data => JSON.parse(Buffer.from(data, "base64").toString())};
+  const allocation = initialFundingAllocation(allocationTx, context, allocationBinding, 99999999n);
+  assert.equal(initialDeposit(allocationTx, context, binding), 99999999n);
+  assert.equal(allocation.composition_fee_lamports, "1652");
+  assert.equal(allocation.protocol_fee_lamports, "165"); // subset, not 1817 total
+  assert.deepEqual(allocation.bins.map(b => b.sol_deposit_lamports), ["66666666", "33333333"]);
+  for (const breakEvidence of [
+    t => {t.blockTime = undefined;}, t => {t.transaction.signatures[0] = "other";},
+    t => {t.meta.innerInstructions[0].instructions.pop();},
+    t => {t.meta.innerInstructions[0].instructions.push(eventIx(addEvent));},
+    t => {t.meta.innerInstructions[0].instructions[2] = eventIx({...feeEvent, data: {...feeEvent.data, from: "foreign"}});},
+    t => {t.meta.innerInstructions[0].instructions[3] = eventIx({...addEvent, data: {...addEvent.data, position: "foreign"}});},
+    t => {t.meta.innerInstructions[0].instructions[3] = eventIx({...addEvent, data: {...addEvent.data, activeBinId: 11}});},
+    t => {t.meta.innerInstructions[0].instructions[2] = eventIx({...feeEvent, data: {...feeEvent.data, protocolTokenYFeeAmount: "1653"}});},
+    t => {t.meta.innerInstructions[0].instructions[2] = eventIx({...feeEvent, data: {...feeEvent.data, tokenYFeeAmount: "33333334"}});},
+    t => {t.meta.innerInstructions[0].instructions[2].stackHeight = 3;},
+    t => {t.meta.innerInstructions[0].instructions[2].data = "00"+t.meta.innerInstructions[0].instructions[2].data.slice(2);},
+    t => {t.meta.innerInstructions[0].instructions[3].programId = "foreign";},
+  ]) {
+    const bad = copy(allocationTx); breakEvidence(bad);
+    assert.equal(initialFundingAllocation(bad, context, allocationBinding, 99999999n), null);
+  }
+  for (const change of [{amountY:"99999999"}, {activeId:1}, {strategyParameters:{...allocationInstruction.data.liquidityParameter.strategyParameters,parameteres:[1]}}]) {
+    const modified = {...allocationInstruction,data:{liquidityParameter:{...allocationInstruction.data.liquidityParameter,...change}}};
+    assert.equal(initialFundingAllocation(allocationTx, context, {...allocationBinding,decodeInstruction:()=>modified}, 99999999n), null);
+  }
+  const shifted = copy(allocationTx);
+  shifted.meta.innerInstructions[0].instructions[1].parsed.info.tokenAmount.amount = "100000000";
+  shifted.meta.innerInstructions[0].instructions.splice(2,2,eventIx({...feeEvent,data:{...feeEvent.data,binId:-1}}),
+    eventIx({...addEvent,data:{...addEvent.data,activeBinId:-1,amounts:["0","100000000"]}}));
+  const moved = initialFundingAllocation(shifted, context, allocationBinding, 100000000n);
+  assert.equal(initialDeposit(shifted,context,binding),100000000n);
+  assert.equal(moved.executed_active_bin, -1); assert.equal(moved.bins[1].sol_deposit_lamports, "0");
+  const above = copy(allocationTx);
+  above.meta.innerInstructions[0].instructions.splice(2,2,eventIx({...addEvent,data:{...addEvent.data,activeBinId:1}}));
+  assert.equal(initialFundingAllocation(above,context,allocationBinding,99999999n).composition_fee_lamports,"0");
   let mark = markInventory(context, native, data, pair, 100000000n);
   assert.equal(mark.source, SOURCE); assert.equal(mark.pnl_sol, -.008); assert.equal(mark.pnl_pct, -8);
   assert.equal(mark.current_value_sol, .09); assert.equal(mark.unclaimed_fees_sol, .002);
@@ -131,10 +180,10 @@ const rejects = callback => assert.throws(callback, /Native risk mark unavailabl
   rejects(() => markInventory(context, native, data, pair, 0n));
 
   // Exercise production executor: no indexed HTTP call, signer or transaction send.
-  let sdkData = data, nativeAccount = native, signatures = history, signerCalls = 0, rpcCalls = 0;
+  let sdkData = data, nativeAccount = native, signatures = history, signerCalls = 0, rpcCalls = 0, fundingTx = tx;
   class Connection {
     async getAccountInfo() {rpcCalls++; return {owner: key(programId), data: Buffer.from([1,2,3,4,5,6,7,8])};}
-    async getParsedTransaction() {rpcCalls++; return tx;}
+    async getParsedTransaction() {rpcCalls++; return fundingTx;}
     async getSignaturesForAddress(_key, options, commitment) {assert.equal(options.limit, 2); assert.equal(commitment, "confirmed"); return signatures;}
     async sendRawTransaction() {throw Error("must never send");}
   }
@@ -165,5 +214,16 @@ const rejects = callback => assert.throws(callback, /Native risk mark unavailabl
   nativeAccount = native; writeProfile(entry, [submission, {...submission, kind: "close", signature: "closing"}]);
   const before = rpcCalls; assert.equal((await run(entry.pool, entry.position)).success, false); assert.equal(rpcCalls, before);
   assert.equal(signerCalls, 0);
+  writeProfile(); fundingTx = allocationTx;
+  pool.program.coder.instruction = {decode: allocationBinding.decodeInstruction};
+  pool.program.coder.events = {decode: allocationBinding.decodeEvent};
+  const beforeAllocation = rpcCalls;
+  mark = await run(entry.pool,entry.position);
+  assert.equal(mark.success,true);
+  assert.equal(mark.bin_observation.initial_funding.composition_fee_lamports,"1652");
+  assert.equal(rpcCalls-beforeAllocation,2); assert.equal(signerCalls,0);
+  // Missing optional allocation evidence preserves native risk valuation.
+  pool.program.coder.events.decode = () => {throw Error("event decoder unavailable");};
+  assert.equal((await run(entry.pool,entry.position)).success,true);
   console.log("Native risk funding, bin coverage, SOL orientation, arithmetic and executor checks passed");
 })().catch(error => {console.error(error); process.exitCode = 1;}).finally(() => fs.rmSync(root, {recursive: true, force: true}));
