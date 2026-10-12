@@ -35,6 +35,7 @@ const pool = {
 };
 let reservePost = 300000000, reserveError = null, reserveChanged = false, reserveReads = 0;
 class Connection {
+  constructor(endpoint = "fake-rpc-1", options = {}) { this.rpcEndpoint = endpoint; this.rpcOptions = options; }
   async getBalanceAndContext() { return {context:{slot:10},value:300000000+(++reserveReads%2===0 && reserveChanged ? 1 : 0)}; }
   async simulateTransaction() { return {context:{slot:10},value:{err:reserveError,accounts:[{lamports:reservePost}]}}; }
   async getAccountInfo() { return accountExists ? {} : null; }
@@ -98,7 +99,7 @@ const sandbox = { require: (name) => deps[name] || require(name), module: { expo
           priceImpactPct: "0", unrelatedDebug: "must-not-persist" }
       : { swapTransaction: "AA==" } };
   },
-  console: { log() {}, warn() {}, error() {} }, Buffer, AbortSignal, setTimeout, clearTimeout };
+  console: { log() {}, warn() {}, error() {} }, Buffer, AbortSignal, AbortController, setTimeout, clearTimeout };
 // Advance the clock for confirmation polling without sleeping eight real seconds
 // per pending fixture. Expiry must still depend on finalized block height.
 const fixtureEpoch = Date.now();
@@ -417,6 +418,60 @@ const clearMarker = () => fs.rmSync(marker, { force: true });
   assert.equal((await recover(1)).success, true); assert.equal(sends,beforeAtomic+1);
   const recordedAtomic=fs.readFileSync(path.join(root,'memories/dlmm_transactions.jsonl'),'utf8').trim().split('\n').map(JSON.parse).at(-1);
   assert.equal(recordedAtomic.swap_quote.token_rent_close_included,true);
+  // Ordinary full-owned settlements may close an ATA too, within a separate
+  // abortable budget. Cash from rent cannot hide a worse simulated sale.
+  const savedOrdinaryFetch=sandbox.fetch, savedOrdinarySim=Connection.prototype.simulateTransaction;
+  const markerBeforeOrdinary=fs.readFileSync(settlementMarker);
+  fs.writeFileSync(settlementMarker,JSON.stringify({position:settlementPosition,mint:"TOKEN",emergency_exit:false}));
+  let ordinaryCombinedError=false, ordinaryWorseSale=false, ordinarySimulations=[];
+  sandbox.fetch=async url=>({ok:true,json:async()=>url.includes('/quote?')
+    ? {inputMint:"TOKEN",outputMint:"So11111111111111111111111111111111111111112",inAmount:"100000000",outAmount:"1000000",otherAmountThreshold:"990000",swapMode:"ExactIn",slippageBps:100,priceImpactPct:"0"}
+    : {swapTransaction:"AA=="}});
+  Connection.prototype.simulateTransaction=async tx=>{
+    const combined=tx.message.instructions.some(i=>i.closeAccount);ordinarySimulations.push(combined);
+    return {context:{slot:10},value:{err:combined&&ordinaryCombinedError ? 'close refused' : null,
+      accounts:[{lamports:1010000+(combined?1488440-(ordinaryWorseSale?1:0):0)}]}};
+  };
+  const ordinary=()=>swapToken("TOKEN","SOL","raw:100000000",15,100,1,true);
+  const lastOrdinary=()=>JSON.parse(fs.readFileSync(journalPath,'utf8').trim().split('\n').at(-1)).swap_quote;
+  const beforeOrdinaryReads=accountReads;
+  assert.equal((await ordinary()).success,true);
+  assert.deepEqual(ordinarySimulations,[false,true]);
+  assert.equal(accountReads-beforeOrdinaryReads,1); // Reuse the already checked balance/closed-position evidence.
+  assert.equal(lastOrdinary().ordinary_token_rent_close,true);
+  assert.equal(lastOrdinary().minimum_out_amount,"990000");assert.equal(lastOrdinary().authorized_slippage_bps,100);
+  for(const failure of ['simulation','worse-sale','emergency','unknown-emergency','legacy','extension']){
+    ordinarySimulations=[];ordinaryCombinedError=failure==='simulation';ordinaryWorseSale=failure==='worse-sale';
+    accounts=[eligible()];inventoryProof={success:true,amount_raw:"100000000",wallet_balance_raw:"100000000",slot:10};
+    const marker={position:settlementPosition,mint:"TOKEN",emergency_exit:false};
+    if(failure==='emergency')marker.emergency_exit=true;
+    if(failure==='unknown-emergency')delete marker.emergency_exit;
+    if(failure==='legacy'){
+      accounts[0].account.data.parsed.info.tokenAmount.amount="100000017";
+      inventoryProof.wallet_balance_raw="100000017";
+    }
+    if(failure==='extension'){
+      accounts[0].account.owner=key('2022');accounts[0].account.data.parsed.info.extensions=[{extension:'pausableAccount'}];
+    }
+    fs.writeFileSync(settlementMarker,JSON.stringify(marker));
+    const before=sends;assert.equal((await ordinary()).success,true);assert.equal(sends,before+1);
+    assert.equal(lastOrdinary().ordinary_token_rent_close,false);
+    assert.equal(lastOrdinary().token_rent_close_included,false);
+    assert.deepEqual(ordinarySimulations,failure==='simulation'||failure==='worse-sale'?[false,true]:[false]);
+  }
+  accounts=[eligible()];inventoryProof={success:true,amount_raw:"100000000",wallet_balance_raw:"100000000",slot:10};
+  fs.writeFileSync(settlementMarker,JSON.stringify({position:settlementPosition,mint:"TOKEN",emergency_exit:false}));
+  let optionalAborts=0;
+  sandbox.fetch=async (_url,options)=>new Promise((_resolve,reject)=>{
+    options.signal.addEventListener('abort',()=>{optionalAborts++;reject(new Error('read cancelled'));},{once:true});
+  });
+  const optionalEvidence={position:settlementPosition,positionClosed:true,accounts:{value:accounts}};
+  const optionalResult=await sandbox.module.exports.ordinarySettlementRentClose(new Connection(),wallet,
+    new SwapTransaction({header:{numRequiredSignatures:1},staticAccountKeys:[wallet.publicKey],addressTableLookups:[],instructions:[]}),
+    'TOKEN','100000000',optionalEvidence,async (_tx,read)=>{await read.rpcOptions.fetch('https://optional.invalid',{});return 1;});
+  assert.equal(optionalResult,null);assert.equal(optionalAborts,1);
+  fs.writeFileSync(settlementMarker,markerBeforeOrdinary);
+  sandbox.fetch=savedOrdinaryFetch;Connection.prototype.simulateTransaction=savedOrdinarySim;
   // First ordinary recoveries may spend another 200 bps only when the fresh
   // owned-inventory quote is <=250,000 lamports. Exercise the actual swap path,
   // including the selected quote sent to /swap and journaled before broadcast.
