@@ -754,7 +754,8 @@ unchanged. No journal is truncated, deleted or backfilled by this read path.
 
 The existing shadow timer also observes up to three recent candidate pools per
 cycle with `candidate-bin-snapshot`. Sources are SOL-as-Y pools in reject records
-from the past 30 minutes, indexed by pool using only the latest 64 identities.
+and live pipeline batch receipts from the past 30 minutes, indexed by pool
+using only the latest 64 identities across both sources.
 The phase has a ten-second ceiling, a three-second process timeout per pool and
 a four-minute retry interval. It preserves the existing 20-second liquidation
 reserve, streams its history and rotates pools by oldest attempt first.
@@ -765,7 +766,17 @@ move in either direction; larger moves can leave incomplete coverage. Identity,
 SOL orientation, decimals, contiguous bounds and native counters are checked
 before writing `memories/dlmm_candidate_bin_samples.jsonl`. Failures remain
 unmeasured without invented counters. `request_started_at` and `collected_at`
-surround the read, and the source reject ID and timestamp remain attached.
+surround the read, and the source watch/reject ID and timestamp remain attached.
+
+Before capacity/ranking checks, live `--from-batch` and `--from-signal`
+invocations append at most 64 unique public SOL-as-Y pool/mint identities to
+`memories/dlmm_candidate_watch.jsonl`. Receipt time describes this local watch
+input, not scanner freshness, eligibility or an executed entry. Dry runs and
+pick-context reads do not append. The optional journal uses a nonblocking
+writer lock; its failure cannot reject a trade. `watch:` source IDs distinguish
+these receipts from reject IDs. They never enter reject-outcome counts.
+Collection still shares the existing three-pool/ten-second phase and trading
+priority checks; this adds no RPC calls to the entry path or new timer.
 
 Before SDK creation and each explicit bin/active read, the command checks the
 wallet's existing entry/swap sockets and defers while a trading worker is active.
@@ -780,7 +791,7 @@ after entry cannot backfill the estimate. Mints, decimals, all funded bin IDs
 and monotonic fee counters must match. Missing history stays unmeasured.
 
 These are separately fetched pool/bin reads, not an atomic bank snapshot.
-Reject sampling is not representative of all pools, and pool-level fee/TVL is
+These bounded sources are not representative of all pools, and pool-level fee/TVL is
 not the fee yield of a funded BidAsk ladder. This adds coverage evidence for
 later prospective fee calibration; it does not estimate profit, change gates,
 claim consistent returns or prove an IL improvement.

@@ -14,6 +14,7 @@ from local_indicators import check_local_indicators
 from tz_util import local_time_str
 from dlmm_monitor import position_live_onchain
 from dlmm_weights import ranking_weight_context
+from dlmm_candidate_watch import record_pipeline_candidates
 
 def emit_execution_receipt(report, position, signature, dry_run, verified):
     """Optional Hermes proof marker; failure must never turn a landed tx into a retry."""
@@ -1211,6 +1212,10 @@ def main():
             sys.exit(1)
         return
     print(f"🔍 Starting DLMM Ingestion Pipeline [{mode.upper()} mode]")
+
+    # Include live batch identities in the existing background bin watch even
+    # when capacity or ranking later skips them. This performs no market read.
+    record_pipeline_candidates(PROFILE_DIR, cli)
 
     params = load_soul_dlmm_params(mode=mode)
     # Both automated entry paths share the SOL-only policy. A stale LLM prompt
