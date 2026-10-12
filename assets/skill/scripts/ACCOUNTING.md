@@ -432,6 +432,34 @@ does not invalidate already-proved wallet coverage.
 
 ### Signal learner outcomes
 
+Settled single-position roots can also prove a **nonpositive cash upper bound**
+without an owned token-rent refund. This covers native-only LP activity that
+reuses an unchanged legacy token account. A new additive finalized transaction
+proof requires complete native/token balances and inner instructions, only
+known DLMM/System/ATA/token/compute programs, unchanged retained wallet token
+accounts, and no retained funding outside the recorded LP position. Temporary
+WSOL must be created, initialized and closed to the wallet in that transaction.
+Other native balance increases must exactly match principal entering an existing
+non-wallet WSOL vault; new reserves, rent top-ups, unknown programs and indirect
+funding to other accounts fail this proof.
+
+Every successful transaction must carry this proof; the last successful slot
+must contain one transaction that deletes the LP position. Finalized failures
+retain their fee, and unlanded/unknown submissions are excluded from this narrow
+path. The whole root must already be settled with unique signature attribution,
+no token inventory and nonpositive recorded cash. Legacy facts and an empty
+`token_rent_evidence.funded` list alone never establish a cash sign. Optional
+refresh considers closed positions from the last two days, at most four facts
+per collection, after missing cash facts and within the existing 60-fetch cap.
+Null proof attempts are cached; missing optional evidence does not affect coverage.
+
+`nonpositive_cash_upper_bounds` has a null lower bound. It can establish a
+non-win for the learner and the every-position acceptance report, but cannot
+establish positive profit, enter cash subtotals or create a rent-refund group.
+Future shared-account cleanup costs may make the result worse. Existing matched
+refund groups take precedence. Each proof retains its real observation cutoff;
+it cannot change earlier reports.
+
 The pre-broadcast entry record retains the same entry signal fields as normal
 Redis registration, including measured zeros, and the known developer address.
 Timeout adoption copies these fields from the exact position record. Without
@@ -441,17 +469,20 @@ inputs. Monitor redeploy contexts retain developer identity too, while re-center
 signals continue to describe only their newly measured conditions. Unknown
 developer addresses remain unknown; older records are not reconstructed.
 
-`dlmm_weights.py` learns win/non-win labels from `refund_cash_bounds`, using
+`dlmm_weights.py` learns win/non-win labels from `refund_cash_bounds` and the
+proved nonpositive upper bounds above, using
 cached finalized cash and complete account histories. Only roots containing
 one position can label that position's entry signals. Recenter chains, missing
-refund proofs and intervals crossing from nonpositive to positive are excluded;
+refund proofs without a separate upper-bound proof, and intervals crossing
+from nonpositive to positive are excluded;
 LP marks and realized LP values cannot substitute for cash. Close rows are
 deduplicated by position without rewriting the source journal.
 
 The bounds establish a label, not an exact per-root profit or summable portfolio
 PnL. The existing sample floor, smoothing, weight limits and scoring signals
 remain; the first cash recalc updates existing weights once, then retains the
-six-hour guard. File, Redis and proposal output identify `outcome_basis`.
+six-hour guard. File, Redis and proposal output identify `outcome_basis` as
+`proved_cash_sign_bounds`; upper-only samples carry `nonpositive_cash_upper_bound`.
 Only the observed, fully reconciled subset can train, so these lifts may have
 coverage and selection bias and do not prove improved prospective returns.
 
