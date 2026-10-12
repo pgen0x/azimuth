@@ -1102,6 +1102,29 @@ async function settlementInventory(position, mint, wallet) {
   if (proof.pending_signatures?.length) {
     await reconcileAccounting(new Set(proof.pending_signatures));
     proof = read();
+    if (proof.pending_signatures?.length) {
+      // A null transaction cannot prove expiry. Refresh the same finalized
+      // history proof as accounting, instead of waiting for its periodic run.
+      const pending = new Set(proof.pending_signatures), now = Math.floor(Date.now()/1000);
+      const events = fs.readFileSync(path.join(PROFILE_DIR, "memories", "dlmm_transactions.jsonl"), "utf8")
+        .split("\n").filter(Boolean).map(JSON.parse).filter(e => pending.has(e.signature)
+          && e.kind === "swap" && e.position === position && e.wallet === wallet
+          && Number.isSafeInteger(e.ts) && e.ts > 0 && now-e.ts > 120
+          && Number.isSafeInteger(e.lastValidBlockHeight) && e.lastValidBlockHeight > 0);
+      if (events.length) {
+        try {
+          const height = await runWithFailover(c => c.getBlockHeight("finalized"));
+          if (events.some(e => Number.isSafeInteger(height) && height > e.lastValidBlockHeight)) {
+            const { collect } = require("./dlmm_nav.js");
+            await collect({dir:path.join(PROFILE_DIR, "memories"), wallet, PublicKey,
+              rpc:runWithFailover, historyOnly:true, includeRentHistory:false});
+            proof = read();
+          }
+        } catch (_) {
+          console.warn("[SETTLEMENT] Expiry evidence unavailable; inventory remains unproven");
+        }
+      }
+    }
   }
   return proof;
 }

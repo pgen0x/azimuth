@@ -215,6 +215,17 @@ processed or unavailable status keeps the submission uncertain; on-chain failure
 remain failures. Durable pending markers and retries of the same signed bytes remain
 in place. Normal successful sends add no status lookup.
 
+The settlement balance reader also refreshes finalized wallet history when a
+still-unresolved swap belongs to that exact position and wallet, is over 120 seconds
+old, and its last valid block height has passed at finalized commitment. This uses
+the existing accounting collector's complete-history, stable-head and null historical
+status requirements; a null transaction alone never authorizes another swap.
+The refresh skips NAV, price quotes and optional rent-account history. Young or
+still-valid submissions add no history scan, and an unavailable or incomplete proof
+keeps inventory unproven. This avoids leaving withdrawn tokens exposed solely while
+waiting for the periodic accounting timer. Slippage, fees, inventory ownership,
+pending-transaction reconciliation and the separate risk-monitor loop are unchanged.
+
 ## September 26 evaluation corrections
 
 - Executor authorization replay uses its persisted post-refresh evidence; the earlier

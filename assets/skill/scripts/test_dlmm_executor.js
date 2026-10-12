@@ -296,6 +296,50 @@ const clearMarker = () => fs.rmSync(marker, { force: true });
     transactionFact:(_,owner,sig)=>({signature:sig,wallet:owner,landed:true})};
   assert.equal((await sandbox.module.exports.settlementInventory(settlementPosition,"TOKEN",wallet.publicKey.toString())).success,true);
   assert.deepEqual(requestedFacts,["proof-close"]);assert.equal(proofCalls,2);
+  // DOPE's first swap never landed; the balance gate must be able to obtain
+  // the existing expiry proof without waiting for a periodic accounting job.
+  const priorHeight = Connection.prototype.getBlockHeight, expirySends = sends;
+  let historyRefreshes=0, expiryHeightReads=0, refreshed=false, historyCompletes=true, historyError=false;
+  const agedSwap={signature:"expiry-swap",wallet:wallet.publicKey.toString(),position:settlementPosition,
+    kind:"swap",ts:Math.floor(sandbox.Date.now()/1000)-300,lastValidBlockHeight:150};
+  deps["./dlmm_nav.js"].parsedAccountingTransaction=async()=>null;
+  deps["./dlmm_nav.js"].collect=async options=>{
+    historyRefreshes++;
+    assert.equal(options.wallet,wallet.publicKey.toString());
+    assert.equal(options.historyOnly,true);assert.equal(options.includeRentHistory,false);
+    if(historyError) throw new Error("history unavailable");
+    refreshed=historyCompletes;
+  };
+  deps["child_process"].execFileSync=()=>JSON.stringify(refreshed ? inventoryProof
+    : {success:false,reason:"settlement_inventory_unproven",pending_signatures:[agedSwap.signature]});
+  Connection.prototype.getBlockHeight=async commitment=>{
+    assert.equal(commitment,"finalized");expiryHeightReads++;return height;
+  };
+  const expiryCase=async (change=()=>{})=>{
+    const event={...agedSwap};change(event);refreshed=false;historyRefreshes=0;expiryHeightReads=0;
+    fs.writeFileSync(journalPath,originalJournal+JSON.stringify(event)+"\n");
+    return sandbox.module.exports.settlementInventory(settlementPosition,"TOKEN",wallet.publicKey.toString());
+  };
+  height=151;
+  assert.equal((await expiryCase()).success,true);assert.equal(historyRefreshes,1);assert.equal(expiryHeightReads,1);
+  for(const change of [e=>e.kind="close",e=>e.wallet="other",e=>e.position="other",
+    e=>e.ts=Math.floor(sandbox.Date.now()/1000)-120,e=>e.ts=Math.floor(sandbox.Date.now()/1000)+1,
+    e=>e.ts=0,e=>delete e.ts,e=>e.lastValidBlockHeight=null,e=>e.lastValidBlockHeight=0,
+    e=>e.lastValidBlockHeight=Number.MAX_SAFE_INTEGER+1]) {
+    assert.equal((await expiryCase(change)).success,false);assert.equal(historyRefreshes,0);assert.equal(expiryHeightReads,0);
+  }
+  height=150;assert.equal((await expiryCase()).success,false);assert.equal(historyRefreshes,0);
+  height=151;historyCompletes=false;
+  assert.equal((await expiryCase()).success,false);assert.equal(historyRefreshes,1); // Missing history/status proof stays blocked.
+  historyError=true;assert.equal((await expiryCase()).success,false);assert.equal(historyRefreshes,1);
+  historyError=false;historyCompletes=true;
+  Connection.prototype.getBlockHeight=async()=>{throw new Error("RPC unavailable")};
+  assert.equal((await expiryCase()).success,false);assert.equal(historyRefreshes,0);
+  Connection.prototype.getBlockHeight=priorHeight;height=100;
+  deps["child_process"].execFileSync=()=>JSON.stringify(inventoryProof);
+  historyRefreshes=0;
+  assert.equal((await sandbox.module.exports.settlementInventory(settlementPosition,"TOKEN",wallet.publicKey.toString())).success,true);
+  assert.equal(historyRefreshes,0);assert.equal(sends,expirySends); // Already proved inventory adds no refresh or trade.
   fs.writeFileSync(journalPath,originalJournal);
   if(originalFacts===null) fs.rmSync(factPath);else fs.writeFileSync(factPath,originalFacts);
   delete deps["./dlmm_nav.js"];
