@@ -30,6 +30,15 @@ def request_timeout(deadline, maximum):
     return min(maximum, remaining)
 
 
+def iter_rows(file):
+    """Scan evidence without materializing growing journals; corruption stays visible."""
+    if file.exists():
+        with file.open() as stream:
+            for line in stream:
+                if line.strip():
+                    yield json.loads(line)
+
+
 def append(file, row):
     file.parent.mkdir(parents=True, exist_ok=True)
     with file.open('a') as stream:
@@ -486,10 +495,10 @@ def collect_liquidation(profile, deadline=None):
                    time.monotonic() + LIQUIDATION_BUDGET_SECONDS)
     memory = profile / 'memories'
     file = memory / 'dlmm_liquidation_quotes.jsonl'
-    latest = {r['position']: r['observed_at'] for r in rows(file)}
-    closed = {r['position'] for r in rows(memory / 'dlmm_closes.jsonl')
+    latest = {r['position']: r['observed_at'] for r in iter_rows(file)}
+    closed = {r['position'] for r in iter_rows(memory / 'dlmm_closes.jsonl')
               if r.get('position') and not r.get('dry_run')}
-    wallets = {r['position']: r['wallet'] for r in rows(memory / 'dlmm_transactions.jsonl')
+    wallets = {r['position']: r['wallet'] for r in iter_rows(memory / 'dlmm_transactions.jsonl')
                if r.get('kind') == 'deploy' and r.get('position') and r.get('wallet')}
 
     def fetch(url):
@@ -525,15 +534,20 @@ def collect_liquidation(profile, deadline=None):
 def collect(profile, reject_file):
     deadline = time.monotonic() + COLLECTION_BUDGET_SECONDS
     memory=profile/'memories'; executor=profile/'skills/solana-dlmm/scripts/dlmm_executor.js'
-    rejected={}
-    for row in rows(reject_file):
-        rejected.setdefault(row['id'],row)
-    done={r['id'] for r in rows(memory/'dlmm_reject_outcomes.jsonl')}
+    seen={row['id'] for row in iter_rows(reject_file)}
+    # Read completions after indexing the reject journal, as before. A second
+    # streaming pass processes only the unfinished first-seen IDs.
+    done={r['id'] for r in iter_rows(memory/'dlmm_reject_outcomes.jsonl')}
+    pending=seen-done; visited=set()
     prices={}; processed=0
     reject_deadline = min(deadline, time.monotonic() + REJECT_BUDGET_SECONDS)
     reject_budget_exhausted = False
-    for ident,row in rejected.items():
-        if ident in done or time.time()<row['ts']+HORIZONS.get(row['mode'],86400): continue
+    for row in (iter_rows(reject_file) if pending else ()):
+        ident=row['id']
+        if ident not in pending or ident in visited:
+            continue
+        visited.add(ident)
+        if time.time()<row['ts']+HORIZONS.get(row['mode'],86400): continue
         if time.monotonic() >= reject_deadline:
             reject_budget_exhausted = True
             break
@@ -551,9 +565,8 @@ def collect(profile, reject_file):
                 price=prices[mint].get(row['pool'])
             except Exception: pass
         append(memory/'dlmm_reject_outcomes.jsonl',rejected_outcome(row,price,int(time.time())))
-    existing=rows(memory/'dlmm_bin_samples.jsonl')
     latest={}
-    for sample in existing: latest[sample['position']]=sample['ts']
+    for sample in iter_rows(memory/'dlmm_bin_samples.jsonl'): latest[sample['position']]=sample['ts']
     count=0
     bin_deadline = min(deadline - LIQUIDATION_BUDGET_SECONDS,
                        time.monotonic() + BIN_BUDGET_SECONDS)
@@ -577,7 +590,7 @@ def collect(profile, reject_file):
             sample=json.loads(output);sample['position']=position
             append(memory/'dlmm_bin_samples.jsonl',sample)
         except Exception: pass
-    return {'rejects_total':len(rejected),'outcomes_attempted':processed,'bin_snapshots_attempted':count,
+    return {'rejects_total':len(seen),'outcomes_attempted':processed,'bin_snapshots_attempted':count,
             'reject_budget_exhausted':reject_budget_exhausted,
             'bin_budget_exhausted':bin_budget_exhausted,
             'liquidation_observations_attempted':collect_liquidation(profile,deadline)}
