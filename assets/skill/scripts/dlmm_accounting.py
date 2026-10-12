@@ -19,11 +19,18 @@ SCRIPT_DIR = Path(os.path.abspath(__file__)).parent
 PROFILE_DIR = SCRIPT_DIR.parent.parent.parent
 
 
-def rows(path):
+def iter_rows(path):
     if not path.exists():
-        return []
+        return
     # Corruption must be visible; silently skipping it understates cash flows.
-    return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+    with path.open() as source:
+        for line in source:
+            if line.strip():
+                yield json.loads(line)
+
+
+def rows(path):
+    return list(iter_rows(path))
 
 
 def unvalued_token_inflows(facts, first_slot, last_slot):
@@ -295,8 +302,12 @@ def report(profile, as_of=None):
     wallet_facts = {r["signature"]: r for r in rows(memories / "dlmm_wallet_transactions.jsonl") if r.get("observed_at", float("inf") if replay else 0) <= as_of}
     facts.update(wallet_facts)
     token_inflows = [r for r in wallet_facts.values() if r.get("classification") == "external_token_inflow"]
-    snapshots = [r for r in rows(memories / "dlmm_nav.jsonl") if r["ts"] <= as_of]
-    latest = snapshots[-1] if snapshots else {}
+    first, latest = {}, {}
+    for snapshot in iter_rows(memories / "dlmm_nav.jsonl"):
+        if snapshot["ts"] <= as_of:
+            latest = snapshot
+            if not first and snapshot.get("nav_sol") is not None:
+                first = snapshot
     coverages = [r for r in rows(memories / "dlmm_wallet_coverage.jsonl") if r["ts"] <= as_of]
     coverage = coverages[-1] if coverages else latest
     closes = {r["position"]: r for r in rows(memories / "dlmm_closes.jsonl")
@@ -426,7 +437,6 @@ def report(profile, as_of=None):
         c["lp_to_cash_difference_sol"] = (c["net_pnl_sol"] - c["lp_pnl_sol"]
             if c["net_pnl_sol"] is not None and c["lp_pnl_sol"] is not None else None)
     nav = latest.get("nav_sol") if as_of - latest.get("ts", 0) <= 600 else None
-    first = next((r for r in snapshots if r.get("nav_sol") is not None), {})
     change = None
     # A gifted token (and externally funded ATA rent) increases wallet wealth,
     # but its transfer-time value is not known. Never count it as trading profit.
