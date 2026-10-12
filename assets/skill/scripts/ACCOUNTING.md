@@ -634,6 +634,24 @@ missing evidence are explicit, not zero losses or wins. This measured subset
 is root cash after fees and matched refunds, not position win rate or full NAV.
 No trading rule, risk limit or historical decision is changed.
 
+### Every-position profit acceptance
+
+`position_profit_acceptance` includes every recorded entry deployed in the
+evaluation window, including positions with incomplete cash evidence. A position
+passes only when its settled cash lower bound is strictly positive after costs
+and proved owned rent. Zero and negative upper bounds fail. An interval spanning
+zero, missing evidence or a multiple-position root remains unresolved/unmeasured;
+aggregate root gains cannot establish the result of each constituent position.
+Shared refund fees use the existing conservative cash bounds, which must not be
+summed across positions. The full root activity must fit within the window and
+the refund proof must exist by its cutoff.
+
+One proved nonpositive position makes the criterion `failed`. Any unresolved or
+unmeasured position makes it `not_verified` when there is no proved failure.
+An empty cohort cannot pass. `observed_all_positive` describes that entry cohort
+only, never a guarantee of future profit or complete portfolio NAV. This report
+does not change ranking, execution, risk exits or learning.
+
 ### Signal learning by entry mode
 
 Cash-proved single-position roots train each entry mode independently. Pulse's
