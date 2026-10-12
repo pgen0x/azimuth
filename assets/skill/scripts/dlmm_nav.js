@@ -8,14 +8,32 @@ const read = file => fs.existsSync(file) ? fs.readFileSync(file, 'utf8').split('
 const append = (file, row) => fs.appendFileSync(file, JSON.stringify(row) + '\n', {mode: 0o600});
 const now = () => Math.floor(Date.now()/1000);
 let quoteReadyAt = 0;
-async function json(url, attempts=3, timeout=12000, deadline=Infinity) {
+// Observe the executor's existing Linux abstract sockets without acquiring its
+// locks. Kernel socket lifetime follows the worker, so stale marker files cannot
+// indefinitely suppress valuation. Other wallets do not consume this priority.
+function walletTradeActive(wallet) {
+  if (typeof wallet!=='string' || !wallet || /[\s\0]/.test(wallet)) return false;
+  const names=new Set([`@azimuth-dlmm-entry-${wallet}`,`@azimuth-dlmm-swap-${wallet}`]);
+  try {
+    return fs.readFileSync('/proc/net/unix','utf8').split('\n').some(line=>{
+      const fields=line.trim().split(/\s+/);
+      return fields.length===8 && fields[4]==='0001' && fields[5]==='01'
+        && (parseInt(fields[3],16)&0x10000)!==0 && names.has(fields[7]);
+    });
+  } catch { return false; } // Keep existing collection behavior without procfs.
+}
+
+async function json(url, attempts=3, timeout=12000, deadline=Infinity, quoteAllowed=()=>true) {
   for (let attempt=0; attempt<attempts; attempt++) {
     const quote = url.includes("/quote?");
     if (quote) {
+      if (!quoteAllowed()) throw new Error('quote_trading_deferred');
       // Keyless Jupiter is 0.5 RPS; reserve time for the response before waiting.
       const wait = Math.max(2100, quoteReadyAt-Date.now());
       if (Date.now()+wait+timeout > deadline) throw new Error('quote_budget_deferred');
       await new Promise(resolve=>setTimeout(resolve,wait));
+      // A trade can start during pacing; check again immediately before HTTP.
+      if (!quoteAllowed()) throw new Error('quote_trading_deferred');
     }
     const response = await fetch(url, {headers: {'User-Agent': 'curl/8.5.0'}, signal: AbortSignal.timeout(timeout)});
     if (quote) {
@@ -576,7 +594,8 @@ async function collect({dir, wallet, PublicKey, rpc, historyOnly=false, includeR
           if (quoteDeferredReason) throw new Error(quoteDeferredReason);
           if (!selected.has(account)) throw new Error('quote_budget_deferred');
           quoteAttempts++;
-          const q=await json(`https://api.jup.ag/swap/v1/quote?inputMint=${mint}&outputMint=${SOL}&amount=${raw}&slippageBps=100`,1,2500,(started+90)*1000);
+          const q=await json(`https://api.jup.ag/swap/v1/quote?inputMint=${mint}&outputMint=${SOL}&amount=${raw}&slippageBps=100`,1,2500,(started+90)*1000,
+            ()=>!walletTradeActive(wallet));
           const mark=navQuoteMark(q,mint,raw,slot);
           value=Number(mark.out_lamports)/1e9; basis="full_balance_quote"; freshness="quote_context_slot_checked";
           priceObservedAt=mark.observed_at; priceContextSlot=mark.slot;
@@ -588,6 +607,7 @@ async function collect({dir, wallet, PublicKey, rpc, historyOnly=false, includeR
         value=null; freshness="unavailable"; markError=err.message;
         if (err.message==='HTTP 429') quoteDeferredReason='quote_rate_limit_deferred';
         if (err.message==='quote_budget_deferred') quoteDeferredReason=err.message;
+        if (err.message==='quote_trading_deferred') quoteDeferredReason=err.message;
         issues.push(`unpriced_token:${mint}`);
       }
       tokens.push({mint,raw,mark_sol:value,basis,mark_error:markError,price_freshness:freshness,price_observed_at:priceObservedAt,price_context_slot:priceContextSlot,observed_at:now()});
@@ -631,4 +651,4 @@ async function collect({dir, wallet, PublicKey, rpc, historyOnly=false, includeR
   append(path.join(dir,'dlmm_nav.jsonl'),snapshot);
   return {nav_sol:snapshot.nav_sol,issues,missing_transactions:missing,wallet_history_complete:snapshot.wallet_history_complete};
 }
-module.exports={collect,transactionFact,heliusPrices,collectRentHistory,parsedAccountingTransaction,navQuoteMark};
+module.exports={collect,transactionFact,heliusPrices,collectRentHistory,parsedAccountingTransaction,navQuoteMark,walletTradeActive};

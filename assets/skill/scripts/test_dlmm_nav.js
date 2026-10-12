@@ -1,5 +1,5 @@
 const assert=require('node:assert/strict'), fs=require('node:fs'), os=require('node:os'), path=require('node:path');
-const {collect,transactionFact,heliusPrices,parsedAccountingTransaction,navQuoteMark}=require('./dlmm_nav.js');
+const {collect,transactionFact,heliusPrices,parsedAccountingTransaction,navQuoteMark,walletTradeActive}=require('./dlmm_nav.js');
 const wallet='wallet',key=s=>({toString:()=>s});
 const tx={slot:100,blockTime:Math.floor(Date.now()/1000),transaction:{message:{accountKeys:[{pubkey:key(wallet)},{pubkey:key('outside')}],instructions:[{program:'system',parsed:{type:'transfer',info:{source:wallet,destination:'outside',lamports:100}}}]}},meta:{err:null,fee:5,preBalances:[1000,0],postBalances:[895,100],preTokenBalances:[],postTokenBalances:[]}};
 const fact=transactionFact(tx,wallet,'sig');
@@ -315,6 +315,31 @@ global.fetch=async url=>{if(url.includes('/quote?'))throw new Error('no route');
  assert.equal(staleBySlot.tokens[0].mark_sol,null);
  assert.equal(quoteCalls,2); // An expired cache triggers a fresh request, whose old provider slot is rejected.
  assert.match(staleBySlot.tokens[0].mark_error,/quote evidence/);
+ // Real kernel locks suppress only background HTTP, and disappear on release.
+ // These are dummy wallet names, not production executors or trade submissions.
+ if (process.platform==='linux') {
+   const net=require('node:net');
+   for (const kind of ['swap','entry']) {
+     const lock=net.createServer();
+     await new Promise((resolve,reject)=>{lock.once('error',reject);lock.listen(`\0azimuth-dlmm-${kind}-${wallet}`,resolve);});
+     try {
+       assert.equal(walletTradeActive(wallet),true);
+       assert.equal(walletTradeActive(wallet+'-other'),false);
+       const before=quoteCalls;
+       await collect(args);
+       const waiting=JSON.parse(fs.readFileSync(path.join(dir,'dlmm_nav.jsonl'),'utf8').trim().split('\n').at(-1));
+       assert.equal(quoteCalls,before);
+       assert.equal(waiting.tokens[0].mark_error,'quote_trading_deferred');
+       assert.equal(waiting.tokens[0].mark_sol,null);
+       assert.equal(waiting.nav_sol,null);
+       assert.equal(waiting.wallet_history_complete,true);
+       assert.equal(waiting.native_sol,1);
+       assert.ok(waiting.issues.every(issue=>!issue.includes('portfolio_unavailable')));
+     } finally { await new Promise(resolve=>lock.close(resolve)); }
+     assert.equal(walletTradeActive(wallet),false);
+   }
+   const before=quoteCalls;await collect(args);assert.equal(quoteCalls,before+1);
+ }
  currentSlot=101;
  connection.getParsedTokenAccountsByOwner=previousAccounts;
  // Preserve the provider slot, including a processed slot ahead of finalized RPC.
@@ -524,5 +549,15 @@ console.log('Allocated account funding classification passed');
  const waited=sleeps.length;
  await context.module.exports.request('https://dlmm.datapi.meteora.ag/portfolio/open');
  assert.equal(sleeps.length,waited); // Jupiter limits do not delay unrelated data/RPC.
+ // A priority change while pacing must stop the actual request too.
+ let allowed=false;const beforePriority=calls, beforeSleep=sleeps.length;
+ await assert.rejects(context.module.exports.request('https://api.jup.ag/swap/v1/quote?test=1',1,2500,clock+90000,()=>allowed),/quote_trading_deferred/);
+ assert.equal(calls,beforePriority);assert.equal(sleeps.length,beforeSleep);
+ let checks=0;
+ await assert.rejects(context.module.exports.request('https://api.jup.ag/swap/v1/quote?test=1',1,2500,clock+90000,()=>++checks===1),/quote_trading_deferred/);
+ assert.equal(checks,2);assert.equal(calls,beforePriority);
+ // Portfolio HTTP remains available even while trading has priority.
+ await context.module.exports.request('https://dlmm.datapi.meteora.ag/portfolio/open',1,2500,clock+90000,()=>false);
+ assert.equal(calls,beforePriority+1);
  console.log('Keyless quote pacing, provider reset headers, bounded time and no extra retries passed');
 })().catch(e=>{console.error(e);process.exitCode=1});
