@@ -558,3 +558,31 @@ with TemporaryDirectory() as root:
         assert dlmm_weights.outcome_sol(learned)==-25/1e9
         assert learned["cash_pnl_lower_sol"]==learned["cash_pnl_upper_sol"]==-25/1e9
 print("Owned inline rent lifecycle, exact cash conservation, hindsight guards and negative learner labels passed")
+
+# Accounting needs two NAV records, not all historical payloads. Preserve the
+# first complete record and the last eligible record in file order, not max(ts).
+import tracemalloc
+from dlmm_accounting import rows
+with TemporaryDirectory() as directory:
+    profile=Path(directory); memory=profile/'memories';memory.mkdir()
+    file=memory/'dlmm_nav.jsonl'
+    with file.open('w') as output:
+        for ts in range(96):
+            output.write(json.dumps(dict(ts=ts,end_slot=ts,nav_sol=1 if ts==10 else None,
+                wallet_history_complete=True,padding='x'*65536))+'\n')
+        output.write(json.dumps(dict(ts=80,end_slot=80,nav_sol=2,wallet_history_complete=True))+'\n')
+        output.write(json.dumps(dict(ts=999,end_slot=999,nav_sol=99,wallet_history_complete=True))+'\n')
+    tracemalloc.start()
+    ledger=report(profile,200)
+    _,peak=tracemalloc.get_traced_memory();tracemalloc.stop()
+    assert peak<2*1024**2,peak
+    assert ledger['nav_snapshot']['ts']==80 and ledger['nav_sol']==2
+    assert ledger['flow_adjusted_wealth_change_sol']==1
+    assert rows(memory/'missing.jsonl')==[]
+    small=memory/'small.jsonl';small.write_text('\n{"a":1}\n\n{"a":2}\n')
+    assert rows(small)==[{'a':1},{'a':2}]
+    with file.open('a') as output:output.write('{broken-json}\n')
+    try: report(profile,200)
+    except json.JSONDecodeError: pass
+    else: raise AssertionError('Corrupt future NAV must remain visible')
+print('Accounting streams NAV history while preserving first/last valuation and corruption visibility')

@@ -678,6 +678,18 @@ capacity, not trading, RPC collection frequency or risk thresholds.
 
 Provider limits: https://developers.jup.ag/docs/portal/rate-limits
 
+### Evaluation journal memory
+
+The rolling evaluator streams reject and NAV history, keeping only records
+needed by the requested window. Accounting retains the first complete NAV and
+last eligible NAV in file order. The public `rows()` helper still returns a
+list, and malformed JSON remains an error even outside the selected window.
+Bin samples are indexed once by byte offset for eligible entries, then loaded
+one position at a time with a SHA-256 check against the indexed bytes. Appends
+after indexing cannot add samples to that run; changed indexed records fail
+visibly. Duplicate/order semantics, financial formulas and cutoff rules remain
+unchanged. No journal is truncated, deleted or backfilled by this read path.
+
 Historical ledger residues alone do not prove ownership of a new position's
 withdrawal. Positive sale authorization now verifies each root fact's raw token
 balance conservation and preserves the exact wallet token balance seen before

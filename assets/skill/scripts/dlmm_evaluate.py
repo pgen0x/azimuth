@@ -4,6 +4,7 @@ import argparse
 import base64
 import collections
 import concurrent.futures
+import hashlib
 import json
 import math
 import os
@@ -12,7 +13,7 @@ import re
 import subprocess
 import sqlite3
 import time
-from dlmm_accounting import report, root_decision, rows, unvalued_token_inflows, refund_cash_bounds
+from dlmm_accounting import report, root_decision, rows, iter_rows, unvalued_token_inflows, refund_cash_bounds
 from dlmm_shadow import bin_replay, native_allocation_replay, bin_width_replay, bin_width_holding_replay, width_study_summary, HORIZONS
 from dlmm_realized import fetch_pools, fetch_closed_positions
 
@@ -239,6 +240,39 @@ def swap_execution(events, facts, start, end):
                 limitation='Quote shortfall is not trading PnL or causal savings. Signed attempts only; pre-broadcast failures are not counted. Missing facts remain explicit; groups may contain different pools and market conditions.')
 
 
+def index_bin_samples(path, positions, end):
+    """Index selected rows by byte offset without retaining historical payloads."""
+    index = {position: [] for position in positions}
+    if not path.exists():
+        return index
+    with path.open('rb') as source:
+        while True:
+            offset = source.tell()
+            line = source.readline()
+            if not line:
+                break
+            if not line.strip():
+                continue
+            sample = json.loads(line)  # Even unrelated corrupt JSON stays visible.
+            if index and sample['position'] in index and sample['ts'] <= end:
+                index[sample['position']].append((offset, len(line), hashlib.sha256(line).digest()))
+    return index
+
+
+def read_bin_samples(path, indexed):
+    if not indexed:
+        return []
+    samples = []
+    with path.open('rb') as source:
+        for offset, length, digest in indexed:
+            source.seek(offset)
+            line = source.read(length)
+            if hashlib.sha256(line).digest() != digest:
+                raise ValueError('bin sample changed after indexing')
+            samples.append(json.loads(line))
+    return samples
+
+
 def evaluate(profile, start, end, rejects):
     memory=profile/'memories'
     accounting=report(profile, end)
@@ -276,12 +310,13 @@ def evaluate(profile, start, end, rejects):
         comparisons.append(dict(ts=decision['ts'],root=decision['root_chain_id'],original=decision['decision'],
             proposed='recenter' if alternative['allow'] else 'stop',reason=alternative['reason'],
             cumulative_net_sol=alternative.get('cumulative_net_sol'),basis='evidence_observed_by_decision_time'))
-    outcomes={r['id']:r for r in rows(memory/'dlmm_reject_outcomes.jsonl')}
-    cohorts={}
-    for r in rows(rejects):
-        if start <= r['ts'] <= end: cohorts.setdefault(r['id'],r)
-    groups={}
-    for ident,r in cohorts.items():
+    outcomes={r['id']:r for r in iter_rows(memory/'dlmm_reject_outcomes.jsonl')}
+    seen=set();groups={}
+    for r in iter_rows(rejects):
+        if not start <= r['ts'] <= end:continue
+        ident=r['id']
+        if ident in seen:continue
+        seen.add(ident)
         key=r['mode']+'/'+r['gate']
         group=groups.setdefault(key,dict(total=0,pending=0,measured=0,censored=0,unmeasured=0,positive_proxy=0))
         group['total']+=1
@@ -291,16 +326,20 @@ def evaluate(profile, start, end, rejects):
         if outcome.get('estimated_false_reject_proxy'):group['positive_proxy']+=1
     for g in groups.values():
         g['estimated_false_reject_proxy_rate']=g['positive_proxy']/g['measured'] if g['measured'] else None
-    samples=rows(memory/'dlmm_bin_samples.jsonl');bins=[];widths=[];holding_widths=[];native_bins=[]
-    native_observations=rows(memory/'dlmm_close_bin_observations.jsonl')
+    entries=[]
     for file in (memory/'dlmm_entries').glob('*.json'):
         entry=json.loads(file.read_text())
-        if not start <= entry.get('deployed_at',0) <= end:continue
+        if start <= entry.get('deployed_at',0) <= end:entries.append(entry)
+    sample_path=memory/'dlmm_bin_samples.jsonl'
+    sample_index=index_bin_samples(sample_path,{e['position'] for e in entries},end)
+    bins=[];widths=[];holding_widths=[];native_bins=[]
+    native_observations=rows(memory/'dlmm_close_bin_observations.jsonl')
+    for entry in entries:
         chain=next((c for c in accounting['chains'] if entry['position'] in c['positions']),None)
         cost=None
         if chain and chain.get('accounting_status')=='settled_cash':
             cost=(chain['network_fee_lamports']+chain.get('nonrefundable_account_cost_lamports',0))/1e9/max(1,len(chain['positions']))
-        position_samples=[s for s in samples if s['position']==entry['position'] and s['ts']<=end]
+        position_samples=read_bin_samples(sample_path,sample_index[entry['position']])
         result=bin_replay(entry,position_samples,cost)
         bins.append(dict(position=entry['position'],**result))
         widths.append(dict(position=entry['position'],mode=entry.get('mode'),**bin_width_replay(entry,position_samples)))
@@ -319,7 +358,7 @@ def evaluate(profile, start, end, rejects):
             funding={}
         native_bins.append(dict(position=entry['position'],mode=entry.get('mode'),
             **native_allocation_replay(entry,observation,funding,holding_close_facts.get(entry['position'],{}),end_ts=end)))
-    snapshots=[s for s in rows(memory/'dlmm_nav.jsonl') if start<=s['ts']<=end]
+    snapshots=[s for s in iter_rows(memory/'dlmm_nav.jsonl') if start<=s['ts']<=end]
     cash_samples=sorted((s for s in snapshots if isinstance(s.get('native_sol'),(int,float))
                          and math.isfinite(s['native_sol'])),key=lambda s:s['ts'])
     native_cash=None
