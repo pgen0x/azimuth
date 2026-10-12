@@ -690,6 +690,41 @@ after indexing cannot add samples to that run; changed indexed records fail
 visibly. Duplicate/order semantics, financial formulas and cutoff rules remain
 unchanged. No journal is truncated, deleted or backfilled by this read path.
 
+### Pre-entry candidate bin evidence
+
+The existing shadow timer also observes up to three recent candidate pools per
+cycle with `candidate-bin-snapshot`. Sources are SOL-as-Y pools in reject records
+from the past 30 minutes, indexed by pool using only the latest 64 identities.
+The phase has a ten-second ceiling, a three-second process timeout per pool and
+a four-minute retry interval. It preserves the existing 20-second liquidation
+reserve, streams its history and rotates pools by oldest attempt first.
+
+The read-only command observes at most 86 bins, from 69 below to 16 above the
+pool's cached active bin. This can cover a later 54-bin entry after a 15-bin
+move in either direction; larger moves can leave incomplete coverage. Identity,
+SOL orientation, decimals, contiguous bounds and native counters are checked
+before writing `memories/dlmm_candidate_bin_samples.jsonl`. Failures remain
+unmeasured without invented counters. `request_started_at` and `collected_at`
+surround the read, and the source reject ID and timestamp remain attached.
+
+Before SDK creation and each explicit bin/active read, the command checks the
+wallet's existing entry/swap sockets and defers while a trading worker is active.
+It requires only `SOLANA_PUBLIC_KEY`, never decodes a signing key, acquires a
+trading lock or submits a transaction. In-flight reads cannot be cancelled by a
+later lock acquisition. No new service or timer is installed.
+
+The evaluator embeds the earliest complete matching prior sample observed
+4–30 minutes before each entry snapshot, with its canonical JSON SHA-256. Both
+native observation time and collection time must precede entry; samples fetched
+after entry cannot backfill the estimate. Mints, decimals, all funded bin IDs
+and monotonic fee counters must match. Missing history stays unmeasured.
+
+These are separately fetched pool/bin reads, not an atomic bank snapshot.
+Reject sampling is not representative of all pools, and pool-level fee/TVL is
+not the fee yield of a funded BidAsk ladder. This adds coverage evidence for
+later prospective fee calibration; it does not estimate profit, change gates,
+claim consistent returns or prove an IL improvement.
+
 Historical ledger residues alone do not prove ownership of a new position's
 withdrawal. Positive sale authorization now verifies each root fact's raw token
 balance conservation and preserves the exact wallet token balance seen before
