@@ -39,6 +39,7 @@ const RPC_URLS = (process.env.SOLANA_RPC_URLS || "https://api.mainnet-beta.solan
   .filter(Boolean);
 const RPC_SEND_MAX_RETRIES = Math.max(2, Number.parseInt(process.env.SOLANA_RPC_MAX_RETRIES || "20", 10) || 20);
 const CONFIRM_OPTIONS = { commitment: "confirmed", preflightCommitment: "confirmed", maxRetries: RPC_SEND_MAX_RETRIES };
+const NATIVE_ENTRY_RESERVE_LAMPORTS = 200000000;
 
 let currentRpcIndex = 0;
 
@@ -341,7 +342,7 @@ function tokenAccountCanClose(account, owner, raw = "0") {
     && Number.isSafeInteger(account.lamports) && account.lamports > 0;
 }
 
-async function reclaimEmptyAccounts(execute = false) {
+async function reclaimEmptyAccounts(execute = false, batch = false) {
   const { TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID, createCloseAccountInstruction } = require("@solana/spl-token");
   const wallet = getWallet(), owner = wallet.publicKey.toString();
   const releaseEntry = await acquireDeployLock(owner);
@@ -380,7 +381,12 @@ async function reclaimEmptyAccounts(execute = false) {
         const info = account.data?.parsed?.info;
         return tokenAccountCanClose(account, owner) && !excluded.has(info.mint);
       });
-      return { connection, accounts };
+      let nativeBalance = null;
+      if (batch && accounts.length === 1) {
+        try { nativeBalance = (await connection.getBalanceAndContext(wallet.publicKey, "finalized")).value; }
+        catch { /* Unknown liquidity cannot authorize a singleton maintenance fee. */ }
+      }
+      return { connection, accounts, nativeBalance };
     });
     if (state.pending) return state.pending;
     // ponytail: eight accounts per invocation keeps legacy transactions small;
@@ -390,6 +396,22 @@ async function reclaimEmptyAccounts(execute = false) {
       eligible: state.accounts.length, accounts: accounts.map(a => ({ account: a.pubkey.toString(),
         mint: a.account.data.parsed.info.mint, program: a.account.owner.toString(), rent_lamports: a.account.lamports })),
       recovered_lamports_before_fee: accounts.reduce((sum, a) => sum + a.account.lamports, 0) };
+    if (batch) {
+      result.batch_minimum_accounts = 2;
+      if (accounts.length === 1) {
+        const balance = state.nativeBalance;
+        if (!Number.isSafeInteger(balance) || balance < 0) {
+          return { ...result, deferred: true, reason: "native_balance_unmeasured" };
+        }
+        result.native_balance_lamports = balance;
+        // Hold at most one eligible account while free native cash above the
+        // existing reserve covers its rent. Larger reserves and cash pressure
+        // reclaim immediately; pending sends were already reconciled above.
+        if (balance - NATIVE_ENTRY_RESERVE_LAMPORTS >= result.recovered_lamports_before_fee) {
+          return { ...result, deferred: true, reason: "waiting_for_second_empty_account" };
+        }
+      }
+    }
     if (result.dry_run || !accounts.length) return result;
     const connection = state.connection;
     const tx = new Transaction();
@@ -467,7 +489,7 @@ async function assertNativeReserve(connection, wallet, transaction) {
   const post = simulated.value.accounts?.[0]?.lamports;
   if (simulated.value.err || !Number.isSafeInteger(post) || !Number.isSafeInteger(before.value)
       || before.value !== after.value) throw new Error("ENTRY REFUSED: native reserve simulation unmeasured");
-  if (post < 200000000) throw new Error("ENTRY REFUSED: rent/fees would breach 0.2 SOL native reserve");
+  if (post < NATIVE_ENTRY_RESERVE_LAMPORTS) throw new Error("ENTRY REFUSED: rent/fees would breach 0.2 SOL native reserve");
 }
 
 async function deployPosition(poolAddressStr, amountX, amountY, binsBelow, binsAbove, strategyTypeStr = "spot", slippageBps = 1000) {
@@ -1577,8 +1599,8 @@ async function main() {
   
   try {
     if (command === "reclaim-empty-accounts") {
-      if (args.slice(1).some(arg => arg !== "--execute")) throw new Error("Usage: reclaim-empty-accounts [--execute]");
-      console.log(JSON.stringify(await reclaimEmptyAccounts(args.includes("--execute"))));
+      if (args.slice(1).some(arg => !["--execute", "--batch"].includes(arg))) throw new Error("Usage: reclaim-empty-accounts [--execute] [--batch]");
+      console.log(JSON.stringify(await reclaimEmptyAccounts(args.includes("--execute"), args.includes("--batch"))));
     } else if (command === "accounting") {
       const recorded = await reconcileAccounting();
       const { collect } = require("./dlmm_nav.js");

@@ -986,12 +986,54 @@ const clearMarker = () => fs.rmSync(marker, { force: true });
   await assert.rejects(reclaimEmptyAccounts(true), /confirmation timeout/);
   assert.equal(sends, beforeRent + 2);
   assert.equal((await reclaimEmptyAccounts(true)).pending, true); assert.equal(sends, beforeRent + 2);
+  assert.equal((await reclaimEmptyAccounts(true, true)).pending, true); assert.equal(sends, beforeRent + 2);
   signatureStatus = { confirmationStatus: "finalized", err: null };
   assert.equal((await reclaimEmptyAccounts(true)).reconciled, true); assert.equal(sends, beforeRent + 2);
   sendError = false; confirmTimeout = false; signatureStatus = null;
   fs.appendFileSync = () => { throw new Error("disk full"); };
   try { await assert.rejects(reclaimEmptyAccounts(true), /disk full/); assert.equal(sends, beforeRent + 2); }
   finally { fs.appendFileSync = append; }
+  signatureStatus = { confirmationStatus: "finalized", err: null };
+  assert.equal((await reclaimEmptyAccounts(true, true)).reconciled,true);
+  assert.equal(sends,beforeRent+2);signatureStatus=null;
+  // Automatic batching reduces fee frequency; a singleton stays recoverable
+  // only while native cash above the existing reserve can cover its rent.
+  const beforeBatch = sends, balanceReader = Connection.prototype.getBalanceAndContext;
+  let batchBalance = 300000000, balanceError = false, batchBalanceReads = 0, feeReads = 0;
+  Connection.prototype.getBalanceAndContext = async (_, commitment) => {
+    assert.equal(commitment, "finalized");batchBalanceReads++;
+    if (balanceError) throw new Error("balance unavailable");
+    return { context: {slot: 100}, value: batchBalance };
+  };
+  Connection.prototype.getFeeForMessage = async () => {feeReads++;return {value:fee};};
+  tokenAccounts = [account("eligible")];
+  const deferred = await reclaimEmptyAccounts(true, true);
+  assert.equal(deferred.deferred, true);assert.equal(deferred.reason, "waiting_for_second_empty_account");
+  assert.equal(deferred.batch_minimum_accounts, 2);assert.equal(sends, beforeBatch);assert.equal(feeReads, 0);
+  assert.equal(fs.existsSync(path.join(root,"memories/dlmm_pending_rent",wallet.publicKey.toString()+".json")),false);
+  batchBalance = 200000000 + 1488440;
+  assert.equal((await reclaimEmptyAccounts(true,true)).deferred,true);assert.equal(sends,beforeBatch);
+  for (const invalid of [null, true, -1, NaN, Infinity, Number.MAX_SAFE_INTEGER+1]) {
+    batchBalance=invalid;
+    assert.equal((await reclaimEmptyAccounts(true,true)).reason,"native_balance_unmeasured");
+    assert.equal(sends,beforeBatch);assert.equal(feeReads,0);
+  }
+  balanceError=true;
+  assert.equal((await reclaimEmptyAccounts(true,true)).reason,"native_balance_unmeasured");
+  balanceError=false;batchBalance=200000000+1488440-1;
+  assert.equal((await reclaimEmptyAccounts(true,true)).fee_lamports,5000);assert.equal(sends,beforeBatch+1);
+  batchBalance=300000000;tokenAccounts=[account("eligible"),account("safe-2022",{extensions:[{extension:"immutableOwner"}]},{owner:token2022})];
+  const readsBeforeBatch=batchBalanceReads;
+  assert.equal((await reclaimEmptyAccounts(true,true)).accounts.length,2);assert.equal(sends,beforeBatch+2);
+  assert.equal(batchBalanceReads,readsBeforeBatch); // A full batch needs no extra balance RPC.
+  tokenAccounts=[account("eligible")];
+  assert.equal((await reclaimEmptyAccounts(true)).fee_lamports,5000);assert.equal(sends,beforeBatch+3);
+  assert.equal(batchBalanceReads,readsBeforeBatch); // Explicit manual cleanup keeps its old behavior.
+  tokenAccounts=[account("eligible",{},{lamports:400000000})];
+  assert.equal((await reclaimEmptyAccounts(true,true)).fee_lamports,5000);assert.equal(sends,beforeBatch+4);
+  env.DRY_RUN="true";batchBalance=0;
+  assert.equal((await reclaimEmptyAccounts(true,true)).dry_run,true);assert.equal(sends,beforeBatch+4);
+  delete env.DRY_RUN;Connection.prototype.getBalanceAndContext=balanceReader;
   // Exercise the real CLI parser, not a copy of its option handling.
   let cliSwapArgs;
   sandbox.captureCLISwap = async (...args) => {cliSwapArgs=args;return {success:true};};
@@ -1004,6 +1046,17 @@ const clearMarker = () => fs.rmSync(marker, { force: true });
     cliSwapArgs=null;sandbox.process.argv=originalArgv.concat(["swap","TOKEN","SOL","raw:1","15","100","1",...option.split(" ")]);
     await assert.rejects(sandbox.module.exports.runCLI(),/exit 1/);assert.equal(cliSwapArgs,null);
   }
+  sandbox.process.argv=originalArgv;
+  let cliRentArgs;
+  sandbox.captureCLIRent=async(...args)=>{cliRentArgs=args;return {success:true};};
+  vm.runInNewContext("reclaimEmptyAccounts = captureCLIRent;",sandbox);
+  for (const options of [[],["--batch"],["--execute"],["--execute","--batch"]]) {
+    sandbox.process.argv=originalArgv.concat(["reclaim-empty-accounts",...options]);
+    await sandbox.module.exports.runCLI();
+    assert.deepEqual(Array.from(cliRentArgs),[options.includes("--execute"),options.includes("--batch")]);
+  }
+  cliRentArgs=null;sandbox.process.argv=originalArgv.concat(["reclaim-empty-accounts","--unknown"]);
+  await assert.rejects(sandbox.module.exports.runCLI(),/exit 1/);assert.equal(cliRentArgs,null);
   sandbox.process.argv=originalArgv;
   console.log("Cross-process lock, concurrent mint, chain exposure, signed expiry and uncertain-send checks passed");
 })().catch((err) => { console.error(err); process.exitCode = 1; }).finally(() => { if (!worker) fs.rmSync(root, { recursive: true, force: true }); });

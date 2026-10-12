@@ -287,14 +287,25 @@ routing and root authorization are unchanged; history-only collection skips pric
 ### Empty SPL account rent
 
 `node dlmm_executor.js reclaim-empty-accounts` previews up to eight eligible
-classic SPL or Token-2022 accounts with only `immutableOwner`. Add `--execute` to close that batch back to the same wallet.
-This is manual maintenance, not a scheduled trading action. Nonzero balances,
+classic SPL or supported Token-2022 accounts. Add `--execute` to close that batch back to the same wallet.
+Nonzero balances,
 wrapped SOL, other/unknown Token-2022 extensions, delegated/frozen accounts, foreign close authorities and
 mints with open Meteora positions are excluded. Entry and swap locks are held;
 unexpired trading reservations block maintenance. An uncertain send retains its
 signed transaction identity for reconciliation before another batch can run.
 Rent batches use a finalized blockhash and require a measured network fee below
 the reclaimed rent before signing; a missing fee still prevents submission.
+
+The scheduled unit passes `--batch`, which waits for at least two eligible
+accounts to share one network fee. A singleton is reclaimed immediately when
+its rent exceeds free native cash above the executor's existing 0.2 SOL reserve;
+this also avoids retaining a large account balance. Unknown native cash defers
+the singleton without signing. Batch deferral leaves one eligible account
+funded, so spendable SOL can temporarily be lower while its rent remains
+recoverable. The eight-account cap, exclusions, trading locks and pending-send
+reconciliation still apply. Explicit manual cleanup retains its previous
+behavior unless `--batch` is supplied. Batched refund fees retain the accounting
+report's conservative shared-fee bounds; a rent release is never new profit.
 
 Submissions use `rent_reclaim` with no entry/root attribution. Reclaimed lamports
 are a move from recoverable account reserves to spendable SOL, **not trading
