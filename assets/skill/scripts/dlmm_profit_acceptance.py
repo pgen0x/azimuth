@@ -3,6 +3,7 @@ import collections
 import math
 
 from dlmm_accounting import refund_cash_bounds
+from dlmm_cash_sign import cash_sign_upper_bound
 
 
 def position_profit_acceptance(accounting, entries, start, end):
@@ -22,6 +23,9 @@ def position_profit_acceptance(accounting, entries, start, end):
         for root in group['root_chain_ids']:
             groups[root].append(group)
     selected = collections.defaultdict(list)
+    sign_proofs = collections.defaultdict(list)
+    for proof in accounting.get('nonpositive_cash_upper_bounds', []):
+        sign_proofs[proof['root_chain_id']].append(proof)
     for entry in entries:
         deployed = entry.get('deployed_at')
         if (type(deployed) in (int, float) and math.isfinite(deployed)
@@ -51,6 +55,12 @@ def position_profit_acceptance(accounting, entries, start, end):
         if chain.get('accounting_status') != 'settled_cash':
             row['reason'] = 'position_cash_incomplete'
             continue
+        if not groups[root] and len(sign_proofs[root]) == 1:
+            upper = cash_sign_upper_bound(sign_proofs[root][0], chain, end)
+            if upper is not None:
+                row.update(cash_upper_lamports=upper, outcome='nonpositive',
+                           reason='proved_no_retained_wallet_funding; upper_only; final_cleanup_cost_unknown')
+                continue
         if len(groups[root]) != 1:
             row['reason'] = 'owned_rent_proof_missing_or_ambiguous'
             continue

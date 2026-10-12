@@ -1,6 +1,7 @@
 // Read-only wallet coverage and marked NAV. No signing or transaction submission.
 const fs = require('fs');
 const path = require('path');
+const {cashSignEvidence,cashSignRefresh} = require('./dlmm_cash_sign.js');
 const SOL = 'So11111111111111111111111111111111111111112';
 const QUOTE_CACHE_MAX_SLOT_LAG = 2500;
 const TOKEN_PROGRAMS = ['TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA', 'TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb'];
@@ -395,6 +396,7 @@ function transactionFact(tx, wallet, signature, event) {
     external_flow_lamports: simpleTransfer ? external : maintenance ? 0 : null,
     rent_maintenance: maintenance,
     token_rent_evidence: tokenRentEvidence(tx,wallet),
+    cash_sign_evidence: cashSignEvidence(tx,wallet,event?.position),
     position_account_closed: !meta.err && !!event?.position && keys.includes(event.position) && meta.preBalances[keys.indexOf(event.position)]>0 && meta.postBalances[keys.indexOf(event.position)]===0,
     classification: event ? 'recorded_bot' : simpleTransfer ? 'external_transfer' : passiveNFT ? 'passive_nft_outside_scope' : passiveToken ? 'external_token_inflow' : maintenance ? 'rent_maintenance' : meta.err ? 'failed' : 'unclassified',
     refundable_rent_locked_lamports: rentLocked, nonrefundable_account_cost_lamports: permanentRent,
@@ -479,8 +481,10 @@ async function collect({dir, wallet, PublicKey, rpc, historyOnly=false, includeR
   // or starve missing transactions. Both queues share the existing 60-fetch cap.
   const needsInline=f=>includeRentHistory && f?.schema_version===11 && f.classification==='recorded_bot'
     && f.token_rent_evidence?.refunds_unmeasured===true;
+  const signRefresh=includeRentHistory ? cashSignRefresh(events,cache,
+    read(path.join(dir,'dlmm_closes.jsonl')),wallet,now()) : new Set();
   const pending=[...signatures.filter(r=>!currentFact(r)),
-    ...signatures.filter(r=>currentFact(r)&&needsInline(cache.get(r.signature)))];
+    ...signatures.filter(r=>currentFact(r)&&(needsInline(cache.get(r.signature)) || signRefresh.has(r.signature)))];
   for (const r of pending) {
     if (fetched++ >= 60) break; // Each invocation resumes from the durable cache.
     try {

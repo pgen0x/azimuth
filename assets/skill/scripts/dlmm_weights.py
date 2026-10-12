@@ -2,7 +2,7 @@
 """Darwinian signal weighting — learn which entry signals predict winners.
 
 Reads the close journal (memories/dlmm_closes.jsonl), splits closed positions
-into wins/losses using proved root cash after fees and matched rent refunds,
+into wins/losses using proved cash bounds after fees and owned rent,
 and computes each entry signal's predictive lift (normalized
 win-mean minus loss-mean). Each signal's weight is then pulled part-way toward
 a target derived from that lift, clamped to [0.3, 2.5]. Weights persist to
@@ -47,13 +47,16 @@ import subprocess
 import time
 
 from dlmm_accounting import report, refund_cash_bounds
+from dlmm_cash_sign import cash_sign_upper_bound
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROFILE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(SCRIPT_DIR)))
 CLOSES_PATH = os.path.join(PROFILE_DIR, "memories", "dlmm_closes.jsonl")
 WEIGHTS_PATH = os.path.join(PROFILE_DIR, "memories", "signal_weights.json")
 REDIS_WEIGHTS_KEY = "sol:dlmm:signal_weights"
-OUTCOME_BASIS = "matched_refund_cash_bounds"
+OUTCOME_BASIS = "proved_cash_sign_bounds"
+REFUND_BASIS = "matched_refund_cash_bounds"
+UPPER_ONLY_BASIS = "nonpositive_cash_upper_bound"
 WEIGHT_SCOPE = "entry_mode"
 MODES = ("casual", "multiday", "turnover", "pulse")
 
@@ -147,6 +150,7 @@ def load_recent_closes():
     ledger = report(PROFILE_DIR)
     chains = {c["root_chain_id"]: c for c in ledger["chains"]}
     eligible = []
+    matched = {root for group in ledger["rent_refund_groups"] for root in group["root_chain_ids"]}
     for group in ledger["rent_refund_groups"]:
         for root in group["root_chain_ids"]:
             chain = chains[root]
@@ -160,13 +164,28 @@ def load_recent_closes():
                    "cash_pnl_lower_sol": bounds[0] / 1e9, "cash_pnl_upper_sol": bounds[1] / 1e9}
             if outcome_sol(rec) is not None:
                 eligible.append(rec)
+    proofs = {}
+    for proof in ledger.get("nonpositive_cash_upper_bounds", []):
+        proofs.setdefault(proof['root_chain_id'], []).append(proof)
+    for root, candidates in proofs.items():
+        chain = chains.get(root)
+        if root in matched or len(candidates) != 1 or chain is None or len(chain['positions']) != 1:
+            continue
+        position = chain['positions'][0]
+        upper = cash_sign_upper_bound(candidates[0], chain, time.time())
+        if position in records and upper is not None:
+            eligible.append({**records[position], "outcome_basis": UPPER_ONLY_BASIS,
+                             "cash_pnl_lower_sol": None, "cash_pnl_upper_sol": upper/1e9})
     return eligible
 
 
 def outcome_sol(rec):
-    # Return a bound for classification only; shared fees prevent an exact PnL.
+    # Classification only; shared fees and upper-only proofs are not exact PnL.
     lower, upper = rec.get("cash_pnl_lower_sol"), rec.get("cash_pnl_upper_sol")
-    if (rec.get("outcome_basis") != OUTCOME_BASIS
+    if rec.get("outcome_basis") == UPPER_ONLY_BASIS:
+        return (float(upper) if lower is None and type(upper) in (int, float)
+                and math.isfinite(upper) and upper <= 0 else None)
+    if (rec.get("outcome_basis") not in (OUTCOME_BASIS, REFUND_BASIS)
             or any(isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v)
                    for v in (lower, upper)) or lower > upper):
         return None

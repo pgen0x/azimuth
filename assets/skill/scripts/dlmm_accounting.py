@@ -14,6 +14,7 @@ import subprocess
 import time
 
 from dlmm_realized import load_realized
+from dlmm_cash_sign import nonpositive_cash_upper_bounds
 
 SCRIPT_DIR = Path(os.path.abspath(__file__)).parent
 PROFILE_DIR = SCRIPT_DIR.parent.parent.parent
@@ -445,13 +446,16 @@ def report(profile, as_of=None):
         external = sum(r.get("external_flow_lamports") or 0 for r in wallet_facts.values()
                        if first["end_slot"] < r.get("slot", 0) <= latest.get("end_slot", 0)) / 1e9
         change = nav - first["nav_sol"] - external
+    rent_groups = rent_refund_groups(list(chains.values()), facts,
+                                   rows(memories / "dlmm_rent_history.jsonl"), as_of)
     return {"basis": "recorded_finalized_wallet_cash_flows", "nav_sol": nav,
             "nav_snapshot": latest, "flow_adjusted_wealth_change_sol": change,
             "unvalued_external_token_inflows": unvalued_inflows,
             "note": "Wallet delta already includes network fees and net account rent movements; do not subtract fees again. LP PnL uses Meteora valuations. Neither is portfolio NAV. Rent, inventory drift and swap attribution require further reconciliation.",
             "pooled_settlements": pooled_settlements(chains.values()),
-            "rent_refund_groups": rent_refund_groups(list(chains.values()), facts,
-                rows(memories / "dlmm_rent_history.jsonl"), as_of),
+            "rent_refund_groups": rent_groups,
+            "nonpositive_cash_upper_bounds": nonpositive_cash_upper_bounds(
+                list(chains.values()), facts, rent_groups, as_of),
             "chains": sorted(chains.values(), key=lambda c: c["root_chain_id"])}
 
 
