@@ -725,6 +725,32 @@ not the fee yield of a funded BidAsk ladder. This adds coverage evidence for
 later prospective fee calibration; it does not estimate profit, change gates,
 claim consistent returns or prove an IL improvement.
 
+### Rent return during ordinary settlement
+
+An owned ordinary settlement at 100 bps can append the existing empty-account
+close instruction even when the swap alone already passes its net recovery
+floor. The caller must explicitly opt into the ordinary settlement path; its
+durable marker must say `emergency_exit: false`. Emergency/retry swaps and
+unknown markers retain their existing path. The optional operation shares a
+250 ms read/simulation timeout on an abortable connection and reuses the closed
+position and exact wallet balance already checked before the swap was built.
+
+Only a single supported token account holding exactly the owned input qualifies.
+Legacy tokens, split accounts, unsupported extensions, missing lookup tables,
+oversized transactions or a failed/timed-out simulation leave the original
+swap in place. The combined simulation must preserve its conservative proceeds
+after subtracting the existing rent reserve. A refund cannot disguise a worse
+sale. Input, quote, slippage threshold and compute-budget instructions are
+unchanged; signing, pending markers and confirmation still run once.
+
+SPL enforces emptiness atomically after the swap. An external token transfer
+after simulation can still make the combined transaction fail and require the
+existing next-tick retry; simulation cannot reserve the bank state. Successful
+inline closure avoids a later standalone cleanup transaction. The rent itself
+is an existing asset, not profit; actual avoided fees depend on the cleanup
+batch. `ordinary_token_rent_close` distinguishes this path in quote evidence,
+and finalized account balance facts remain authoritative for accounting.
+
 Historical ledger residues alone do not prove ownership of a new position's
 withdrawal. Positive sale authorization now verifies each root fact's raw token
 balance conservation and preserves the exact wallet token balance seen before
