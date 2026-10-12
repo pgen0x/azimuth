@@ -441,6 +441,71 @@ with tempfile.TemporaryDirectory() as directory:
     assert len((memory/'dlmm_bin_samples.jsonl').read_text().splitlines())==12
 print('Slow shadow phases retain bin/probe time and resume without fabricated or duplicate outcomes')
 
+# Growing journals must not turn the periodic collector into an OOM victim.
+# Most reject payloads are already complete; bin payloads need only timestamps.
+import tracemalloc
+with tempfile.TemporaryDirectory() as directory:
+    profile=Path(directory);memory=profile/'memories';(memory/'dlmm_entries').mkdir(parents=True)
+    reject_file=profile/'rejects.jsonl';payload='x'*(64*1024)
+    with reject_file.open('w') as stream, (memory/'dlmm_bin_samples.jsonl').open('w') as bins:
+        for i in range(96):
+            stream.write(json.dumps(dict(id=str(i),ts=1,mode='pulse',gate='done',payload=payload))+'\n')
+            bins.write(json.dumps(dict(position='old',ts=i,payload=payload))+'\n')
+        pending=dict(id='pending',ts=1,mode='pulse',gate='first',payload=payload,
+                     snapshot={'pool_price':1},candidate={'sol_is_x':False})
+        stream.write(json.dumps(pending)+'\n')
+        stream.write(json.dumps(dict(pending,gate='duplicate'))+'\n')
+    (memory/'dlmm_reject_outcomes.jsonl').write_text(''.join(json.dumps({'id':str(i)})+'\n' for i in range(96)))
+    tracemalloc.start()
+    try:
+        with patch.object(shadow_module.time,'time',return_value=10000), \
+             patch.object(shadow_module.urllib.request,'urlopen') as http, \
+             patch.object(shadow_module.subprocess,'check_output') as node, \
+             patch.object(shadow_module,'collect_liquidation',return_value=0):
+            result=shadow_module.collect(profile,reject_file)
+        peak=tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    assert peak<2*1024*1024, peak
+    assert result['rejects_total']==97 and result['outcomes_attempted']==1
+    assert not http.called and not node.called
+    outcomes=shadow_module.rows(memory/'dlmm_reject_outcomes.jsonl')
+    assert len(outcomes)==97 and outcomes[-1]['gate']=='first' and outcomes[-1]['status']=='censored'
+    with reject_file.open('w') as stream:
+        for i in range(128):stream.write(json.dumps(dict(pending,id=str(i)))+'\n')
+    (memory/'dlmm_reject_outcomes.jsonl').write_text('')
+    tracemalloc.start()
+    try:
+        with patch.object(shadow_module.time,'time',return_value=10000), \
+             patch.object(shadow_module,'collect_liquidation',return_value=0):
+            backlog=shadow_module.collect(profile,reject_file)
+        peak=tracemalloc.get_traced_memory()[1]
+    finally:tracemalloc.stop()
+    assert peak<2*1024*1024, peak
+    assert backlog['rejects_total']==128 and backlog['outcomes_attempted']==100
+    assert len(shadow_module.rows(memory/'dlmm_reject_outcomes.jsonl'))==100
+    assert list(shadow_module.iter_rows(memory/'missing.jsonl'))==[]
+    broken=memory/'broken.jsonl';broken.write_text('{"id":"good"}\n\ninvalid\n')
+    scan=shadow_module.iter_rows(broken);assert next(scan)=={'id':'good'}
+    try:next(scan);raise AssertionError('corrupt evidence was hidden')
+    except json.JSONDecodeError:pass
+    # A completion published while rejects are being indexed must still be
+    # observed before deciding which candidates need another outcome.
+    reject_file.write_text(json.dumps(dict(pending,id='racing'))+'\n')
+    (memory/'dlmm_reject_outcomes.jsonl').write_text('')
+    original_scan=shadow_module.iter_rows
+    def concurrent_completion(file):
+        yield from original_scan(file)
+        if file==reject_file:
+            with (memory/'dlmm_reject_outcomes.jsonl').open('a') as stream:
+                stream.write(json.dumps({'id':'racing'})+'\n')
+    with patch.object(shadow_module,'iter_rows',side_effect=concurrent_completion), \
+         patch.object(shadow_module,'collect_liquidation',return_value=0):
+        resumed=shadow_module.collect(profile,reject_file)
+    assert resumed['outcomes_attempted']==0
+    assert len(shadow_module.rows(memory/'dlmm_reject_outcomes.jsonl'))==1
+print('Growing shadow journals stay within the memory budget; first IDs and visible corruption preserved')
+
 # A position can finish entirely in SOL and still lose its entry composition
 # cost. Reweighting its earned fees alone must not turn that cost into profit.
 from copy import deepcopy

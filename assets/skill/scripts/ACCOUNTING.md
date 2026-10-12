@@ -135,6 +135,14 @@ unattempted records remain pending for the next run; missing bin observations
 are never filled from later prices. This prevents slow discovery requests from
 consuming the entire run before the IL snapshots can be collected.
 
+The collector streams growing journals instead of retaining full historical bin
+samples or completed reject payloads in memory. It keeps completed IDs, first-seen
+reject IDs, unfinished IDs and the last recorded timestamp per position. Pending
+candidate payloads are processed one at a time, even with a large backlog.
+Duplicate cohort IDs retain their first record, and corrupt JSON remains an error;
+no evidence is deleted or silently skipped. This bounds memory by the indexes and
+pending work rather than every historical snapshot's reserves and fee counters.
+
 Entry bin state is captured before broadcast; subsequent bin states retain reserves,
 supply and fee-growth counters. Fixed uniform, near-active and far-active allocations
 are replayed under an infinitesimal fixed-share assumption. Results show fees,
