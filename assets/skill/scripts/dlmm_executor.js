@@ -1063,15 +1063,16 @@ function swapAmountRaw(amount, decimals) {
   return raw.toString();
 }
 
-async function settlementRentClose(connection, wallet, transaction, mint, raw) {
+async function settlementRentClose(connection, wallet, transaction, mint, raw, evidence = null) {
   const position = process.env.DLMM_SETTLEMENT_POSITION;
   if (!position || !/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(position)) return transaction;
   try {
     const marker = JSON.parse(fs.readFileSync(path.join(PROFILE_DIR, "memories", "dlmm_settlements", `${position}.json`), "utf8"));
     if (marker.position !== position || marker.mint !== mint || transaction.message.header.numRequiredSignatures !== 1
-        || transaction.message.staticAccountKeys?.[0]?.toString() !== wallet.publicKey.toString()
-        || await positionAccountExists(connection, position)) return transaction;
-    const accounts = await connection.getParsedTokenAccountsByOwner(wallet.publicKey, { mint: new PublicKey(mint) }, "confirmed");
+        || transaction.message.staticAccountKeys?.[0]?.toString() !== wallet.publicKey.toString()) return transaction;
+    if (evidence ? evidence.position !== position || evidence.positionClosed !== true
+                 : await positionAccountExists(connection, position)) return transaction;
+    const accounts = evidence?.accounts || await connection.getParsedTokenAccountsByOwner(wallet.publicKey, { mint: new PublicKey(mint) }, "confirmed");
     // ponytail: one full-balance account only; leave split/unsupported inventory to the existing recovery gate.
     if (accounts.value.length !== 1) return transaction;
     const account = accounts.value[0];
@@ -1088,6 +1089,36 @@ async function settlementRentClose(connection, wallet, transaction, mint, raw) {
     return combined; // The SPL program atomically refuses closure unless the preceding swap empties this account.
   } catch {
     return transaction; // Unknown evidence never credits rent; the existing exact simulation still gates the swap.
+  }
+}
+
+// A successful ordinary settlement can return its own empty ATA rent in the
+// same swap. Optional reads/simulation have a shared 250ms budget and their own
+// abortable connection; a slow provider must not delay the already valid swap.
+async function ordinarySettlementRentClose(connection, wallet, transaction, mint, raw, evidence, measureRecovery) {
+  const controller = new AbortController();
+  let timer;
+  try {
+    const marker = JSON.parse(fs.readFileSync(path.join(PROFILE_DIR, "memories", "dlmm_settlements", `${evidence.position}.json`), "utf8"));
+    if (marker.emergency_exit !== false) return null;
+    const readConnection = new Connection(connection.rpcEndpoint, {commitment: "confirmed", disableRetryOnRateLimit: true,
+      fetch: (url, options) => fetch(url, {...options, signal: controller.signal})});
+    const timeout = new Promise(resolve => {
+      timer = setTimeout(() => {controller.abort(); resolve(null);}, 250);
+    });
+    const candidate = (async () => {
+      const combined = await settlementRentClose(readConnection, wallet, transaction, mint, raw, evidence);
+      if (combined === transaction) return null;
+      const net = await measureRecovery(combined, readConnection);
+      return !Number.isSafeInteger(net) ? null : {transaction: combined, net,
+        rentLamports: evidence.accounts.value[0].account.lamports};
+    })();
+    return await Promise.race([candidate.catch(() => null), timeout]);
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+    controller.abort();
   }
 }
 
@@ -1277,6 +1308,7 @@ async function swapToken(inputMintStr, outputMintStr, amountFloat, maxPriceImpac
     return await runWithFailover(async (connection) => {
     if (submittedSignature) return { success: false, pending: true, txHash: submittedSignature,
       error: "Previous swap submission needs reconciliation" };
+    let settlementRead = null;
     if (inventory) {
       if (await positionAccountExists(connection, process.env.DLMM_SETTLEMENT_POSITION)) {
         return { success: false, reason: "settlement_position_still_open" };
@@ -1291,6 +1323,7 @@ async function swapToken(inputMintStr, outputMintStr, amountFloat, maxPriceImpac
       if (raw.toString() !== inventory.wallet_balance_raw || raw < BigInt(inputRaw)) {
         return { success: false, reason: "settlement_inventory_changed" };
       }
+      settlementRead = {position: process.env.DLMM_SETTLEMENT_POSITION, positionClosed: true, accounts};
     }
     // 3. Fetch swap transaction
     const swapRes = await fetch("https://api.jup.ag/swap/v1/swap", {
@@ -1313,6 +1346,7 @@ async function swapToken(inputMintStr, outputMintStr, amountFloat, maxPriceImpac
     const swapTransactionBuf = Buffer.from(swapTransaction, "base64");
     let transaction = VersionedTransaction.deserialize(swapTransactionBuf);
     let tokenRentCloseIncluded = false;
+    let ordinaryTokenRentClose = false;
     
     const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash("confirmed");
     transaction.message.recentBlockhash = blockhash;
@@ -1323,13 +1357,13 @@ async function swapToken(inputMintStr, outputMintStr, amountFloat, maxPriceImpac
       if (!Number.isSafeInteger(out) || !Number.isSafeInteger(minimum) || minimum <= 0 || minimum > out) {
         return { success: false, aborted: true, reason: "net_recovery_invalid_quote" };
       }
-      const measureRecovery = async candidate => {
-        const before = await connection.getBalanceAndContext(wallet.publicKey, "confirmed");
-        const simulated = await connection.simulateTransaction(candidate, {
+      const measureRecovery = async (candidate, readConnection = connection) => {
+        const before = await readConnection.getBalanceAndContext(wallet.publicKey, "confirmed");
+        const simulated = await readConnection.simulateTransaction(candidate, {
           commitment: "confirmed", sigVerify: false, minContextSlot: before.context.slot,
           accounts: { encoding: "base64", addresses: [wallet.publicKey.toString()] }
         });
-        const after = await connection.getBalanceAndContext(wallet.publicKey,
+        const after = await readConnection.getBalanceAndContext(wallet.publicKey,
           { commitment: "confirmed", minContextSlot: simulated.context.slot });
         const post = simulated.value.accounts?.[0]?.lamports;
         if (simulated.value.err || !Number.isSafeInteger(post) || !Number.isSafeInteger(before.value)
@@ -1348,6 +1382,18 @@ async function swapToken(inputMintStr, outputMintStr, amountFloat, maxPriceImpac
           if (withRent !== null && withRent >= minNetLamports) {
             transaction = combined; conservativeNet = withRent; tokenRentCloseIncluded = true;
           }
+        }
+      } else if (smallSettlement && selectedSlippageBps === 100 && settlementRead
+          && quoteResponse.inputMint === input_mint && quoteResponse.outputMint === output_mint
+          && quoteResponse.inAmount === inputRaw && quoteResponse.swapMode === "ExactIn"
+          && quoteResponse.slippageBps === 100) {
+        const candidate = await ordinarySettlementRentClose(connection, wallet, transaction,
+          input_mint, inputRaw, settlementRead, measureRecovery);
+        // Rent is an existing asset, not profit. Do not accept a worse simulated
+        // sale merely because adding the refund makes its cash receipt larger.
+        if (candidate && candidate.net - candidate.rentLamports >= conservativeNet) {
+          transaction = candidate.transaction; conservativeNet = candidate.net;
+          tokenRentCloseIncluded = ordinaryTokenRentClose = true;
         }
       }
       if (conservativeNet < minNetLamports) {
@@ -1377,6 +1423,7 @@ async function swapToken(inputMintStr, outputMintStr, amountFloat, maxPriceImpac
       authorized_slippage_bps: selectedSlippageBps, context_slot: quoteResponse.contextSlot ?? null,
       small_settlement_requote: smallSettlement && selectedSlippageBps === 300,
       token_rent_close_included: tokenRentCloseIncluded,
+      ordinary_token_rent_close: ordinaryTokenRentClose,
       price_impact_pct: quoteResponse.priceImpactPct ?? null,
       basis: "provider_quote_before_broadcast; raw_token_units; not_realized_proceeds",
     });
@@ -1703,4 +1750,4 @@ async function main() {
 
 if (require.main === module) main();
 module.exports = { settlementInventory, swapAmountRaw, reclaimEmptyAccounts, assertRootBudget, reconcileAccounting, recordSubmission, closePosition, swapToken, confirmSignedTransaction, deployPosition, acquireDeployLock, acquireSwapLock, reconcilePendingSwap,
-  assertNoTokenExposure, positionIsEmpty, positionAccountExists, slippageBpsToPercent, settlementRentClose, tokenAccountCanClose, getPositionRiskMark, candidateBinSnapshot };
+  assertNoTokenExposure, positionIsEmpty, positionAccountExists, slippageBpsToPercent, settlementRentClose, ordinarySettlementRentClose, tokenAccountCanClose, getPositionRiskMark, candidateBinSnapshot };
