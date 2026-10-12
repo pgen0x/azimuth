@@ -15,6 +15,7 @@ from decimal import Decimal, getcontext
 from fractions import Fraction
 from dlmm_accounting import rows
 from dlmm_monitor import verified_risk_mark
+from dlmm_candidate_watch import WATCH_FILENAME
 
 getcontext().prec = 60
 HORIZONS = {'turnover': 3600, 'pulse': 1800, 'casual': 14400, 'multiday': 86400}
@@ -699,6 +700,10 @@ def collect(profile, reject_file):
     seen=set(); candidates={}; source_now=time.time()
     for row in iter_rows(reject_file):
         seen.add(row['id'])
+        index_candidate(candidates,row,source_now)
+    # Batch receipts are watch inputs, never rejected-candidate outcome IDs.
+    # The same 30m/64-pool index and later three-read budget cover both sources.
+    for row in iter_rows(memory/WATCH_FILENAME):
         index_candidate(candidates,row,source_now)
     # Read completions after indexing the reject journal, as before. A second
     # streaming pass processes only the unfinished first-seen IDs.
