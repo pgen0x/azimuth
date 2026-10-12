@@ -596,3 +596,49 @@ with tempfile.TemporaryDirectory() as directory:
         (memory/'dlmm_wallet_transactions.jsonl').write_text(''.join(json.dumps(f)+'\n' for f in [allocation_funding,dict(allocation_close,failed=True)]))
         assert native_evaluation.evaluate(profile,1,200,profile/'rejects.jsonl')['native_bin_replay'][0]['status']=='unmeasured'
 print('Native bin replay preserves composition cost, executed support and finalized observation cutoffs')
+
+# Evaluate a small window in large unrelated journals. Indexing preserves file
+# order/duplicates and the evaluator's original timestamp and first-reject rules.
+import tracemalloc
+from dlmm_evaluate import index_bin_samples, read_bin_samples
+with tempfile.TemporaryDirectory() as directory:
+    profile=Path(directory);memory=profile/'memories';(memory/'dlmm_entries').mkdir(parents=True)
+    initial_bin=dict(id=0,x='0',y='1000000000',supply=str(1000000000*2**64),fee_x='0',fee_y='0',price=1)
+    e=dict(position='position',mode='pulse',deployed_at=100,size_sol=.1,amount_x=0,amount_y=.1,
+        bin_snapshot=dict(ts=100,active_bin=0,price=1,decimals_x=9,decimals_y=9,sol_is_x=False,bins=[initial_bin]))
+    (memory/'dlmm_entries/position.json').write_text(json.dumps(e))
+    samples=[dict(position='position',ts=ts,price=1,active_bin=0,
+                  bins=[dict(initial_bin,fee_y=str((i+1)*2**64//100))])
+             for i,ts in enumerate([101,101,2000,2100,3000])]
+    file=memory/'dlmm_bin_samples.jsonl';rejects=profile/'rejects.jsonl'
+    with file.open('w') as output, rejects.open('w') as rejected:
+        for i in range(96):
+            output.write(json.dumps(dict(position='unrelated',ts=1,padding='x'*65536))+'\n')
+            rejected.write(json.dumps(dict(id=str(i),ts=1,padding='x'*65536))+'\n')
+            rejected.write(json.dumps(dict(id='selected'+str(i),ts=150,mode='pulse',gate='memory',padding='x'*65536))+'\n')
+        for sample in samples:output.write(json.dumps(sample)+'\n')
+        for gate in ['first','duplicate']:
+            rejected.write(json.dumps(dict(id='kept',ts=150,mode='pulse',gate=gate))+'\n')
+    with patch.object(native_evaluation,'report',return_value={'chains':[],'rent_refund_groups':[]}):
+        tracemalloc.start()
+        evaluated=native_evaluation.evaluate(profile,100,2100,rejects)
+        _,peak=tracemalloc.get_traced_memory();tracemalloc.stop()
+    assert peak<2*1024**2,peak
+    assert evaluated['bin_replay'][0]['schemes']==bin_replay(e,samples[:-1])['schemes']
+    assert set(evaluated['rejected_candidates'])=={'pulse/first','pulse/memory'}
+    assert evaluated['rejected_candidates']['pulse/memory']['total']==96
+    indexed=index_bin_samples(file,{'position'},2100)
+    assert read_bin_samples(file,indexed['position'])==samples[:-1]
+    with file.open('a') as output:output.write(json.dumps(dict(samples[0],ts=200))+'\n')
+    assert read_bin_samples(file,indexed['position'])==samples[:-1]
+    file.write_bytes(file.read_bytes().replace(b'"ts": 101',b'"ts": 102',1))
+    try: read_bin_samples(file,indexed['position'])
+    except ValueError: pass
+    else: raise AssertionError('Changed indexed evidence must fail')
+    with file.open('a') as output:output.write('{broken-json}\n')
+    for positions in [set(),{'position'}]:
+        try: index_bin_samples(file,positions,2100)
+        except json.JSONDecodeError: pass
+        else: raise AssertionError('Corrupt unrelated samples must remain visible')
+    assert index_bin_samples(profile/'missing',{'position'},2100)=={'position':[]}
+print('Evaluator bounds journal memory, preserves replay/reject semantics and detects changed indexed evidence')
