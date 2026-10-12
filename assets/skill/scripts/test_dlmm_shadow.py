@@ -642,3 +642,132 @@ with tempfile.TemporaryDirectory() as directory:
         else: raise AssertionError('Corrupt unrelated samples must remain visible')
     assert index_bin_samples(profile/'missing',{'position'},2100)=={'position':[]}
 print('Evaluator bounds journal memory, preserves replay/reject semantics and detects changed indexed evidence')
+
+# Candidate reads share the shadow timer, stay bounded, and never become yield
+# labels. In particular, a sample fetched after entry cannot backfill history.
+from copy import deepcopy
+from dlmm_shadow import index_candidate, collect_candidate_bins, validate_candidate_snapshot, pre_entry_bin_coverage
+candidate_mint='EkFRff9a2jKztJHML1LG9FRmEkPJDR6XAYp3uCPdpump'
+candidate_pool='CqJVXBTY644ZBtPCkbaqV7Nu8Qzau2A4sChtpkvQQLLi'
+def candidate_sample(pool=candidate_pool,stamp=10000):
+    return dict(status='observed',pool=pool,ts=stamp,active_bin=0,anchor_bin=0,
+        lower_bin=-69,upper_bin=16,decimals_x=6,decimals_y=9,sol_is_x=False,price=.001,
+        token_x_mint=candidate_mint,token_y_mint=shadow_module.SOL_MINT,
+        bins=[dict(id=i,x='0',y='1000000',supply=str(1000000*2**64),fee_x='0',fee_y='0',price=.001)
+              for i in range(-69,17)])
+def candidate_source(pool=candidate_pool,stamp=10000,ident='source'):
+    return dict(id=ident,ts=stamp,pool=pool,mode='pulse',
+                candidate=dict(base_mint=candidate_mint,sol_is_x=False,padding='discarded'))
+candidates={}
+for i in range(80):
+    index_candidate(candidates,candidate_source('1'*30+str(i//9+1)+str(i%9+1),10000+i,str(i)),10100)
+assert len(candidates)==64
+assert min(c['source_ts'] for c in candidates.values())==10016
+assert all(set(c)=={'pool','base_mint','mode','source_id','source_ts'} for c in candidates.values())
+selected_pool=next(iter(candidates)); original=candidates[selected_pool]
+index_candidate(candidates,candidate_source(selected_pool,9999,'older'),10100)
+assert candidates[selected_pool]==original
+for bad in [dict(candidate_source(),ts=10101),dict(candidate_source(),ts=8299),
+            dict(candidate_source(),pool='invalid'),dict(candidate_source(),mode='unknown'),
+            dict(candidate_source(),candidate=dict(base_mint=candidate_mint,sol_is_x=True))]:
+    empty={};index_candidate(empty,bad,10100);assert empty=={}
+validate_candidate_snapshot(candidate_sample(),candidate_pool,candidate_mint)
+for change in [dict(pool='other'),dict(token_x_mint='other'),dict(token_y_mint='other'),
+               dict(sol_is_x=True),dict(decimals_x=True),dict(decimals_y=6),dict(price=float('nan')),
+               dict(anchor_bin=1),dict(upper_bin=17),dict(bins=candidate_sample()['bins'][:-1])]:
+    bad=dict(candidate_sample(),**change)
+    try: validate_candidate_snapshot(bad,candidate_pool,candidate_mint)
+    except ValueError: pass
+    else: raise AssertionError(change)
+for field,value in [('x',str(2**64)),('fee_y',str(2**128)),('supply','-1'),('id',0),('price',0)]:
+    bad=candidate_sample();bad['bins'][0][field]=value
+    try: validate_candidate_snapshot(bad,candidate_pool,candidate_mint)
+    except ValueError: pass
+    else: raise AssertionError((field,value))
+
+with tempfile.TemporaryDirectory() as directory:
+    profile=Path(directory);clock=[0.0];epoch=10000;small={}
+    for i in range(5):index_candidate(small,candidate_source('1'*31+str(i+1)),epoch)
+    calls=[]
+    def candidate_fetch(command,stderr,timeout):
+        assert command[2]=='candidate-bin-snapshot' and command[-2:]==['69','16']
+        assert 0<timeout<=3
+        calls.append(command[3]);clock[0]+=timeout
+        return json.dumps(candidate_sample(command[3],int(epoch+clock[0]))).encode()
+    journal=profile/'memories/dlmm_candidate_bin_samples.jsonl'
+    with patch.object(shadow_module.time,'time',side_effect=lambda:epoch+clock[0]), \
+         patch.object(shadow_module.time,'monotonic',side_effect=lambda:clock[0]), \
+         patch.object(shadow_module.subprocess,'check_output',side_effect=candidate_fetch):
+        observed=collect_candidate_bins(profile,small,40)
+        assert observed['candidate_bin_snapshots_attempted']==observed['candidate_bin_snapshots_observed']==3
+        assert clock[0]==9 and 40-clock[0]>=20
+        observed=collect_candidate_bins(profile,small,50)
+        assert observed['candidate_bin_snapshots_observed']==2 and len(set(calls))==5
+        assert collect_candidate_bins(profile,small,60)['candidate_bin_snapshots_attempted']==0
+        stored=shadow_module.rows(journal)
+        assert len(stored)==5 and all(s['source_id']=='source' and s['source_ts']==10000 for s in stored)
+        assert all(s['request_started_at']<=s['ts']<=s['collected_at'] for s in stored)
+        # No scan or subprocess when the liquidation reserve consumes all slack.
+        with patch.object(shadow_module,'iter_rows',side_effect=AssertionError('No time to scan')):
+            assert collect_candidate_bins(profile,small,clock[0]+20)['candidate_bin_budget_exhausted']
+    journal.unlink();clock[0]=0
+    with patch.object(shadow_module.time,'time',return_value=epoch), \
+         patch.object(shadow_module.time,'monotonic',return_value=0), \
+         patch.object(shadow_module.subprocess,'check_output',return_value=b'{"status":"deferred","reason":"wallet_trade_active"}') as fetch:
+        deferred=collect_candidate_bins(profile,small,40)
+        assert deferred['candidate_bin_trading_deferred'] and fetch.call_count==1
+        assert not journal.exists()
+    with patch.object(shadow_module.time,'time',side_effect=lambda:epoch+clock[0]), \
+         patch.object(shadow_module.time,'monotonic',side_effect=lambda:clock[0]), \
+         patch.object(shadow_module.subprocess,'check_output',side_effect=lambda *a,**kw: (_ for _ in ()).throw(OSError('https://secret.invalid'))):
+        failed=collect_candidate_bins(profile,small,40)
+        assert failed['candidate_bin_snapshots_attempted']==3 and failed['candidate_bin_snapshots_observed']==0
+        assert all(s['reason']=='OSError' and 'bins' not in s for s in shadow_module.rows(journal))
+        assert 'secret' not in journal.read_text()
+    journal.unlink()
+    # Exercise the actual collector source wiring without doing any live reads.
+    rejects=profile/'rejects.jsonl';rejects.write_text(json.dumps(candidate_source())+'\n')
+    with patch.object(shadow_module.time,'time',return_value=epoch), \
+         patch.object(shadow_module.time,'monotonic',return_value=0), \
+         patch.object(shadow_module.subprocess,'check_output',return_value=json.dumps(candidate_sample()).encode()), \
+         patch.object(shadow_module,'collect_liquidation',return_value=0):
+        assert shadow_module.collect(profile,rejects)['candidate_bin_snapshots_observed']==1
+
+with tempfile.TemporaryDirectory() as directory:
+    profile=Path(directory);memory=profile/'memories';(memory/'dlmm_entries').mkdir(parents=True)
+    initial=candidate_sample(stamp=10000)
+    initial['bins']=[dict(b,fee_y='100') for b in initial['bins'] if -44<=b['id']<=0]
+    e=dict(position='entry',pool=candidate_pool,base_mint=candidate_mint,mode='pulse',
+           deployed_at=10001,bin_snapshot=initial)
+    file=memory/'dlmm_candidate_bin_samples.jsonl'
+    before=dict(candidate_sample(stamp=8500),collected_at=8501,source_id='earliest')
+    closer=dict(candidate_sample(stamp=9000),collected_at=9001,source_id='closer')
+    after=dict(candidate_sample(stamp=8400),collected_at=10001,source_id='after-entry')
+    outside=dict(candidate_sample(stamp=8000),collected_at=8001,source_id='too-old')
+    too_near=dict(candidate_sample(stamp=9800),collected_at=9801,source_id='too-near')
+    file.write_text(''.join(json.dumps(s)+'\n' for s in [closer,after,outside,too_near,before]))
+    coverage=pre_entry_bin_coverage([e],file,11000)[0]
+    assert coverage['status']=='observed' and coverage['span_seconds']==1500
+    assert coverage['covered_entry_bins']==45 and coverage['prior_snapshot']['source_id']=='earliest'
+    assert len(coverage['prior_sha256'])==64 and 'profit' not in coverage
+    assert pre_entry_bin_coverage([e],file,10000)[0]['status']=='unmeasured'
+    for bad in [dict(before,collected_at=10001),dict(before,collected_at=8499),dict(before,token_x_mint='other'),
+                dict(before,decimals_x=9),dict(before,lower_bin=-43,bins=before['bins'][26:]),
+                dict(before,bins=[dict(b,fee_y='101') for b in before['bins']])]:
+        file.write_text(json.dumps(bad)+'\n')
+        assert pre_entry_bin_coverage([e],file,11000)[0]['status']=='unmeasured'
+    # Unrelated growing payloads are streamed, not retained alongside each entry.
+    with file.open('w') as out:
+        for i in range(96):out.write(json.dumps(dict(pool='unrelated',padding='x'*65536))+'\n')
+        out.write(json.dumps(before)+'\n')
+    tracemalloc.start();coverage=pre_entry_bin_coverage([e],file,11000)
+    _,peak=tracemalloc.get_traced_memory();tracemalloc.stop()
+    assert peak<2*1024**2 and coverage[0]['status']=='observed',peak
+    (memory/'dlmm_entries/entry.json').write_text(json.dumps(e))
+    with patch.object(native_evaluation,'report',return_value={'chains':[],'rent_refund_groups':[]}):
+        assert native_evaluation.evaluate(profile,10000,11000,profile/'rejects')['pre_entry_bin_history']==coverage
+    file.write_text('{broken-json}\n')
+    try:pre_entry_bin_coverage([e],file,11000)
+    except json.JSONDecodeError:pass
+    else:raise AssertionError('Candidate history corruption must remain visible')
+print('Pre-entry candidate history: bounded reads, trading priority, fair rotation and no future backfill')
