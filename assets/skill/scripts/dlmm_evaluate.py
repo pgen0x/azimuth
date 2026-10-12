@@ -14,7 +14,7 @@ import subprocess
 import sqlite3
 import time
 from dlmm_accounting import report, root_decision, rows, iter_rows, unvalued_token_inflows, refund_cash_bounds
-from dlmm_shadow import bin_replay, native_allocation_replay, bin_width_replay, bin_width_holding_replay, width_study_summary, HORIZONS
+from dlmm_shadow import bin_replay, native_allocation_replay, bin_width_replay, bin_width_holding_replay, width_study_summary, pre_entry_bin_coverage, HORIZONS
 from dlmm_realized import fetch_pools, fetch_closed_positions
 
 
@@ -393,6 +393,7 @@ def evaluate(profile, start, end, rejects):
                 wealth_change=wealth,native_cash_change=native_cash,unvalued_external_token_inflows=unvalued_inflows,price_coverage=price_coverage,nav_samples=len(snapshots),complete_nav_samples=len(valid),
                 root_replay=[replay_root_decision(r) for r in live],eligibility_replay=comparisons,root_live_decisions=live,
                 rejected_candidates=groups,bin_replay=bins,bin_width_replay=widths,
+                pre_entry_bin_history=pre_entry_bin_coverage(entries,memory/'dlmm_candidate_bin_samples.jsonl',end),
                 bin_width_holding_replay=holding_widths,
                 native_bin_replay=native_bins,
                 limits=['Native SOL changes include deployments, withdrawals, swaps, fees, rent and external transfers; they are not trading profit. Rent and incomplete token marks are shown separately, never treated as complete NAV.',
@@ -508,6 +509,8 @@ def main():
         str(dict(collections.Counter(r['status'] for r in data['liquidation_observations']))),
         'Per-position observations are in evaluation JSON. Quote-based asset change excludes network fees and rent; it is not net cash or a guaranteed exit price.',
         '## Bin replay',str(dict(collections.Counter(r['status'] for r in data['bin_replay']))),
+        'Pre-entry bin history (4–30 minutes before entry): '+str(dict(collections.Counter(r['status'] for r in data['pre_entry_bin_history']))),
+        'Complete prior observations and their canonical SHA-256 are embedded in evaluation JSON. Only counters collected before the entry snapshot qualify; missing coverage stays unmeasured. Candidate sampling comes from recent reject records and is not representative of all pools. Coverage does not predict fee income, net profit or IL and does not change entry decisions.',
         '70-bin width study: '+str(dict(collections.Counter(r['status'] for r in data.get('bin_width_replay', [])))),
         'Completed width pairs by mode (wider minus baseline): '+json.dumps(width_study_summary(data.get('bin_width_replay', []))),
         'Pre-close width observations: '+str(dict(collections.Counter(r['status'] for r in data.get('bin_width_holding_replay', [])))),

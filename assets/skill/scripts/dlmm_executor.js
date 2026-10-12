@@ -1443,8 +1443,10 @@ async function entryBinSnapshots(pool, lower, upper, studySide) {
   }
 }
 
-async function binSnapshot(pool, lower, upper) {
+async function binSnapshot(pool, lower, upper, mayRead = () => true) {
+  if (!mayRead()) return {status: "deferred", reason: "wallet_trade_active"};
   const data = await pool.getBinsBetweenLowerAndUpperBound(lower, upper);
+  if (!mayRead()) return {status: "deferred", reason: "wallet_trade_active"};
   const active = await pool.getActiveBin();
   return {ts: Math.floor(Date.now()/1000), active_bin: active.binId,
     price: Number(pool.fromPricePerLamport(Number(active.price))),
@@ -1453,6 +1455,37 @@ async function binSnapshot(pool, lower, upper) {
     bins: data.bins.map(b => ({id:b.binId, x:b.xAmount.toString(), y:b.yAmount.toString(),
       supply:b.supply.toString(), fee_x:b.feeAmountXPerTokenStored.toString(),
       fee_y:b.feeAmountYPerTokenStored.toString(), price:Number(b.pricePerToken)}))};
+}
+
+// Background evidence only. The caller caps this process at three seconds;
+// never load a signing key or acquire a lock ahead of the trading workers.
+async function candidateBinSnapshot(poolAddress, below = 69, above = 16) {
+  if (!Number.isInteger(below) || below < 0 || below > 69
+      || !Number.isInteger(above) || above < 0 || above > 16) {
+    throw new Error("Invalid candidate snapshot bounds");
+  }
+  const address = new PublicKey(poolAddress);
+  const wallet = process.env.SOLANA_PUBLIC_KEY;
+  if (!wallet) throw new Error("Candidate snapshots require SOLANA_PUBLIC_KEY");
+  new PublicKey(wallet);
+  const mayRead = () => !require("./dlmm_nav").walletTradeActive(wallet);
+  if (!mayRead()) return {status: "deferred", reason: "wallet_trade_active"};
+  return runWithFailover(async connection => {
+    if (!mayRead()) return {status: "deferred", reason: "wallet_trade_active"};
+    const pool = await DLMM.create(connection, address);
+    const tokenX = pool.lbPair.tokenXMint.toString(), tokenY = pool.lbPair.tokenYMint.toString();
+    if (tokenY !== "So11111111111111111111111111111111111111112" || tokenX === tokenY) {
+      throw new Error("Candidate snapshot requires SOL as token Y");
+    }
+    const anchor = pool.lbPair.activeId;
+    if (!Number.isSafeInteger(anchor)) throw new Error("Invalid candidate active bin");
+    const snapshot = await binSnapshot(pool, anchor - below, anchor + above, mayRead);
+    if (snapshot.status === "deferred") return snapshot;
+    return {...snapshot, status: "observed", pool: address.toString(),
+      token_x_mint: tokenX, token_y_mint: tokenY, anchor_bin: anchor,
+      lower_bin: anchor - below, upper_bin: anchor + above,
+      basis: "native_candidate_pool_bin_state_not_position_return"};
+  });
 }
 
 // Read-only reconciliation. A missing transaction remains unknown, never zero.
@@ -1510,6 +1543,10 @@ async function main() {
           "--profile", PROFILE_DIR, "--sync-pool-memory"], {encoding:"utf8", timeout:20000});
       } catch (_) { console.warn("[ACCOUNTING] Pool cash history publication failed; cached evidence will expire"); }
       console.log(JSON.stringify({recorded, nav}));
+    } else if (command === "candidate-bin-snapshot") {
+      if (args.length < 2 || args.length > 4) throw new Error("Usage: candidate-bin-snapshot <pool> [below=69] [above=16]");
+      console.log(JSON.stringify(await candidateBinSnapshot(args[1],
+        args[2] === undefined ? 69 : Number(args[2]), args[3] === undefined ? 16 : Number(args[3]))));
     } else if (command === "bin-snapshot") {
       const lower = Number(args[2]), upper = Number(args[3]);
       if (!Number.isInteger(lower) || !Number.isInteger(upper) || upper < lower || upper-lower > 200) throw new Error("Invalid snapshot bounds");
@@ -1666,4 +1703,4 @@ async function main() {
 
 if (require.main === module) main();
 module.exports = { settlementInventory, swapAmountRaw, reclaimEmptyAccounts, assertRootBudget, reconcileAccounting, recordSubmission, closePosition, swapToken, confirmSignedTransaction, deployPosition, acquireDeployLock, acquireSwapLock, reconcilePendingSwap,
-  assertNoTokenExposure, positionIsEmpty, positionAccountExists, slippageBpsToPercent, settlementRentClose, tokenAccountCanClose, getPositionRiskMark };
+  assertNoTokenExposure, positionIsEmpty, positionAccountExists, slippageBpsToPercent, settlementRentClose, tokenAccountCanClose, getPositionRiskMark, candidateBinSnapshot };

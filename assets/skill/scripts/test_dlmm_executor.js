@@ -12,6 +12,7 @@ let reads = 0, sends = 0, builds = 0, minted = 0, height = 100, sendError = fals
 let lastSlippage = null, lastMaxRetries = null;
 let positions = [], confirmationError = false, signatureStatus = null;
 let confirmTimeout = false, accountExists = true, failNextSend = false, sendFailed = false;
+let candidateCreates = 0, candidateTradeChecks = 0, candidateTradeAfter = Infinity;
 const closeBytes = [];
 const key = (value) => ({ toString: () => value });
 const wallet = { publicKey: key(`test-wallet-${worker ? "swap" : process.pid}`) };
@@ -75,7 +76,8 @@ class SwapTransaction {
 const deps = {
   "@solana/web3.js": { Transaction: RentTransaction, Connection, Keypair: { generate: () => ({ publicKey: key(`position-${++minted}`) }) }, PublicKey: function (v) { return key(v); }, VersionedTransaction: SwapTransaction,
     TransactionMessage: { decompile(message) { const instructions = [...message.instructions]; return {instructions, compileToV0Message() { return {...message, instructions}; }}; } } },
-  "@meteora-ag/dlmm": { create: async () => pool, StrategyType: { Spot: 0, Curve: 1, BidAsk: 2 }, positionOwnerFilter: () => ({}) },
+  "@meteora-ag/dlmm": { create: async () => {candidateCreates++; return pool;}, StrategyType: { Spot: 0, Curve: 1, BidAsk: 2 }, positionOwnerFilter: () => ({}) },
+  "./dlmm_nav": { walletTradeActive: () => ++candidateTradeChecks >= candidateTradeAfter },
   "bn.js": function (value) { this.value = value; }, "bs58": { encode: () => "signature" },
   "dotenv": { config() {}, parse: () => ({}) },
 };
@@ -139,6 +141,53 @@ const clearMarker = () => fs.rmSync(marker, { force: true });
   assert.equal(captured.width_study, null);
   assert.equal(captured.bin_snapshot.bins[0].id, -44);
   vm.runInNewContext("binSnapshot = originalSnapshot;", sandbox);
+
+  if (!worker) {
+    const snapshot = sandbox.module.exports.candidateBinSnapshot;
+    env.SOLANA_PUBLIC_KEY = wallet.publicKey.toString();
+    pool.lbPair.activeId = 0;
+    pool.tokenX = {mint: {decimals: 9}}; pool.tokenY = {mint: {decimals: 9}};
+    let binReads = 0, activeReads = 0;
+    const previousActive = pool.getActiveBin;
+    pool.getActiveBin = async () => {activeReads++; return previousActive();};
+    pool.getBinsBetweenLowerAndUpperBound = async (lower, upper) => {
+      binReads++;
+      return {bins: Array.from({length: upper-lower+1}, (_, i) => ({binId: lower+i,
+        xAmount: 0, yAmount: 100, supply: 100, feeAmountXPerTokenStored: 0,
+        feeAmountYPerTokenStored: 0, pricePerToken: 1}))};
+    };
+    vm.runInNewContext("const candidateOriginalWallet = getWallet; getWallet = () => {throw new Error('Read-only candidate must not decode wallet');};", sandbox);
+    candidateCreates = candidateTradeChecks = 0;
+    const observed = await snapshot("pool");
+    assert.equal(observed.status, "observed");
+    assert.equal(observed.pool, "pool");
+    assert.equal(observed.token_x_mint, "TOKEN");
+    assert.equal(observed.lower_bin, -69); assert.equal(observed.upper_bin, 16);
+    assert.equal(observed.bins.length, 86); assert.equal(binReads, 1); assert.equal(activeReads, 1);
+    assert.equal(sends, 0); assert.equal(builds, 0);
+    for (const [below, above] of [[70, 0], [-1, 0], [1.5, 0], [0, 17], [0, NaN]]) {
+      await assert.rejects(snapshot("pool", below, above), /bounds/);
+    }
+    assert.equal(candidateCreates, 1);
+    delete env.SOLANA_PUBLIC_KEY;
+    await assert.rejects(snapshot("pool"), /SOLANA_PUBLIC_KEY/);
+    env.SOLANA_PUBLIC_KEY = wallet.publicKey.toString();
+    for (const at of [1, 2, 3, 4]) {
+      candidateTradeChecks = 0; candidateTradeAfter = at; candidateCreates = binReads = activeReads = 0;
+      assert.equal((await snapshot("pool")).status, "deferred");
+      assert.equal(candidateCreates, at >= 3 ? 1 : 0);
+      assert.equal(binReads, at === 4 ? 1 : 0);
+      assert.equal(activeReads, 0);
+    }
+    candidateTradeAfter = Infinity;
+    pool.lbPair.tokenYMint = key("NOT-SOL");
+    await assert.rejects(snapshot("pool"), /RPC endpoints failed/);
+    pool.lbPair.tokenYMint = key("So11111111111111111111111111111111111111112");
+    pool.getActiveBin = previousActive;
+    delete pool.getBinsBetweenLowerAndUpperBound; delete pool.lbPair.activeId;
+    delete pool.tokenX; delete pool.tokenY;
+    vm.runInNewContext("getWallet = candidateOriginalWallet;", sandbox);
+  }
 
   if (worker && worker.startsWith("reclaim-")) {
     const shares = worker === "reclaim-unknown" ? undefined : [{binId:0,positionLiquidity:worker === "reclaim-funded" ? "100000000000000000000000000" : "0"}];

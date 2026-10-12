@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Forward shadow outcomes and bin replay. Never submits a trade or changes weights."""
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -21,6 +22,167 @@ COLLECTION_BUDGET_SECONDS = 240
 REJECT_BUDGET_SECONDS = 45
 BIN_BUDGET_SECONDS = 150
 LIQUIDATION_BUDGET_SECONDS = 20
+CANDIDATE_BUDGET_SECONDS = 10
+CANDIDATE_MAX_POOLS = 64
+CANDIDATE_MAX_AGE_SECONDS = 1800
+SOL_MINT = 'So11111111111111111111111111111111111111112'
+ADDRESS = re.compile(r'[1-9A-HJ-NP-Za-km-z]{32,44}\Z')
+
+
+def finite_number(value):
+    return type(value) in (int, float) and math.isfinite(value)
+
+
+def index_candidate(candidates, row, now):
+    """Keep only small, recent pool identities while streaming the reject journal."""
+    candidate = row.get('candidate') or {}
+    pool, mint, stamp = row.get('pool'), candidate.get('base_mint'), row.get('ts')
+    if (not isinstance(pool, str) or not ADDRESS.fullmatch(pool)
+            or not isinstance(mint, str) or not ADDRESS.fullmatch(mint) or mint == SOL_MINT
+            or candidate.get('sol_is_x') is not False or row.get('mode') not in HORIZONS
+            or not finite_number(stamp) or not 0 <= now - stamp <= CANDIDATE_MAX_AGE_SECONDS):
+        return
+    previous = candidates.get(pool)
+    if previous and previous['source_ts'] >= stamp:
+        return
+    candidates[pool] = dict(pool=pool, base_mint=mint, mode=row['mode'],
+                            source_id=row['id'], source_ts=stamp)
+    if len(candidates) > CANDIDATE_MAX_POOLS:
+        del candidates[min(candidates, key=lambda key: (candidates[key]['source_ts'], key))]
+
+
+def validate_candidate_snapshot(sample, pool, mint):
+    """Validate native counters, identity and bounded contiguous read coverage."""
+    if (sample.get('status') != 'observed' or sample.get('pool') != pool
+            or sample.get('token_x_mint') != mint or sample.get('token_y_mint') != SOL_MINT
+            or sample.get('sol_is_x') is not False or not finite_number(sample.get('ts'))
+            or not finite_number(sample.get('price')) or sample['price'] <= 0
+            or type(sample.get('decimals_x')) is not int or not 0 <= sample['decimals_x'] <= 18
+            or type(sample.get('decimals_y')) is not int or sample['decimals_y'] != 9):
+        raise ValueError('invalid_candidate_identity_or_mark')
+    lower, upper, anchor = (sample.get(k) for k in ('lower_bin', 'upper_bin', 'anchor_bin'))
+    if (any(type(v) is not int or not -(2**31) <= v < 2**31 for v in (lower, upper, anchor, sample.get('active_bin')))
+            or not 0 <= anchor - lower <= 69 or not 0 <= upper - anchor <= 16):
+        raise ValueError('invalid_candidate_range')
+    bins = sample.get('bins')
+    if not isinstance(bins, list) or len(bins) != upper - lower + 1:
+        raise ValueError('missing_candidate_bins')
+    for ident, b in zip(range(lower, upper + 1), bins):
+        if (not isinstance(b, dict) or type(b.get('id')) is not int or b['id'] != ident
+                or not finite_number(b.get('price')) or b['price'] <= 0):
+            raise ValueError('invalid_candidate_bin')
+        for field in ('x', 'y', 'supply', 'fee_x', 'fee_y'):
+            value = b.get(field)
+            bits = 64 if field in ('x', 'y') else 128
+            if (not isinstance(value, str) or not re.fullmatch(r'[0-9]{1,39}', value)
+                    or int(value) >= 2**bits):
+                raise ValueError('invalid_candidate_counter')
+
+
+def collect_candidate_bins(profile, candidates, deadline):
+    """Use existing timer slack; leave liquidation time and never acquire a lock."""
+    result = dict(candidate_bin_snapshots_attempted=0, candidate_bin_snapshots_observed=0,
+                  candidate_bin_trading_deferred=False, candidate_bin_budget_exhausted=False)
+    phase_end = min(deadline - LIQUIDATION_BUDGET_SECONDS,
+                    time.monotonic() + CANDIDATE_BUDGET_SECONDS)
+    if not candidates:
+        return result
+    if time.monotonic() >= phase_end:
+        result['candidate_bin_budget_exhausted'] = True
+        return result
+    file = profile/'memories/dlmm_candidate_bin_samples.jsonl'
+    latest = {}
+    for row in iter_rows(file):
+        if time.monotonic() >= phase_end:
+            result['candidate_bin_budget_exhausted'] = True
+            return result
+        stamp = row.get('collected_at')
+        if row.get('pool') in candidates and finite_number(stamp):
+            latest[row['pool']] = max(latest.get(row['pool'], 0), stamp)
+    executor = profile/'skills/solana-dlmm/scripts/dlmm_executor.js'
+    for pool in sorted(candidates, key=lambda p: (latest.get(p, 0), -candidates[p]['source_ts'], p)):
+        if time.monotonic() >= phase_end:
+            result['candidate_bin_budget_exhausted'] = True
+            break
+        if result['candidate_bin_snapshots_attempted'] >= 3:
+            break
+        candidate = candidates[pool]
+        if time.time() - latest.get(pool, 0) < 240 or time.time() - candidate['source_ts'] > CANDIDATE_MAX_AGE_SECONDS:
+            continue
+        result['candidate_bin_snapshots_attempted'] += 1
+        started = time.time()
+        record = dict(candidate, request_started_at=started)
+        try:
+            output = subprocess.check_output(['node', str(executor), 'candidate-bin-snapshot', pool, '69', '16'],
+                stderr=subprocess.DEVNULL, timeout=request_timeout(phase_end, 3))
+            sample = json.loads(output)
+            if sample.get('status') == 'deferred' and sample.get('reason') == 'wallet_trade_active':
+                result['candidate_bin_trading_deferred'] = True
+                break
+            validate_candidate_snapshot(sample, pool, candidate['base_mint'])
+            if not started - 1 <= sample['ts'] <= time.time():
+                raise ValueError('invalid_candidate_timestamp')
+            fields = ('ts', 'active_bin', 'anchor_bin', 'lower_bin', 'upper_bin', 'price',
+                      'decimals_x', 'decimals_y', 'sol_is_x', 'token_x_mint', 'token_y_mint', 'bins')
+            record.update({k: sample[k] for k in fields})
+            record.update(status='observed', basis='native_candidate_pool_bin_state_not_position_return')
+            result['candidate_bin_snapshots_observed'] += 1
+        except Exception as error:
+            record.update(status='unmeasured', reason=type(error).__name__)
+        record['collected_at'] = time.time()
+        append(file, record)
+    return result
+
+
+def pre_entry_bin_coverage(entries, file, end_ts):
+    """Select complete native history observed 4–30m before the entry snapshot.
+
+    Earliest eligible snapshot is fixed by time, never by subsequent returns.
+    This is coverage evidence, not a yield forecast or a trading gate.
+    """
+    results, targets, selected = {}, {}, {}
+    for entry in entries:
+        position = entry['position']
+        results[position] = dict(position=position, mode=entry.get('mode'), status='unmeasured',
+                                 reason='missing_pre_entry_bins')
+        initial = entry.get('bin_snapshot') or {}
+        if (not finite_number(initial.get('ts')) or not finite_number(entry.get('deployed_at'))
+                or not 0 < initial['ts'] <= entry['deployed_at'] <= end_ts
+                or not initial.get('bins') or initial.get('sol_is_x') is not False
+                or not isinstance(entry.get('pool'), str) or not isinstance(entry.get('base_mint'), str)):
+            results[position]['reason'] = 'missing_or_unsupported_entry_snapshot'
+            continue
+        targets.setdefault(entry['pool'], []).append(entry)
+    for sample in iter_rows(file):
+        for entry in targets.get(sample.get('pool'), ()):
+            position, initial = entry['position'], entry['bin_snapshot']
+            stamp, collected = sample.get('ts'), sample.get('collected_at')
+            if (not finite_number(stamp) or not finite_number(collected)
+                    or not stamp <= collected <= initial['ts']
+                    or not 240 <= initial['ts'] - stamp <= 1800):
+                continue
+            try:
+                validate_candidate_snapshot(sample, entry['pool'], entry['base_mint'])
+            except ValueError:
+                continue
+            old = {b['id']: b for b in sample['bins']}
+            ids = [b['id'] for b in initial['bins']]
+            if (len(set(ids)) != len(ids) or not set(ids) <= old.keys()
+                    or any(sample[k] != initial.get(k) for k in ('decimals_x', 'decimals_y'))):
+                continue
+            if any(int(b['fee_x']) < int(old[b['id']]['fee_x'])
+                   or int(b['fee_y']) < int(old[b['id']]['fee_y']) for b in initial['bins']):
+                continue
+            key = (stamp, collected)
+            if position in selected and selected[position] <= key:
+                continue
+            selected[position] = key
+            results[position] = dict(position=position, mode=entry.get('mode'), status='observed',
+                span_seconds=initial['ts'] - stamp, covered_entry_bins=len(ids),
+                entry_snapshot_ts=initial['ts'], prior_snapshot=sample,
+                prior_sha256=hashlib.sha256(json.dumps(sample, sort_keys=True, separators=(',', ':'), allow_nan=False).encode()).hexdigest(),
+                basis='observed_pre_entry_pool_bin_counters_not_fee_forecast_or_profit')
+    return list(results.values())
 
 
 def request_timeout(deadline, maximum):
@@ -534,7 +696,10 @@ def collect_liquidation(profile, deadline=None):
 def collect(profile, reject_file):
     deadline = time.monotonic() + COLLECTION_BUDGET_SECONDS
     memory=profile/'memories'; executor=profile/'skills/solana-dlmm/scripts/dlmm_executor.js'
-    seen={row['id'] for row in iter_rows(reject_file)}
+    seen=set(); candidates={}; source_now=time.time()
+    for row in iter_rows(reject_file):
+        seen.add(row['id'])
+        index_candidate(candidates,row,source_now)
     # Read completions after indexing the reject journal, as before. A second
     # streaming pass processes only the unfinished first-seen IDs.
     done={r['id'] for r in iter_rows(memory/'dlmm_reject_outcomes.jsonl')}
@@ -590,9 +755,11 @@ def collect(profile, reject_file):
             sample=json.loads(output);sample['position']=position
             append(memory/'dlmm_bin_samples.jsonl',sample)
         except Exception: pass
+    candidate_results=collect_candidate_bins(profile,candidates,deadline)
     return {'rejects_total':len(seen),'outcomes_attempted':processed,'bin_snapshots_attempted':count,
             'reject_budget_exhausted':reject_budget_exhausted,
             'bin_budget_exhausted':bin_budget_exhausted,
+            **candidate_results,
             'liquidation_observations_attempted':collect_liquidation(profile,deadline)}
 
 
