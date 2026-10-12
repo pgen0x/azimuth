@@ -434,7 +434,7 @@ async function collectRentHistory({dir, wallet, PublicKey, rpc, cache}) {
   result.observed_at=now();
   append(file,result);
 }
-async function collect({dir, wallet, PublicKey, rpc, historyOnly=false}) {
+async function collect({dir, wallet, PublicKey, rpc, historyOnly=false, includeRentHistory=true}) {
   fs.mkdirSync(dir, {recursive:true, mode:0o700});
   const publicKey = new PublicKey(wallet);
   const events = new Map(read(path.join(dir,'dlmm_transactions.jsonl')).map(r => [r.signature,r]));
@@ -459,7 +459,7 @@ async function collect({dir, wallet, PublicKey, rpc, historyOnly=false}) {
   let fetched = 0;
   // Optional lifecycle evidence must not invalidate already proved balances
   // or starve missing transactions. Both queues share the existing 60-fetch cap.
-  const needsInline=f=>f?.schema_version===11 && f.classification==='recorded_bot'
+  const needsInline=f=>includeRentHistory && f?.schema_version===11 && f.classification==='recorded_bot'
     && f.token_rent_evidence?.refunds_unmeasured===true;
   const pending=[...signatures.filter(r=>!currentFact(r)),
     ...signatures.filter(r=>currentFact(r)&&needsInline(cache.get(r.signature)))];
@@ -499,7 +499,7 @@ async function collect({dir, wallet, PublicKey, rpc, historyOnly=false}) {
     }
   }
   append(path.join(dir,'dlmm_wallet_coverage.jsonl'),coverage);
-  if (coverage.wallet_history_complete && !coverage.unclassified_transactions.length) {
+  if (includeRentHistory && coverage.wallet_history_complete && !coverage.unclassified_transactions.length) {
     await collectRentHistory({dir,wallet,PublicKey,rpc,cache});
   }
   if (historyOnly) return coverage;

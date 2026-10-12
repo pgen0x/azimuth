@@ -218,6 +218,16 @@ global.fetch=async url=>{if(url.includes('/quote?'))throw new Error('no route');
  const r=await collect(args);assert.equal(r.nav_sol,2.00203928);assert.equal(r.wallet_history_complete,true);
  unknown=true;const missing=await collect(args);assert.equal(missing.nav_sol,null);assert.equal(missing.issues[0],'unpriced_token:unknown');
  assert.equal(fs.readFileSync(path.join(dir,'dlmm_wallet_transactions.jsonl'),'utf8').trim().split('\n').length,1);
+ // Optional inline rent evidence cannot consume the expiry refresh budget.
+ const cachedFact=JSON.parse(fs.readFileSync(path.join(dir,'dlmm_wallet_transactions.jsonl'),'utf8').trim());
+ cachedFact.schema_version=11;cachedFact.classification='recorded_bot';
+ cachedFact.token_rent_evidence={version:1,funded:[],refunded:[],refunds_unmeasured:true};
+ fs.writeFileSync(path.join(dir,'dlmm_wallet_transactions.jsonl'),JSON.stringify(cachedFact)+'\n');
+ const priorParsedReader=connection.getParsedTransaction;let optionalReads=0;
+ connection.getParsedTransaction=async()=>{optionalReads++;return tx;};
+ await collect({...args,historyOnly:true,includeRentHistory:false});assert.equal(optionalReads,0);
+ await collect({...args,historyOnly:true});assert.equal(optionalReads,1);
+ connection.getParsedTransaction=priorParsedReader;
  // Expiry is not enough: confirmed or potentially live submissions remain unresolved.
  const event={signature:'absent',wallet,position:'p',ts:tx.blockTime-300,lastValidBlockHeight:150};
  fs.writeFileSync(path.join(dir,'dlmm_transactions.jsonl'),JSON.stringify(event)+'\n');
@@ -228,7 +238,18 @@ global.fetch=async url=>{if(url.includes('/quote?'))throw new Error('no route');
  assert.equal(fs.readFileSync(path.join(dir,'dlmm_wallet_transactions.jsonl'),'utf8').includes('expired_unlanded'),false);
  height=151;signatureStatus={confirmationStatus:'confirmed'};await collect({...args,historyOnly:true});
  assert.equal(fs.readFileSync(path.join(dir,'dlmm_wallet_transactions.jsonl'),'utf8').includes('expired_unlanded'),false);
- signatureStatus=null;await collect({...args,historyOnly:true});
+ signatureStatus={confirmationStatus:'processed',err:null};
+ await collect({...args,historyOnly:true,includeRentHistory:false});
+ assert.equal(fs.readFileSync(path.join(dir,'dlmm_wallet_transactions.jsonl'),'utf8').includes('expired_unlanded'),false);
+ signatureStatus=null;
+ const signaturesReader=connection.getSignaturesForAddress;
+ connection.getSignaturesForAddress=async(key,options)=>options.limit===1
+   ? [{signature:'new-head',slot:102,blockTime:tx.blockTime}] : signaturesReader(key,options);
+ const moving=await collect({...args,historyOnly:true,includeRentHistory:false});
+ assert.equal(moving.wallet_history_complete,false);
+ assert.equal(fs.readFileSync(path.join(dir,'dlmm_wallet_transactions.jsonl'),'utf8').includes('expired_unlanded'),false);
+ connection.getSignaturesForAddress=signaturesReader;
+ await collect({...args,historyOnly:true,includeRentHistory:false});
  const expired=JSON.parse(fs.readFileSync(path.join(dir,'dlmm_wallet_transactions.jsonl'),'utf8').trim().split('\n').at(-1));
  assert.equal(expired.classification,'expired_unlanded');assert.equal(expired.landed,false);
  // The observed 65–74 quote-dependent balances need two bounded rotations.
@@ -449,6 +470,23 @@ console.log('Allocated account funding classification passed');
     assert.equal(latest().complete,true);assert.equal(latest().lamports,1513840);
     assert.deepEqual(latest().history_signatures,['swap','fund']);
     assert.equal(cache.get('refund').wallet_delta_lamports,undefined);
+    // Settlement expiry refreshes wallet proof only; ordinary collection still
+    // performs optional rent history. Neither history-only run values NAV.
+    fs.unlinkSync(path.join(rentDir,'dlmm_rent_history.jsonl'));
+    fs.writeFileSync(path.join(rentDir,'dlmm_wallet_transactions.jsonl'),[...cache.values()].map(JSON.stringify).join('\n')+'\n');
+    const historyArgs={dir:rentDir,wallet,PublicKey:args.PublicKey,historyOnly:true,
+      rpc:async fn=>fn({getBlockHeight:async()=>151,getSlot:async()=>31,
+        getSignaturesForAddress:async(key,options,commitment)=>{
+          if(key.value===wallet)return [];
+          calls++;assert.equal(key.value,'ata');assert.deepEqual(options,{before:'refund',limit:100});
+          assert.equal(commitment,'finalized');return history;
+        }})};
+    const beforeHistory=calls;
+    await collect({...historyArgs,includeRentHistory:false});
+    assert.equal(calls,beforeHistory);assert.equal(fs.existsSync(path.join(rentDir,'dlmm_rent_history.jsonl')),false);
+    assert.equal(fs.existsSync(path.join(rentDir,'dlmm_nav.jsonl')),false);
+    await collect(historyArgs);
+    assert.equal(calls,beforeHistory+1);assert.equal(latest().complete,true);
     console.log('Bounded rent account history, retry, cache completeness and no cash mutation passed');
   } finally {fs.rmSync(rentDir,{recursive:true,force:true});}
 })().catch(e=>{console.error(e);process.exitCode=1});
