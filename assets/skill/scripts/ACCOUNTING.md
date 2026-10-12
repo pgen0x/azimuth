@@ -658,6 +658,16 @@ retain the stricter 1,500-slot check. A 429 stops the remaining quotes for that 
 No quote retry, Helius Wallet API call, stale mark or zero price is introduced.
 Other clients sharing the same public rate bucket can still cause deferrals.
 
+Before each NAV quote and again after its pacing wait, the collector checks the
+executor's existing wallet entry/swap lock in Linux `/proc/net/unix`. An active
+worker defers the remaining background quotes with `quote_trading_deferred`.
+Finalized wallet history, balances, cached/spot marks and portfolio reads still
+run; missing marks stay unpriced. The collector never acquires a trading lock.
+Released workers leave no stale priority marker, and other wallets do not block
+this collection. Without procfs the existing pacing behavior applies. This
+reduces local quote competition; it cannot cancel an in-flight request, reserve
+provider quota, or prove that an exit will avoid 429 responses or be profitable.
+
 The observed wallet has 105 nonzero token balances, with 65–74 requiring
 quotes instead of fresh spot marks. Two capped rotations can now cover up to
 80 balances before the 600-second cache limit at the current roughly 500-second
