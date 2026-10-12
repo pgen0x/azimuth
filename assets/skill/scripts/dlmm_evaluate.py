@@ -16,6 +16,7 @@ import time
 from dlmm_accounting import report, root_decision, rows, iter_rows, unvalued_token_inflows, refund_cash_bounds
 from dlmm_shadow import bin_replay, native_allocation_replay, bin_width_replay, bin_width_holding_replay, width_study_summary, pre_entry_bin_coverage, HORIZONS
 from dlmm_realized import fetch_pools, fetch_closed_positions
+from dlmm_profit_acceptance import position_profit_acceptance
 
 
 
@@ -387,6 +388,7 @@ def evaluate(profile, start, end, rejects):
                 liquidation_observations=[r for r in rows(memory/'dlmm_liquidation_quotes.jsonl')
                                           if start <= r.get('observed_at', end+1) <= end],
                 root_cash_cohort=root_cash_cohort(accounting,start,end),
+                position_profit_acceptance=position_profit_acceptance(accounting,entries,start,end),
                 matched_refund_cash_cohort=matched_refund_cash_cohort(accounting,start,end),
                 rent_refund_groups=[g for g in accounting.get('rent_refund_groups', [])
                                     if start <= g['first_activity'] <= g['last_activity'] <= end],
@@ -494,6 +496,9 @@ def main():
         '## Root cash after proved rent refunds (measured subset)',
         json.dumps(data['matched_refund_cash_cohort']),
         'Each refund goes to its proved funder. Carry-in roots are excluded from the selected cohort even when they share a refund batch. Cohort bounds charge shared fees once; do not add individual root bounds or overlapping report subtotals. Positive rate uses only roots whose cash sign is proved and is not a position win rate or complete wallet profit. Missing refund evidence stays unmeasured.',
+        '## Every-position profit acceptance (entry window)',
+        json.dumps(data['position_profit_acceptance']),
+        'Every recorded entry stays in this denominator, including open or unresolved positions. A position passes only when its proved cash lower bound is strictly positive after costs and owned rent. Zero or negative cash fails; shared-fee uncertainty, missing evidence and multi-position root totals cannot establish per-position profit. Observed all-positive results do not guarantee future profit. These bounds are not additive or portfolio NAV.',
         '## Pooled settlement cash (full-life groups; no per-root allocation)',
         json.dumps([g for g in data['accounting'].get('pooled_settlements',[]) if a.start <= g['first_activity'] and g['last_activity'] <= a.end]),
         '## Cash including matched rent refunds (full-life groups)',
