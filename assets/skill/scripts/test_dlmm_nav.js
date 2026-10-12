@@ -216,6 +216,11 @@ global.fetch=async url=>{if(url.includes('/quote?'))throw new Error('no route');
 
  const args={dir,wallet,PublicKey:function(s){return key(s)},rpc:fn=>fn(connection)};
  const r=await collect(args);assert.equal(r.nav_sol,2.00203928);assert.equal(r.wallet_history_complete,true);
+ // Keep the fixture transaction inside later history scans across a real
+ // second boundary; the mocked RPC keeps returning this same transaction.
+ const initialSnapshot=JSON.parse(fs.readFileSync(path.join(dir,'dlmm_nav.jsonl'),'utf8').trim());
+ initialSnapshot.started_at=tx.blockTime;
+ fs.writeFileSync(path.join(dir,'dlmm_nav.jsonl'),JSON.stringify(initialSnapshot)+'\n');
  unknown=true;const missing=await collect(args);assert.equal(missing.nav_sol,null);assert.equal(missing.issues[0],'unpriced_token:unknown');
  assert.equal(fs.readFileSync(path.join(dir,'dlmm_wallet_transactions.jsonl'),'utf8').trim().split('\n').length,1);
  // Optional inline rent evidence cannot consume the expiry refresh budget.
