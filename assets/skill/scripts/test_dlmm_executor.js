@@ -54,6 +54,10 @@ class Connection {
   async sendRawTransaction(raw, options) {
     const event=JSON.parse(fs.readFileSync(path.join(root,"memories/dlmm_transactions.jsonl"),"utf8").trim().split("\n").at(-1));
     if (event.kind === "swap") {
+      const pending=JSON.parse(fs.readFileSync(path.join(root,'memories/dlmm_pending_swaps',
+        `${event.wallet}-${event.swap_quote.input_mint}-${event.swap_quote.output_mint}.json`)));
+      assert.equal(pending.signature,event.signature);assert.equal(pending.blockhash,raw.toString());
+      assert.equal(pending.lastValidBlockHeight,event.lastValidBlockHeight);
       assert.equal(event.swap_quote.in_amount,"100000000");
       assert.equal(typeof event.swap_quote.out_amount,"string");
       assert.equal(typeof event.swap_quote.observed_at,"number");
@@ -130,6 +134,21 @@ const { swapAmountRaw, closePosition, swapToken, confirmSignedTransaction, deplo
 const marker = path.join(root, "memories/dlmm_pending_deploys", `${wallet.publicKey}.json`);
 const deploy = () => deployPosition("pool", 0, 0.1, 20, 0, "bid_ask", 1000);
 const clearMarker = () => fs.rmSync(marker, { force: true });
+// The transport's concurrency/deadline is exercised separately. Here keep one
+// fake send and verify routing/persistence at the executor boundary.
+let settlementFanoutCalls=0, settlementFanoutMode='single';
+sandbox.settlementFanoutProbe=async(strategy,raw,kind,options)=>{
+  settlementFanoutCalls++;assert.equal(kind,'settlement_swap');
+  assert.equal(options.skipPreflight,true);assert.equal(options.maxRetries,20);
+  const pending=path.join(root,'memories/dlmm_pending_swaps',`${wallet.publicKey}-TOKEN-So11111111111111111111111111111111111111112.json`);
+  const marker=JSON.parse(fs.readFileSync(pending));
+  assert.equal(marker.signature,strategy.signature);assert.equal(marker.blockhash,strategy.blockhash);
+  assert.equal(marker.lastValidBlockHeight,strategy.lastValidBlockHeight);assert.equal(raw.toString(),strategy.blockhash);
+  if(settlementFanoutMode==='pending')throw new Error('bounded transport deadline');
+  if(settlementFanoutMode==='failed'){const error=new Error('confirmed chain failure');error.transactionFailed=true;throw error;}
+  return sandbox.module.exports.confirmSignedTransaction(new Connection(),strategy,raw,options);
+};
+vm.runInNewContext("const productionExitTransport=confirmExitTransaction;confirmExitTransaction=(...args)=>args[2]==='settlement_swap'?settlementFanoutProbe(...args):productionExitTransport(...args);",sandbox);
 
 (async () => {
   // Wider observation shares one snapshot with the baseline; it never changes
@@ -348,6 +367,7 @@ const clearMarker = () => fs.rmSync(marker, { force: true });
   // combined full-balance swap + close, never by adding an estimated refund.
   const settlementPosition = "11111111111111111111111111111111";
   const settlementMarker = path.join(root, "memories/dlmm_settlements", settlementPosition + ".json");
+  assert.equal(settlementFanoutCalls,0); // Other swaps retain their existing single-RPC transport.
   fs.mkdirSync(path.dirname(settlementMarker), {recursive: true});
   fs.writeFileSync(settlementMarker, JSON.stringify({position:settlementPosition,mint:"TOKEN"}));
   env.DLMM_SETTLEMENT_POSITION = settlementPosition;
@@ -441,6 +461,26 @@ const clearMarker = () => fs.rmSync(marker, { force: true });
   assert.equal((await recover(1)).success, true); assert.equal(sends,beforeAtomic+1);
   const recordedAtomic=fs.readFileSync(path.join(root,'memories/dlmm_transactions.jsonl'),'utf8').trim().split('\n').map(JSON.parse).at(-1);
   assert.equal(recordedAtomic.swap_quote.token_rent_close_included,true);
+  assert.ok(settlementFanoutCalls>0);
+  // Unknown fanout outcomes keep the signed marker and return directly. A
+  // subsequent call reconciles it before requesting another quote or signature.
+  const pendingSwap=path.join(root,'memories/dlmm_pending_swaps',`${wallet.publicKey}-TOKEN-So11111111111111111111111111111111111111112.json`);
+  const statusBeforeOwned=Connection.prototype.getSignatureStatuses,fetchBeforeOwned=sandbox.fetch;
+  let ownedStatusReads=0,ownedQuoteReads=0;
+  Connection.prototype.getSignatureStatuses=async function(...args){ownedStatusReads++;return statusBeforeOwned.apply(this,args);};
+  sandbox.fetch=async(...args)=>{if(args[0].includes('/quote?'))ownedQuoteReads++;return fetchBeforeOwned(...args);};
+  const sendsBeforeOwnedPending=sends,callsBeforeOwnedPending=settlementFanoutCalls;
+  settlementFanoutMode='pending';
+  const ownedPending=await recover(1);
+  assert.equal(ownedPending.pending,true);assert.equal(ownedStatusReads,0);assert.equal(ownedQuoteReads,1);
+  assert.equal(fs.existsSync(pendingSwap),true);assert.equal(sends,sendsBeforeOwnedPending);
+  settlementFanoutMode='single';
+  assert.equal((await recover(1)).pending,true);
+  assert.equal(ownedQuoteReads,1);assert.equal(settlementFanoutCalls,callsBeforeOwnedPending+1);
+  assert.equal(sends,sendsBeforeOwnedPending);fs.rmSync(pendingSwap);
+  settlementFanoutMode='failed';
+  assert.equal((await recover(1)).success,false);assert.equal(fs.existsSync(pendingSwap),false);
+  settlementFanoutMode='single';Connection.prototype.getSignatureStatuses=statusBeforeOwned;sandbox.fetch=fetchBeforeOwned;
   // Ordinary full-owned settlements may close an ATA too, within a separate
   // abortable budget. Cash from rent cannot hide a worse simulated sale.
   const savedOrdinaryFetch=sandbox.fetch, savedOrdinarySim=Connection.prototype.simulateTransaction;
@@ -701,7 +741,6 @@ const clearMarker = () => fs.rmSync(marker, { force: true });
   assert.throws(() => slippageBpsToPercent(0), /positive integer/);
   assert.doesNotMatch(source, /const latestBlockHash = await connection\.getLatestBlockhash/);
   assert.match(source, /blockhash, lastValidBlockHeight, signature: txid/);
-  assert.ok(source.indexOf("fs.renameSync(markerTmp, pendingPath)") < source.indexOf("await confirmSignedTransaction(connection, { blockhash, lastValidBlockHeight, signature: txid }, rawTransaction"));
   const swapMarker = path.join(root, "pending-swap.json");
   fs.writeFileSync(swapMarker, JSON.stringify({ signature: "swap-sig", lastValidBlockHeight: 150,
     inputAmount: "10", outputAmount: "20" }));
