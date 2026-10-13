@@ -254,7 +254,7 @@ const clearMarker = () => fs.rmSync(marker, { force: true });
   const closeRestart = JSON.parse(execFileSync(process.execPath, [__filename, "close-resume", root], {encoding:"utf8"}));
   assert.equal(closeRestart.result.success, true);
   assert.equal(closeRestart.builds, 0); // resumed the persisted bytes in a new process
-  assert.equal(closeRestart.sends, 1);
+  assert.equal(closeRestart.sends, 2); // Same persisted bytes fan out to both configured RPCs.
   const emptyClose = JSON.parse(execFileSync(process.execPath, [__filename, "close-empty", root], {encoding:"utf8"}));
   assert.equal(emptyClose.result.success, true);
   assert.equal(emptyClose.claimBuilds, 1); // preserve fees when combined close cannot be built
@@ -801,7 +801,7 @@ const clearMarker = () => fs.rmSync(marker, { force: true });
   clearMarker();
   const closeSends = sends;
   assert.equal((await closePosition("landed-close")).success, true);
-  assert.equal(sends-closeSends, 1);
+  assert.equal(sends-closeSends, 2);
   const signed = { signature: "signature", blockhash: "exact-blockhash", lastValidBlockHeight: 150 };
   for (const status of [null, {confirmationStatus:"processed",err:null},
       {confirmationStatus:"confirmed"}, {confirmationStatus:"confirmed",err:false},

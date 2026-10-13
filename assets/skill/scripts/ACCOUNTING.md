@@ -221,7 +221,22 @@ proof of execution. Confirmation is bounded to eight seconds; its fallback uses
 Only confirmed/finalized status with an explicit null error proves success. Missing,
 processed or unavailable status keeps the submission uncertain; on-chain failures
 remain failures. Durable pending markers and retries of the same signed bytes remain
-in place. Normal successful sends add no status lookup.
+in place.
+
+Funded-position closes broadcast their persisted signed bytes concurrently to
+the distinct configured RPC endpoints. Each signed transaction has one eight-second
+group deadline covering broadcast and confirmation; the first confirmed/finalized verdict ends
+the group and cancels the other HTTP requests and polling timers. A confirmed
+chain error remains a failure. RPC acknowledgement, processed status and a group
+timeout cannot authorize another transaction or a new blockhash. Restart retries
+reuse the same pending close bytes. Empty-only cleanup retains its existing path.
+
+This changes transport only: the transaction, preflight options, fees and close
+instructions are unchanged. Optional `dlmm_close_transports.jsonl` records the
+signature, bytes hash, configured endpoint count, client elapsed time and outcome.
+It stores no RPC URLs or raw transaction. Journal failure cannot block a close.
+These timings are client observations, not finalized block times, saved SOL or
+proof that an earlier close would have prevented a historical loss.
 
 The settlement balance reader also refreshes finalized wallet history when a
 still-unresolved swap belongs to that exact position and wallet, is over 120 seconds
