@@ -7,7 +7,7 @@ const source = fs.readFileSync(path.join(__dirname, 'dlmm_executor.js'), 'utf8')
 const raw = Buffer.from('one-persisted-signed-close');
 const strategy = {signature:'same-signature',blockhash:'same-blockhash',lastValidBlockHeight:150};
 
-function fixture(plans, urls = ['rpc-1','rpc-2']) {
+function fixture(plans, urls = ['rpc-1','rpc-2'], kind = 'close') {
   let now=0, sequence=0;
   const timers=new Map(), sends=[], reads=[], signals=[], logs=[], journal=[];
   let journalError=false;
@@ -26,8 +26,8 @@ function fixture(plans, urls = ['rpc-1','rpc-2']) {
     constructor(url,options){this.url=url;this.options=options;}
     async sendRawTransaction(bytes,options){
       sends.push({url:this.url,at:now,bytes:bytes.toString('hex'),options:{...options}});
-      assert.equal(bytes,raw);assert.equal(options.preflightCommitment,'confirmed');
-      assert.equal(options.maxRetries,20);assert.equal(options.skipPreflight,undefined);
+      assert.equal(bytes,raw);assert.equal(options.preflightCommitment,kind==='close'?'confirmed':undefined);
+      assert.equal(options.maxRetries,20);assert.equal(options.skipPreflight,kind==='close'?undefined:true);
       const plan=plans[this.url];
       if(plan.sendError)throw new Error('transport rejected');
       if(plan.stallSend)return this.options.fetch(this.url,{method:'POST'});
@@ -64,8 +64,12 @@ function fixture(plans, urls = ['rpc-1','rpc-2']) {
       const abort=()=>reject(new Error('fetch aborted'));
       if(options.signal.aborted)abort();else options.signal.addEventListener('abort',abort,{once:true});
     })};
-  vm.runInNewContext(source+'\nmodule.exports.confirmCloseTransaction=confirmCloseTransaction;',context);
-  return {confirm:()=>context.module.exports.confirmCloseTransaction(strategy,raw),single:()=>context.module.exports.confirmSignedTransaction(new Connection('rpc-1',{}),strategy,raw),tick,flush,sends,reads,signals,timers,logs,journal,failJournal(){journalError=true;},now:()=>now};
+  vm.runInNewContext(source+'\nmodule.exports.confirmCloseTransaction=confirmCloseTransaction;module.exports.confirmExitTransaction=confirmExitTransaction;',context);
+  const options=kind==='close'?undefined:{skipPreflight:true,maxRetries:20};
+  return {confirm:()=>kind==='close'?context.module.exports.confirmCloseTransaction(strategy,raw)
+      :context.module.exports.confirmExitTransaction(strategy,raw,kind,options),
+    single:()=>context.module.exports.confirmSignedTransaction(new Connection('rpc-1',{}),strategy,raw,options),
+    tick,flush,sends,reads,signals,timers,logs,journal,failJournal(){journalError=true;},now:()=>now};
 }
 const confirmed={confirmationStatus:'confirmed',err:null};
 const finalized={confirmationStatus:'finalized',err:null};
@@ -127,5 +131,28 @@ const finalized={confirmationStatus:'finalized',err:null};
   const old=baseline.single();await baseline.tick(5000);await old;
   const parallel=fixture({'rpc-1':{stallSend:true},'rpc-2':{statuses:[confirmed]}});
   await parallel.confirm();assert.equal(baseline.now(),5000);assert.equal(parallel.now(),0);
+  // Owned settlement swaps share the bounded transport while preserving their
+  // skip-preflight send options. Every endpoint receives one identical signature.
+  for(const plan of [{stallSend:true},{sendError:true,readError:true}]){
+    f=fixture({'rpc-1':plan,'rpc-2':{statuses:[confirmed]}},undefined,'settlement_swap');
+    await f.confirm();await f.flush();
+    assert.deepEqual(f.sends.map(s=>[s.url,s.at]),[['rpc-1',0],['rpc-2',0]]);
+    assert.equal(new Set(f.sends.map(s=>s.bytes)).size,1);assert.equal(f.timers.size,0);
+    assert.equal(f.journal[1].transaction_kind,'settlement_swap');assert.equal(f.journal[1].outcome,'confirmed');
+    assert.ok(f.logs.some(l=>l.includes('settlement-swap-fanout-confirmed')));
+  }
+  f=fixture({'rpc-1':{statuses:[{confirmationStatus:'confirmed',err:{InstructionError:[3,{Custom:6001}]}}]},'rpc-2':{stallSend:true}},undefined,'settlement_swap');
+  await assert.rejects(f.confirm(),e=>e.transactionFailed===true);
+  await f.flush();assert.equal(f.journal[1].outcome,'chain_failure');assert.equal(f.timers.size,0);
+  for(const status of [null,{confirmationStatus:'processed',err:null}]){
+    f=fixture({'rpc-1':{statuses:[status]},'rpc-2':{stallSend:true}},undefined,'settlement_swap');
+    const result=f.confirm().catch(error=>error);
+    await f.tick(7999);assert.ok(f.timers.size>0);await f.tick(1);
+    assert.match((await result).message,/Settlement swap.*timeout.*pending/);
+    assert.equal(f.journal[1].outcome,'pending');assert.equal(f.timers.size,0);
+    assert.ok(f.signals.every(signal=>signal.aborted));assert.equal(f.sends.length,2);
+  }
+  f=fixture({'rpc-1':{sendError:true,readError:true},'rpc-2':{sendError:true,readError:true}},undefined,'settlement_swap');
+  await assert.rejects(f.confirm(),/Settlement swap.*unavailable.*pending/);assert.equal(f.timers.size,0);
   console.log('close RPC fanout: identical bytes, confirmed verdicts, cancellation, pending deadline and controlled transport delay passed');
 })().catch(error=>{console.error(error);process.exitCode=1;});

@@ -238,6 +238,19 @@ It stores no RPC URLs or raw transaction. Journal failure cannot block a close.
 These timings are client observations, not finalized block times, saved SOL or
 proof that an earlier close would have prevented a historical loss.
 
+After finalized accounting proves a closed position's owned token inventory,
+its settlement swap uses the same concurrent RPC transport and one shared
+eight-second broadcast/confirmation deadline. The signature is persisted before
+broadcast; every endpoint receives the same signed bytes and the existing
+skip-preflight options. Amount, route, slippage ceiling, simulation and net
+recovery checks stay the same. An unknown group outcome returns pending without
+another unbounded status read, retaining the marker for normal reconciliation
+before any later quote or signing. A confirmed chain failure remains a failure.
+Other swaps retain their existing transport. Optional
+`dlmm_swap_transports.jsonl` records the same public timing/hash fields as the
+close journal. This does not shorten the finalized inventory proof or establish
+that a historical swap would have filled earlier or profitably.
+
 The settlement balance reader also refreshes finalized wallet history when a
 still-unresolved swap belongs to that exact position and wallet, is over 120 seconds
 old, and its last valid block height has passed at finalized commitment. This uses
