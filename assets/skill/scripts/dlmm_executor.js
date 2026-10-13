@@ -39,7 +39,17 @@ const RPC_URLS = (process.env.SOLANA_RPC_URLS || "https://api.mainnet-beta.solan
   .filter(Boolean);
 const RPC_SEND_MAX_RETRIES = Math.max(2, Number.parseInt(process.env.SOLANA_RPC_MAX_RETRIES || "20", 10) || 20);
 const CONFIRM_OPTIONS = { commitment: "confirmed", preflightCommitment: "confirmed", maxRetries: RPC_SEND_MAX_RETRIES };
-const NATIVE_ENTRY_RESERVE_LAMPORTS = 200000000;
+// Loaded only on entry/maintenance paths; exit reconciliation never needs it.
+function nativeCashPolicy() {
+  const policy = require("./dlmm_cash_policy.json");
+  const values = [policy.native_reserve_lamports, policy.entry_rent_allowance_lamports, policy.minimum_entry_lamports];
+  if (policy.version !== 1 || !values.every(n => Number.isSafeInteger(n) && n >= 0)
+      || !Number.isSafeInteger(values.reduce((sum, n) => sum+n, 0))
+      || policy.native_reserve_lamports <= 0 || policy.minimum_entry_lamports <= 0) {
+    throw new Error("ENTRY REFUSED: invalid native cash policy");
+  }
+  return {...policy, entry_floor_lamports: values.reduce((sum, n) => sum+n, 0)};
+}
 
 let currentRpcIndex = 0;
 
@@ -476,6 +486,7 @@ async function reclaimEmptyAccounts(execute = false, batch = false) {
       eligible: state.accounts.length, accounts: accounts.map(a => ({ account: a.pubkey.toString(),
         mint: a.account.data.parsed.info.mint, program: a.account.owner.toString(), rent_lamports: a.account.lamports })),
       recovered_lamports_before_fee: accounts.reduce((sum, a) => sum + a.account.lamports, 0) };
+    let entryLiquidityShortfall = null;
     if (batch) {
       result.batch_minimum_accounts = 2;
       if (accounts.length === 1) {
@@ -484,11 +495,17 @@ async function reclaimEmptyAccounts(execute = false, batch = false) {
           return { ...result, deferred: true, reason: "native_balance_unmeasured" };
         }
         result.native_balance_lamports = balance;
-        // Hold at most one eligible account while free native cash above the
-        // existing reserve covers its rent. Larger reserves and cash pressure
-        // reclaim immediately; pending sends were already reconciled above.
-        if (balance - NATIVE_ENTRY_RESERVE_LAMPORTS >= result.recovered_lamports_before_fee) {
-          return { ...result, deferred: true, reason: "waiting_for_second_empty_account" };
+        const policy = nativeCashPolicy();
+        // Reserve pressure keeps its existing exception. A separate entry
+        // liquidity gap is useful only if the measured net refund closes it.
+        if (balance - policy.native_reserve_lamports >= result.recovered_lamports_before_fee) {
+          const gap = policy.entry_floor_lamports - balance;
+          if (gap <= 0 || result.recovered_lamports_before_fee < gap) {
+            return { ...result, deferred: true, reason: "waiting_for_second_empty_account" };
+          }
+          entryLiquidityShortfall = gap;
+          result.entry_liquidity_floor_lamports = policy.entry_floor_lamports;
+          result.entry_liquidity_shortfall_lamports = gap;
         }
       }
     }
@@ -503,6 +520,9 @@ async function reclaimEmptyAccounts(execute = false, batch = false) {
     const fee = (await connection.getFeeForMessage(tx.compileMessage(), "confirmed")).value;
     if (!Number.isSafeInteger(fee) || fee < 0 || fee >= result.recovered_lamports_before_fee) {
       throw new Error("Rent reclaim refused: unknown or uneconomic network fee");
+    }
+    if (entryLiquidityShortfall !== null && result.recovered_lamports_before_fee-fee < entryLiquidityShortfall) {
+      return {...result, deferred: true, reason: "singleton_net_below_entry_floor", fee_lamports: fee};
     }
     tx.sign(wallet);
     const raw = tx.serialize(), signature = bs58.encode(tx.signature);
@@ -569,7 +589,7 @@ async function assertNativeReserve(connection, wallet, transaction) {
   const post = simulated.value.accounts?.[0]?.lamports;
   if (simulated.value.err || !Number.isSafeInteger(post) || !Number.isSafeInteger(before.value)
       || before.value !== after.value) throw new Error("ENTRY REFUSED: native reserve simulation unmeasured");
-  if (post < NATIVE_ENTRY_RESERVE_LAMPORTS) throw new Error("ENTRY REFUSED: rent/fees would breach 0.2 SOL native reserve");
+  if (post < nativeCashPolicy().native_reserve_lamports) throw new Error("ENTRY REFUSED: rent/fees would breach 0.2 SOL native reserve");
 }
 
 async function deployPosition(poolAddressStr, amountX, amountY, binsBelow, binsAbove, strategyTypeStr = "spot", slippageBps = 1000) {
