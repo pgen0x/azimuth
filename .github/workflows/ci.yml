@@ -47,6 +47,7 @@ jobs:
       - name: Solana execution and accounting regression checks
         run: |
           node assets/skill/scripts/test_dlmm_executor.js
+          node assets/skill/scripts/test_dlmm_close_broadcast.js
           node assets/skill/scripts/test_dlmm_risk_mark.js
           python3 assets/skill/scripts/test_dlmm_guards.py
           python3 assets/skill/scripts/test_dlmm_monitor_bounds.py
