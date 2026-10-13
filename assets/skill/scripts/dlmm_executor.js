@@ -115,7 +115,8 @@ async function recordedClaim(connection, tx, wallet, position) {
 }
 
 // Reconcile the exact signed signature after either broadcast or confirmation errors.
-async function confirmSignedTransaction(connection, strategy, raw, options = CONFIRM_OPTIONS) {
+async function confirmSignedTransaction(connection, strategy, raw, options = CONFIRM_OPTIONS, signal = null) {
+  if (signal?.aborted) throw new Error("Transaction observation cancelled; signature remains pending");
   console.warn(`[TX] ${JSON.stringify({stage: "confirm", ...strategy})}`);
   if (raw) {
     try { await connection.sendRawTransaction(raw, options); }
@@ -128,6 +129,7 @@ async function confirmSignedTransaction(connection, strategy, raw, options = CON
   const deadline = Date.now() + 8000;
   let previousStatus;
   while (true) {
+    if (signal?.aborted) throw new Error("Transaction observation cancelled; signature remains pending");
     const status = (await connection.getSignatureStatuses(
       [strategy.signature], { searchTransactionHistory: true }
     )).value[0];
@@ -146,7 +148,85 @@ async function confirmSignedTransaction(connection, strategy, raw, options = CON
     }
     const remaining = deadline - Date.now();
     if (remaining <= 0) throw new Error("Transaction confirmation timeout; signed status remains pending");
-    await new Promise(resolve => setTimeout(resolve, Math.min(1000, remaining)));
+    await new Promise((resolve, reject) => {
+      const finish = (error) => {
+        clearTimeout(timer);
+        signal?.removeEventListener("abort", cancelled);
+        if (error) reject(error); else resolve();
+      };
+      const cancelled = () => finish(new Error("Transaction observation cancelled; signature remains pending"));
+      const timer = setTimeout(() => finish(), Math.min(1000, remaining));
+      signal?.addEventListener("abort", cancelled, { once: true });
+      if (signal?.aborted) cancelled();
+    });
+  }
+}
+
+// Broadcast only the already persisted close bytes. An unresponsive provider
+// must not hold up submission to the other configured providers.
+async function confirmCloseTransaction(strategy, raw) {
+  const controller = new AbortController();
+  const started = Date.now();
+  const rawHash = require("crypto").createHash("sha256").update(raw).digest("hex");
+  const urls = [...new Set(RPC_URLS)];
+  const observe = (stage, extra = {}) => {
+    try {
+      const dir = path.join(PROFILE_DIR, "memories");
+      fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+      fs.appendFileSync(path.join(dir, "dlmm_close_transports.jsonl"), JSON.stringify({
+        version: 1, signature: strategy.signature, raw_sha256: rawHash, stage,
+        observed_at: Date.now() / 1000, elapsed_ms: Date.now() - started,
+        rpc_count: urls.length, ...extra, basis: "client_transport_observation_not_finalized_execution",
+      }) + "\n", { mode: 0o600 });
+    } catch (_) { /* Optional timing evidence must not prevent an exit. */ }
+  };
+  let outcome = "pending", confirmedRpcIndex = null;
+  let timer;
+  const deadline = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      controller.abort();
+      reject(new Error("Close confirmation timeout; signed status remains pending"));
+    }, 8000);
+  });
+  console.warn(`[TX] ${JSON.stringify({ stage: "close-fanout", signature: strategy.signature,
+    rpc_count: urls.length, observed_at: started / 1000 })}`);
+  const attempts = urls.map(async (url, index) => {
+    const connection = new Connection(url, { commitment: "confirmed", disableRetryOnRateLimit: true,
+      fetch: (request, options) => fetch(request, { ...options,
+        signal: AbortSignal.any([controller.signal, AbortSignal.timeout(8000)]) }) });
+    try {
+      await confirmSignedTransaction(connection, strategy, raw, CONFIRM_OPTIONS, controller.signal);
+      return { index };
+    } catch (error) {
+      // A confirmed chain failure is a verdict, not a transport failure that
+      // another provider should conceal. Processed/unknown status is pending.
+      if (error.transactionFailed) return { index, error };
+      throw error;
+    }
+  });
+  observe("started");
+  try {
+    let result;
+    try {
+      result = await Promise.race([Promise.any(attempts), deadline]);
+    } catch (error) {
+      if (error instanceof AggregateError) {
+        throw new Error("Close RPC confirmation unavailable; signed status remains pending");
+      }
+      throw error;
+    }
+    if (result.error) {
+      outcome = "chain_failure";
+      throw result.error;
+    }
+    outcome = "confirmed";
+    confirmedRpcIndex = result.index;
+    console.warn(`[TX] ${JSON.stringify({ stage: "close-fanout-confirmed", signature: strategy.signature,
+      rpc_index: result.index, elapsed_ms: Date.now() - started })}`);
+  } finally {
+    clearTimeout(timer);
+    controller.abort();
+    observe("finished", { outcome, confirmed_rpc_index: confirmedRpcIndex });
   }
 }
 
@@ -759,9 +839,12 @@ async function closePositionLocked(positionAddressStr, emptyOnly = false) {
     const status = await runWithFailover(c => reconcilePendingSwap(c, pendingPath, "Close"));
     if (status?.pending) {
       try {
-        await runWithFailover(async c => {
-          await confirmSignedTransaction(c, pending, Buffer.from(pending.raw, "base64"));
-        });
+        const raw = Buffer.from(pending.raw, "base64");
+        if (pending.emptyOnly) {
+          await runWithFailover(c => confirmSignedTransaction(c, pending, raw));
+        } else {
+          await confirmCloseTransaction(pending, raw);
+        }
         fs.rmSync(pendingPath, { force: true });
       } catch (err) {
         return { ...status, error: `Close retry pending: ${err.message}` };
@@ -812,20 +895,22 @@ async function closePositionLocked(positionAddressStr, emptyOnly = false) {
       submittedSignature = signature;
       console.warn(`[TX] ${JSON.stringify({stage: "close-send", signature: submittedSignature,
         position: positionAddressStr, blockhash, lastValidBlockHeight})}`);
-      // Retry the SAME signed bytes across RPCs: one signature cannot execute twice.
-      // A timeout is ambiguous; never build a replacement while it may still land.
-      const txHash = await runWithFailover(async (rpc) => {
-        try {
-          await confirmSignedTransaction(rpc, { signature, blockhash, lastValidBlockHeight }, raw);
-          return signature;
-        } catch (err) {
-          submissionError = err.message;
-          throw err;
+      // The persisted signature is reused across concurrent RPC broadcasts and
+      // restarts. A timeout cannot authorize a replacement transaction.
+      try {
+        const strategy = { signature, blockhash, lastValidBlockHeight };
+        if (emptyOnly) {
+          await runWithFailover(rpc => confirmSignedTransaction(rpc, strategy, raw));
+        } else {
+          await confirmCloseTransaction(strategy, raw);
         }
-      });
+      } catch (err) {
+        submissionError = err.message;
+        throw err;
+      }
       fs.rmSync(pendingPath, { force: true });
       submittedSignature = null;
-      return txHash;
+      return signature;
     };
 
     // The program checks emptiness atomically. Never withdraw liquidity on this path,
