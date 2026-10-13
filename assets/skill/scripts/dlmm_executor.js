@@ -655,7 +655,8 @@ async function deployPosition(poolAddressStr, amountX, amountY, binsBelow, binsA
         // caller's mode and re-center root. No wallet secret is recorded.
         const context = JSON.parse(process.env.DLMM_ENTRY_CONTEXT || "{}");
         // Overlap the bounded optional lookup with existing snapshot/build
-        // reads. It is never retried if unavailable or the build fails.
+        // reads, retaining late replies without extending the entry wait.
+        // It is never retried if unavailable or the build fails.
         let pdaHistory = null;
         if (binsBelow + binsAbove <= 69) try {
           const range = `${minBinId}:${maxBinId}`;
@@ -764,6 +765,7 @@ async function deployPosition(poolAddressStr, amountX, amountY, binsBelow, binsA
       }
     });
   } finally {
+    for (const history of pdaHistories.values()) history?.cancel?.();
     await release();
   }
 }
