@@ -16,6 +16,7 @@ from fractions import Fraction
 from dlmm_accounting import rows
 from dlmm_monitor import verified_risk_mark
 from dlmm_candidate_watch import WATCH_FILENAME
+from dlmm_canonical_liquidity import retain_canonical_snapshot
 
 getcontext().prec = 60
 HORIZONS = {'turnover': 3600, 'pulse': 1800, 'casual': 14400, 'multiday': 86400}
@@ -126,6 +127,10 @@ def collect_candidate_bins(profile, candidates, deadline):
             fields = ('ts', 'active_bin', 'anchor_bin', 'lower_bin', 'upper_bin', 'price',
                       'decimals_x', 'decimals_y', 'sol_is_x', 'token_x_mint', 'token_y_mint', 'bins')
             record.update({k: sample[k] for k in fields})
+            if type(sample.get('bin_step')) is int and 0 < sample['bin_step'] <= 10000:
+                record['bin_step'] = sample['bin_step']
+            record['canonical_liquidity'] = retain_canonical_snapshot(
+                sample.get('canonical_liquidity'), candidate['base_mint'], started, time.time())
             record.update(status='observed', basis='native_candidate_pool_bin_state_not_position_return')
             result['candidate_bin_snapshots_observed'] += 1
         except Exception as error:
