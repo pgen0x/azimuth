@@ -17,9 +17,9 @@ from dlmm_accounting import rows
 from dlmm_monitor import verified_risk_mark
 from dlmm_candidate_watch import WATCH_FILENAME
 from dlmm_canonical_liquidity import retain_canonical_snapshot
+from dlmm_fee_forecast import HORIZONS
 
 getcontext().prec = 60
-HORIZONS = {'turnover': 3600, 'pulse': 1800, 'casual': 14400, 'multiday': 86400}
 COLLECTION_BUDGET_SECONDS = 240
 REJECT_BUDGET_SECONDS = 45
 BIN_BUDGET_SECONDS = 150
@@ -84,7 +84,8 @@ def validate_candidate_snapshot(sample, pool, mint):
 def collect_candidate_bins(profile, candidates, deadline):
     """Use existing timer slack; leave liquidation time and never acquire a lock."""
     result = dict(candidate_bin_snapshots_attempted=0, candidate_bin_snapshots_observed=0,
-                  candidate_bin_trading_deferred=False, candidate_bin_budget_exhausted=False)
+                  candidate_bin_trading_deferred=False, candidate_bin_budget_exhausted=False,
+                  candidate_fee_forecasts_frozen=0, candidate_fee_forecasts_unmeasured=0)
     phase_end = min(deadline - LIQUIDATION_BUDGET_SECONDS,
                     time.monotonic() + CANDIDATE_BUDGET_SECONDS)
     if not candidates:
@@ -93,7 +94,8 @@ def collect_candidate_bins(profile, candidates, deadline):
         result['candidate_bin_budget_exhausted'] = True
         return result
     file = profile/'memories/dlmm_candidate_bin_samples.jsonl'
-    latest = {}
+    latest, recent, history_limited = {}, {}, set()
+    history_now = time.time()
     for row in iter_rows(file):
         if time.monotonic() >= phase_end:
             result['candidate_bin_budget_exhausted'] = True
@@ -101,6 +103,13 @@ def collect_candidate_bins(profile, candidates, deadline):
         stamp = row.get('collected_at')
         if row.get('pool') in candidates and finite_number(stamp):
             latest[row['pool']] = max(latest.get(row['pool'], 0), stamp)
+            if (row.get('status') == 'observed' and finite_number(row.get('ts'))
+                    and 0 <= history_now-row['ts'] <= 1800):
+                history = recent.setdefault(row['pool'], [])
+                if len(history) >= 16:
+                    history_limited.add(row['pool'])
+                else:
+                    history.append(row)
     executor = profile/'skills/solana-dlmm/scripts/dlmm_executor.js'
     for pool in sorted(candidates, key=lambda p: (latest.get(p, 0), -candidates[p]['source_ts'], p)):
         if time.monotonic() >= phase_end:
@@ -137,6 +146,23 @@ def collect_candidate_bins(profile, candidates, deadline):
             record.update(status='unmeasured', reason=type(error).__name__)
         record['collected_at'] = time.time()
         append(file, record)
+        if record['status'] == 'observed':
+            try:
+                from dlmm_fee_forecast import candidate_fee_forecast, FORECAST_FILE, BASIS
+                if time.monotonic() >= phase_end:
+                    forecast = dict(version=1, pool=pool, base_mint=candidate['base_mint'], mode=candidate['mode'],
+                                    frozen_at=time.time(), status='unmeasured', reason='forecast_budget_exhausted',
+                                    basis=BASIS, funded_position=False, net_cash_profit_proved=False)
+                else:
+                    forecast = candidate_fee_forecast(record, recent.get(pool, []), time.time(),
+                        validate_candidate_snapshot, history_limited=pool in history_limited)
+                forecast['recorded_at'] = time.time()
+                append(profile/'memories'/FORECAST_FILE, forecast)
+                result['candidate_fee_forecasts_frozen' if forecast['status']=='frozen_prediction'
+                       else 'candidate_fee_forecasts_unmeasured'] += 1
+            except Exception:
+                # Optional diagnostic failures must not discard native bins.
+                result['candidate_fee_forecasts_unmeasured'] += 1
     return result
 
 
