@@ -172,9 +172,16 @@ async function confirmSignedTransaction(connection, strategy, raw, options = CON
   }
 }
 
-// Broadcast only the already persisted close bytes. An unresponsive provider
-// must not hold up submission to the other configured providers.
 async function confirmCloseTransaction(strategy, raw) {
+  return confirmExitTransaction(strategy, raw);
+}
+
+// Broadcast only the already signed exit bytes with a persisted signature.
+// An unresponsive provider must not hold up the other configured providers.
+async function confirmExitTransaction(strategy, raw, kind = "close", options = CONFIRM_OPTIONS) {
+  if (!["close", "settlement_swap"].includes(kind)) throw new Error("Unsupported exit transport kind");
+  const label = kind === "close" ? "Close" : "Settlement swap";
+  const logStage = kind === "close" ? "close-fanout" : "settlement-swap-fanout";
   const controller = new AbortController();
   const started = Date.now();
   const rawHash = require("crypto").createHash("sha256").update(raw).digest("hex");
@@ -183,8 +190,10 @@ async function confirmCloseTransaction(strategy, raw) {
     try {
       const dir = path.join(PROFILE_DIR, "memories");
       fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-      fs.appendFileSync(path.join(dir, "dlmm_close_transports.jsonl"), JSON.stringify({
+      const journal = kind === "close" ? "dlmm_close_transports.jsonl" : "dlmm_swap_transports.jsonl";
+      fs.appendFileSync(path.join(dir, journal), JSON.stringify({
         version: 1, signature: strategy.signature, raw_sha256: rawHash, stage,
+        transaction_kind: kind,
         observed_at: Date.now() / 1000, elapsed_ms: Date.now() - started,
         rpc_count: urls.length, ...extra, basis: "client_transport_observation_not_finalized_execution",
       }) + "\n", { mode: 0o600 });
@@ -195,17 +204,17 @@ async function confirmCloseTransaction(strategy, raw) {
   const deadline = new Promise((_, reject) => {
     timer = setTimeout(() => {
       controller.abort();
-      reject(new Error("Close confirmation timeout; signed status remains pending"));
+      reject(new Error(`${label} confirmation timeout; signed status remains pending`));
     }, 8000);
   });
-  console.warn(`[TX] ${JSON.stringify({ stage: "close-fanout", signature: strategy.signature,
+  console.warn(`[TX] ${JSON.stringify({ stage: logStage, signature: strategy.signature,
     rpc_count: urls.length, observed_at: started / 1000 })}`);
   const attempts = urls.map(async (url, index) => {
     const connection = new Connection(url, { commitment: "confirmed", disableRetryOnRateLimit: true,
       fetch: (request, options) => fetch(request, { ...options,
         signal: AbortSignal.any([controller.signal, AbortSignal.timeout(8000)]) }) });
     try {
-      await confirmSignedTransaction(connection, strategy, raw, CONFIRM_OPTIONS, controller.signal);
+      await confirmSignedTransaction(connection, strategy, raw, options, controller.signal);
       return { index };
     } catch (error) {
       // A confirmed chain failure is a verdict, not a transport failure that
@@ -221,7 +230,7 @@ async function confirmCloseTransaction(strategy, raw) {
       result = await Promise.race([Promise.any(attempts), deadline]);
     } catch (error) {
       if (error instanceof AggregateError) {
-        throw new Error("Close RPC confirmation unavailable; signed status remains pending");
+        throw new Error(`${label} RPC confirmation unavailable; signed status remains pending`);
       }
       throw error;
     }
@@ -231,7 +240,7 @@ async function confirmCloseTransaction(strategy, raw) {
     }
     outcome = "confirmed";
     confirmedRpcIndex = result.index;
-    console.warn(`[TX] ${JSON.stringify({ stage: "close-fanout-confirmed", signature: strategy.signature,
+    console.warn(`[TX] ${JSON.stringify({ stage: `${logStage}-confirmed`, signature: strategy.signature,
       rpc_index: result.index, elapsed_ms: Date.now() - started })}`);
   } finally {
     clearTimeout(timer);
@@ -1595,15 +1604,20 @@ async function swapToken(inputMintStr, outputMintStr, amountFloat, maxPriceImpac
     });
     submittedSignature = signedTxid;
     try {
-      await confirmSignedTransaction(connection, { blockhash, lastValidBlockHeight, signature: txid }, rawTransaction, {
-        skipPreflight: true,
-        maxRetries: RPC_SEND_MAX_RETRIES
-      });
+      const strategy = { blockhash, lastValidBlockHeight, signature: txid };
+      const options = { skipPreflight: true, maxRetries: RPC_SEND_MAX_RETRIES };
+      if (inventory) await confirmExitTransaction(strategy, rawTransaction, "settlement_swap", options);
+      else await confirmSignedTransaction(connection, strategy, rawTransaction, options);
     } catch (err) {
       if (err.transactionFailed) {
         fs.rmSync(pendingPath, { force: true });
         return { success: false, txHash: txid, error: err.message };
       }
+      // The bounded fanout already sought a confirmed verdict from every
+      // configured provider. Leave the persisted signature for the next tick;
+      // another unbounded read here must not hold up the settlement worker.
+      if (inventory) return { success: false, pending: true, txHash: txid,
+        error: `Settlement swap confirmation pending: ${err.message}` };
       let status;
       try {
         status = (await connection.getSignatureStatuses(
