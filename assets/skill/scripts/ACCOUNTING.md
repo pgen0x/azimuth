@@ -906,9 +906,14 @@ IL result. See the official
 
 The PDA depends on wallet, pool, lower bin and width, so it must never replace an
 old entry's identity. An existing entry file or any returned address history
-keeps the ordinary builder. The optional history read has no retry and a 300 ms
-deadline, overlapping the existing snapshot/build reads; unavailable evidence
-also keeps the ordinary builder. PDA provenance
+keeps the ordinary builder. The optional history read has no retry and overlaps
+the existing snapshot/build reads. Its background lifetime is at most three
+seconds, so a reply taking over 300 ms can still be used when the builder takes
+longer. Entry can wait only within the original 300 ms window measured from the
+lookup's start; when that window has elapsed, a still-pending read is canceled
+and the ordinary builder proceeds immediately. Any returned prior signature
+or unavailable evidence keeps the ordinary builder. Build failures and
+other early returns also cancel pending reads. PDA provenance
 uses an exclusive file create before signing, protecting a race with another
 writer. `position_creation` records the selected kind and public derivation
 fields. Extended positions retain the ordinary initialization.

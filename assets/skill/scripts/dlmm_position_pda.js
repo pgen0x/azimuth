@@ -2,28 +2,53 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
+const {performance} = require('node:perf_hooks');
 const {PublicKey, Transaction, TransactionInstruction, SystemProgram, SYSVAR_RENT_PUBKEY} = require('@solana/web3.js');
 const AMM = 'LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo';
 const tag = name => crypto.createHash('sha256').update('global:' + name).digest().subarray(0, 8);
 
-async function unusedHistory(url, address, fetchFn) {
+function historyRead(url, address, fetchFn, timeoutMs) {
   const controller = new AbortController();
-  let timer;
-  try {
-    const read = (async () => {
+  const history = {address, waitUntil: performance.now() + 300, settled: false, unused: false};
+  let timer, resolve;
+  history.read = new Promise(done => {resolve = done;});
+  const finish = unused => {
+    if (history.settled) return;
+    history.settled = true;
+    history.unused = unused === true;
+    clearTimeout(timer);
+    controller.abort();
+    resolve(history.unused);
+  };
+  history.cancel = () => finish(false);
+  timer = setTimeout(history.cancel, timeoutMs);
+  void (async () => {
+    try {
       const response = await fetchFn(url, {method: 'POST', headers: {'content-type': 'application/json'},
         signal: controller.signal, body: JSON.stringify({jsonrpc: '2.0', id: 1,
           method: 'getSignaturesForAddress', params: [address, {limit: 1, commitment: 'confirmed'}]})});
-      if (!response.ok) return false;
+      if (!response.ok) return finish(false);
       const data = await response.json();
-      return !data.error && Array.isArray(data.result) && data.result.length === 0;
-    })().catch(() => false);
-    return await Promise.race([read, new Promise(resolve => {
-      timer = setTimeout(() => {controller.abort(); resolve(false);}, 300);
+      finish(!data.error && Array.isArray(data.result) && data.result.length === 0);
+    } catch { finish(false); }
+  })();
+  return history;
+}
+
+async function historyUnused(history) {
+  if (history.settled) return history.unused === true;
+  // Replies may arrive during a slower builder, but entry never waits beyond
+  // the original 300 ms window measured from the start of the lookup.
+  const remaining = Number.isFinite(history.waitUntil)
+    ? Math.min(300, history.waitUntil - performance.now()) : 0;
+  if (remaining <= 0) return false;
+  let timer;
+  try {
+    return await Promise.race([history.read, new Promise(resolve => {
+      timer = setTimeout(() => resolve(false), remaining);
     })]);
   } finally {
     clearTimeout(timer);
-    controller.abort();
   }
 }
 
@@ -41,7 +66,9 @@ function beginPositionPdaHistory({pool, wallet, lower, upper, entryDir, rpcUrl},
   try {
     const position = derive(pool, wallet, lower, upper);
     if (fs.existsSync(path.join(entryDir, position.toString() + '.json'))) return null;
-    return {address: position.toString(), read: unusedHistory(rpcUrl, position.toString(), fetchFn)};
+    // The three-second lifetime is background only. preparePositionPda keeps
+    // the original wait deadline and cancels a still-pending read immediately.
+    return historyRead(rpcUrl, position.toString(), fetchFn, 3000);
   } catch { return null; }
 }
 
@@ -69,8 +96,9 @@ async function preparePositionPda({pool, transaction, wallet, originalPosition, 
     // Never reuse a journal identity, including a closed or failed old entry.
     if (fs.existsSync(path.join(entryDir, position.toString() + '.json'))) return null;
     if (history === undefined) {
-      if (!await unusedHistory(rpcUrl, position.toString(), fetchFn)) return null;
-    } else if (!history || history.address !== position.toString() || !await history.read) return null;
+      history = historyRead(rpcUrl, position.toString(), fetchFn, 300);
+    }
+    if (!history || history.address !== position.toString() || await historyUnused(history) !== true) return null;
     const pda = await pool.program.methods.initializePositionPda(lower, width).accountsStrict({
       payer: wallet, base: wallet, position, lbPair: pool.pubkey, owner: wallet,
       systemProgram: SystemProgram.programId, rent: SYSVAR_RENT_PUBKEY,
@@ -93,6 +121,8 @@ async function preparePositionPda({pool, transaction, wallet, originalPosition, 
   } catch {
     // History, SDK or layout uncertainty retains the ordinary unsigned builder.
     return null;
+  } finally {
+    history?.cancel?.();
   }
 }
 

@@ -14,7 +14,7 @@ let positions = [], confirmationError = false, signatureStatus = null;
 let confirmTimeout = false, accountExists = true, failNextSend = false, sendFailed = false;
 let candidateCreates = 0, candidateTradeChecks = 0, candidateTradeAfter = Infinity;
 let candidateCanonicalReads = 0, candidateCanonicalError = false;
-let pdaMode = null, pdaCalls = 0, lastSignedKeys = [], signCalls = 0;
+let pdaMode = null, pdaCalls = 0, pdaHistoryCancels = 0, lastSignedKeys = [], signCalls = 0;
 const closeBytes = [];
 const key = (value) => ({ toString: () => value });
 const wallet = { publicKey: key(`test-wallet-${worker ? "swap" : process.pid}`) };
@@ -89,7 +89,7 @@ const deps = {
     assert.equal(args.history.address,"pda-"+pdaMode);
     const tx=transaction();tx.compileMessage=()=>({pda:true});
     return {transaction:tx,position:key("pda-"+pdaMode),creation:{kind:"wallet_pda",base:wallet.publicKey.toString(),lower_bin_id:-20,width:21}};
-  },beginPositionPdaHistory: () => ({address:"pda-"+pdaMode,read:Promise.resolve(true)})},
+  },beginPositionPdaHistory: () => ({address:"pda-"+pdaMode,read:Promise.resolve(true),cancel:()=>{pdaHistoryCancels++;}})},
   "./dlmm_canonical_liquidity": {observeCanonicalLiquidity: async (url, mint, options) => {
     if (!options.mayRead()) return {version: 1, status: "unmeasured", reason: "wallet_trade_active"};
     candidateCanonicalReads++;
@@ -822,10 +822,19 @@ const clearMarker = () => fs.rmSync(marker, { force: true });
   assert.equal(sends-beforeLanded.sends, 1);
   assert.equal(builds-beforeLanded.builds, 1);
   clearMarker();
-  sendError=false;signatureStatus=null;pdaMode="success";
+  sendError=false;signatureStatus=null;
+  const canceledBeforeBuild=pdaHistoryCancels, signedBeforeBuild=signCalls, sentBeforeBuild=sends;
+  buildError=true;
+  await assert.rejects(deploy(),/RPC endpoints failed/);
+  buildError=false;
+  assert.equal(pdaHistoryCancels,canceledBeforeBuild+1);
+  assert.equal(signCalls,signedBeforeBuild);assert.equal(sends,sentBeforeBuild);
+  pdaMode="success";
   const pdaBefore=sends;
+  const canceledBeforePda=pdaHistoryCancels;
   const pdaEntry=await deploy();
   assert.equal(pdaEntry.success,true);assert.equal(pdaEntry.position,"pda-success");
+  assert.equal(pdaHistoryCancels,canceledBeforePda+1);
   assert.equal(sends,pdaBefore+1);assert.deepEqual(lastSignedKeys,[wallet.publicKey.toString()]);
   const pdaFile=path.join(root,"memories/dlmm_entries/pda-success.json");
   const pdaProvenance=fs.readFileSync(pdaFile,"utf8");

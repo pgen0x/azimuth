@@ -73,6 +73,29 @@ function setup() {
     }}}};
   return {pool,transaction,wallet,originalPosition,lower:f.lower,upper:f.upper,entryDir:root,rpcUrl:'https://secret.invalid'};
 }
+function clockedHelper() {
+  let now=0, next=0, reply;
+  const timers=new Map(), state={requests:0};
+  const testContext={...context,module:{exports:{}},
+    require:name=>name==='node:perf_hooks'?{performance:{now:()=>now}}:context.require(name),
+    setTimeout:(callback,ms)=>{const id=++next;timers.set(id,{at:now+ms,callback});return id;},
+    clearTimeout:id=>timers.delete(id)};
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname,'dlmm_position_pda.js'),'utf8'),testContext);
+  return {...testContext.module.exports,state,
+    fetch:async(url,options)=>{state.requests++;state.signal=options.signal;return new Promise(resolve=>{reply=resolve;});},
+    respond:data=>reply({ok:true,json:async()=>data}),
+    now:()=>now,timerCount:()=>timers.size,
+    advance:ms=>{
+      const target=now+ms;
+      while(true){
+        const due=[...timers].filter(([,t])=>t.at<=target).sort((a,b)=>a[1].at-b[1].at)[0];
+        if(!due)break;
+        now=due[1].at;timers.delete(due[0]);due[1].callback();
+      }
+      now=target;
+    }};
+}
+const flush=async()=>{for(let i=0;i<8;i++)await Promise.resolve();};
 (async()=>{
   const input=setup(), before=JSON.stringify(input.transaction);
   const optimized=await preparePositionPda(input,fetchFn);
@@ -114,5 +137,50 @@ function setup() {
   assert.equal(await preparePositionPda(forged,fetchFn),null);
   assert.equal(await preparePositionPda(setup(),async(url,options)=>{signal=options.signal;return new Promise(()=>{});}),null);
   assert.equal(signal.aborted,true);
+  // A completed late response can save a signature while the SDK is busy,
+  // without adding any wait after its builder returns.
+  for(const data of [{result:[]},{result:[{signature:'prior-entry'}]}]){
+    const clock=clockedHelper(),candidate=setup();
+    candidate.history=clock.beginPositionPdaHistory(candidate,clock.fetch);
+    clock.advance(800);assert.equal(clock.state.signal.aborted,false);
+    clock.respond(data);await flush();
+    const at=clock.now(),result=await clock.preparePositionPda(candidate);
+    assert.equal(clock.now(),at);assert.equal(clock.state.requests,1);assert.equal(clock.timerCount(),0);
+    if(data.result.length)assert.equal(result,null);
+    else assert.equal(result.transaction.compileMessage().header.numRequiredSignatures,1);
+  }
+  // Fast builders retain only the remainder of the original 300 ms window.
+  for(const responds of [true,false]){
+    const clock=clockedHelper(),candidate=setup();
+    candidate.history=clock.beginPositionPdaHistory(candidate,clock.fetch);
+    clock.advance(100);
+    let done=false;
+    const result=clock.preparePositionPda(candidate).then(value=>{done=true;return value;});
+    await flush();clock.advance(responds?150:199);await flush();assert.equal(done,false);
+    if(responds)clock.respond({result:[]});else clock.advance(1);
+    await flush();
+    const value=await result;
+    if(responds)assert.equal(value.transaction.compileMessage().header.numRequiredSignatures,1);
+    else assert.equal(value,null);
+    assert.equal(clock.now(),responds?250:300);assert.equal(clock.state.signal.aborted,true);
+    assert.equal(clock.state.requests,1);assert.equal(clock.timerCount(),0);
+  }
+  // A slow builder with no completed history falls back immediately. A later
+  // empty response cannot resurrect the canceled evidence or trigger a retry.
+  const pendingClock=clockedHelper(),pending=setup();
+  pending.history=pendingClock.beginPositionPdaHistory(pending,pendingClock.fetch);
+  pendingClock.advance(500);
+  assert.equal(await pendingClock.preparePositionPda(pending),null);
+  assert.equal(pendingClock.now(),500);assert.equal(pendingClock.state.signal.aborted,true);
+  assert.equal(pendingClock.timerCount(),0);
+  pendingClock.advance(300);pendingClock.respond({result:[]});await flush();
+  assert.equal(await pending.history.read,false);
+  assert.equal(await pendingClock.preparePositionPda(pending),null);
+  assert.equal(pendingClock.state.requests,1);
+  const abandonedClock=clockedHelper(),abandoned=setup();
+  const abandonedHistory=abandonedClock.beginPositionPdaHistory(abandoned,abandonedClock.fetch);
+  abandonedClock.advance(2999);assert.equal(abandonedClock.state.signal.aborted,false);
+  abandonedClock.advance(1);assert.equal(await abandonedHistory.read,false);
+  assert.equal(abandonedClock.state.signal.aborted,true);assert.equal(abandonedClock.timerCount(),0);
   console.log('position PDA identity, unsigned rewrite, bounded history and fallback checks passed');
 })().catch(error=>{console.error(error);process.exitCode=1;}).finally(()=>fs.rmSync(root,{recursive:true,force:true}));
