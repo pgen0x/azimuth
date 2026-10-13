@@ -851,6 +851,34 @@ remain attached. These candidate observations cannot establish unchanged supply
 or reserve state at a later entry without additional historical/freshness proof.
 They do not activate a trading gate or predict a cash return.
 
+### Position creation fees
+
+For a new position spanning at most 70 bins, the executor may replace the SDK's
+unsigned `initialize_position` instruction with `initialize_position_pda`, using
+the wallet as payer, base and owner. The liquidity amounts, bin range, slippage,
+remaining instructions, custody and close path are preserved. One signature
+replaces two; in the frozen native-bank comparison, initialization and a funded
+entry/close both saved 5,000 lamports, with identical position bytes, rent and
+other account balances. This is a local cost comparison, not a live profit or
+IL result. See the official
+[Meteora position instructions](https://github.com/MeteoraAg/docs/blob/main/developer-guides/dlmm/program/instructions.mdx).
+
+The PDA depends on wallet, pool, lower bin and width, so it must never replace an
+old entry's identity. An existing entry file or any returned address history
+keeps the ordinary builder. The optional history read has no retry and a 300 ms
+deadline, overlapping the existing snapshot/build reads; unavailable evidence
+also keeps the ordinary builder. PDA provenance
+uses an exclusive file create before signing, protecting a race with another
+writer. `position_creation` records the selected kind and public derivation
+fields. Extended positions retain the ordinary initialization.
+
+The exact final unsigned transaction still passes the native reserve simulation.
+Only failure of that simulation before persistence/signing can select and
+simulate the original SDK transaction instead. A successful simulation below
+the native reserve floor is still rejected. After signing or uncertain
+submission, the existing persisted signature and blockhash reconciliation apply;
+there is no identity change, replacement signing or second position mint.
+
 ### Rent return during ordinary settlement
 
 An owned ordinary settlement at 100 bps can append the existing empty-account

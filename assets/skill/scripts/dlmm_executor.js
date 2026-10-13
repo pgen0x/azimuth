@@ -597,11 +597,13 @@ async function deployPosition(poolAddressStr, amountX, amountY, binsBelow, binsA
   const pendingDir = path.join(PROFILE_DIR, "memories", "dlmm_pending_deploys");
   const pendingPath = path.join(pendingDir, `${wallet.publicKey}.json`);
   const entryDir = path.join(PROFILE_DIR, "memories", "dlmm_entries");
+  const pdaHistories = new Map();
   try {
     return await runWithFailover(async (connection) => {
       let submitted = false;
       const txHashes = [];
-      const newPosition = Keypair.generate();
+      let newPosition = Keypair.generate();
+      let positionCreation = {kind: "keypair"};
       try {
         if (!dry && fs.existsSync(pendingPath)) {
           const pending = JSON.parse(fs.readFileSync(pendingPath, "utf8"));
@@ -632,6 +634,16 @@ async function deployPosition(poolAddressStr, amountX, amountY, binsBelow, binsA
         // Persist provenance BEFORE submission, so timeout adoption keeps the
         // caller's mode and re-center root. No wallet secret is recorded.
         const context = JSON.parse(process.env.DLMM_ENTRY_CONTEXT || "{}");
+        // Overlap the bounded optional lookup with existing snapshot/build
+        // reads. It is never retried if unavailable or the build fails.
+        let pdaHistory = null;
+        if (binsBelow + binsAbove <= 69) try {
+          const range = `${minBinId}:${maxBinId}`;
+          if (!pdaHistories.has(range)) pdaHistories.set(range,
+            require("./dlmm_position_pda").beginPositionPdaHistory({pool, wallet: wallet.publicKey,
+              lower: minBinId, upper: maxBinId, entryDir, rpcUrl: connection.rpcEndpoint}));
+          pdaHistory = pdaHistories.get(range);
+        } catch { /* Keep the ordinary initialization. */ }
         let snapshots = { bin_snapshot: null, width_study: null };
         const solMint = "So11111111111111111111111111111111111111112";
         const studySide = strategyTypeStr !== "bid_ask" ? null
@@ -645,15 +657,28 @@ async function deployPosition(poolAddressStr, amountX, amountY, binsBelow, binsA
           pool: poolAddressStr, position: newPosition.publicKey.toString(),
           entry_bin: activeBin.binId, entry_price: pool.fromPricePerLamport(Number(activeBin.price)),
           bins_below: binsBelow, bins_above: binsAbove, bin_step: Number(pool.lbPair.binStep),
-          amount_x: amountX, amount_y: amountY,
+          amount_x: amountX, amount_y: amountY, position_creation: positionCreation,
           deployed_at: Math.floor(Date.now() / 1000),
-        }), { mode: 0o600 });
-        const send = async (tx, signers) => {
+        }), { mode: 0o600, flag: positionCreation.kind === "wallet_pda" ? "wx" : "w" });
+        const send = async (tx, signers, fallback = null) => {
           const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash("confirmed");
-          tx.recentBlockhash = blockhash;
-          tx.lastValidBlockHeight = lastValidBlockHeight;
-          tx.feePayer = wallet.publicKey;
-          await assertNativeReserve(connection, wallet, new VersionedTransaction(tx.compileMessage()));
+          const simulate = async candidate => {
+            candidate.recentBlockhash = blockhash;
+            candidate.lastValidBlockHeight = lastValidBlockHeight;
+            candidate.feePayer = wallet.publicKey;
+            await assertNativeReserve(connection, wallet, new VersionedTransaction(candidate.compileMessage()));
+          };
+          try { await simulate(tx); }
+          catch (error) {
+            if (!fallback || !error.message.includes("simulation unmeasured")) throw error;
+            // Only a failed unsigned simulation may switch back. Never rebuild
+            // or change identity after persistence, signing or submission.
+            newPosition = fallback.signer;
+            positionCreation = {kind: "keypair"};
+            tx = fallback.transaction;
+            signers = [wallet, newPosition];
+            await simulate(tx);
+          }
           if (!submitted) persistEntry();
           tx.sign(...signers);
           const raw = tx.serialize();
@@ -686,12 +711,24 @@ async function deployPosition(poolAddressStr, amountX, amountY, binsBelow, binsA
           });
           for (const tx of Array.isArray(adds) ? adds : [adds]) await send(tx, [wallet]);
         } else {
-          const tx = await pool.initializePositionAndAddLiquidityByStrategy({
+          let tx = await pool.initializePositionAndAddLiquidityByStrategy({
             positionPubKey: newPosition.publicKey, user: wallet.publicKey,
             totalXAmount: totalXLamports, totalYAmount: totalYLamports,
             strategy: { minBinId, maxBinId, strategyType }, slippage: slippageBpsToPercent(slippageBps),
           });
-          await send(tx, [wallet, newPosition]);
+          const fallback = {transaction: tx, signer: newPosition};
+          let optimized = null;
+          try {
+            optimized = await require("./dlmm_position_pda").preparePositionPda({pool, transaction: tx,
+              wallet: wallet.publicKey, originalPosition: newPosition.publicKey, lower: minBinId, upper: maxBinId,
+              entryDir, rpcUrl: connection.rpcEndpoint, history: pdaHistory});
+          } catch { /* An optional optimization cannot prevent an ordinary entry. */ }
+          if (optimized) {
+            newPosition = {publicKey: optimized.position};
+            positionCreation = optimized.creation;
+            tx = optimized.transaction;
+          }
+          await send(tx, optimized ? [wallet] : [wallet, newPosition], optimized ? fallback : null);
         }
         // Keep the reservation through blockhash expiry even on success: an
         // immediately-following RPC may lag the confirming endpoint. Exits are
