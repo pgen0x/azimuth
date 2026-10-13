@@ -811,6 +811,38 @@ not the fee yield of a funded BidAsk ladder. This adds coverage evidence for
 later prospective fee calibration; it does not estimate profit, change gates,
 claim consistent returns or prove an IL improvement.
 
+#### Prospective candidate fee calibration
+
+After a successful natural candidate observation, the same shadow cycle can
+append a versioned record to `dlmm_candidate_fee_forecasts.jsonl`. It uses
+already collected counters from the earliest complete matching sample 4–30
+minutes earlier, the production SOL BidAsk geometry and a fixed hypothetical
+0.1 SOL budget. The first prediction is frozen immediately after collection,
+before its future mode horizon. Published native bin prices, exact integer
+share/counter arithmetic, input hashes, geometry, horizon, input freeze time and
+journal record time remain
+bound to the record. It adds no subprocess or RPC calls. The existing candidate
+phase and liquidation reserve still bound collection; missing, empty, oversized
+or unsupported inputs stay unmeasured. At most 16 recent samples per indexed
+pool are retained for this optional calculation; overflow remains unmeasured.
+
+`python3 scripts/dlmm_fee_forecast.py --profile <profile> [--as-of <timestamp>]`
+reads and scores these recorded forecasts locally. It uses the first native
+terminal observation within the mode horizon's 600-second grace and never
+replaces an invalid first outcome with a later favorable one. It reports fees
+at both the original and terminal price and compares fee pace at the actual
+observed duration. Recorded geometry and horizons survive later production
+parameter changes. The reader never creates retrospective forecasts.
+An observation's allocation can differ from a later funded entry; using a
+forecast for that entry requires separate support, identity and timing checks.
+
+These are correlated observations of unfunded candidates, not realized position
+returns. They cannot predict bin occupancy, the actual exit time, added-liquidity
+impact or net cash profit; composition cost, principal changes, rent and execution
+costs are excluded. They do not enter position profit acceptance or change entry
+and exit rules. This replaces the fragile manual forecast capture used in the
+earlier calibration study, whose overnight window produced no saved predictions.
+
 #### Optional canonical market liquidity
 
 After the bin reads, the same background command can append
