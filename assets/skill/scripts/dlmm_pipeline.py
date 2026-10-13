@@ -10,11 +10,21 @@ import os
 import re
 import math
 import shlex
+from pathlib import Path
 from local_indicators import check_local_indicators
 from tz_util import local_time_str
 from dlmm_monitor import position_live_onchain
 from dlmm_weights import ranking_weight_context
 from dlmm_candidate_watch import record_pipeline_candidates
+
+CASH_POLICY = json.loads(Path(__file__).with_name('dlmm_cash_policy.json').read_text())
+if (type(CASH_POLICY.get('version')) is not int or CASH_POLICY['version'] != 1
+        or any(type(CASH_POLICY.get(key)) is not int or not 0 <= CASH_POLICY[key] <= 2**53-1
+               for key in ('native_reserve_lamports', 'entry_rent_allowance_lamports', 'minimum_entry_lamports'))
+        or CASH_POLICY['native_reserve_lamports'] <= 0 or CASH_POLICY['minimum_entry_lamports'] <= 0
+        or sum(CASH_POLICY[key] for key in ('native_reserve_lamports', 'entry_rent_allowance_lamports',
+                                          'minimum_entry_lamports')) > 2**53-1):
+    raise ValueError('Invalid native cash policy')
 
 def emit_execution_receipt(report, position, signature, dry_run, verified):
     """Optional Hermes proof marker; failure must never turn a landed tx into a retry."""
@@ -516,10 +526,12 @@ def reconcile_redis_vs_meteora():
 
 
 def compute_deploy_amount(wallet_sol):
-    reserve = 0.2
+    reserve = CASH_POLICY['native_reserve_lamports']/1e9
+    minimum = CASH_POLICY['minimum_entry_lamports']/1e9
     # Existing 0.05 SOL transaction allowance covers typical position/ATA rent.
     # The executor verifies the exact post-transaction reserve before signing.
-    if wallet_sol < reserve + 0.05 + 0.1:
+    if wallet_sol < sum(CASH_POLICY[key] for key in ('native_reserve_lamports',
+                           'entry_rent_allowance_lamports', 'minimum_entry_lamports'))/1e9:
         return 0.0
     pct = 0.45
     floor = 0.3
@@ -527,7 +539,7 @@ def compute_deploy_amount(wallet_sol):
     deployable = max(0.0, wallet_sol - reserve)
     dynamic = deployable * pct
     if dynamic < floor:
-        return max(0.1, round(dynamic, 2)) if wallet_sol - reserve >= 0.1 else 0.0
+        return max(minimum, round(dynamic, 2)) if wallet_sol - reserve >= minimum else 0.0
     result = min(ceil, dynamic)
     return round(result, 2)
 

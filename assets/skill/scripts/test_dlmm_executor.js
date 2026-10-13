@@ -14,11 +14,11 @@ let positions = [], confirmationError = false, signatureStatus = null;
 let confirmTimeout = false, accountExists = true, failNextSend = false, sendFailed = false;
 let candidateCreates = 0, candidateTradeChecks = 0, candidateTradeAfter = Infinity;
 let candidateCanonicalReads = 0, candidateCanonicalError = false;
-let pdaMode = null, pdaCalls = 0, lastSignedKeys = [];
+let pdaMode = null, pdaCalls = 0, lastSignedKeys = [], signCalls = 0;
 const closeBytes = [];
 const key = (value) => ({ toString: () => value });
 const wallet = { publicKey: key(`test-wallet-${worker ? "swap" : process.pid}`) };
-const transaction = () => ({ signature: Buffer.from([1]), sign(...signers) {lastSignedKeys=signers.map(s=>s.publicKey.toString());}, compileMessage() { return {}; }, serialize() { return Buffer.from(this.recentBlockhash); } });
+const transaction = () => ({ signature: Buffer.from([1]), sign(...signers) {signCalls++;lastSignedKeys=signers.map(s=>s.publicKey.toString());}, compileMessage() { return {}; }, serialize() { return Buffer.from(this.recentBlockhash); } });
 const pool = {
   pubkey: key("pool"), lbPair: { tokenXMint: key("TOKEN"), tokenYMint: key("So11111111111111111111111111111111111111112"), binStep: 100 },
   program: { account: {
@@ -1098,7 +1098,31 @@ const clearMarker = () => fs.rmSync(marker, { force: true });
   assert.equal((await reclaimEmptyAccounts(true,true)).fee_lamports,5000);assert.equal(sends,beforeBatch+4);
   env.DRY_RUN="true";batchBalance=0;
   assert.equal((await reclaimEmptyAccounts(true,true)).dry_run,true);assert.equal(sends,beforeBatch+4);
-  delete env.DRY_RUN;Connection.prototype.getBalanceAndContext=balanceReader;
+  delete env.DRY_RUN;
+  tokenAccounts=[account("eligible")];batchBalance=348630923;
+  const beforeEntryRent=sends;
+  const entryReady=await reclaimEmptyAccounts(true,true);
+  assert.equal(entryReady.entry_liquidity_floor_lamports,350000000);
+  assert.equal(entryReady.entry_liquidity_shortfall_lamports,1369077);
+  assert.equal(entryReady.fee_lamports,5000);assert.equal(sends,beforeEntryRent+1);
+  assert.equal(batchBalance+entryReady.recovered_lamports_before_fee-entryReady.fee_lamports,350114363);
+  batchBalance=350000000-1488440+5000;
+  assert.equal((await reclaimEmptyAccounts(true,true)).fee_lamports,5000);assert.equal(sends,beforeEntryRent+2);
+  batchBalance--;
+  const feeCount=feeReads,signCount=signCalls;
+  const stillShort=await reclaimEmptyAccounts(true,true);
+  assert.equal(stillShort.reason,"singleton_net_below_entry_floor");
+  assert.equal(feeReads,feeCount+1);assert.equal(signCalls,signCount);assert.equal(sends,beforeEntryRent+2);
+  assert.equal(fs.existsSync(path.join(root,"memories/dlmm_pending_rent",wallet.publicKey.toString()+".json")),false);
+  for(const balance of [350000000,350000000-1488440-1]){
+    batchBalance=balance;const beforeFee=feeReads;
+    assert.equal((await reclaimEmptyAccounts(true,true)).reason,"waiting_for_second_empty_account");
+    assert.equal(feeReads,beforeFee);assert.equal(sends,beforeEntryRent+2);
+  }
+  batchBalance=348630923;fee=null;
+  await assert.rejects(reclaimEmptyAccounts(true,true),/unknown or uneconomic/);
+  assert.equal(signCalls,signCount);assert.equal(sends,beforeEntryRent+2);fee=5000;
+  Connection.prototype.getBalanceAndContext=balanceReader;
   // Exercise the real CLI parser, not a copy of its option handling.
   let cliSwapArgs;
   sandbox.captureCLISwap = async (...args) => {cliSwapArgs=args;return {success:true};};
