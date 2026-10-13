@@ -14,10 +14,11 @@ let positions = [], confirmationError = false, signatureStatus = null;
 let confirmTimeout = false, accountExists = true, failNextSend = false, sendFailed = false;
 let candidateCreates = 0, candidateTradeChecks = 0, candidateTradeAfter = Infinity;
 let candidateCanonicalReads = 0, candidateCanonicalError = false;
+let pdaMode = null, pdaCalls = 0, lastSignedKeys = [];
 const closeBytes = [];
 const key = (value) => ({ toString: () => value });
 const wallet = { publicKey: key(`test-wallet-${worker ? "swap" : process.pid}`) };
-const transaction = () => ({ signature: Buffer.from([1]), sign() {}, compileMessage() { return {}; }, serialize() { return Buffer.from(this.recentBlockhash); } });
+const transaction = () => ({ signature: Buffer.from([1]), sign(...signers) {lastSignedKeys=signers.map(s=>s.publicKey.toString());}, compileMessage() { return {}; }, serialize() { return Buffer.from(this.recentBlockhash); } });
 const pool = {
   pubkey: key("pool"), lbPair: { tokenXMint: key("TOKEN"), tokenYMint: key("So11111111111111111111111111111111111111112"), binStep: 100 },
   program: { account: {
@@ -80,6 +81,15 @@ const deps = {
     TransactionMessage: { decompile(message) { const instructions = [...message.instructions]; return {instructions, compileToV0Message() { return {...message, instructions}; }}; } } },
   "@meteora-ag/dlmm": { create: async () => {candidateCreates++; return pool;}, StrategyType: { Spot: 0, Curve: 1, BidAsk: 2 }, positionOwnerFilter: () => ({}) },
   "./dlmm_nav": { walletTradeActive: () => ++candidateTradeChecks >= candidateTradeAfter },
+  "./dlmm_position_pda": {preparePositionPda: async args => {
+    pdaCalls++;
+    if (!pdaMode) return null;
+    if (pdaMode === "throw") throw new Error("Optional optimization unavailable");
+    assert.equal(args.lower,-20);assert.equal(args.upper,0);
+    assert.equal(args.history.address,"pda-"+pdaMode);
+    const tx=transaction();tx.compileMessage=()=>({pda:true});
+    return {transaction:tx,position:key("pda-"+pdaMode),creation:{kind:"wallet_pda",base:wallet.publicKey.toString(),lower_bin_id:-20,width:21}};
+  },beginPositionPdaHistory: () => ({address:"pda-"+pdaMode,read:Promise.resolve(true)})},
   "./dlmm_canonical_liquidity": {observeCanonicalLiquidity: async (url, mint, options) => {
     if (!options.mayRead()) return {version: 1, status: "unmeasured", reason: "wallet_trade_active"};
     candidateCanonicalReads++;
@@ -812,6 +822,48 @@ const clearMarker = () => fs.rmSync(marker, { force: true });
   assert.equal(sends-beforeLanded.sends, 1);
   assert.equal(builds-beforeLanded.builds, 1);
   clearMarker();
+  sendError=false;signatureStatus=null;pdaMode="success";
+  const pdaBefore=sends;
+  const pdaEntry=await deploy();
+  assert.equal(pdaEntry.success,true);assert.equal(pdaEntry.position,"pda-success");
+  assert.equal(sends,pdaBefore+1);assert.deepEqual(lastSignedKeys,[wallet.publicKey.toString()]);
+  const pdaFile=path.join(root,"memories/dlmm_entries/pda-success.json");
+  const pdaProvenance=fs.readFileSync(pdaFile,"utf8");
+  assert.equal(JSON.parse(pdaProvenance).position_creation.kind,"wallet_pda");
+  assert.equal(JSON.parse(fs.readFileSync(marker)).position,pdaEntry.position);
+  clearMarker();
+  await assert.rejects(deploy(),/RPC endpoints failed/); // exclusive create protects a racing journal
+  assert.equal(fs.readFileSync(pdaFile,"utf8"),pdaProvenance);assert.equal(sends,pdaBefore+1);
+  pdaMode="simulation-fallback";
+  let pdaSimulations=0;
+  Connection.prototype.simulateTransaction=async (tx,options)=>{
+    pdaSimulations++;
+    return tx.message.pda ? {context:{slot:10},value:{err:"AlreadyInUse",accounts:[{lamports:300000000}]}}
+      : defaultSimulation.call(new Connection(),tx,options);
+  };
+  const fallbackEntry=await deploy();
+  assert.equal(fallbackEntry.success,true);assert.match(fallbackEntry.position,/^position-/);
+  assert.equal(pdaSimulations,2);assert.equal(lastSignedKeys.length,2);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(root,"memories/dlmm_entries",fallbackEntry.position+".json"))).position_creation.kind,"keypair");
+  assert.equal(fs.existsSync(path.join(root,"memories/dlmm_entries/pda-simulation-fallback.json")),false);
+  Connection.prototype.simulateTransaction=defaultSimulation;clearMarker();
+  pdaMode="reserve-floor";reservePost=199999999;
+  const beforePdaFloor=sends;
+  assert.match((await deploy()).error,/native reserve/);assert.equal(sends,beforePdaFloor);
+  assert.equal(fs.existsSync(path.join(root,"memories/dlmm_entries/pda-reserve-floor.json")),false);
+  reservePost=300000000;
+  pdaMode="throw";assert.equal((await deploy()).success,true);assert.equal(lastSignedKeys.length,2);clearMarker();
+  pdaMode="uncertain";sendError=true;
+  const uncertainPdaBefore={builds,sends,bytes:closeBytes.length};
+  const uncertainPda=await deploy();
+  assert.equal(uncertainPda.pending,true);assert.equal(uncertainPda.position,"pda-uncertain");
+  assert.equal(builds-uncertainPdaBefore.builds,1);assert.equal(sends-uncertainPdaBefore.sends,2);
+  assert.equal(new Set(closeBytes.slice(uncertainPdaBefore.bytes)).size,1);
+  assert.deepEqual(lastSignedKeys,[wallet.publicKey.toString()]);
+  const callsBeforePending=pdaCalls;
+  height=100;
+  assert.equal((await deploy()).pending,true);assert.equal(pdaCalls,callsBeforePending);
+  pdaMode=null;sendError=true;signatureStatus={confirmationStatus:"finalized",err:null};height=151;clearMarker();
   const closeSends = sends;
   assert.equal((await closePosition("landed-close")).success, true);
   assert.equal(sends-closeSends, 2);
