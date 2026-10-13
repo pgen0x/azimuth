@@ -1,0 +1,124 @@
+{
+  "description": "Pool bytes are a previously captured public on-chain account. LP mint and vault balances are synthetic fixtures; this combined snapshot is not historical on-chain evidence.",
+  "base_mint": "3q2U15sSP4gy6PEYgmcVtEyurEHBhXgLre21NeHNpump",
+  "pool_source_sha256": "78bb7ded0aa38bca69331d990bf8361a47e19233d630881253635c28c1c0e31a",
+  "expected_pool_decoded_by_official_idl": {
+    "pool_bump": 255,
+    "index": 0,
+    "creator": "Z2QQGfMuX1XJCNoSYmqAmW3DmCy1tXi7w3HwBPsRSTt",
+    "base_mint": "3q2U15sSP4gy6PEYgmcVtEyurEHBhXgLre21NeHNpump",
+    "quote_mint": "So11111111111111111111111111111111111111112",
+    "lp_mint": "9bwAcKgXVwuMP9uyUJKuK4HiA1gMFStARjUYnKEh7PWj",
+    "pool_base_token_account": "CtqudoTKDfrjU2zj9ZVynmGBEdEM36ybWjhqYiAfDJtM",
+    "pool_quote_token_account": "2WvwxLbG53okDLgNnpytBCLPD5XJFDXDemZeuWErgkW9",
+    "lp_supply": "4193388282825",
+    "coin_creator": "7ALQvrJmcSTSQWbbcnHHZvBCdZbFrrUZRAMEDwTXXJ3M",
+    "is_mayhem_mode": false,
+    "is_cashback_coin": false,
+    "virtual_quote_reserves": "17582563258",
+    "creator_fee_bps": "0",
+    "can_edit_creator_fee": false,
+    "is_holder_reward": false,
+    "protocol_fees": "587563",
+    "creator_fees": "1354464"
+  },
+  "pda_cases": [
+    {
+      "program": "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P",
+      "seeds": [
+        "706f6f6c2d617574686f72697479",
+        "2a04e8e77bb817107a1dba9e475cfe17d3a04680ab1c3615d6c68c914de298df"
+      ],
+      "address": "Z2QQGfMuX1XJCNoSYmqAmW3DmCy1tXi7w3HwBPsRSTt"
+    },
+    {
+      "program": "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA",
+      "seeds": [
+        "706f6f6c",
+        "0000",
+        "08342c3c7cbcad6405855af9c9615cdd2f7b333eb82d7c8618e86d6c49d43cbb",
+        "2a04e8e77bb817107a1dba9e475cfe17d3a04680ab1c3615d6c68c914de298df",
+        "069b8857feab8184fb687f634618c035dac439dc1aeb3b5598a0f00000000001"
+      ],
+      "address": "7qZeWsd4UBcRDT6HRhJDvTvwxEp5HcvV2SaZPJRF4Q34"
+    },
+    {
+      "program": "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA",
+      "seeds": [
+        "706f6f6c5f6c705f6d696e74",
+        "6596ea0cfed0b98957ac9b63351e655e0ef7049ffc78a94cfcafcb19a2a2724b"
+      ],
+      "address": "9bwAcKgXVwuMP9uyUJKuK4HiA1gMFStARjUYnKEh7PWj"
+    },
+    {
+      "program": "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL",
+      "seeds": [
+        "6596ea0cfed0b98957ac9b63351e655e0ef7049ffc78a94cfcafcb19a2a2724b",
+        "06ddf6e1d765a193d9cbe146ceeb79ac1cb485ed5f5b37913a8cf5857eff00a9",
+        "2a04e8e77bb817107a1dba9e475cfe17d3a04680ab1c3615d6c68c914de298df"
+      ],
+      "address": "5ePRKD69ster9Pybzi2zqBSUEY77LaQPnfftYgCrNjgb"
+    },
+    {
+      "program": "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL",
+      "seeds": [
+        "6596ea0cfed0b98957ac9b63351e655e0ef7049ffc78a94cfcafcb19a2a2724b",
+        "06ddf6e1ee758fde18425dbce46ccddab61afc4d83b90d27febdf928d8a18bfc",
+        "2a04e8e77bb817107a1dba9e475cfe17d3a04680ab1c3615d6c68c914de298df"
+      ],
+      "address": "CtqudoTKDfrjU2zj9ZVynmGBEdEM36ybWjhqYiAfDJtM"
+    },
+    {
+      "program": "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL",
+      "seeds": [
+        "6596ea0cfed0b98957ac9b63351e655e0ef7049ffc78a94cfcafcb19a2a2724b",
+        "06ddf6e1d765a193d9cbe146ceeb79ac1cb485ed5f5b37913a8cf5857eff00a9",
+        "069b8857feab8184fb687f634618c035dac439dc1aeb3b5598a0f00000000001"
+      ],
+      "address": "2WvwxLbG53okDLgNnpytBCLPD5XJFDXDemZeuWErgkW9"
+    }
+  ],
+  "snapshot": {
+    "context": {
+      "slot": 456200000
+    },
+    "value": [
+      {
+        "lamports": 2179320,
+        "data": [
+          "8ZptBBGxbbz/AAAINCw8fLytZAWFWvnJYVzdL3szPrgtfIYY6G1sSdQ8uyoE6Od7uBcQeh26nkdc/hfToEaAqxw2FdbGjJFN4pjfBpuIV/6rgYT7aH9jRhjANdrEOdwa6ztVmKDwAAAAAAF/0Hz9U41IOTp4B99MU3sXJK9t/Z1Gm5mEKCgZh18mZLC4ejJDyOEXbcWXpVcCl+XCnuhhgFYA0cBi5aqsew2mFoaHbNnzOklrN/mf2GnkoAHtiaF78ujHTZF+9S9MJS7JQ2tZ0AMAAFuKTHb/sDd3XWkA8q5pdCqpBG9+lhibz2LdDGw2/tM8AAC6nwAYBAAAAAAAAAAAAAAAAAAAAAAAAAAAACv3CAAAAAAA4KoUAAAAAAAAAAAAAAAAAAAAAAAAAA==",
+          "base64"
+        ],
+        "owner": "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA",
+        "executable": false,
+        "rentEpoch": 18446744073709552000,
+        "space": 301
+      },
+      {
+        "owner": "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb",
+        "executable": false,
+        "data": [
+          "AQAAAGWW6gz+0LmJV6ybYzUeZV4O9wSf/HipTPyvyxmionJLQ8Ejc0UBAAAJAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==",
+          "base64"
+        ]
+      },
+      null,
+      {
+        "owner": "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb",
+        "executable": false,
+        "data": [
+          "KgTo53u4FxB6HbqeR1z+F9OgRoCrHDYV1saMkU3imN9lluoM/tC5iVesm2M1HmVeDvcEn/x4qUz8r8sZoqJySwBAehDzWgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+          "base64"
+        ]
+      },
+      {
+        "owner": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+        "executable": false,
+        "data": [
+          "BpuIV/6rgYT7aH9jRhjANdrEOdwa6ztVmKDwAAAAAAFlluoM/tC5iVesm2M1HmVeDvcEn/x4qUz8r8sZoqJySwAQpdToAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+          "base64"
+        ]
+      }
+    ]
+  }
+}

@@ -811,6 +811,46 @@ not the fee yield of a funded BidAsk ladder. This adds coverage evidence for
 later prospective fee calibration; it does not estimate profit, change gates,
 claim consistent returns or prove an IL improvement.
 
+#### Optional canonical market liquidity
+
+After the bin reads, the same background command can append
+`canonical_liquidity` and the DLMM `bin_step` to its existing sample. It derives
+the SOL PumpSwap canonical pool and LP mint from the base mint, then reads the
+pool, LP mint and possible base/quote vaults in one `getMultipleAccounts` call.
+Only these canonical accounts share an atomic RPC slot; the earlier DLMM bin
+reads are separate observations. The read has no retry, aborts after at most
+300 milliseconds, and is skipped when the command has used its two-second
+read allowance or a trading worker is active. The existing three-second process
+timeout, pool rotation and liquidation reserve still apply. No RPC is added to
+the entry or exit path.
+
+Version 1 evidence binds the owner programs, pool discriminator, canonical PDA,
+mint/vault identities and token authorities before retaining exact raw amounts.
+`lp_circulating_raw` is the SPL mint supply; `protocol_lp_basis_raw` is the
+pool's LP supply, which does not shrink when holders burn LP outside a withdrawal.
+Their ratio is a potential withdrawal upper bound. Escrow, frozen accounts,
+holder control and protocol settings can limit actual withdrawal; neither zero
+circulating supply nor a nonzero boost establishes token safety or future profit.
+`pool_coin_creator` is the currently observed fee recipient identity, not a
+replacement for a developer missing from a historical entry record.
+
+Retained protocol/creator fees are excluded from `real_quote_raw`.
+`signed_virtual_quote_raw` is a signed i128, and `effective_quote_raw` adds it
+to the quote vault amount. `boost_reserves_raw` adds the retained fees back to
+the virtual field. The native decoder and journal validator preserve these
+relationships, including negative virtual reserves. See the official
+[PumpSwap LP supply description](https://github.com/pump-fun/pump-public-docs/blob/main/docs/PUMP_SWAP_README.md)
+and [reserve/fee accounting](https://github.com/pump-fun/pump-public-docs/blob/main/docs/VIRTUAL_QUOTE_RESERVES_FEE_ADJUSTMENT.md).
+
+Missing canonical pools, timeouts and invalid/unsupported accounts remain
+`unmeasured` without invented zero balances. Optional failure cannot discard an
+otherwise valid bin observation. The Python writer keeps only validated public
+fields and bounded reason codes, never RPC URLs, response payloads or error text.
+Both native request/observation timestamps and the existing collection timestamp
+remain attached. These candidate observations cannot establish unchanged supply
+or reserve state at a later entry without additional historical/freshness proof.
+They do not activate a trading gate or predict a cash return.
+
 ### Rent return during ordinary settlement
 
 An owned ordinary settlement at 100 bps can append the existing empty-account
