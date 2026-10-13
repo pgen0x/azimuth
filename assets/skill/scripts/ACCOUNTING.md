@@ -314,7 +314,16 @@ the reclaimed rent before signing; a missing fee still prevents submission.
 The scheduled unit passes `--batch`, which waits for at least two eligible
 accounts to share one network fee. A singleton is reclaimed immediately when
 its rent exceeds free native cash above the executor's existing 0.2 SOL reserve;
-this also avoids retaining a large account balance. Unknown native cash defers
+this also avoids retaining a large account balance. It can also run when the
+measured net refund restores the pipeline's existing minimum entry liquidity:
+0.2 SOL reserve + 0.05 SOL rent allowance + 0.1 SOL minimum ticket = 0.35 SOL.
+These unchanged amounts share `dlmm_cash_policy.json` between the pipeline and
+executor. The policy is loaded on entry/maintenance paths; exit reconciliation
+does not depend on it. When the gross refund could restore entry liquidity, the
+executor reads the actual network fee and defers without signing if the net
+refund is still insufficient. A wallet already above the entry floor, or one
+whose singleton cannot cover the gap, continues waiting for a second account
+unless the original reserve-pressure exception applies. Unknown native cash defers
 the singleton without signing. Batch deferral leaves one eligible account
 funded, so spendable SOL can temporarily be lower while its rent remains
 recoverable. The eight-account cap, exclusions, trading locks and pending-send

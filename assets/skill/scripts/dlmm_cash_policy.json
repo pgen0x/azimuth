@@ -1,0 +1,6 @@
+{
+  "version": 1,
+  "native_reserve_lamports": 200000000,
+  "entry_rent_allowance_lamports": 50000000,
+  "minimum_entry_lamports": 100000000
+}
