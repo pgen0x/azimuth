@@ -1622,6 +1622,7 @@ async function candidateBinSnapshot(poolAddress, below = 69, above = 16) {
   const wallet = process.env.SOLANA_PUBLIC_KEY;
   if (!wallet) throw new Error("Candidate snapshots require SOLANA_PUBLIC_KEY");
   new PublicKey(wallet);
+  const started = Date.now();
   const mayRead = () => !require("./dlmm_nav").walletTradeActive(wallet);
   if (!mayRead()) return {status: "deferred", reason: "wallet_trade_active"};
   return runWithFailover(async connection => {
@@ -1635,7 +1636,16 @@ async function candidateBinSnapshot(poolAddress, below = 69, above = 16) {
     if (!Number.isSafeInteger(anchor)) throw new Error("Invalid candidate active bin");
     const snapshot = await binSnapshot(pool, anchor - below, anchor + above, mayRead);
     if (snapshot.status === "deferred") return snapshot;
+    let canonical;
+    try {
+      canonical = await require("./dlmm_canonical_liquidity").observeCanonicalLiquidity(connection.rpcEndpoint, tokenX,
+        {mayRead, timeoutMs: Math.max(0, 2000 - (Date.now() - started))});
+    } catch {
+      canonical = {version: 1, status: "unmeasured", reason: "native_evidence_unavailable",
+        base_mint: tokenX, quote_mint: tokenY, request_started_at: Date.now()/1000, observed_at: Date.now()/1000};
+    }
     return {...snapshot, status: "observed", pool: address.toString(),
+      bin_step: Number(pool.lbPair.binStep), canonical_liquidity: canonical,
       token_x_mint: tokenX, token_y_mint: tokenY, anchor_bin: anchor,
       lower_bin: anchor - below, upper_bin: anchor + above,
       basis: "native_candidate_pool_bin_state_not_position_return"};

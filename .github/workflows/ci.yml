@@ -49,6 +49,8 @@ jobs:
           node assets/skill/scripts/test_dlmm_executor.js
           node assets/skill/scripts/test_dlmm_close_broadcast.js
           node assets/skill/scripts/test_dlmm_risk_mark.js
+          node assets/skill/scripts/test_dlmm_canonical_liquidity.js
+          python3 assets/skill/scripts/test_dlmm_canonical_liquidity.py
           python3 assets/skill/scripts/test_dlmm_guards.py
           python3 assets/skill/scripts/test_dlmm_monitor_bounds.py
           python3 assets/skill/scripts/test_solana_policy.py

@@ -13,6 +13,7 @@ let lastSlippage = null, lastMaxRetries = null;
 let positions = [], confirmationError = false, signatureStatus = null;
 let confirmTimeout = false, accountExists = true, failNextSend = false, sendFailed = false;
 let candidateCreates = 0, candidateTradeChecks = 0, candidateTradeAfter = Infinity;
+let candidateCanonicalReads = 0, candidateCanonicalError = false;
 const closeBytes = [];
 const key = (value) => ({ toString: () => value });
 const wallet = { publicKey: key(`test-wallet-${worker ? "swap" : process.pid}`) };
@@ -79,6 +80,13 @@ const deps = {
     TransactionMessage: { decompile(message) { const instructions = [...message.instructions]; return {instructions, compileToV0Message() { return {...message, instructions}; }}; } } },
   "@meteora-ag/dlmm": { create: async () => {candidateCreates++; return pool;}, StrategyType: { Spot: 0, Curve: 1, BidAsk: 2 }, positionOwnerFilter: () => ({}) },
   "./dlmm_nav": { walletTradeActive: () => ++candidateTradeChecks >= candidateTradeAfter },
+  "./dlmm_canonical_liquidity": {observeCanonicalLiquidity: async (url, mint, options) => {
+    if (!options.mayRead()) return {version: 1, status: "unmeasured", reason: "wallet_trade_active"};
+    candidateCanonicalReads++;
+    assert.ok(options.timeoutMs > 0 && options.timeoutMs <= 2000);
+    if (candidateCanonicalError) throw new Error("Optional read failed");
+    return {version: 1, status: "unmeasured", reason: "canonical_pool_absent"};
+  }},
   "bn.js": function (value) { this.value = value; }, "bs58": { encode: () => "signature" },
   "dotenv": { config() {}, parse: () => ({}) },
 };
@@ -165,11 +173,16 @@ const clearMarker = () => fs.rmSync(marker, { force: true });
     assert.equal(observed.token_x_mint, "TOKEN");
     assert.equal(observed.lower_bin, -69); assert.equal(observed.upper_bin, 16);
     assert.equal(observed.bins.length, 86); assert.equal(binReads, 1); assert.equal(activeReads, 1);
+    assert.equal(observed.bin_step, 100); assert.equal(candidateCanonicalReads, 1);
+    assert.equal(observed.canonical_liquidity.reason, "canonical_pool_absent");
+    candidateCanonicalError = true;
+    assert.equal((await snapshot("pool")).status, "observed");
+    candidateCanonicalError = false;
     assert.equal(sends, 0); assert.equal(builds, 0);
     for (const [below, above] of [[70, 0], [-1, 0], [1.5, 0], [0, 17], [0, NaN]]) {
       await assert.rejects(snapshot("pool", below, above), /bounds/);
     }
-    assert.equal(candidateCreates, 1);
+    assert.equal(candidateCreates, 2);
     delete env.SOLANA_PUBLIC_KEY;
     await assert.rejects(snapshot("pool"), /SOLANA_PUBLIC_KEY/);
     env.SOLANA_PUBLIC_KEY = wallet.publicKey.toString();
