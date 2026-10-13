@@ -1,0 +1,133 @@
+{
+  "source": "Unsigned local native SVM control, cached slot 455939479; no live signing",
+  "wallet": "3w2SBc58L3VSnoMGnvLcsGxXXJKVigmFagrB7ChRGa13",
+  "pool": "FpRcdzEgiHLpo4LPTWDkhq86fCuwoejFXnmoH9cSZZ6Q",
+  "lower": -605,
+  "upper": -552,
+  "standard": "MVDJherfjtQEk7kzN2q4hox8kTCVpfULiRjqViM6KHU",
+  "pda": "G2QUCKs93h6buSV1Jk54FkJZCqSjSZnDEYCZkK2UTQLC",
+  "instructions": {
+    "standard": {
+      "program": "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo",
+      "data": "dbc0ea47bebf6650a3fdffff36000000",
+      "keys": [
+        {
+          "address": "3w2SBc58L3VSnoMGnvLcsGxXXJKVigmFagrB7ChRGa13",
+          "isSigner": true,
+          "isWritable": true
+        },
+        {
+          "address": "MVDJherfjtQEk7kzN2q4hox8kTCVpfULiRjqViM6KHU",
+          "isSigner": true,
+          "isWritable": true
+        },
+        {
+          "address": "FpRcdzEgiHLpo4LPTWDkhq86fCuwoejFXnmoH9cSZZ6Q",
+          "isSigner": false,
+          "isWritable": false
+        },
+        {
+          "address": "3w2SBc58L3VSnoMGnvLcsGxXXJKVigmFagrB7ChRGa13",
+          "isSigner": true,
+          "isWritable": true
+        },
+        {
+          "address": "11111111111111111111111111111111",
+          "isSigner": false,
+          "isWritable": false
+        },
+        {
+          "address": "SysvarRent111111111111111111111111111111111",
+          "isSigner": false,
+          "isWritable": false
+        },
+        {
+          "address": "D1ZN9Wj1fRSUQfCjhvnu1hqDMT7hzjzBBpi12nVniYD6",
+          "isSigner": false,
+          "isWritable": false
+        },
+        {
+          "address": "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo",
+          "isSigner": false,
+          "isWritable": false
+        }
+      ]
+    },
+    "pda": {
+      "program": "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo",
+      "data": "2e527d92558de499a3fdffff36000000",
+      "keys": [
+        {
+          "address": "3w2SBc58L3VSnoMGnvLcsGxXXJKVigmFagrB7ChRGa13",
+          "isSigner": true,
+          "isWritable": true
+        },
+        {
+          "address": "3w2SBc58L3VSnoMGnvLcsGxXXJKVigmFagrB7ChRGa13",
+          "isSigner": true,
+          "isWritable": true
+        },
+        {
+          "address": "G2QUCKs93h6buSV1Jk54FkJZCqSjSZnDEYCZkK2UTQLC",
+          "isSigner": false,
+          "isWritable": true
+        },
+        {
+          "address": "FpRcdzEgiHLpo4LPTWDkhq86fCuwoejFXnmoH9cSZZ6Q",
+          "isSigner": false,
+          "isWritable": false
+        },
+        {
+          "address": "3w2SBc58L3VSnoMGnvLcsGxXXJKVigmFagrB7ChRGa13",
+          "isSigner": true,
+          "isWritable": true
+        },
+        {
+          "address": "11111111111111111111111111111111",
+          "isSigner": false,
+          "isWritable": false
+        },
+        {
+          "address": "SysvarRent111111111111111111111111111111111",
+          "isSigner": false,
+          "isWritable": false
+        },
+        {
+          "address": "D1ZN9Wj1fRSUQfCjhvnu1hqDMT7hzjzBBpi12nVniYD6",
+          "isSigner": false,
+          "isWritable": false
+        },
+        {
+          "address": "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo",
+          "isSigner": false,
+          "isWritable": false
+        }
+      ]
+    }
+  },
+  "key_bytes": {
+    "3w2SBc58L3VSnoMGnvLcsGxXXJKVigmFagrB7ChRGa13": "2b8e5bf36b5f3783ba80b9f8e212a0321172eea212a42a88c3518ceffc63003e",
+    "MVDJherfjtQEk7kzN2q4hox8kTCVpfULiRjqViM6KHU": "053f84098cbfaa4efa14deab493b9cd86011759c1fe5d438622442c41a275beb",
+    "FpRcdzEgiHLpo4LPTWDkhq86fCuwoejFXnmoH9cSZZ6Q": "dc29bf237a0bd7ba006adf96548c5895e320388e5e52ee47bc5e86a2a241ca29",
+    "11111111111111111111111111111111": "0000000000000000000000000000000000000000000000000000000000000000",
+    "SysvarRent111111111111111111111111111111111": "06a7d517192c5c51218cc94c3d4af17f58daee089ba1fd44e3dbd98a00000000",
+    "D1ZN9Wj1fRSUQfCjhvnu1hqDMT7hzjzBBpi12nVniYD6": "b270d67fa98c51cf0213051358962baf35742bed59c9d9445e9c0d0c85c7cd91",
+    "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo": "04e9e12fbc84e826c932cce9e2640cce15590c1c6273b0925708ba3b8520b0bc",
+    "G2QUCKs93h6buSV1Jk54FkJZCqSjSZnDEYCZkK2UTQLC": "df3b6bca52259c9fec9e05219f6838bf7c3a28c2ca0d8eff32646c62e1e706f5"
+  },
+  "native_bank_comparison": {
+    "snapshot_slot": 455939479,
+    "bank_fixture_sha256": "2f2ed880fd0efc4935e4069ec4820b8dfcb538c9d2e2069f5dfa885690d633f0",
+    "program_elf_sha256": "d296c6771cec945601027613ca637c1be6721044c5859009d41c453477844c1f",
+    "initialization_position_bytes_identical": true,
+    "initialization_wallet_debit_lamports": {
+      "standard": 41909840,
+      "pda": 41904840
+    },
+    "funded_position_bytes_identical": true,
+    "funded_entry_close_other_accounts_identical": true,
+    "funded_entry_close_native_cash_improvement_lamports": 5000,
+    "no_future_profit_or_IL_claim": true,
+    "CI_test_reexecutes_native_bank": false
+  }
+}
