@@ -937,6 +937,8 @@ def risk_scaled_ticket(deploy_sol, score, mode):
     """Keep the existing risk multiplier without raising a subminimum ticket."""
     if score is None:
         return deploy_sol, 1.0
+    if type(score) not in (int, float) or not math.isfinite(score):
+        return 0.0, 0.0
     floor = BATCH_CONVICTION_FLOOR.get(mode, 12.0)
     margin = max(0.0, min(1.0, (float(score) - floor) / 40.0))
     multiplier = 0.5 + 0.5 * margin
@@ -961,6 +963,10 @@ def apply_batch_conviction(candidates, mode="multiday"):
     """
     survivors = []
     for c in candidates:
+        score = c.get("score")
+        if type(score) not in (int, float) or not math.isfinite(score):
+            print(f"Batch reject {c.get('name', '?')} - invalid conviction score")
+            continue
         # Token has produced almost no swap fees globally = bundled/inorganic.
         # Only the truly-dead tail hard-rejects; the 30-SOL line is a penalty
         # below. Absent field = unknown (fail-open), never zero.
