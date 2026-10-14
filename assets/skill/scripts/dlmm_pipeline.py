@@ -528,7 +528,7 @@ def reconcile_redis_vs_meteora():
 def compute_deploy_amount(wallet_sol):
     reserve = CASH_POLICY['native_reserve_lamports']/1e9
     minimum = CASH_POLICY['minimum_entry_lamports']/1e9
-    # Existing 0.05 SOL transaction allowance covers typical position/ATA rent.
+    # Configured transaction allowance covers typical position/ATA rent.
     # The executor verifies the exact post-transaction reserve before signing.
     if wallet_sol < sum(CASH_POLICY[key] for key in ('native_reserve_lamports',
                            'entry_rent_allowance_lamports', 'minimum_entry_lamports'))/1e9:
