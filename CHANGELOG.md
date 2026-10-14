@@ -5,6 +5,61 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.11.0](https://github.com/pgen0x/azimuth/compare/v2.10.0...v2.11.0) (2026-10-14)
+
+
+### Features
+
+* **dlmm:** archive bounded unsigned exit banks for local replay ([#247](https://github.com/pgen0x/azimuth/issues/247)) ([c1f6b70](https://github.com/pgen0x/azimuth/commit/c1f6b704305dba466cc512ac1a4d90a77d97edfb))
+* **dlmm:** freeze candidate fee forecasts in natural shadow cycles ([#238](https://github.com/pgen0x/azimuth/issues/238)) ([59f055c](https://github.com/pgen0x/azimuth/commit/59f055c70b654a45ef58fc93efbd1fca1f8c2837))
+* **dlmm:** record bounded canonical liquidity evidence ([#236](https://github.com/pgen0x/azimuth/issues/236)) ([19bf8a5](https://github.com/pgen0x/azimuth/commit/19bf8a54080b1e9fc25958da5c3576f22f0c7b47))
+* **evaluation:** assess net SOL profit for every position ([#231](https://github.com/pgen0x/azimuth/issues/231)) ([0cd7ee3](https://github.com/pgen0x/azimuth/commit/0cd7ee3df8335563196738b70c193ea41c5e9bf9))
+* **evaluation:** collect pre-entry candidate bin evidence ([cffb7be](https://github.com/pgen0x/azimuth/commit/cffb7bed94042a4fd102768017b129968df37269))
+* **evaluation:** preserve executed bin funding costs ([#224](https://github.com/pgen0x/azimuth/issues/224)) ([d617236](https://github.com/pgen0x/azimuth/commit/d617236af99162c6c304fe0e2c209d8d360c522a))
+* **evaluation:** quote proved native withdrawal inventory ([#223](https://github.com/pgen0x/azimuth/issues/223)) ([cbb4f7e](https://github.com/pgen0x/azimuth/commit/cbb4f7e835cf9d5e7e81b4b46273ecf1568d9e04))
+* **evaluation:** retain native bins around close decisions ([#220](https://github.com/pgen0x/azimuth/issues/220)) ([a15de54](https://github.com/pgen0x/azimuth/commit/a15de5475e99b87d3362bc18159739ae2257e6d8))
+
+
+### Bug Fixes
+
+* **accounting:** exclude proved expired submissions from rent lifecycle ([#222](https://github.com/pgen0x/azimuth/issues/222)) ([2e5c4c7](https://github.com/pgen0x/azimuth/commit/2e5c4c7af8242cfbf5d03a403f71514cea93f52d))
+* **accounting:** retain proved nonpositive native cash labels ([#232](https://github.com/pgen0x/azimuth/issues/232)) ([6c1edd6](https://github.com/pgen0x/azimuth/commit/6c1edd641a0465ef8d0d8916101570db995bc932))
+* **accounting:** yield NAV quotes while wallet trades are active ([a3f7bc6](https://github.com/pgen0x/azimuth/commit/a3f7bc6b1b2bae3027fd82ca85bdf3c4a6d3d66c))
+* **dlmm:** archive pool oracle for direct exit replay ([b640324](https://github.com/pgen0x/azimuth/commit/b640324e7e768baf7803d12b761541eaba470e99))
+* **dlmm:** fan out owned settlement swaps with a shared confirmation deadline ([#241](https://github.com/pgen0x/azimuth/issues/241)) ([219193f](https://github.com/pgen0x/azimuth/commit/219193f56c5acd02e595636776667e818c941b69))
+* **dlmm:** include pool oracle in natural exit bank archives ([52ece80](https://github.com/pgen0x/azimuth/commit/52ece8085dee424ae2d16b1e5586ad84e1edcbe1))
+* **dlmm:** lower entry liquidity floor to 0.345 SOL ([#242](https://github.com/pgen0x/azimuth/issues/242)) ([2062dac](https://github.com/pgen0x/azimuth/commit/2062dac034de904a525ae04288abe76024afb509))
+* **dlmm:** reclaim singleton rent when net refund restores entry liquidity ([#239](https://github.com/pgen0x/azimuth/issues/239)) ([0c9319a](https://github.com/pgen0x/azimuth/commit/0c9319adf20df67538b797f09d4738ffb517ea71))
+* **dlmm:** retain PDA history replies during entry build without extending waits ([#240](https://github.com/pgen0x/azimuth/issues/240)) ([267b153](https://github.com/pgen0x/azimuth/commit/267b15392db86b12d33f78ec066932e50a74eb1f))
+* **dlmm:** share cash policy in final entry balance check ([#243](https://github.com/pgen0x/azimuth/issues/243)) ([ca91b8d](https://github.com/pgen0x/azimuth/commit/ca91b8dacd8bb69c5d07b20a57131945e922a9ab))
+* **dlmm:** skip candidates below the risk-adjusted ticket minimum ([#244](https://github.com/pgen0x/azimuth/issues/244)) ([59f21d0](https://github.com/pgen0x/azimuth/commit/59f21d054e73b715581c70c356c4d0c3b0e7ffdf))
+* **dlmm:** verify native inventory for wallet PDA entries ([#245](https://github.com/pgen0x/azimuth/issues/245)) ([ffcdbbd](https://github.com/pgen0x/azimuth/commit/ffcdbbdafd345548f93fdee72db546043fc1d3a9))
+* **evaluation:** separate pre-close bin outcomes ([#218](https://github.com/pgen0x/azimuth/issues/218)) ([5699d56](https://github.com/pgen0x/azimuth/commit/5699d567dc09d23fdea98f1c6423c20938c59230))
+* **evaluation:** stream daily review journals within memory budget ([745236a](https://github.com/pgen0x/azimuth/commit/745236af2baf00a0feac76f1a33d234560f7a0f9))
+* **evaluation:** stream shadow journals within memory budget ([18d2e6f](https://github.com/pgen0x/azimuth/commit/18d2e6f156501fc9dde73cd35724c00f1339bccf))
+* **evaluation:** use finalized close time for bin replay ([#219](https://github.com/pgen0x/azimuth/issues/219)) ([559e8a3](https://github.com/pgen0x/azimuth/commit/559e8a3de690d0afca6f05239e57ea8e9443487e))
+* **evaluation:** watch live batch candidates before entry gates ([#234](https://github.com/pgen0x/azimuth/issues/234)) ([7764998](https://github.com/pgen0x/azimuth/commit/7764998169876440e166d0aa1edd234edb9a1d4f))
+* **executor:** broadcast persisted closes across RPCs concurrently ([#235](https://github.com/pgen0x/azimuth/issues/235)) ([f78bfb2](https://github.com/pgen0x/azimuth/commit/f78bfb237d02a5ea225b7a856e90296d281b19bf))
+* **hermes:** bound AI exit review context ([#211](https://github.com/pgen0x/azimuth/issues/211)) ([89070e5](https://github.com/pgen0x/azimuth/commit/89070e50486ca110d8d232571eb5345ac1f6fb5c))
+* **settlement:** batch rent refunds when native cash permits ([#233](https://github.com/pgen0x/azimuth/issues/233)) ([456c871](https://github.com/pgen0x/azimuth/commit/456c8715806a77e09c1c439402f78eeeae601a5b))
+* **settlement:** refresh expired swap evidence before retry ([bc65df2](https://github.com/pgen0x/azimuth/commit/bc65df2e6ed3a2b038e4da5d2090a7127ae815f9))
+* **settlement:** return owned rent during ordinary swaps ([#230](https://github.com/pgen0x/azimuth/issues/230)) ([08cd950](https://github.com/pgen0x/azimuth/commit/08cd95071261b7c7bde2b294673e3476d9a85792))
+* **solana:** bound shadow collection phases ([#214](https://github.com/pgen0x/azimuth/issues/214)) ([88db6bc](https://github.com/pgen0x/azimuth/commit/88db6bc937585434d3e46ed488e8de3d9561486d))
+* **solana:** bound small settlement slippage by fee cost ([#212](https://github.com/pgen0x/azimuth/issues/212)) ([65c5dce](https://github.com/pgen0x/azimuth/commit/65c5dce47f5c941f48d5863025ce33e93491f677))
+* **solana:** confirm signed transactions over HTTP ([#213](https://github.com/pgen0x/azimuth/issues/213)) ([e5b3bd1](https://github.com/pgen0x/azimuth/commit/e5b3bd11330c8be8b2ce8157406a1249fc6a91f3))
+* **solana:** include owned inline rent in cash outcomes ([#217](https://github.com/pgen0x/azimuth/issues/217)) ([17b8b91](https://github.com/pgen0x/azimuth/commit/17b8b91686c39af3c1b3e817d0153d92b45eeb39))
+* **solana:** preserve risk provenance through timeout adoption ([#210](https://github.com/pgen0x/azimuth/issues/210)) ([78890ca](https://github.com/pgen0x/azimuth/commit/78890ca7c4b20d78541a8575ddc802b9ceeeb529))
+* **solana:** probe configured same-endpoint AI fallbacks ([#246](https://github.com/pgen0x/azimuth/issues/246)) ([473e90f](https://github.com/pgen0x/azimuth/commit/473e90f524b3415e617a856d6db67c64d69eb58a))
+* **solana:** start emergency settlement at existing retry limit ([#208](https://github.com/pgen0x/azimuth/issues/208)) ([031937c](https://github.com/pgen0x/azimuth/commit/031937c180c1bf77724866427193389587fd8331))
+* **solana:** use native marks for ordinary exit risk ([#216](https://github.com/pgen0x/azimuth/issues/216)) ([1a51dda](https://github.com/pgen0x/azimuth/commit/1a51dda7de4c5f1086b9d496ad2873198f93d618))
+* **solana:** use native observations for fee pace ([#221](https://github.com/pgen0x/azimuth/issues/221)) ([30e867b](https://github.com/pgen0x/azimuth/commit/30e867b9fa2199732e95c9bc2ec76e58761a440e))
+* **solana:** verify suspect PnL against native inventory ([#215](https://github.com/pgen0x/azimuth/issues/215)) ([034aa43](https://github.com/pgen0x/azimuth/commit/034aa4387e2b78301cd918aab2afa43aaee5d272))
+
+
+### Performance Improvements
+
+* **dlmm:** reduce new position initialization signatures ([#237](https://github.com/pgen0x/azimuth/issues/237)) ([01923d1](https://github.com/pgen0x/azimuth/commit/01923d1a1553cffd1f171a9b6db1123ea408ae1f))
+
 ## [2.10.0](https://github.com/pgen0x/azimuth/compare/v2.9.0...v2.10.0) (2026-10-11)
 
 
