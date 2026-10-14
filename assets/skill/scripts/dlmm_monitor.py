@@ -3400,16 +3400,6 @@ Pre-close LP mark | {pnl_pct:+.2f}% ({realized_sol:+.4f} SOL) — estimate befor
         print(render_status_report(report_rows, sol_price_usd, trailing_trigger_pct, min_fee_tvl_24h_limit, max_oor_minutes))
         print("MONITOR_REPORT:" + json.dumps({"positions": report_rows}))
 
-    # Darwinian signal-weights refresh. Self-guarded inside the script (recalcs
-    # at most every 6h and only with enough closed positions) — cheap no-op on
-    # most runs, and never allowed to fail the monitor.
-    try:
-        subprocess.run(
-            [sys.executable, os.path.join(SCRIPT_DIR, "dlmm_weights.py"), "--quiet"],
-            timeout=60,
-        )
-    except Exception:
-        pass
 
 if __name__ == "__main__":
     from dlmm_research_io import run_observed_main
