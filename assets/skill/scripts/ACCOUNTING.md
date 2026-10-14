@@ -982,3 +982,9 @@ minimum. A valid runner-up can still be selected; an explicit pool choice in a
 batch is checked again before deployment. This enforces the existing risk
 budget and does not establish profitability or protect against a high-score
 pool collapsing. It does not modify exits or existing positions.
+
+Native inventory verification recognizes both ordinary position initialization
+and wallet-PDA initialization. PDA funding must bind the same payer, base wallet,
+owner, pool and planned bin range before its SOL transfer can establish the
+principal denominator. Unsupported or mismatched initialization remains
+unmeasured; PDA fee savings must not disable independent native valuation.
