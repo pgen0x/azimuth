@@ -702,6 +702,26 @@ vm.runInNewContext("const productionExitTransport=confirmExitTransaction;confirm
   };
   assert.equal((await closePosition("deadline-position")).success, true);
   assert.equal(confirmationAttempts, 2);
+  const preparationPath = path.join(root, "memories/dlmm_close_preparations.jsonl");
+  const preparation = fs.readFileSync(preparationPath, "utf8").trim().split("\n").map(JSON.parse)
+    .filter(row => row.position === "deadline-position");
+  assert.deepEqual(preparation.map(row => row.stage), ["started", "lock_acquired", "lookup_started",
+    "lookup_completed", "withdrawal_build_started", "withdrawal_build_completed", "blockhash_started",
+    "blockhash_completed", "signed_and_persisted", "confirmation_completed", "completed"]);
+  assert.equal(new Set(preparation.map(row => row.attempt)).size, 1);
+  assert.ok(preparation.every((row, i) => row.since_previous_ms >= 0 &&
+    (!i || row.elapsed_ms >= preparation[i-1].elapsed_ms)));
+  assert.equal(preparation.find(row => row.stage === "signed_and_persisted").signature, "signature");
+  assert.ok(!JSON.stringify(preparation).includes("fake-rpc"));
+  // Optional telemetry failure cannot interrupt withdrawal or confirmation.
+  fs.renameSync(preparationPath, preparationPath + ".saved");
+  fs.mkdirSync(preparationPath);
+  try {
+    assert.equal((await closePosition("unwritable-journal-position")).success, true);
+  } finally {
+    fs.rmdirSync(preparationPath);
+    fs.renameSync(preparationPath + ".saved", preparationPath);
+  }
   // Null/processed responses are pending, even when they have err:null. Poll
   // the original signature until confirmed, without another broadcast.
   const observedStatuses = [null,{confirmationStatus:"processed",err:null},{confirmationStatus:"confirmed",err:null}];
