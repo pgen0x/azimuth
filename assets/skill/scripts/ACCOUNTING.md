@@ -238,8 +238,10 @@ processed or unavailable status keeps the submission uncertain; on-chain failure
 remain failures. Durable pending markers and retries of the same signed bytes remain
 in place.
 
-Monitor risk valuation still attempts the bounded native inventory read when both
-portfolio and per-position indexed PnL are unavailable. A verified native loss can
+Monitor risk valuation first attempts the three-second native inventory read before
+starting any per-position indexed PnL fallback. A valid native result skips that
+fallback's potential 30-second wait; unavailable native data retains indexed
+fallback. Already fetched portfolio data still supplies fee-rate context. A verified native loss can
 therefore reach emergency stop rules during an indexer outage. If neither source
 provides usable valuation, the tick skips risk evaluation instead of treating the
 initialized zero PnL or token price return as a measured LP result.
