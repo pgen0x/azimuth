@@ -39,6 +39,33 @@ class CandidateForecastTests(unittest.TestCase):
         return score_forecasts([forecast], [self.old, self.base, *future], cutoff,
                                shadow.validate_candidate_snapshot)
 
+    def test_lower_bin_fees_are_not_attributed_to_current_active_bin(self):
+        self.base['bins'][-17]['fee_y'] = '0'  # Active bin 0; lower bins earned.
+        forecast = self.freeze()
+        self.assertEqual(forecast['version'], 2)
+        attribution = forecast['fee_attribution']
+        self.assertEqual(attribution['active_bin'], 0)
+        self.assertEqual(attribution['active_bin_fraction'], 0)
+        self.assertGreater(forecast['linear_fee_lamports'], 0)
+        for token in ('x', 'y'):
+            key = 'historical_fee_' + token + '_raw'
+            self.assertEqual(sum(int(b[key]) for b in attribution['bins']), int(forecast[key]))
+        future = sample(11800, DELTA*2)
+        self.assertEqual(self.score(forecast, [future])['scored'], 1)
+        forecast['fee_attribution']['bins'][0]['historical_fee_y_raw'] = '123'
+        result = self.score(forecast, [future])
+        self.assertEqual(result['scored'], 0)
+        self.assertEqual(result['results'][0]['reason'], 'forecast_or_input_binding_mismatch')
+
+    def test_legacy_forecasts_still_score_and_new_zero_fee_is_not_a_fraction(self):
+        legacy = self.freeze(model_version=1)
+        self.assertNotIn('fee_attribution', legacy)
+        self.assertEqual(self.score(legacy, [sample(11800, DELTA*2)])['scored'], 1)
+        self.assertNotEqual(legacy['id'], self.freeze()['id'])
+        flat = self.freeze(history=[sample(9700, DELTA)])
+        self.assertIsNone(flat['fee_attribution']['active_bin_fraction'])
+        self.assertEqual(flat['linear_fee_lamports'], 0)
+
     def test_freezes_inputs_geometry_and_never_claims_cash_profit(self):
         before = deepcopy([self.old, self.base])
         self.base['unrelatedSecret'] = 'https://secret.invalid/key'
