@@ -676,7 +676,9 @@ measure compute use itself.
 
 `dlmm_exit_banks/<position>.json` contains SDK close instructions, Jupiter's
 ledger swap instructions, lookup tables and one final account-response bank
-including discovered upgradeable program data. Missing accounts remain explicit
+including discovered upgradeable program data and the position pool's oracle
+for direct-pool swap replay even when Jupiter routes through another pool.
+Missing accounts remain explicit
 nulls. A changed program, closed position, budget overrun or more than 100
 accounts leaves the observation unmeasured. Capture stops after eight archived
 positions and never replaces an existing archive. Summary outcomes go to

@@ -150,7 +150,10 @@ async function capture(profile, sample, budgetMs) {
       wrapAndUnwrapSol: true, dynamicComputeUnitLimit: false})});
   requireThat(built.ok, 'swap_instructions_unavailable');
   const response = await boundedJson(built, 1024*1024);
-  const keys = dependencyKeys(close, response, {wallet, position, pool: poolAddress, mint});
+  // Withdrawal and an external swap route need not reference the DLMM oracle.
+  // Preserve it in the same bank for direct-pool exit replay as well.
+  const keys = dependencyKeys(close, response, {wallet, position, pool: poolAddress, mint,
+    oracle: address(pool.lbPair.oracle)});
   const bank = await captureBank(keys, keys => rpc('getMultipleAccounts', [keys,
     {encoding: 'base64', commitment: 'confirmed'}]), position);
   check();
