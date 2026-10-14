@@ -936,6 +936,19 @@ WEIGHTED_SIGNALS_HIGHER_IS_BETTER = (
 BATCH_CONVICTION_FLOOR = {"casual": 30.0, "multiday": 12.0, "turnover": 30.0, "pulse": 30.0}
 
 
+
+def risk_scaled_ticket(deploy_sol, score, mode):
+    """Keep the existing risk multiplier without raising a subminimum ticket."""
+    if score is None:
+        return deploy_sol, 1.0
+    floor = BATCH_CONVICTION_FLOOR.get(mode, 12.0)
+    margin = max(0.0, min(1.0, (float(score) - floor) / 40.0))
+    multiplier = 0.5 + 0.5 * margin
+    amount = round(deploy_sol * multiplier, 2) if multiplier < 1.0 else deploy_sol
+    minimum = CASH_POLICY['minimum_entry_lamports'] / 1e9
+    return (amount if amount >= minimum else 0.0), multiplier
+
+
 def apply_batch_conviction(candidates, mode="multiday"):
     """Deterministic port of the deploy agent's STEP 3 pick heuristics.
 
@@ -1710,6 +1723,11 @@ def main():
         # the whole batch (the agent flow only ever checked its single pick).
         winner = None
         for c in valid_candidates:
+            if batch_mode:
+                candidate_ticket, _ = risk_scaled_ticket(deploy_sol, c.get("score"), mode)
+                if candidate_ticket == 0:
+                    print(f"Skipping {c['name']} - risk-scaled ticket below minimum; no size increase")
+                    continue
             v = c["volatility"]
             bsp = max(c.get("bin_step", 100), 1) / 100.0
             # Probe the range the RESOLVED strategy will actually deploy —
@@ -1749,33 +1767,24 @@ def main():
             winner = c
             break
         if not winner:
-            print("No candidates deployable (bin-array rent / entry timing rejected every candidate).")
+            print("No candidates deployable (risk sizing / bin-array rent / entry timing rejected every candidate).")
             sys.exit(0)
 
     if batch_mode:
         others = ", ".join(c["base_symbol"] for c in valid_candidates if c is not winner) or "none"
         print(f"BATCH_PICK: {winner['base_symbol']} (score {winner['score']:.1f}) over [{others}]")
 
-    # Risk-scaled ticket size (2026-08-21). compute_deploy_amount() above is
-    # wallet-size-only — every winner in a mode got the same ticket regardless
-    # of how close its conviction score sat to BATCH_CONVICTION_FLOOR. Two 24h
-    # tail losses (CYBERCAT-SOL -0.0652 SOL, URANUS-SOL -0.0398 SOL) were both
-    # near-floor picks that cleared the gate but not by much — exactly the
-    # population this discounts. 0.5x at the floor, scaling linearly to 1.0x
-    # (no change from today) at floor+40 or better. batch_mode-only and
-    # fail-open to 1.0x (today's behavior) when score/floor data isn't
-    # available, e.g. --pool/--from-signal manual overrides — this can only
-    # ever shrink a ticket relative to the status quo, never grow one.
-    if batch_mode and winner.get("score") is not None:
-        _floor = BATCH_CONVICTION_FLOOR.get(mode, 12.0)
-        _margin = max(0.0, min(1.0, (float(winner["score"]) - _floor) / 40.0))
-        _risk_mult = 0.5 + 0.5 * _margin
-        if _risk_mult < 1.0:
-            _orig_deploy_sol = deploy_sol
-            deploy_sol = round(max(0.10, deploy_sol * _risk_mult), 2)
+    # Apply the same risk budget used during batch selection. A pool override
+    # must not bypass it, and the minimum ticket must not undo the reduction.
+    if batch_mode:
+        original_deploy = deploy_sol
+        deploy_sol, risk_multiplier = risk_scaled_ticket(deploy_sol, winner.get("score"), mode)
+        if deploy_sol == 0:
+            print("Aborting: risk-scaled ticket below minimum; no size increase")
+            sys.exit(0)
+        if risk_multiplier < 1.0:
             print(f"Risk-scaled ticket: {winner['base_symbol']} score {winner['score']:.1f} "
-                  f"(floor {_floor:.0f}, margin {_margin*100:.0f}%) -> {_risk_mult:.2f}x "
-                  f"({_orig_deploy_sol:.2f} -> {deploy_sol:.2f} SOL)")
+                  f"-> {risk_multiplier:.2f}x ({original_deploy:.2f} -> {deploy_sol:.2f} SOL)")
 
     # 5. Indicators Check (batch mode already ran this inside the pick loop)
     if params.get("INDICATORS_ENABLED") and not batch_mode:
