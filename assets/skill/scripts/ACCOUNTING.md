@@ -247,7 +247,14 @@ timeout cannot authorize another transaction or a new blockhash. Restart retries
 reuse the same pending close bytes. Empty-only cleanup retains its existing path.
 
 This changes transport only: the transaction, preflight options, fees and close
-instructions are unchanged. Optional `dlmm_close_transports.jsonl` records the
+instructions are unchanged. Close preparation first uses the saved entry's pool
+as a hint, verifying the native position program, discriminator, pool and wallet
+owner before a targeted SDK position read. The returned owner and position must
+also match. Missing or mismatched hints retain wallet-wide discovery; RPC errors
+retain ordinary failover. Local metadata alone never authorizes withdrawal.
+This avoids enumerating unrelated positions for a verified known position;
+it is not proof of improved live latency or exit price.
+Optional `dlmm_close_transports.jsonl` records the
 signature, bytes hash, configured endpoint count, client elapsed time and outcome.
 It stores no RPC URLs or raw transaction. Journal failure cannot block a close.
 These timings are client observations, not finalized block times, saved SOL or

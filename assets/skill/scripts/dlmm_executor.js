@@ -847,6 +847,37 @@ async function deployPosition(poolAddressStr, amountX, amountY, binsBelow, binsA
 
 
 async function findPoolForPosition(connection, wallet, positionAddressStr) {
+  // A local entry is only a pool hint. Prove program, account type, pool and
+  // wallet ownership on chain before avoiding the wallet-wide SDK scan.
+  let poolHint = null;
+  if (path.basename(positionAddressStr) === positionAddressStr) {
+    try {
+      const entry = JSON.parse(fs.readFileSync(path.join(PROFILE_DIR, "memories", "dlmm_entries",
+        `${positionAddressStr}.json`), "utf8"));
+      if (entry.position === positionAddressStr && typeof entry.pool === "string") {
+        poolHint = new PublicKey(entry.pool);
+      }
+    } catch { /* Legacy or invalid local evidence uses ordinary discovery. */ }
+  }
+  if (poolHint) {
+    const positionKey = new PublicKey(positionAddressStr);
+    const account = await connection.getAccountInfo(positionKey, "confirmed");
+    const idl = DLMM.IDL;
+    const discriminator = idl.accounts.find(a => a.name === "PositionV2")?.discriminator;
+    if (account && account.owner.toString() === idl.address && discriminator
+        && account.data.subarray(0, 8).equals(Buffer.from(discriminator))) {
+      const pool = await DLMM.create(connection, poolHint);
+      const native = pool.program.coder.accounts.decode("positionV2", account.data);
+      if (native.owner.toString() === wallet.publicKey.toString()
+          && native.lbPair.toString() === poolHint.toString()) {
+        const positionData = await pool.getPosition(positionKey);
+        if (positionData.publicKey.toString() === positionAddressStr
+            && positionData.positionData.owner.toString() === wallet.publicKey.toString()) {
+          return { pool, positionData, poolAddressStr: poolHint.toString() };
+        }
+      }
+    }
+  }
   // Try SDK first
   const allPositions = await DLMM.getAllLbPairPositionsByUser(connection, wallet.publicKey);
   for (const [lbPairKey, posData] of allPositions) {
