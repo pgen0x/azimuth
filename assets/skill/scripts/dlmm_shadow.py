@@ -72,10 +72,20 @@ def index_due_forecast(candidates, row, now):
     existing = candidates.get(pool)
     if existing and existing['base_mint'] != mint:
         return
+    allocations = row.get('allocations')
+    below = row.get('bins_below')
+    if (type(below) is not int or not 0 <= below <= 69
+            or not isinstance(allocations, list) or len(allocations) != below+1
+            or any(not isinstance(b, dict) or type(b.get('id')) is not int for b in allocations)):
+        return
+    anchor = allocations[-1]['id']
+    if abs(anchor) > 100000 or [b['id'] for b in allocations] != list(range(anchor-below, anchor+1)):
+        return
     candidate = dict(existing) if existing else dict(
         pool=pool, base_mint=mint, mode=row['mode'], source_id=row['id'],
         source_ts=recorded, terminal_only=True)
-    candidate['terminal_target_ts'] = min(target, candidate.get('terminal_target_ts', target))
+    if target < candidate.get('terminal_target_ts', float('inf')):
+        candidate.update(terminal_target_ts=target, terminal_anchor_bin=anchor)
     candidates[pool] = candidate
     if len(candidates) > CANDIDATE_MAX_POOLS:
         # Earliest terminal deadlines precede ordinary rolling watch inputs.
@@ -175,13 +185,18 @@ def collect_candidate_bins(profile, candidates, deadline):
         started = time.time()
         record = dict(candidate, request_started_at=started)
         try:
-            output = subprocess.check_output(['node', str(executor), 'candidate-bin-snapshot', pool, '69', '16'],
+            command = ['node', str(executor), 'candidate-bin-snapshot', pool, '69', '16']
+            if terminal_due:
+                command.append(str(candidate['terminal_anchor_bin']))
+            output = subprocess.check_output(command,
                 stderr=subprocess.DEVNULL, timeout=request_timeout(phase_end, 3))
             sample = json.loads(output)
             if sample.get('status') == 'deferred' and sample.get('reason') == 'wallet_trade_active':
                 result['candidate_bin_trading_deferred'] = True
                 break
             validate_candidate_snapshot(sample, pool, candidate['base_mint'])
+            if terminal_due and sample['anchor_bin'] != candidate['terminal_anchor_bin']:
+                raise ValueError('terminal_anchor_mismatch')
             if not started - 1 <= sample['ts'] <= time.time():
                 raise ValueError('invalid_candidate_timestamp')
             fields = ('ts', 'active_bin', 'anchor_bin', 'lower_bin', 'upper_bin', 'price',
@@ -197,7 +212,7 @@ def collect_candidate_bins(profile, candidates, deadline):
             record.update(status='unmeasured', reason=type(error).__name__)
         record['collected_at'] = time.time()
         append(file, record)
-        if record['status'] == 'observed' and not candidate.get('terminal_only'):
+        if record['status'] == 'observed' and not candidate.get('terminal_only') and not terminal_due:
             try:
                 from dlmm_fee_forecast import candidate_fee_forecast, BASIS
                 if time.monotonic() >= phase_end:

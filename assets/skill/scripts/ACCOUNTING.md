@@ -903,6 +903,11 @@ remain in force. A terminal-only observation does not create another forecast.
 Already observed terminal windows are skipped. This reduces dependence on
 continued candidate selection, but does not guarantee coverage under the
 shared request budget or recover missing historical observations.
+Terminal reads use the earliest due forecast's original allocation anchor,
+keeping the same bounded 69-below/16-above snapshot while separately observing
+the current active bin and price. They do not freeze new forecasts from this
+historical geometry. Different overlapping forecasts can still require bins
+outside that single snapshot; missing coverage remains unmeasured.
 
 `python3 scripts/dlmm_fee_forecast.py --profile <profile> [--as-of <timestamp>]`
 reads and scores these recorded forecasts locally. It uses the first native

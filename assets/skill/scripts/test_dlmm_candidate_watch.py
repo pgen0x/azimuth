@@ -43,7 +43,8 @@ class CandidateWatchTests(unittest.TestCase):
         return dict(dict(version=1, id='frozen-test', status='frozen_prediction',
             pool=POOL, base_mint=MINT, mode='turnover', baseline_ts=6400,
             frozen_at=6401, recorded_at=6402, horizon_seconds=3600,
-            horizon_target_ts=10000), **changes)
+            horizon_target_ts=10000, bins_below=44,
+            allocations=[dict(id=i) for i in range(-44,1)]), **changes)
 
     def test_expired_watch_still_collects_due_forecast_without_renewing_it(self):
         forecast_file = self.profile/'memories'/shadow.FORECAST_FILE
@@ -56,6 +57,7 @@ class CandidateWatchTests(unittest.TestCase):
             result = shadow.collect_candidate_bins(self.profile, {}, 40)
             self.assertEqual(result['candidate_bin_snapshots_observed'], 1)
             self.assertEqual(read.call_count, 1)
+            self.assertEqual(read.call_args.args[0][-1], '0')
             self.assertEqual(forecast_file.read_bytes(), before)
         with patch.object(shadow.time, 'time', return_value=10300), \
              patch.object(shadow.time, 'monotonic', return_value=0), \
@@ -66,7 +68,8 @@ class CandidateWatchTests(unittest.TestCase):
     def test_terminal_watch_rejects_late_future_expired_and_invalid_identity(self):
         for changes in (dict(recorded_at=10000), dict(horizon_target_ts=10001),
                         dict(pool='bad'), dict(base_mint=watch.SOL_MINT),
-                        dict(frozen_at=float('nan')), dict(horizon_seconds=1)):
+                        dict(frozen_at=float('nan')), dict(horizon_seconds=1),
+                        dict(allocations=[]), dict(bins_below=70)):
             candidates = {}
             shadow.index_due_forecast(candidates, self.due_forecast(**changes), 10000)
             self.assertEqual(candidates, {})
@@ -99,6 +102,16 @@ class CandidateWatchTests(unittest.TestCase):
             shadow.collect_candidate_bins(self.profile, fresh, 40)
         self.assertEqual(read.call_args_list[0].args[0][3], POOL)
         self.assertEqual(read.call_count, 2)
+
+    def test_terminal_snapshot_rejects_executor_that_ignores_frozen_anchor(self):
+        shadow.append(self.profile/'memories'/shadow.FORECAST_FILE,
+            self.due_forecast(allocations=[dict(id=i) for i in range(-244,-199)]))
+        with patch.object(shadow.time, 'time', return_value=10000), \
+             patch.object(shadow.time, 'monotonic', return_value=0), \
+             patch.object(shadow.subprocess, 'check_output', return_value=json.dumps(snapshot()).encode()):
+            result = shadow.collect_candidate_bins(self.profile, {}, 40)
+        self.assertEqual(result['candidate_bin_snapshots_observed'], 0)
+        self.assertEqual(result['candidate_fee_forecasts_frozen'], 0)
 
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()

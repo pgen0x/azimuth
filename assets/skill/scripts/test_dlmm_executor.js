@@ -204,6 +204,15 @@ vm.runInNewContext("const productionExitTransport=confirmExitTransaction;confirm
     assert.equal(observed.bins.length, 86); assert.equal(binReads, 1); assert.equal(activeReads, 1);
     assert.equal(observed.bin_step, 100); assert.equal(candidateCanonicalReads, 1);
     assert.equal(observed.canonical_liquidity.reason, "canonical_pool_absent");
+    // A terminal read follows the original allocation even after active moves.
+    const anchored = await snapshot("pool", 69, 16, -200);
+    assert.equal(anchored.anchor_bin, -200);
+    assert.equal(anchored.lower_bin, -269); assert.equal(anchored.upper_bin, -184);
+    assert.equal(anchored.bins.length, 86);
+    assert.equal(anchored.active_bin, observed.active_bin);
+    for (const anchor of [NaN, Infinity, 0.5, 100001]) {
+      await assert.rejects(snapshot("pool", 69, 16, anchor), /anchor/);
+    }
     candidateCanonicalError = true;
     assert.equal((await snapshot("pool")).status, "observed");
     candidateCanonicalError = false;
@@ -211,7 +220,7 @@ vm.runInNewContext("const productionExitTransport=confirmExitTransaction;confirm
     for (const [below, above] of [[70, 0], [-1, 0], [1.5, 0], [0, 17], [0, NaN]]) {
       await assert.rejects(snapshot("pool", below, above), /bounds/);
     }
-    assert.equal(candidateCreates, 2);
+    assert.equal(candidateCreates, 3);
     delete env.SOLANA_PUBLIC_KEY;
     await assert.rejects(snapshot("pool"), /SOLANA_PUBLIC_KEY/);
     env.SOLANA_PUBLIC_KEY = wallet.publicKey.toString();
