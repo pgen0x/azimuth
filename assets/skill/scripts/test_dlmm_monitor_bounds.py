@@ -309,6 +309,28 @@ class SuspectRiskTests(unittest.TestCase):
         self.assertTrue(healthy['emergency_close'])
         self.assertIn('RUG velocity dump', healthy['emergency_reason'])
 
+    def test_discovery_outage_keeps_tracked_risk_checks_bounded(self):
+        source = Path(monitor.__file__).read_text()
+        start = source.index("    # Get current positions from Meteora Portfolio API")
+        code = source[start:source.index("    now = int(time.time())", start)]
+        for tracked, expected in ((['position'], [3, 3]), ([], [15, 30])):
+            calls = []
+            def indexed(wallet, *, timeout):
+                calls.append(timeout)
+                return None, 'indexer unavailable'
+            def sdk(command, *, timeout):
+                calls.append(timeout)
+                return None, 'discovery unavailable'
+            scope = dict(vars(monitor), active_positions=tracked,
+                         get_wallet_address=lambda: 'wallet',
+                         get_meteora_portfolio_positions=indexed, run_command_json=sdk)
+            with contextlib.redirect_stdout(io.StringIO()):
+                exec(compile(textwrap.dedent(code), monitor.__file__, 'exec'), scope)
+            self.assertEqual(calls, expected)
+            self.assertFalse(scope['api_available'])
+            self.assertEqual(scope['active_positions'], tracked)
+            self.assertEqual(scope['blockchain_positions'], {})
+
     def test_verified_native_loss_does_not_wait_for_indexed_fallback(self):
         state, calls = self.replay(self.mark(pct=-60), portfolio=False)
         self.assertTrue(state["emergency_close"])

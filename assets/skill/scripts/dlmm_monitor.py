@@ -126,13 +126,13 @@ def record_close_bin_observation(mark, pool, position, reason, decision_at):
         return False  # Telemetry must not change close handling or its verdict.
 
 
-def get_meteora_portfolio_positions(wallet_address):
+def get_meteora_portfolio_positions(wallet_address, *, timeout=15):
     """Returns dict keyed by position address using Meteora Portfolio HTTP API.
     More reliable than DLMM SDK getAllLbPairPositionsByUser which requires fully initialized bin arrays."""
     try:
         url = f"{METEORA_PORTFOLIO_API}?user={wallet_address}"
         req = urllib.request.Request(url, headers={"User-Agent": "dlmm-lp/1.0"})
-        with urllib.request.urlopen(req, timeout=15) as resp:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
             data = json.loads(resp.read())
         sol_price_usd = float(data.get("solPrice") or 0.0)
         result = {}
@@ -1893,7 +1893,11 @@ def main():
     meteora_sol_price = 0.0
     wallet_address = get_wallet_address()
     if wallet_address:
-        bp_dict, bp_err = get_meteora_portfolio_positions(wallet_address)
+        # Discovery enriches known positions but must not consume a full risk
+        # cycle during an indexer outage. With no tracked positions, retain the
+        # longer recovery budget so orphan discovery can still complete.
+        discovery_timeout = 3 if active_positions else 15
+        bp_dict, bp_err = get_meteora_portfolio_positions(wallet_address, timeout=discovery_timeout)
         if bp_dict is not None:
             blockchain_positions = bp_dict
             api_available = True
@@ -1901,7 +1905,8 @@ def main():
             print(f"Meteora Portfolio API: {len(bp_dict)} position(s) found on-chain")
         else:
             print(f"Meteora Portfolio API failed ({bp_err}). Falling back to SDK.")
-            bp_list, bp_err2 = run_command_json(f"node {EXECUTOR_PATH} positions")
+            bp_list, bp_err2 = run_command_json(f"node {EXECUTOR_PATH} positions",
+                                                timeout=3 if active_positions else 30)
             if bp_list and isinstance(bp_list, list):
                 for bp in bp_list:
                     blockchain_positions[bp["position"]] = bp
