@@ -980,6 +980,7 @@ def apply_batch_conviction(candidates, mode="multiday"):
 
     weights = load_signal_weights(mode)
     for c in survivors:
+        c["_conviction_input_score"] = c.get("score")
         adj = 0.0
         notes = []
 
@@ -1736,6 +1737,7 @@ def main():
         sys.exit(0)
 
     # --pool override: AI specified which pool to deploy
+    risk_sizing = None
     winner = None
     if cli.pool:
         for c in valid_candidates:
@@ -1819,6 +1821,16 @@ def main():
         if risk_multiplier < 1.0:
             print(f"Risk-scaled ticket: {winner['base_symbol']} score {winner['score']:.1f} "
                   f"-> {risk_multiplier:.2f}x ({original_deploy:.2f} -> {deploy_sol:.2f} SOL)")
+        risk_sizing = {
+            "version": 1, "source": "from_batch" if batch_mode else "from_signal",
+            "mode": mode, "input_score": winner.get("_conviction_input_score"),
+            "adjusted_score": winner.get("score"),
+            "score_adjustment": winner.get("_conviction_adj"),
+            "adjustment_notes": list(winner.get("_conviction_notes", [])),
+            "requested_ticket_sol": original_deploy, "multiplier": risk_multiplier,
+            "accepted_ticket_sol": deploy_sol,
+            "minimum_entry_lamports": CASH_POLICY["minimum_entry_lamports"],
+        }
 
     # 5. Indicators Check (batch mode already ran this inside the pick loop)
     if params.get("INDICATORS_ENABLED") and not batch_mode:
@@ -2002,6 +2014,8 @@ def main():
     # A timed-out sender can still land. Adoption must retain the same risk
     # identity and learner inputs as normal registration after confirmation.
     entry_context = {key: winner.get(key) for key in ("pair", "base_mint", "base_symbol", "sol_is_x", "dev")}
+    if risk_sizing is not None:
+        entry_context["risk_sizing"] = risk_sizing
     entry_context.update(entry_id=entry_id, pair=winner["name"], mode=mode, strategy=strategy, size_sol=deploy_sol,
                          signal={key: winner.get(key) for key in (
                              "score", "organic_score", "fee_tvl_ratio", "fee_active_tvl_ratio",
