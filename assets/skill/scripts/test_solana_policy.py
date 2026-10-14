@@ -454,6 +454,38 @@ def main():
                 assert ns["deploy_sol"] == .1
         assert market_reads == (["high"] if expected else [])
 
+    # AI-selected records enter with the original signal score. Exercise the
+    # actual parsing/conviction branch and selection block together: penalties
+    # apply once, and --pool cannot bypass the same minimum-ticket decision.
+    signal_branch = next(n for n in ast.walk(ast.parse(source))
+                         if isinstance(n, ast.If) and ast.unparse(n.test) == "cli.from_signal")
+    signal_code = compile(ast.Module(body=signal_branch.body, type_ignores=[]),
+                          pipeline.__file__, "exec")
+    for score, ticket, override, expected_score, expected_ticket in [
+        (75, .1, None, 50, None), (75, .1, "high", 50, None),
+        (75, .2, None, 50, .15), (95, .1, None, 70, .1),
+        (40, .1, None, None, None),
+    ]:
+        record = dict(high, score=score, tvl=20000, gmgn_dev_status="creator_close")
+        ns = dict(vars(pipeline), cli=argparse.Namespace(pool=override, strategy="sol_bidask",
+                  from_signal=json.dumps(record)), batch_mode=False, deploy_sol=ticket,
+                  mode="turnover", params={}, timeframe="30m")
+        market_reads = []
+        ns["check_bin_coverage"] = lambda pool,*args: market_reads.append(pool) or {"deployable":True}
+        with patch.object(pipeline, "load_signal_weights", return_value={}), \
+                contextlib.redirect_stdout(io.StringIO()):
+            try:
+                exec(signal_code, ns)
+                assert ns["candidates"][0]["score"] == expected_score
+                ns["valid_candidates"] = ns["candidates"]
+                exec(selection, ns)
+            except SystemExit as exc:
+                assert expected_ticket is None and exc.code == 0
+            else:
+                assert expected_ticket is not None and ns["deploy_sol"] == expected_ticket
+        if expected_ticket is None:
+            assert not market_reads
+
     # The risk/override paths must never execute a token swap. Only the explicit
     # manual-cleanup branch may do so; pending settlement runs in its own worker.
     monitor = ast.parse(Path(__file__).with_name("dlmm_monitor.py").read_text())
