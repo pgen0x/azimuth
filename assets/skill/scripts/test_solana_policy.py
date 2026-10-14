@@ -419,6 +419,41 @@ def main():
             assert ("expects a non-empty JSON array" in output.getvalue()) == passed
             assert defer.call_count == (0 if passed else 1)
 
+    # Risk reductions cannot be raised back to the minimum ticket. Preserve
+    # the existing multiplier/rounding and full-size high-conviction path.
+    assert pipeline.risk_scaled_ticket(.1, 30, "turnover") == (0, .5)
+    assert pipeline.risk_scaled_ticket(.1, 35.27279169983886, "turnover")[0] == 0
+    assert pipeline.risk_scaled_ticket(.2, 30, "turnover") == (.1, .5)
+    assert pipeline.risk_scaled_ticket(.1, 70, "turnover") == (.1, 1)
+    assert pipeline.risk_scaled_ticket(.1, 52, "multiday") == (.1, 1)
+    assert pipeline.risk_scaled_ticket(.12, 106.788112, "turnover") == (.12, 1)
+    assert pipeline.risk_scaled_ticket(.12, None, "turnover") == (.12, 1)
+    # Execute the actual selection+sizing block: a subminimum first candidate
+    # must not consume market reads or prevent a valid runner-up from winning.
+    source = Path(pipeline.__file__).read_text()
+    start = source.index("    # --pool override:")
+    end = source.index("    # 5. Indicators Check", start)
+    selection = compile(textwrap.dedent(source[start:end]), pipeline.__file__, "exec")
+    low = dict(pool="low", name="low", base_symbol="LOW", base_mint="lowmint", score=35,
+               volatility=2, bin_step=100, sol_is_x=False)
+    high = dict(low, pool="high", name="high", base_symbol="HIGH", score=75)
+    for candidates, override, expected in [([low,high],None,"high"),([low],None,None),([low,high],"low",None)]:
+        ns = dict(vars(pipeline), valid_candidates=candidates,
+                  cli=argparse.Namespace(pool=override,strategy="sol_bidask"),
+                  batch_mode=True, deploy_sol=.1, mode="turnover", params={}, timeframe="30m")
+        market_reads=[]
+        ns["check_bin_coverage"]=lambda pool,*args: market_reads.append(pool) or {"deployable":True}
+        ns["predeploy_live_gate_reject"]=lambda *args: None
+        with contextlib.redirect_stdout(io.StringIO()):
+            try:
+                exec(selection, ns)
+            except SystemExit as exc:
+                assert expected is None and exc.code == 0
+            else:
+                assert expected is not None and ns["winner"]["pool"] == expected
+                assert ns["deploy_sol"] == .1
+        assert market_reads == (["high"] if expected else [])
+
     # The risk/override paths must never execute a token swap. Only the explicit
     # manual-cleanup branch may do so; pending settlement runs in its own worker.
     monitor = ast.parse(Path(__file__).with_name("dlmm_monitor.py").read_text())
