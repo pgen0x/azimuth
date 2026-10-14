@@ -13,6 +13,10 @@ const definition = {name: "add_liquidity_by_strategy2", discriminator: [3,221,14
     .map(name => ({name}))};
 const initializeDefinition = {name: "initialize_position", discriminator: [219,192,234,71,190,191,102,80],
   accounts: ["payer","position","lb_pair","owner"].map(name => ({name}))};
+const pdaDefinition = {name: "initialize_position_pda",
+  discriminator: [...require("node:crypto").createHash("sha256").update("global:initialize_position_pda").digest().subarray(0,8)],
+  accounts: ["payer","base","position","lb_pair","owner","system_program","rent","event_authority","program"]
+    .map(name => ({name}))};
 const entry = {position: "2".repeat(32), pool: "3".repeat(32), base_mint: "4".repeat(32),
   entry_id: "entry", root_chain_id: "2".repeat(32), strategy: "sol_bidask", sol_is_x: false,
   size_sol: .1, amount_x: 0, amount_y: .1, entry_bin: 0, bins_below: 1, bins_above: 0};
@@ -191,7 +195,7 @@ const rejects = callback => assert.throws(callback, /Native risk mark unavailabl
     program: {coder: {accounts: {decode: () => nativeAccount}}}, getPosition: async () => ({positionData: sdkData}),
     fromPricePerLamport: value => String(value/1000)};
   const deps = {"@solana/web3.js": {Connection, PublicKey: function(v) {return key(v);}, Keypair: {fromSecretKey() {signerCalls++; throw Error("must never sign");}}},
-    "@meteora-ag/dlmm": {create: async () => pool, getPriceOfBinByBinId: () => "1.25", IDL: {address: programId, accounts: [{name: "PositionV2", discriminator: [1,2,3,4,5,6,7,8]}], instructions: [definition, initializeDefinition]}},
+    "@meteora-ag/dlmm": {create: async () => pool, getPriceOfBinByBinId: () => "1.25", IDL: {address: programId, accounts: [{name: "PositionV2", discriminator: [1,2,3,4,5,6,7,8]}], instructions: [definition, initializeDefinition, pdaDefinition]}},
     "bn.js": {}, "bs58": {decode: binding.decode}, "dotenv": {config() {}, parse: () => ({})}};
   const sandbox = {require: name => deps[name] || require(name), module: {exports: {}}, Buffer,
     process: {argv: ["node", path.join(root, "skills/solana-dlmm/scripts/dlmm_executor.js")],
@@ -222,6 +226,32 @@ const rejects = callback => assert.throws(callback, /Native risk mark unavailabl
   assert.equal(mark.success,true);
   assert.equal(mark.bin_observation.initial_funding.composition_fee_lamports,"1652");
   assert.equal(rpcCalls-beforeAllocation,2); assert.equal(signerCalls,0);
+  // Exercise the executor's real definition selection for the wallet-PDA
+  // entry path; all original transfer, owner and signature checks still run.
+  const pdaPayload = Buffer.alloc(16); Buffer.from(pdaDefinition.discriminator).copy(pdaPayload);
+  pdaPayload.writeInt32LE(-1,8); pdaPayload.writeInt32LE(2,12);
+  const pdaTx = copy(allocationTx);
+  pdaTx.transaction.message.instructions[0] = {programId, data:pdaPayload.toString("hex"),
+    accounts:[submission.wallet,submission.wallet,entry.position,entry.pool,submission.wallet,
+      "system","rent","event-authority",programId]};
+  fundingTx=pdaTx;
+  mark=await run(entry.pool,entry.position);
+  assert.equal(mark.success,true);
+  assert.equal(mark.deposit_lamports,"99999999");
+  assert.equal(mark.bin_observation.initial_funding.composition_fee_lamports,"1652");
+  for (const breakPda of [
+    t=>{t.transaction.message.instructions[0].accounts[1]="foreign-base";},
+    t=>{t.transaction.message.instructions[0].accounts[4]="foreign-owner";},
+    t=>{const b=Buffer.from(pdaPayload);b.writeInt32LE(-2,8);t.transaction.message.instructions[0].data=b.toString("hex");},
+    t=>{const b=Buffer.from(pdaPayload);b.writeInt32LE(3,12);t.transaction.message.instructions[0].data=b.toString("hex");},
+    t=>{t.transaction.message.instructions[0].data+="00";},
+    t=>{t.meta.innerInstructions[0].instructions[1].parsed.info.destination="foreign-vault";},
+  ]) {
+    fundingTx=copy(pdaTx);breakPda(fundingTx);
+    assert.equal((await run(entry.pool,entry.position)).success,false);
+  }
+  assert.equal(signerCalls,0);
+  fundingTx=pdaTx;
   // Missing optional allocation evidence preserves native risk valuation.
   pool.program.coder.events.decode = () => {throw Error("event decoder unavailable");};
   assert.equal((await run(entry.pool,entry.position)).success,true);

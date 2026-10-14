@@ -1157,7 +1157,7 @@ async function getPositionRiskMark(poolAddressStr, positionAddressStr) {
       const native = pool.program.coder.accounts.decode("positionV2", account.data);
       const fundingBinding = {
         definition: idl.instructions.find(i => i.name === "add_liquidity_by_strategy2"),
-        initializeDefinitions: idl.instructions.filter(i => ["initialize_position", "initialize_position2"].includes(i.name)),
+        initializeDefinitions: idl.instructions.filter(i => ["initialize_position", "initialize_position2", "initialize_position_pda"].includes(i.name)),
         decode: bs58.decode, programId: idl.address,
         tokenX: pool.lbPair.tokenXMint.toString(), tokenY: pool.lbPair.tokenYMint.toString(),
         reserveX: pool.lbPair.reserveX.toString(), reserveY: pool.lbPair.reserveY.toString(),
