@@ -483,6 +483,14 @@ def main():
                 assert expected_ticket is None and exc.code == 0
             else:
                 assert expected_ticket is not None and ns["deploy_sol"] == expected_ticket
+                evidence = ns["risk_sizing"]
+                assert evidence["source"] == "from_signal"
+                assert evidence["input_score"] == score
+                assert evidence["adjusted_score"] == expected_score
+                assert evidence["score_adjustment"] == -25
+                assert evidence["requested_ticket_sol"] == ticket
+                assert evidence["accepted_ticket_sol"] == expected_ticket
+                assert evidence["minimum_entry_lamports"] == 100000000
         if expected_ticket is None:
             assert not market_reads
 
@@ -594,11 +602,12 @@ def main():
                   mcap=None)
     ns=dict(vars(pipeline),winner=winner,entry_id="entry",mode="pulse",strategy="sol_bidask",
             deploy_sol=.12,amount_x=0,amount_y=.12,bins_below=44,bins_above=0,
-            strategy_type="bid_ask",slippage_bps=1000)
+            strategy_type="bid_ask",slippage_bps=1000,risk_sizing=evidence)
     start=source.index("    entry_context =");end=source.index('    print(f"Running deploy:',start)
     exec(compile(textwrap.dedent(source[start:end]),pipeline.__file__,"exec"),ns)
     encoded=shlex.split(ns["deploy_cmd"])[0].split("=",1)[1]
     persisted=json.loads(encoded)
+    assert persisted["risk_sizing"] == evidence
     assert persisted["signal"]["entry_live_gates"]==checks
     assert persisted["dev"]=="developer"
     assert persisted["signal"]["holders"]==0 and persisted["signal"]["global_fees_sol"]==0
@@ -610,6 +619,13 @@ def main():
     assert json.loads(json.dumps(ns["tracking_data"],allow_nan=False))["signal"]["entry_live_gates"]==checks
     assert ns["tracking_data"]["signal"]==persisted["signal"]
     assert ns["tracking_data"]["dev"]==persisted["dev"]
+    # Manual discovery has no automatic sizing proof; do not inherit a caller's
+    # object or manufacture one when the automatic policy was not evaluated.
+    ns["risk_sizing"] = None
+    ns["winner"]["risk_sizing"] = {"source": "forged"}
+    start=source.index("    entry_context =");end=source.index('    print(f"Running deploy:',start)
+    exec(compile(textwrap.dedent(source[start:end]),pipeline.__file__,"exec"),ns)
+    assert "risk_sizing" not in ns["entry_context"]
     with patch.dict(os.environ,DRY_RUN="true"),patch.object(pipeline,"get_momentum",side_effect=AssertionError("dry run fetched market")):
         dry=dict(candidate,entry_live_gates={"forged":True})
         assert pipeline.predeploy_live_gate_reject(dry,.1,"5m") is None

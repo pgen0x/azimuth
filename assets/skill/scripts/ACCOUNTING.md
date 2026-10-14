@@ -1027,6 +1027,13 @@ This enforces the existing risk
 budget and does not establish profitability or protect against a high-score
 pool collapsing. It does not modify exits or existing positions.
 
+Accepted automatic entries carry `risk_sizing` in the executor context persisted
+before transaction submission: original and adjusted scores, adjustment notes,
+requested ticket, multiplier, accepted ticket and configured minimum. This is
+decision provenance, not a profit prediction. Manual discovery has no such
+proof, and historical entries without it remain unknown rather than being
+backfilled with today's policy or weights.
+
 Native inventory verification recognizes both ordinary position initialization
 and wallet-PDA initialization. PDA funding must bind the same payer, base wallet,
 owner, pool and planned bin range before its SOL transfer can establish the
