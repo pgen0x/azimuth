@@ -141,6 +141,9 @@ func (s *Seen) PoolCloseHistory(ctx context.Context, pool string) *PoolHistory {
 	} else if cash.Basis == "matched_refund_cash_bounds" && cash.Net == nil &&
 		cash.Lower != nil && cash.Upper != nil && *cash.Lower <= *cash.Upper {
 		h.Lower, h.Upper, h.Basis = cash.Lower, cash.Upper, cash.Basis
+	} else if cash.Basis == "nonpositive_cash_upper_bound" && cash.Net == nil &&
+		cash.Lower == nil && cash.Upper != nil && *cash.Upper <= 0 {
+		h.Upper, h.Basis = cash.Upper, cash.Basis
 	}
 	return h
 }

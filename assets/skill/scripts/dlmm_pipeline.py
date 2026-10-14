@@ -1039,6 +1039,11 @@ def apply_batch_conviction(candidates, mode="multiday"):
             if (all(type(v) in (int, float) and math.isfinite(v) for v in (lo, hi))
                     and lo <= hi and (hi < 0 or lo >= 0)):
                 prior_pnl, bounded_cash = hi, True
+        if c.get("prior_pnl_basis") == "nonpositive_cash_upper_bound":
+            hi = c.get("prior_cash_upper_sol")
+            if (c.get("prior_cash_lower_sol") is None and c.get("prior_net_pnl_sol") is None
+                    and type(hi) in (int, float) and math.isfinite(hi) and hi <= 0):
+                prior_pnl, bounded_cash = hi, True
         if prior_pnl is not None and float(prior_pnl) < 0:
             adj -= 20; notes.append("prior_bounded_cash_loss-20" if bounded_cash else "prior_cash_loss-20" if cash_history else "prior_mark_loss-20")
         # Surviving PVP candidates (score >= 60) still yield to a clean pick.
