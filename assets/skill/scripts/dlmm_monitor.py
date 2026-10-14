@@ -2432,7 +2432,14 @@ def main():
         # because the recovery grace below reads the 5m candle. The exit-side
         # liquidity floor (5b) and the downtrend/fast-out exits (5c/5d) reuse
         # these values — still one fetch per position per cycle.
-        pool_liquidity_usd, price_change_h1, price_change_m5 = get_pool_liquidity_usd(pool, meta.get("base_mint"))
+        # Once the hard emergency floor fires, optional market enrichment must
+        # not delay the already-required exit (two HTTP endpoints can time out).
+        # Unknown values keep downstream enrichment-only rules inactive; the
+        # emergency reason is preserved below and still bypasses holds.
+        if emergency_close:
+            pool_liquidity_usd, price_change_h1, price_change_m5 = None, None, None
+        else:
+            pool_liquidity_usd, price_change_h1, price_change_m5 = get_pool_liquidity_usd(pool, meta.get("base_mint"))
 
         # 3c. Rug velocity gate: a 5m candle at or below RUG_M5_PCT is the token
         # dying in real time, not volatility — emergency close NOW, same class

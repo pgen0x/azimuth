@@ -287,6 +287,31 @@ class SuspectRiskTests(unittest.TestCase):
                 exec(compile(risk, monitor.__file__, "exec"), scope)
         return scope, calls
 
+    def test_native_emergency_skips_optional_market_fetch_but_keeps_rug_detection(self):
+        source = Path(monitor.__file__).read_text()
+        code = textwrap.dedent(source[source.index("        # 3b. DexScreener liquidity"):
+                                      source.index("        # 4. Out of Range (OOR)")])
+        emergency, _ = self.replay(self.mark(pct=-60), portfolio=False)
+        def unavailable(*args):
+            self.fail("Emergency exit waited for optional DexScreener request")
+        emergency['get_pool_liquidity_usd'] = unavailable
+        reason = emergency['emergency_reason']
+        exec(compile(code, monitor.__file__, 'exec'), emergency)
+        self.assertEqual(emergency['emergency_reason'], reason)
+        self.assertTrue(emergency['emergency_close'])
+        self.assertIsNone(emergency['pool_liquidity_usd'])
+        self.assertIsNone(emergency['price_change_m5'])
+        healthy, _ = self.replay(self.mark(pct=.1), indexed=.1)
+        calls = []
+        def rug_data(*args):
+            calls.append(args)
+            return 100000, -25, -30
+        healthy['get_pool_liquidity_usd'] = rug_data
+        exec(compile(code, monitor.__file__, 'exec'), healthy)
+        self.assertEqual(len(calls), 1)
+        self.assertTrue(healthy['emergency_close'])
+        self.assertIn('RUG velocity dump', healthy['emergency_reason'])
+
     def test_verified_native_loss_does_not_wait_for_indexed_fallback(self):
         state, calls = self.replay(self.mark(pct=-60), portfolio=False)
         self.assertTrue(state["emergency_close"])
