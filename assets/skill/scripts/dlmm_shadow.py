@@ -68,7 +68,8 @@ def index_due_forecast(candidates, row, now):
     """Retain terminal observations independently of renewed market selection."""
     target, recorded = row.get('horizon_target_ts'), row.get('recorded_at')
     pool, mint = row.get('pool'), row.get('base_mint')
-    if (row.get('status') != 'frozen_prediction' or row.get('version') != 1
+    if (row.get('status') != 'frozen_prediction'
+            or type(row.get('version')) is not int or row['version'] not in (1, 2)
             or row.get('mode') not in HORIZONS
             or not isinstance(pool, str) or not ADDRESS.fullmatch(pool)
             or not isinstance(mint, str) or not ADDRESS.fullmatch(mint) or mint == SOL_MINT

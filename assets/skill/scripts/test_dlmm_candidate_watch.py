@@ -47,26 +47,31 @@ class CandidateWatchTests(unittest.TestCase):
             allocations=[dict(id=i) for i in range(-44,1)]), **changes)
 
     def test_expired_watch_still_collects_due_forecast_without_renewing_it(self):
-        forecast_file = self.profile/'memories'/shadow.FORECAST_FILE
-        shadow.append(forecast_file, self.due_forecast())
-        before = forecast_file.read_bytes()
-        # Original candidate selection has expired; no current watch inputs.
-        with patch.object(shadow.time, 'time', return_value=10000), \
-             patch.object(shadow.time, 'monotonic', return_value=0), \
-             patch.object(shadow.subprocess, 'check_output', return_value=json.dumps(snapshot()).encode()) as read:
-            result = shadow.collect_candidate_bins(self.profile, {}, 40)
-            self.assertEqual(result['candidate_bin_snapshots_observed'], 1)
-            self.assertEqual(read.call_count, 1)
-            self.assertEqual(read.call_args.args[0][-1], '0')
-            self.assertEqual(forecast_file.read_bytes(), before)
-        with patch.object(shadow.time, 'time', return_value=10300), \
-             patch.object(shadow.time, 'monotonic', return_value=0), \
-             patch.object(shadow.subprocess, 'check_output') as read:
-            shadow.collect_candidate_bins(self.profile, {}, 40)
-            read.assert_not_called()  # Already observed within terminal window.
+        for version in (1, 2):
+            with self.subTest(version=version):
+                self.profile = Path(self.directory.name)/str(version)
+                forecast_file = self.profile/'memories'/shadow.FORECAST_FILE
+                shadow.append(forecast_file, self.due_forecast(version=version))
+                before = forecast_file.read_bytes()
+                # Original candidate selection has expired; no current watch inputs.
+                with patch.object(shadow.time, 'time', return_value=10000), \
+                     patch.object(shadow.time, 'monotonic', return_value=0), \
+                     patch.object(shadow.subprocess, 'check_output', return_value=json.dumps(snapshot()).encode()) as read:
+                    result = shadow.collect_candidate_bins(self.profile, {}, 40)
+                    self.assertEqual(result['candidate_bin_snapshots_observed'], 1)
+                    self.assertEqual(read.call_count, 1)
+                    self.assertEqual(read.call_args.args[0][-1], '0')
+                    self.assertEqual(forecast_file.read_bytes(), before)
+                with patch.object(shadow.time, 'time', return_value=10300), \
+                     patch.object(shadow.time, 'monotonic', return_value=0), \
+                     patch.object(shadow.subprocess, 'check_output') as read:
+                    shadow.collect_candidate_bins(self.profile, {}, 40)
+                    read.assert_not_called()  # Already observed within terminal window.
 
     def test_terminal_watch_rejects_late_future_expired_and_invalid_identity(self):
-        for changes in (dict(recorded_at=10000), dict(horizon_target_ts=10001),
+        for changes in (dict(version=0), dict(version=3), dict(version=True),
+                        dict(version=2.0), dict(version='2'),
+                        dict(recorded_at=10000), dict(horizon_target_ts=10001),
                         dict(pool='bad'), dict(base_mint=watch.SOL_MINT),
                         dict(frozen_at=float('nan')), dict(horizon_seconds=1),
                         dict(allocations=[]), dict(bins_below=70)):
