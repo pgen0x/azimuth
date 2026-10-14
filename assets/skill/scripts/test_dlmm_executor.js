@@ -76,7 +76,8 @@ class RentTransaction {
 }
 class SwapTransaction {
   constructor(message) { this.message = message; this.signatures = [Buffer.from([1])]; }
-  static deserialize() { return new SwapTransaction({ header: { numRequiredSignatures: 1 }, staticAccountKeys: [wallet.publicKey], addressTableLookups: [], instructions: [] }); }
+  static deserialize() { return new SwapTransaction({ header: { numRequiredSignatures: 1 }, staticAccountKeys: [wallet.publicKey], addressTableLookups: [], instructions: [],
+    serialize() { return Buffer.from(JSON.stringify({blockhash:this.recentBlockhash,instructions:this.instructions})); } }); }
   sign() {}
   serialize() { return Buffer.from(this.message.recentBlockhash || "unsigned"); }
 }
@@ -507,6 +508,22 @@ vm.runInNewContext("const productionExitTransport=confirmExitTransaction;confirm
   assert.equal(lastOrdinary().net_recovery.required_minimum_lamports,1);
   assert.equal(lastOrdinary().net_recovery.reserved_quote_slippage_lamports,10000);
   assert.equal(lastOrdinary().net_recovery.token_rent_close_included,true);
+  assert.equal(lastOrdinary().net_recovery.simulated_wallet_delta_lamports,2488440);
+  assert.equal(lastOrdinary().net_recovery.simulation_slot,10);
+  assert.equal(lastOrdinary().net_recovery.wallet_read_before_slot,10);
+  assert.equal(lastOrdinary().net_recovery.wallet_read_after_slot,10);
+  assert.match(lastOrdinary().net_recovery.message_sha256,/^[a-f0-9]{64}$/);
+  const selectedRecoveryHash=lastOrdinary().net_recovery.message_sha256;
+  const ordinarySimulation=Connection.prototype.simulateTransaction;
+  const sendsBeforeMutation=sends;
+  Connection.prototype.simulateTransaction=async function(candidate,options) {
+    const result=await ordinarySimulation.call(this,candidate,options);
+    candidate.message.recentBlockhash="mutated-after-simulation";
+    return result;
+  };
+  assert.equal((await ordinary()).reason,"net_recovery_unmeasured");
+  assert.equal(sends,sendsBeforeMutation);
+  Connection.prototype.simulateTransaction=ordinarySimulation;
   assert.equal(lastOrdinary().minimum_out_amount,"990000");assert.equal(lastOrdinary().authorized_slippage_bps,100);
   for(const failure of ['simulation','worse-sale','emergency','unknown-emergency','legacy','extension']){
     ordinarySimulations=[];ordinaryCombinedError=failure==='simulation';ordinaryWorseSale=failure==='worse-sale';
@@ -527,6 +544,8 @@ vm.runInNewContext("const productionExitTransport=confirmExitTransaction;confirm
     assert.equal(lastOrdinary().token_rent_close_included,false);
     assert.equal(lastOrdinary().net_recovery.conservative_wallet_delta_lamports,990000);
     assert.equal(lastOrdinary().net_recovery.token_rent_close_included,false);
+    assert.notEqual(lastOrdinary().net_recovery.message_sha256,selectedRecoveryHash);
+    assert.equal(lastOrdinary().net_recovery.simulated_wallet_delta_lamports,1000000);
     assert.deepEqual(ordinarySimulations,failure==='simulation'||failure==='worse-sale'?[false,true]:[false]);
   }
   accounts=[eligible()];inventoryProof={success:true,amount_raw:"100000000",wallet_balance_raw:"100000000",slot:10};

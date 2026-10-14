@@ -601,6 +601,13 @@ value; rejected variants do not replace the original simulation's value.
 This includes simulated account funding and refunds, but is neither executed
 proceeds nor whole-position profit. Swaps without that gate omit this evidence.
 Recording it introduces no additional simulation or RPC request.
+New evidence also includes the SHA-256 of the selected serialized message,
+simulation slot, before/after wallet-read slots, and simulated wallet delta
+before reserving quote slippage. A message change during the measurement
+invalidates that result before signing. Accepted rent-close variants retain their
+own hash and readings; rejected optional variants cannot replace the selected
+message evidence. Slot numbers and equal wallet balances do not prove an atomic
+cross-route bank snapshot or unchanged market liquidity.
 
 New swap submission rows include `swap_quote`: quote receipt time, input/output
 mints, raw input/output amounts, minimum output, authorized slippage, provider
