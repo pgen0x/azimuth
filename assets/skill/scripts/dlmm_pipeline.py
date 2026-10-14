@@ -1280,7 +1280,8 @@ def main():
         print(f"Aborting: deploy amount {deploy_sol:.3f} SOL below 0.10 SOL minimum (wallet {sol_balance:.3f} SOL)")
         defer_capacity_signals(cli)
         sys.exit(0)
-    min_required = deploy_sol + 0.2 + 0.05
+    min_required = deploy_sol + (CASH_POLICY['native_reserve_lamports']
+                                 + CASH_POLICY['entry_rent_allowance_lamports']) / 1e9
     if sol_balance < min_required and not cli.analyze_only:
         print(f"Aborting: Insufficient SOL balance ({sol_balance:.3f} SOL < {min_required:.3f} SOL required)")
         defer_capacity_signals(cli)
