@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import sys
+import time
 import urllib.request
 import urllib.error
 
@@ -18,7 +19,7 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         return None  # Never forward provider credentials to a redirect target.
 
 
-def probe(runtime, model, opener=None):
+def probe(runtime, model, opener=None, timeout=60):
     if runtime.get("api_mode") != "chat_completions":
         raise ValueError("probe requires chat_completions")
     request = urllib.request.Request(
@@ -36,7 +37,7 @@ def probe(runtime, model, opener=None):
     opener = opener or urllib.request.build_opener(NoRedirect)
     # The configured router chain can take tens of seconds to answer. Allow it
     # to finish before declaring the route down.
-    with opener.open(request, timeout=60) as response:
+    with opener.open(request, timeout=timeout) as response:
         data = json.loads(response.read(1_000_000))
     if data.get("error"):
         return False
@@ -62,6 +63,43 @@ def probe(runtime, model, opener=None):
     # Both fields prove generated inference; neither proves a completed AI pick.
     return any(isinstance(message.get(key), str) and message[key].strip()
                for key in ("content", "reasoning_content"))
+
+
+def configured_probe_models(config, runtime, primary):
+    """Reuse credentials only for configured custom fallbacks on this endpoint."""
+    models = [primary]
+    if config.get("model", {}).get("provider") != "custom":
+        return models
+    for fallback in config.get("fallback_providers", []):
+        if not isinstance(fallback, dict):
+            continue
+        model = fallback.get("model")
+        if (fallback.get("provider") == "custom"
+                and isinstance(fallback.get("base_url"), str)
+                and fallback["base_url"].rstrip("/") == runtime["base_url"].rstrip("/")
+                and not fallback.get("api_key")
+                and isinstance(model, str) and model.strip() and model not in models):
+            models.append(model)
+    return models
+
+
+def probe_configured_route(runtime, models, opener=None, clock=time.monotonic):
+    """Share the existing deadline across primary and already configured fallbacks."""
+    deadline = clock() + 60
+    last_error = None
+    for model in models:
+        remaining = deadline - clock()
+        if remaining <= 0:
+            raise TimeoutError("AI probe deadline exhausted")
+        try:
+            if probe(runtime, model, opener, timeout=remaining):
+                return True
+            last_error = None
+        except (urllib.error.URLError, TimeoutError, ValueError) as exc:
+            last_error = exc
+    if last_error is not None:
+        raise last_error
+    return False
 
 
 def main():
@@ -91,7 +129,7 @@ def main():
             raise ValueError("route/profile model mismatch")
         runtime = resolve_runtime_provider(requested=model_cfg.get("provider"), target_model=model)
         stage = "inference"
-        healthy = probe(runtime, model)
+        healthy = probe_configured_route(runtime, configured_probe_models(config, runtime, model))
         print("AI probe healthy" if healthy else "AI probe unavailable")
         return 0 if healthy else 13
     except urllib.error.HTTPError as exc:

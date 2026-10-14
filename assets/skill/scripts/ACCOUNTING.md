@@ -644,6 +644,14 @@ advisory selection evidence, not portfolio NAV or a new risk-limit authority.
 
 ### Hermes delivery evidence
 
+The pre-dispatch inference probe checks the primary model, then explicitly
+configured custom-provider fallbacks using the same endpoint and credentials.
+All attempts share the existing 60-second deadline. Different endpoints,
+providers, or explicit fallback credentials are not probed with the primary
+credentials. A healthy fallback permits the existing Hermes route to own the
+batch; it does not change the configured model chain, submit a trade, or prove
+a completed pick. Exhausted/unavailable probes retain deterministic fallback.
+
 Solana webhook requests receive a random `X-Request-ID`, supported by Hermes as
 its delivery ID. The scanner persists the signal before sending, then records
 acceptance/rejection/uncertainty in

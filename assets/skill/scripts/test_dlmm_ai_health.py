@@ -1,11 +1,69 @@
 import io
 import json
 import unittest
+import urllib.error
 
-from dlmm_ai_health import probe
+from dlmm_ai_health import probe, configured_probe_models, probe_configured_route
 
 
 class ProbeTest(unittest.TestCase):
+    def test_only_configured_same_endpoint_fallbacks_reuse_credentials(self):
+        runtime = {"base_url": "http://router.test/v1/"}
+        fallbacks = [
+            {"provider": "custom", "model": "backup", "base_url": "http://router.test/v1"},
+            {"provider": "custom", "model": "foreign", "base_url": "http://other.test/v1"},
+            {"provider": "custom", "model": "other-key", "base_url": "http://router.test/v1", "api_key": "other"},
+            {"provider": "other", "model": "other-provider", "base_url": "http://router.test/v1"},
+            {"provider": "custom", "model": "implicit-endpoint"},
+            {"provider": "custom", "model": "markt", "base_url": "http://router.test/v1"},
+            None,
+        ]
+        config = {"model": {"provider": "custom"}, "fallback_providers": fallbacks}
+        self.assertEqual(configured_probe_models(config, runtime, "markt"), ["markt", "backup"])
+        config["model"]["provider"] = "other"
+        self.assertEqual(configured_probe_models(config, runtime, "markt"), ["markt"])
+
+    def test_primary_failure_uses_fallback_with_remaining_deadline(self):
+        runtime = {"api_mode": "chat_completions", "base_url": "http://router.test/v1", "api_key": "test"}
+        calls = []
+        class Opener:
+            def open(inner, req, timeout):
+                calls.append((json.loads(req.data)["model"], timeout))
+                if len(calls) == 1:
+                    raise urllib.error.HTTPError(req.full_url, 400, "unavailable", {}, None)
+                return io.BytesIO(b'{"choices":[{"message":{"content":"OK"}}]}')
+        ticks = iter([0, 0, 12])
+        self.assertTrue(probe_configured_route(runtime, ["markt", "backup"], Opener(), lambda: next(ticks)))
+        self.assertEqual(calls, [("markt", 60), ("backup", 48)])
+
+    def test_deadline_exhaustion_never_starts_fallback(self):
+        runtime = {"api_mode": "chat_completions", "base_url": "http://router.test/v1", "api_key": "test"}
+        calls = []
+        class Opener:
+            def open(inner, req, timeout):
+                calls.append(json.loads(req.data)["model"])
+                raise TimeoutError()
+        ticks = iter([0, 0, 60])
+        with self.assertRaises(TimeoutError):
+            probe_configured_route(runtime, ["markt", "backup"], Opener(), lambda: next(ticks))
+        self.assertEqual(calls, ["markt"])
+
+    def test_healthy_primary_stops_and_failed_chain_preserves_http_status(self):
+        runtime = {"api_mode": "chat_completions", "base_url": "http://router.test/v1", "api_key": "test"}
+        calls = []
+        class Opener:
+            def open(inner, req, timeout):
+                calls.append(json.loads(req.data)["model"])
+                return io.BytesIO(b'{"choices":[{"message":{"content":"OK"}}]}')
+        self.assertTrue(probe_configured_route(runtime, ["markt", "backup"], Opener()))
+        self.assertEqual(calls, ["markt"])
+        class Failed:
+            def open(inner, req, timeout):
+                raise urllib.error.HTTPError(req.full_url, 429, "limited", {}, None)
+        with self.assertRaises(urllib.error.HTTPError) as caught:
+            probe_configured_route(runtime, ["markt", "backup"], Failed())
+        self.assertEqual(caught.exception.code, 429)
+
     def test_availability_probe_and_model_preserved(self):
         runtime = {"api_mode": "chat_completions", "base_url": "http://router.test/v1", "api_key": "test"}
         good = {"choices": [{"message": {"tool_calls": [{"function": {
