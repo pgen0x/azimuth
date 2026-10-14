@@ -179,6 +179,7 @@ def score_forecasts(forecasts, samples, cutoff, validate):
             bins = {b['id']: b for b in terminal['bins']}
             initial_bins = {b['id']: b for b in base['bins']}
             fx, fy = 0, 0
+            principal_x = principal_y = initial_x = initial_y = Fraction(0)
             for b in f['allocations']:
                 observed = bins[b['id']]
                 if (int(observed['supply']) <= int(b['estimated_share_raw'])
@@ -187,12 +188,35 @@ def score_forecasts(forecasts, samples, cutoff, validate):
                 dx, dy = int(observed['fee_x'])-int(b['initial_fee_x']), int(observed['fee_y'])-int(b['initial_fee_y'])
                 if dx < 0 or dy < 0:
                     raise ValueError('counter reset')
-                share = int(b['estimated_share_raw']) >> 64
+                raw_share = int(b['estimated_share_raw'])
+                initial = initial_bins[b['id']]
+                principal_x += Fraction(raw_share * int(observed['x']), int(observed['supply']))
+                principal_y += Fraction(raw_share * int(observed['y']), int(observed['supply']))
+                initial_x += Fraction(raw_share * int(initial['x']), int(initial['supply']))
+                initial_y += Fraction(raw_share * int(initial['y']), int(initial['supply']))
+                share = raw_share >> 64
                 fx += share*dx >> 64
                 fy += share*dy >> 64
             price = Fraction(int(f['raw_token_price_numerator']), int(f['raw_token_price_denominator']))
             at_baseline = fx*price+fy
             terminal_price = Fraction(str(terminal['price']))*Fraction(10**terminal['decimals_y'], 10**terminal['decimals_x'])
+            # Fixed inferred shares, not a funded alternative position. Keep
+            # principal and initial-inventory revaluation separate from fees.
+            # Unallocated rounding dust stays in cash, so subtract only paid bins.
+            spent = sum(b['paid_lamports'] for b in f['allocations'])
+            principal = principal_x*terminal_price + principal_y
+            held = initial_x*terminal_price + initial_y
+            principal_change = principal - spent
+            gross_change = principal_change + fx*terminal_price + fy
+            row['principal_sensitivity'] = dict(
+                modeled_principal_change_lamports=float(principal_change),
+                modeled_gross_change_before_costs_lamports=float(gross_change),
+                modeled_initial_inventory_change_lamports=float(held-spent),
+                modeled_principal_vs_initial_inventory_lamports=float(principal-held),
+                initial_inventory_includes_token_x=initial_x > 0,
+                basis='fixed_inferred_shares_at_terminal_reserves; unallocated_dust_stays_cash',
+                limitation='Not executed profit or pure IL. Excludes added-liquidity effects, '
+                           'entry composition charges, network costs, rent and exit execution.')
             elapsed = terminal['ts']-f['baseline_ts']
             expected = Fraction(f['historical_fee_x_raw'])*price+int(f['historical_fee_y_raw'])
             expected = expected*elapsed/f['history_span_seconds']
