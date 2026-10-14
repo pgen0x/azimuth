@@ -2147,6 +2147,15 @@ def main():
 
         pnl_sol_actual = None  # Meteora-exact SOL P&L; used at close-booking instead of size*pct
         indexed_pnl_available = False
+        # Native inventory is the risk source of first resort. Do not wait for a
+        # per-position indexer subprocess (up to 30 seconds) when it verifies.
+        native_mark_valid = False
+        native_mark, native_mark_err = None, None
+        if not is_dry_run_stored:
+            native_mark, native_mark_err = run_command_json(
+                f"node {shlex.quote(EXECUTOR_PATH)} pnl-onchain {shlex.quote(pool)} {shlex.quote(pos_addr)}",
+                timeout=3)
+            native_mark_valid = verified_risk_mark(native_mark, pool, pos_addr, time.time())
         if api_available and bp and bp.get("pnl_pct") is not None:
             # Indexed metrics remain the fallback and supply the 24h fee rate.
             indexed_pnl_available = True
@@ -2157,8 +2166,8 @@ def main():
             if bp.get("pool_price", 0.0) > 0:
                 active_price = bp["pool_price"]
             print(f"Meteora Portfolio API: {pnl_pct:+.2f}% PnL | Fee/TVL 24h: {fee_per_tvl_24h:.2f}% | Range: {'🟢 In' if in_range else '🔴 Out'}")
-        elif not is_dry_run_stored:
-            # Per-position indexed metrics when the portfolio fast path failed.
+        elif not is_dry_run_stored and not native_mark_valid:
+            # Fall back to indexed metrics only when native inventory failed.
             pnl_data, pnl_err = run_command_json(f"node {EXECUTOR_PATH} pnl {pool} {pos_addr}")
             if pnl_data and pnl_data.get("success") != False:
                 indexed_pnl_available = True
@@ -2168,8 +2177,8 @@ def main():
                 fee_per_tvl_24h = float(pnl_data.get("fee_per_tvl_24h", 0.0))
                 print(f"Executor PnL: {pnl_pct:+.2f}% | Fee/TVL 24h: {fee_per_tvl_24h:.2f}% | Range: {'🟢 In' if in_range else '🔴 Out'}")
             else:
-                print(f"⚠️ Indexed SOL PnL unavailable for {pair}; checking native inventory.")
-        else:
+                print(f"⚠️ Indexed SOL PnL unavailable for {pair}; native inventory also unavailable.")
+        elif is_dry_run_stored:
             # Dry run
             ab_data, ab_err = run_command_json(f"node {EXECUTOR_PATH} active-bin {pool}")
             if ab_data:
@@ -2188,12 +2197,7 @@ def main():
         # Those different-time observations do not prove earlier-exit savings.
         # Read once per real tick. A verified mark also supplies current bounds,
         # bin and price, replacing the otherwise necessary active-bin command.
-        native_mark, native_mark_err = None, None
         if not is_dry_run_stored:
-            native_mark, native_mark_err = run_command_json(
-                f"node {shlex.quote(EXECUTOR_PATH)} pnl-onchain {shlex.quote(pool)} {shlex.quote(pos_addr)}",
-                timeout=3)
-            native_mark_valid = verified_risk_mark(native_mark, pool, pos_addr, time.time())
             if not native_mark_valid and not indexed_pnl_available:
                 print(f"⚠️ SOL PnL unavailable for {pair}; retry next tick. Token price return is not LP return.")
                 continue

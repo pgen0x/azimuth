@@ -287,6 +287,20 @@ class SuspectRiskTests(unittest.TestCase):
                 exec(compile(risk, monitor.__file__, "exec"), scope)
         return scope, calls
 
+    def test_verified_native_loss_does_not_wait_for_indexed_fallback(self):
+        state, calls = self.replay(self.mark(pct=-60), portfolio=False)
+        self.assertTrue(state["emergency_close"])
+        self.assertFalse(any(" pnl " in command for command in calls))
+        self.assertFalse(any(" active-bin " in command for command in calls))
+
+    def test_failed_native_read_retains_indexed_fallback_in_order(self):
+        state, calls = self.replay(None, portfolio=False, indexed=-5)
+        self.assertTrue(state.get("guard_passed"))
+        self.assertEqual(state["pnl_pct"], -5)
+        native = next(i for i, command in enumerate(calls) if " pnl-onchain " in command)
+        indexed = next(i for i, command in enumerate(calls) if " pnl " in command)
+        self.assertLess(native, indexed)
+
     def test_indexer_outage_cannot_skip_native_emergency_exit(self):
         state, calls = self.replay(self.mark(pct=-60), portfolio=False, indexed_failure=True)
         self.assertTrue(state.get("guard_passed"))
