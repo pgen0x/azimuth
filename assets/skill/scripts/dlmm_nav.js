@@ -2,6 +2,7 @@
 const fs = require('fs');
 const path = require('path');
 const {cashSignEvidence,cashSignRefresh} = require('./dlmm_cash_sign.js');
+const {retainedRentEvidence} = require('./dlmm_retained_rent.js');
 const SOL = 'So11111111111111111111111111111111111111112';
 const QUOTE_CACHE_MAX_SLOT_LAG = 2500;
 const TOKEN_PROGRAMS = ['TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA', 'TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb'];
@@ -411,6 +412,7 @@ function transactionFact(tx, wallet, signature, event) {
     rent_maintenance: maintenance,
     token_rent_evidence: tokenRentEvidence(tx,wallet),
     cash_sign_evidence: cashSignEvidence(tx,wallet,event?.position),
+    retained_rent_evidence: retainedRentEvidence(tx,wallet,event?.position),
     position_account_closed: !meta.err && !!event?.position && keys.includes(event.position) && meta.preBalances[keys.indexOf(event.position)]>0 && meta.postBalances[keys.indexOf(event.position)]===0,
     classification: event ? 'recorded_bot' : simpleTransfer ? 'external_transfer' : passiveNFT ? 'passive_nft_outside_scope' : passiveToken ? 'external_token_inflow' : maintenance ? 'rent_maintenance' : meta.err ? 'failed' : 'unclassified',
     refundable_rent_locked_lamports: rentLocked, nonrefundable_account_cost_lamports: permanentRent,

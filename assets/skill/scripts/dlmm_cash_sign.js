@@ -103,9 +103,15 @@ function cashSignRefresh(events, cache, closes, wallet, stamp) {
     const facts=signatures.map(s=>cache.get(s));
     if (facts.some(f=>!f || f.wallet!==wallet || f.landed===false
         || !Number.isSafeInteger(f.wallet_delta_lamports)
-        || !Array.isArray(f.token_rent_evidence?.funded) || f.token_rent_evidence.funded.length)
+        || !Array.isArray(f.token_rent_evidence?.funded)
+        || f.token_rent_evidence.funded.some(r=>typeof r.account!=='string' || !r.account
+          || typeof r.mint!=='string' || !r.mint || !Number.isSafeInteger(r.lamports) || r.lamports<=0))
         || facts.reduce((sum,f)=>sum+f.wallet_delta_lamports,0)>0) continue;
-    pending.push(...signatures.filter(s=>!Object.hasOwn(cache.get(s),'cash_sign_evidence')));
+    pending.push(...signatures.filter(s=>{
+      const f=cache.get(s);
+      return !Object.hasOwn(f,'cash_sign_evidence') || (f.token_rent_evidence.funded.length>0
+        && !Object.hasOwn(f,'retained_rent_evidence'));
+    }));
   }
   return new Set(pending.slice(0,4));
 }
