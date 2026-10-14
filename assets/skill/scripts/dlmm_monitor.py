@@ -908,7 +908,8 @@ def log_close(pool, pair, meta, pos_addr, pnl_pct, realized_sol, fee_per_tvl_24h
         "base_mint": meta.get("base_mint"),
         "mode": meta.get("mode"),
         "pnl_pct": round(float(pnl_pct), 4),
-        "pnl_sol": round(float(realized_sol), 6) if realized_sol is not None else None,
+        # Preserve a lamport: six decimals silently turn small losses into zero.
+        "pnl_sol": round(float(realized_sol), 9) if realized_sol is not None else None,
         "fee_per_tvl_24h": round(float(fee_per_tvl_24h), 4),
         "age_min": round(float(age_min), 1),
         # Canary arm (PULSE_HOLD_CANARY); null when the flag is off or the mode is not pulse.
@@ -1616,7 +1617,7 @@ def build_report_row(pos_addr, pair, pool, meta, pool_liquidity_usd, pnl_pct, pn
         "pool_liquidity_usd": round(pool_liquidity_usd, 0) if pool_liquidity_usd is not None else None,
         "strategy": meta.get("strategy", "spot"),
         "pnl_pct": round(pnl_pct, 4),
-        "pnl_sol": round(pnl_sol_actual, 6) if pnl_sol_actual is not None else None,
+        "pnl_sol": round(pnl_sol_actual, 9) if pnl_sol_actual is not None else None,
         "in_range": in_range,
         "oor_minutes": round(oor_minutes, 1),
         "fee_per_tvl_24h": round(fee_per_tvl_24h, 2),
