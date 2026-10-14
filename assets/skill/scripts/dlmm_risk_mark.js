@@ -85,6 +85,13 @@ function initialDeposit(tx, context, binding) {
       check(!initialized && deposited === null && accounts.position === entry.position
         && accounts.lb_pair === entry.pool && accounts.owner === submission.wallet
         && accounts.payer === submission.wallet, "position initialization mismatch");
+      if (init.name === "initialize_position_pda") {
+        const lower = entry.entry_bin - entry.bins_below;
+        const width = entry.bins_below + entry.bins_above + 1;
+        check(accounts.base === submission.wallet && bytes.length === 16
+          && bytes.readInt32LE(8) === lower && bytes.readInt32LE(12) === width,
+          "PDA initialization base or bounds mismatch");
+      }
       initialized = true;
       continue;
     }
