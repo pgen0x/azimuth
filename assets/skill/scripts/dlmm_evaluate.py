@@ -208,6 +208,48 @@ def matched_refund_cash_by_mode(accounting, profile, start, end, cohort):
         basis='full_life_root_cash_plus_proved_refunds; earliest_root_entry_mode; per_root_conservative_bounds; not_NAV_or_position_win_rate')
 
 
+def net_recovery_comparison(event, fact, end):
+    """Compare simulated and finalized wallet cash without undoing account costs."""
+    unknown = dict(status='unmeasured', reason='invalid_or_unavailable_net_recovery_evidence')
+    try:
+        quote = event['swap_quote']
+        evidence = quote['net_recovery']
+        conservative = evidence['conservative_wallet_delta_lamports']
+        required = evidence['required_minimum_lamports']
+        reserve = evidence['reserved_quote_slippage_lamports']
+        recorded = evidence['recorded_at']
+        if (type(evidence.get('version')) is not int or evidence['version'] != 1
+                or not all(type(v) is int for v in (conservative, required, reserve))
+                or not 0 <= required <= conservative or reserve < 0
+                or type(recorded) not in (int, float) or not math.isfinite(recorded)
+                or not 0 < quote['observed_at'] <= recorded <= end
+                or not recorded < event['ts']+1  # Journal timestamps truncate seconds.
+                or quote['output_mint'] != 'So11111111111111111111111111111111111111112'
+                or not all(isinstance(quote.get(k), str) and quote[k].isascii()
+                           and quote[k].isdigit() and int(quote[k]) > 0
+                           for k in ('in_amount', 'out_amount', 'minimum_out_amount'))
+                or reserve != int(quote['out_amount'])-int(quote['minimum_out_amount'])
+                or type(evidence.get('token_rent_close_included')) is not bool
+                or evidence['token_rent_close_included'] != quote.get('token_rent_close_included', False)
+                or not event.get('wallet') or fact['wallet'] != event['wallet']
+                or fact['signature'] != event['signature']
+                or fact.get('event_position') != event.get('position')
+                or fact.get('failed') is not False or fact.get('landed') is False
+                or fact.get('basis') != 'finalized_transaction_balances'
+                or not 0 < fact['block_time'] <= fact['observed_at'] <= end
+                or fact['block_time'] < int(recorded)
+                or type(fact['wallet_delta_lamports']) is not int
+                or fact['token_deltas_raw'].get(quote['input_mint']) != str(-int(quote['in_amount']))):
+            return unknown
+        actual = fact['wallet_delta_lamports']
+        return dict(status='measured', conservative_simulated_wallet_delta_lamports=conservative,
+                    finalized_wallet_delta_lamports=actual, actual_minus_simulated_lamports=actual-conservative,
+                    below_simulated_recovery=actual < conservative, below_required_minimum=actual < required,
+                    basis='whole_swap_wallet_cash_including_account_funding_refunds_and_fees; not_position_profit')
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return unknown
+
+
 def swap_execution(events, facts, start, end):
     """Compare recorded SOL exit quotes with finalized cash, undoing fees/rent."""
     results = {}
@@ -223,6 +265,8 @@ def swap_execution(events, facts, start, end):
         if type(bps) is int and 0 < bps <= 10000:
             item['slippage_bps'] = bps
         fact = facts.get(signature)
+        if 'net_recovery' in quote:
+            item['net_recovery'] = net_recovery_comparison(event, fact, end)
         if not fact or fact.get('observed_at', end+1) > end:
             item.update(status='pending', reason='no_finalized_fact_at_cutoff')
             continue
@@ -277,7 +321,11 @@ def swap_execution(events, facts, start, end):
         group[item['status']] += 1
         group['known_network_fee_lamports'] += item.get('network_fee_lamports', 0)
         group['measured_shortfall_lamports'] += item.get('shortfall_lamports', 0)
+    net = [r['net_recovery'] for r in results.values() if 'net_recovery' in r]
     return dict(attempts=list(results.values()), by_slippage_bps=groups,
+                net_recovery_summary=dict(recorded=len(net), measured=sum(r['status']=='measured' for r in net),
+                    below_simulated=sum(r.get('below_simulated_recovery', False) for r in net),
+                    below_required_minimum=sum(r.get('below_required_minimum', False) for r in net)),
                 basis='finalized_native_delta_plus_fee_plus_funded_minus_refunded_token_rent',
                 limitation='Quote shortfall is not trading PnL or causal savings. Signed attempts only; pre-broadcast failures are not counted. Missing facts remain explicit; groups may contain different pools and market conditions.')
 
@@ -551,6 +599,8 @@ def main():
         json.dumps(data['rent_refund_groups']),
         'These groups overlap the root cash above: do not add the subtotals together. Each shared reclaim fee is included once. Unmatched refunds remain unattributed; this is not portfolio NAV or a per-root win rate.',
         '## Swap execution by authorized slippage',json.dumps(data['swap_execution']['by_slippage_bps']),
+        'Swap net recovery versus simulation (wallet cash, not position profit): ' +
+            json.dumps(data['swap_execution']['net_recovery_summary']),
         data['swap_execution']['limitation'],
         '## Latest token valuation coverage',json.dumps(data['price_coverage']),
         '## Root-chain replay',f"Decisions: {len(data['root_replay'])}; reasons: {dict(collections.Counter(r['reason'] for r in data['root_replay']))}",

@@ -562,6 +562,12 @@ value; rejected variants do not replace the original simulation's value.
 This includes simulated account funding and refunds, but is neither executed
 proceeds nor whole-position profit. Swaps without that gate omit this evidence.
 Recording it introduces no additional simulation or RPC request.
+Evaluation compares this evidence with the finalized wallet delta only after
+binding wallet, signature, position, input token amount and observation cutoff.
+`net_recovery_summary` counts measured comparisons and outcomes below the
+simulated recovery or required minimum. It includes account funding/refunds and
+fees without reconstructing gross swap output, and remains independent of
+whether rent attribution is complete. It does not alter position profit labels.
 
 New swap submission rows include `swap_quote`: quote receipt time, input/output
 mints, raw input/output amounts, minimum output, authorized slippage, provider
