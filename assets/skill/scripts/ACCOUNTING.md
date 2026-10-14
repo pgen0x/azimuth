@@ -586,6 +586,13 @@ value; rejected variants do not replace the original simulation's value.
 This includes simulated account funding and refunds, but is neither executed
 proceeds nor whole-position profit. Swaps without that gate omit this evidence.
 Recording it introduces no additional simulation or RPC request.
+New evidence also includes the SHA-256 of the selected serialized message,
+simulation slot, before/after wallet-read slots, and simulated wallet delta
+before reserving quote slippage. A message change during the measurement
+invalidates that result before signing. Accepted rent-close variants retain their
+own hash and readings; rejected optional variants cannot replace the selected
+message evidence. Slot numbers and equal wallet balances do not prove an atomic
+cross-route bank snapshot or unchanged market liquidity.
 Evaluation compares this evidence with the finalized wallet delta only after
 binding wallet, signature, position, input token amount and observation cutoff.
 `net_recovery_summary` counts measured comparisons and outcomes below the

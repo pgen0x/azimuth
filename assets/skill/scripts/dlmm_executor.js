@@ -1608,7 +1608,10 @@ async function swapToken(inputMintStr, outputMintStr, amountFloat, maxPriceImpac
       if (!Number.isSafeInteger(out) || !Number.isSafeInteger(minimum) || minimum <= 0 || minimum > out) {
         return { success: false, aborted: true, reason: "net_recovery_invalid_quote" };
       }
+      const recoveryMeasurements = new WeakMap();
       const measureRecovery = async (candidate, readConnection = connection) => {
+        const messageHash = require("crypto").createHash("sha256")
+          .update(candidate.message.serialize()).digest("hex");
         const before = await readConnection.getBalanceAndContext(wallet.publicKey, "confirmed");
         const simulated = await readConnection.simulateTransaction(candidate, {
           commitment: "confirmed", sigVerify: false, minContextSlot: before.context.slot,
@@ -1619,6 +1622,16 @@ async function swapToken(inputMintStr, outputMintStr, amountFloat, maxPriceImpac
         const post = simulated.value.accounts?.[0]?.lamports;
         if (simulated.value.err || !Number.isSafeInteger(post) || !Number.isSafeInteger(before.value)
             || before.value !== after.value) return null;
+        const currentHash = require("crypto").createHash("sha256")
+          .update(candidate.message.serialize()).digest("hex");
+        if (currentHash !== messageHash) return null;
+        recoveryMeasurements.set(candidate, {
+          message_sha256: messageHash,
+          simulation_slot: simulated.context.slot,
+          wallet_read_before_slot: before.context.slot,
+          wallet_read_after_slot: after.context.slot,
+          simulated_wallet_delta_lamports: post - before.value,
+        });
         return post - before.value - (out - minimum);
       };
       let conservativeNet = await measureRecovery(transaction);
@@ -1655,6 +1668,7 @@ async function swapToken(inputMintStr, outputMintStr, amountFloat, maxPriceImpac
       // accepted rent-close variant. This is cash recovery, not position profit.
       netRecoveryEvidence = {
         version: 1, recorded_at: Date.now() / 1000,
+        ...recoveryMeasurements.get(transaction),
         conservative_wallet_delta_lamports: conservativeNet,
         required_minimum_lamports: minNetLamports,
         reserved_quote_slippage_lamports: out - minimum,
