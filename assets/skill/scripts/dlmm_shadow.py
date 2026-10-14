@@ -17,7 +17,7 @@ from dlmm_accounting import rows
 from dlmm_monitor import verified_risk_mark
 from dlmm_candidate_watch import WATCH_FILENAME
 from dlmm_canonical_liquidity import retain_canonical_snapshot
-from dlmm_fee_forecast import HORIZONS
+from dlmm_fee_forecast import HORIZONS, FORECAST_FILE
 
 getcontext().prec = 60
 COLLECTION_BUDGET_SECONDS = 240
@@ -51,6 +51,37 @@ def index_candidate(candidates, row, now):
                             source_id=row['id'], source_ts=stamp)
     if len(candidates) > CANDIDATE_MAX_POOLS:
         del candidates[min(candidates, key=lambda key: (candidates[key]['source_ts'], key))]
+
+
+def index_due_forecast(candidates, row, now):
+    """Retain terminal observations independently of renewed market selection."""
+    target, recorded = row.get('horizon_target_ts'), row.get('recorded_at')
+    pool, mint = row.get('pool'), row.get('base_mint')
+    if (row.get('status') != 'frozen_prediction' or row.get('version') != 1
+            or row.get('mode') not in HORIZONS
+            or not isinstance(pool, str) or not ADDRESS.fullmatch(pool)
+            or not isinstance(mint, str) or not ADDRESS.fullmatch(mint) or mint == SOL_MINT
+            or not isinstance(row.get('id'), str)
+            or not all(finite_number(row.get(k)) for k in
+                       ('baseline_ts', 'frozen_at', 'recorded_at', 'horizon_target_ts'))
+            or row.get('horizon_seconds') != HORIZONS[row['mode']]
+            or target != row['baseline_ts'] + row['horizon_seconds']
+            or not row['baseline_ts'] <= row['frozen_at'] <= recorded < target
+            or not target <= now <= target + 600):
+        return
+    existing = candidates.get(pool)
+    if existing and existing['base_mint'] != mint:
+        return
+    candidate = dict(existing) if existing else dict(
+        pool=pool, base_mint=mint, mode=row['mode'], source_id=row['id'],
+        source_ts=recorded, terminal_only=True)
+    candidate['terminal_target_ts'] = min(target, candidate.get('terminal_target_ts', target))
+    candidates[pool] = candidate
+    if len(candidates) > CANDIDATE_MAX_POOLS:
+        # Earliest terminal deadlines precede ordinary rolling watch inputs.
+        keep = sorted(candidates, key=lambda p: (
+            candidates[p].get('terminal_target_ts', float('inf')), -candidates[p]['source_ts'], p))
+        del candidates[keep[-1]]
 
 
 def validate_candidate_snapshot(sample, pool, mint):
@@ -88,13 +119,22 @@ def collect_candidate_bins(profile, candidates, deadline):
                   candidate_fee_forecasts_frozen=0, candidate_fee_forecasts_unmeasured=0)
     phase_end = min(deadline - LIQUIDATION_BUDGET_SECONDS,
                     time.monotonic() + CANDIDATE_BUDGET_SECONDS)
+    if time.monotonic() >= phase_end:
+        result['candidate_bin_budget_exhausted'] = True
+        return result
+    candidates = {pool: dict(value) for pool, value in candidates.items()}
+    for forecast in iter_rows(profile/'memories'/FORECAST_FILE):
+        if time.monotonic() >= phase_end:
+            result['candidate_bin_budget_exhausted'] = True
+            return result
+        index_due_forecast(candidates, forecast, time.time())
     if not candidates:
         return result
     if time.monotonic() >= phase_end:
         result['candidate_bin_budget_exhausted'] = True
         return result
     file = profile/'memories/dlmm_candidate_bin_samples.jsonl'
-    latest, recent, history_limited = {}, {}, set()
+    latest, recent, history_limited, terminal_done = {}, {}, set(), set()
     history_now = time.time()
     for row in iter_rows(file):
         if time.monotonic() >= phase_end:
@@ -103,6 +143,11 @@ def collect_candidate_bins(profile, candidates, deadline):
         stamp = row.get('collected_at')
         if row.get('pool') in candidates and finite_number(stamp):
             latest[row['pool']] = max(latest.get(row['pool'], 0), stamp)
+            target = candidates[row['pool']].get('terminal_target_ts')
+            if (target is not None and row.get('status') == 'observed'
+                    and finite_number(row.get('ts')) and target <= row['ts'] <= target+600
+                    and row['ts'] <= stamp <= history_now):
+                terminal_done.add(row['pool'])
             if (row.get('status') == 'observed' and finite_number(row.get('ts'))
                     and 0 <= history_now-row['ts'] <= 1800):
                 history = recent.setdefault(row['pool'], [])
@@ -111,14 +156,20 @@ def collect_candidate_bins(profile, candidates, deadline):
                 else:
                     history.append(row)
     executor = profile/'skills/solana-dlmm/scripts/dlmm_executor.js'
-    for pool in sorted(candidates, key=lambda p: (latest.get(p, 0), -candidates[p]['source_ts'], p)):
+    for pool in sorted(candidates, key=lambda p: (
+            candidates[p].get('terminal_target_ts', float('inf')) if p not in terminal_done else float('inf'),
+            latest.get(p, 0), -candidates[p]['source_ts'], p)):
         if time.monotonic() >= phase_end:
             result['candidate_bin_budget_exhausted'] = True
             break
         if result['candidate_bin_snapshots_attempted'] >= 3:
             break
         candidate = candidates[pool]
-        if time.time() - latest.get(pool, 0) < 240 or time.time() - candidate['source_ts'] > CANDIDATE_MAX_AGE_SECONDS:
+        terminal_due = (pool not in terminal_done and 'terminal_target_ts' in candidate
+                        and candidate['terminal_target_ts'] <= time.time() <= candidate['terminal_target_ts']+600)
+        if (time.time() - latest.get(pool, 0) < 240
+                or (candidate.get('terminal_only') and not terminal_due)
+                or (not terminal_due and time.time() - candidate['source_ts'] > CANDIDATE_MAX_AGE_SECONDS)):
             continue
         result['candidate_bin_snapshots_attempted'] += 1
         started = time.time()
@@ -146,9 +197,9 @@ def collect_candidate_bins(profile, candidates, deadline):
             record.update(status='unmeasured', reason=type(error).__name__)
         record['collected_at'] = time.time()
         append(file, record)
-        if record['status'] == 'observed':
+        if record['status'] == 'observed' and not candidate.get('terminal_only'):
             try:
-                from dlmm_fee_forecast import candidate_fee_forecast, FORECAST_FILE, BASIS
+                from dlmm_fee_forecast import candidate_fee_forecast, BASIS
                 if time.monotonic() >= phase_end:
                     forecast = dict(version=1, pool=pool, base_mint=candidate['base_mint'], mode=candidate['mode'],
                                     frozen_at=time.time(), status='unmeasured', reason='forecast_budget_exhausted',

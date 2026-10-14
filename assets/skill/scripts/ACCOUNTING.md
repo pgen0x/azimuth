@@ -895,6 +895,15 @@ phase and liquidation reserve still bound collection; missing, empty, oversized
 or unsupported inputs stay unmeasured. At most 16 recent samples per indexed
 pool are retained for this optional calculation; overflow remains unmeasured.
 
+During a frozen forecast's terminal window, its pool remains eligible for a
+read even if the ordinary 30-minute candidate watch has expired. Due terminal
+observations receive priority within the same 64-pool, three-request and
+10-second phase limits; the 240-second per-pool pacing and trading deferral
+remain in force. A terminal-only observation does not create another forecast.
+Already observed terminal windows are skipped. This reduces dependence on
+continued candidate selection, but does not guarantee coverage under the
+shared request budget or recover missing historical observations.
+
 `python3 scripts/dlmm_fee_forecast.py --profile <profile> [--as-of <timestamp>]`
 reads and scores these recorded forecasts locally. It uses the first native
 terminal observation within the mode horizon's 600-second grace and never
