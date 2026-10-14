@@ -238,6 +238,12 @@ processed or unavailable status keeps the submission uncertain; on-chain failure
 remain failures. Durable pending markers and retries of the same signed bytes remain
 in place.
 
+Monitor risk valuation still attempts the bounded native inventory read when both
+portfolio and per-position indexed PnL are unavailable. A verified native loss can
+therefore reach emergency stop rules during an indexer outage. If neither source
+provides usable valuation, the tick skips risk evaluation instead of treating the
+initialized zero PnL or token price return as a measured LP result.
+
 Funded-position closes broadcast their persisted signed bytes concurrently to
 the distinct configured RPC endpoints. Each signed transaction has one eight-second
 group deadline covering broadcast and confirmation; the first confirmed/finalized verdict ends

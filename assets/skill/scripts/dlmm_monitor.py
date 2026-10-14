@@ -2043,8 +2043,10 @@ def main():
         fee_per_tvl_24h = 0.0
 
         pnl_sol_actual = None  # Meteora-exact SOL P&L; used at close-booking instead of size*pct
+        indexed_pnl_available = False
         if api_available and bp and bp.get("pnl_pct") is not None:
             # Indexed metrics remain the fallback and supply the 24h fee rate.
+            indexed_pnl_available = True
             in_range = not bp.get("is_out_of_range", False)
             pnl_pct = bp.get("pnl_pct", 0.0)
             pnl_sol_actual = bp.get("pnl_sol")  # exact SOL P&L from Meteora
@@ -2056,14 +2058,14 @@ def main():
             # Per-position indexed metrics when the portfolio fast path failed.
             pnl_data, pnl_err = run_command_json(f"node {EXECUTOR_PATH} pnl {pool} {pos_addr}")
             if pnl_data and pnl_data.get("success") != False:
+                indexed_pnl_available = True
                 pnl_pct = float(pnl_data.get("pnl_pct", 0.0))
                 pnl_sol_actual = pnl_data.get("pnl_sol")
                 in_range = pnl_data.get("in_range", True)
                 fee_per_tvl_24h = float(pnl_data.get("fee_per_tvl_24h", 0.0))
                 print(f"Executor PnL: {pnl_pct:+.2f}% | Fee/TVL 24h: {fee_per_tvl_24h:.2f}% | Range: {'🟢 In' if in_range else '🔴 Out'}")
             else:
-                print(f"⚠️ SOL PnL unavailable for {pair}; retry next tick. Token price return is not LP return.")
-                continue
+                print(f"⚠️ Indexed SOL PnL unavailable for {pair}; checking native inventory.")
         else:
             # Dry run
             ab_data, ab_err = run_command_json(f"node {EXECUTOR_PATH} active-bin {pool}")
@@ -2089,6 +2091,9 @@ def main():
                 f"node {shlex.quote(EXECUTOR_PATH)} pnl-onchain {shlex.quote(pool)} {shlex.quote(pos_addr)}",
                 timeout=3)
             native_mark_valid = verified_risk_mark(native_mark, pool, pos_addr, time.time())
+            if not native_mark_valid and not indexed_pnl_available:
+                print(f"⚠️ SOL PnL unavailable for {pair}; retry next tick. Token price return is not LP return.")
+                continue
             native_price_available = False
             if native_mark_valid:
                 pnl_pct, pnl_sol_actual = native_mark["pnl_pct"], native_mark["pnl_sol"]

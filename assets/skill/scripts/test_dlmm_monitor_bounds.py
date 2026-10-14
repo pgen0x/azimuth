@@ -245,7 +245,7 @@ class SuspectRiskTests(unittest.TestCase):
                     active_bin=-470, lower_bin=-465, upper_bin=-430, in_range=False,
                     unclaimed_fees_sol=.001, pool_price=.9, **changes)
 
-    def replay(self, verify, *, age=1, prior=False, indexed=-100, portfolio=True, adopted=False):
+    def replay(self, verify, *, age=1, prior=False, indexed=-100, portfolio=True, adopted=False, indexed_failure=False):
         source = Path(monitor.__file__).read_text()
         code = textwrap.dedent(source[source.index("        # Get current pool price"):
                                       source.index("        # Pool aggregates do not include")])
@@ -266,6 +266,8 @@ class SuspectRiskTests(unittest.TestCase):
             if " active-bin " in command:
                 return {"binId":-430,"price":1.0},None
             self.assertIn(" pnl ", command)
+            if indexed_failure:
+                return None, "indexer unavailable"
             return {"success":True,"pnl_pct":indexed,"pnl_sol":indexed*.001,
                     "fee_per_tvl_24h":10.0,"in_range":True},None
         def redis(command):
@@ -281,6 +283,19 @@ class SuspectRiskTests(unittest.TestCase):
                                               source.index("        # 3. Pumped Far Above")])
                 exec(compile(risk, monitor.__file__, "exec"), scope)
         return scope, calls
+
+    def test_indexer_outage_cannot_skip_native_emergency_exit(self):
+        state, calls = self.replay(self.mark(pct=-60), portfolio=False, indexed_failure=True)
+        self.assertTrue(state.get("guard_passed"))
+        self.assertEqual(state["pnl_pct"], -60)
+        self.assertTrue(state["emergency_close"])
+        self.assertEqual(sum(" pnl-onchain " in c for c in calls), 1)
+
+    def test_both_value_sources_unavailable_cannot_use_default_zero(self):
+        for native in (None, self.mark() | {"pool": "wrong-pool"}):
+            state, calls = self.replay(native, portfolio=False, indexed_failure=True)
+            self.assertFalse(state.get("guard_passed", False))
+            self.assertEqual(sum(" pnl-onchain " in c for c in calls), 1)
 
     def test_real_native_young_loss_reaches_risk_rules(self):
         for portfolio in (True, False):
