@@ -683,6 +683,25 @@ def liquidation_observation(entry, wallet, fetch, native_mark=None):
                            'Excludes network fees, rent, prior flows and rewards; quote is not an executed exit.')
 
 
+def archive_exit_bank(profile, sample, deadline):
+    """Optional unsigned research archive; never extend the collection deadline."""
+    if (sample.get('status') != 'measured' or sample.get('inventory_source') != 'onchain_sol_inventory'
+            or not sample.get('quote') or sample.get('token_sell_raw') == '0'):
+        return None
+    remaining = deadline - time.monotonic()
+    if remaining < 4:
+        return dict(status='unmeasured', reason='exit_bank_budget')
+    try:
+        budget = min(15, remaining)
+        result = subprocess.run(
+            ['node', str(profile/'skills/solana-dlmm/scripts/dlmm_exit_bank.js')],
+            input=json.dumps(dict(profile=str(profile), sample=sample, budget_ms=int(budget*1000))),
+            text=True, capture_output=True, timeout=budget, check=True)
+        return json.loads(result.stdout)
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return dict(status='unmeasured', reason='exit_bank_unavailable')
+
+
 def collect_liquidation(profile, deadline=None):
     """One position, one bounded native probe, then a quote or indexed fallback."""
     deadline = min(deadline if deadline is not None else float('inf'),
@@ -721,6 +740,11 @@ def collect_liquidation(profile, deadline=None):
             # HTTP errors can contain URLs; persist only their type, never credentials.
             sample.update(status='unmeasured', reason=type(error).__name__, observed_at=time.time())
         append(file, sample)
+        # Save the ordinary quote first: optional research must not erase it.
+        archive = archive_exit_bank(profile, sample, deadline)
+        if archive is not None:
+            append(memory/'dlmm_exit_bank_observations.jsonl',
+                   dict(position=position, observed_at=time.time(), **archive))
         return 1
     return 0
 
