@@ -399,6 +399,26 @@ def main():
                'entry_rent_allowance_lamports', 'minimum_entry_lamports')) == 345000000
     assert pipeline.compute_deploy_amount((348630923+1488440-5000)/1e9) == 0.1
 
+    # Both real CLI capital gates must agree with the shared policy. An empty
+    # batch stops after these gates, before any candidate/trade path can run.
+    for balance, passed in [(0.344999999, False), (0.345, True), (0.346556150, True)]:
+        with patch.object(sys, "argv", ["dlmm_pipeline.py", "--mode", "turnover", "--from-batch", "[]"]), \
+                patch.object(pipeline, "record_pipeline_candidates"), \
+                patch.object(pipeline, "load_soul_dlmm_params", return_value={**pipeline.MODE_DEFAULTS["turnover"], "MIN_ORGANIC_SCORE": 60}), \
+                patch.object(pipeline, "reconcile_redis_vs_meteora"), \
+                patch.object(pipeline, "get_active_positions_count_for_mode", return_value=0), \
+                patch.object(pipeline, "get_wallet_sol_balance", return_value=balance), \
+                patch.object(pipeline, "defer_capacity_signals") as defer, \
+                contextlib.redirect_stdout(io.StringIO()) as output:
+            try:
+                pipeline.main()
+            except SystemExit as exc:
+                assert exc.code == (1 if passed else 0)
+            else:
+                raise AssertionError("Empty batch unexpectedly continued")
+            assert ("expects a non-empty JSON array" in output.getvalue()) == passed
+            assert defer.call_count == (0 if passed else 1)
+
     # The risk/override paths must never execute a token swap. Only the explicit
     # manual-cleanup branch may do so; pending settlement runs in its own worker.
     monitor = ast.parse(Path(__file__).with_name("dlmm_monitor.py").read_text())
