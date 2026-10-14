@@ -593,6 +593,14 @@ coverage and selection bias and do not prove improved prospective returns.
 
 ### Swap quote evidence
 
+The executor interprets Jupiter Metis `priceImpactPct` as a decimal fraction
+and multiplies it by 100 for the configured percentage ceiling. It requires a
+complete finite numeric string in [0, 1]; absent, malformed, negative and
+out-of-range values return `price_impact_unmeasured` before swap construction.
+Scientific notation remains accepted. The DLMM SDK's quote impact is already
+in percentage units and must not reuse this conversion when routes are compared.
+See [Jupiter's Metis guide](https://developers.jup.ag/docs/guides/how-to-build-a-custom-swap-with-metis).
+
 For swaps using the minimum-recovery gate, `swap_quote.net_recovery` records
 the selected unsigned transaction's simulated wallet delta after reserving the
 quoted slippage allowance, the required minimum, and whether an inline token

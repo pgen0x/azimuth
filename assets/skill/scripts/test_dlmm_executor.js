@@ -602,6 +602,10 @@ vm.runInNewContext("const productionExitTransport=confirmExitTransaction;confirm
   assert.equal(swapRequests[0].quoteResponse.slippageBps,100);
   resetSmall(["249999","249000"]);
   assert.equal((await smallRecovery()).success,true);assert.equal(swapRequests[0].quoteResponse.outAmount,"249000");
+  resetSmall();quoteAlter=q=>q.priceImpactPct="0.15";
+  assert.equal((await smallRecovery()).success,true); // Exact 15% ceiling.
+  resetSmall();quoteAlter=q=>q.priceImpactPct="1.5e-1";
+  assert.equal((await smallRecovery()).success,true); // Same fraction in exponent notation.
   const smallSends = sends;
   resetSmall(["250000","250001"]);
   assert.equal((await smallRecovery()).reason,"small_settlement_value_changed");assert.equal(swapRequests.length,0);
@@ -621,6 +625,13 @@ vm.runInNewContext("const productionExitTransport=confirmExitTransaction;confirm
   assert.equal((await smallRecovery()).reason,"swap_no_route");assert.equal(swapRequests.length,0);
   resetSmall();quoteFailure=429;
   await assert.rejects(smallRecovery(),/429/);assert.equal(swapRequests.length,0);
+  for (const impact of [undefined,null,false,""," ","NaN","Infinity","0.01junk","-0.1","1.01",{},[]]) {
+    resetSmall();quoteAlter=q=>q.priceImpactPct=impact;
+    const beforeImpactSends=sends;
+    assert.equal((await smallRecovery()).reason,"price_impact_unmeasured");
+    assert.equal(swapRequests.length,0);
+    assert.equal(sends,beforeImpactSends);
+  }
   resetSmall();quoteAlter=q=>q.priceImpactPct="0.16";
   assert.equal((await smallRecovery()).reason,"price_impact_exceeded");assert.equal(swapRequests.length,0);
   resetSmall();accountExists=true;
