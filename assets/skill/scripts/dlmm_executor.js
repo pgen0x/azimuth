@@ -973,26 +973,59 @@ async function claimFees(positionAddressStr) {
   });
 }
 
+// Best-effort phase boundaries: never persist endpoint URLs, errors or signed bytes.
+function closePreparationObserver(position, emptyOnly) {
+  try {
+    const { performance } = require("node:perf_hooks");
+    const started = performance.now();
+    const attempt = require("node:crypto").randomUUID();
+    const journal = path.join(PROFILE_DIR, "memories", "dlmm_close_preparations.jsonl");
+    let previous = started;
+    return (stage, signature = null) => {
+      try {
+        const now = performance.now();
+        const record = { version: 1, attempt, position, empty_only: emptyOnly, stage,
+          observed_at: Date.now() / 1000, elapsed_ms: now - started,
+          since_previous_ms: now - previous, signature,
+          basis: "client_preparation_observation_not_finalized_execution" };
+        previous = now;
+        fs.mkdirSync(path.dirname(journal), { recursive: true, mode: 0o700 });
+        fs.appendFileSync(journal, JSON.stringify(record) + "\n", { mode: 0o600 });
+      } catch (_) { /* Timing evidence must never prevent an exit. */ }
+    };
+  } catch (_) { return () => {}; }
+}
+
 async function closePosition(positionAddressStr, emptyOnly = false) {
   if (process.env.DRY_RUN === "true" && (positionAddressStr.includes("DRY_RUN") || positionAddressStr.length < 32)) {
     console.warn(JSON.stringify({ success: true, dryRun: true, txHashes: ["DRY_RUN_TX_HASH"] }));
     return { success: true, dryRun: true, txHashes: ["DRY_RUN_TX_HASH"] };
   }
   new PublicKey(positionAddressStr);
-  const release = await acquireSwapLock(`close-${positionAddressStr}`);
+  const observe = closePreparationObserver(positionAddressStr, emptyOnly);
+  observe("started");
+  let release;
   try {
-    return await closePositionLocked(positionAddressStr, emptyOnly);
+    release = await acquireSwapLock(`close-${positionAddressStr}`);
+    observe("lock_acquired");
+    const result = await closePositionLocked(positionAddressStr, emptyOnly, observe);
+    observe(result.success ? "completed" : result.pending ? "pending" : "refused");
+    return result;
+  } catch (error) {
+    observe("failed");
+    throw error;
   } finally {
-    await release();
+    if (release) await release();
   }
 }
 
-async function closePositionLocked(positionAddressStr, emptyOnly = false) {
+async function closePositionLocked(positionAddressStr, emptyOnly = false, observe = () => {}) {
   const pendingDir = path.join(PROFILE_DIR, "memories", "dlmm_pending_closes");
   const pendingPath = path.join(pendingDir, `${positionAddressStr}.json`);
   let submittedSignature;
   let submissionError;
   if (fs.existsSync(pendingPath)) {
+    observe("pending_reconciliation_started");
     const pending = JSON.parse(fs.readFileSync(pendingPath, "utf8"));
     if (emptyOnly && !pending.emptyOnly) return { success: false, pending: true,
       error: "Existing withdrawal requires normal close reconciliation" };
@@ -1029,7 +1062,9 @@ async function closePositionLocked(positionAddressStr, emptyOnly = false) {
     }
     const wallet = getWallet();
 
+    observe("lookup_started");
     const foundPos = await findPoolForPosition(connection, wallet, positionAddressStr);
+    observe("lookup_completed");
     if (!foundPos) {
       throw new Error(`Position ${positionAddressStr} not found for user ${wallet.publicKey.toString()}`);
     }
@@ -1045,7 +1080,9 @@ async function closePositionLocked(positionAddressStr, emptyOnly = false) {
     }
 
     const sendClose = async (tx) => {
+      observe("blockhash_started");
       const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash("confirmed");
+      observe("blockhash_completed");
       tx.recentBlockhash = blockhash;
       tx.feePayer = wallet.publicKey;
       tx.sign(wallet);
@@ -1058,6 +1095,7 @@ async function closePositionLocked(positionAddressStr, emptyOnly = false) {
         raw: raw.toString("base64") }), { mode: 0o600, flush: true });
       fs.renameSync(tmp, pendingPath);
       submittedSignature = signature;
+      observe("signed_and_persisted", signature);
       console.warn(`[TX] ${JSON.stringify({stage: "close-send", signature: submittedSignature,
         position: positionAddressStr, blockhash, lastValidBlockHeight})}`);
       // The persisted signature is reused across concurrent RPC broadcasts and
@@ -1073,6 +1111,7 @@ async function closePositionLocked(positionAddressStr, emptyOnly = false) {
         submissionError = err.message;
         throw err;
       }
+      observe("confirmation_completed", signature);
       fs.rmSync(pendingPath, { force: true });
       submittedSignature = null;
       return signature;
@@ -1081,7 +1120,9 @@ async function closePositionLocked(positionAddressStr, emptyOnly = false) {
     // The program checks emptiness atomically. Never withdraw liquidity on this path,
     // even if a deposit lands after the SDK read above.
     if (emptyOnly) {
+      observe("empty_close_build_started");
       const txs = await pool.closePositionIfEmpty({ owner: wallet.publicKey, position: positionData });
+      observe("empty_close_build_completed");
       const txHashes = [];
       for (const tx of Array.isArray(txs) ? txs : [txs]) txHashes.push(await sendClose(tx));
       return { success: true, txHashes };
@@ -1095,6 +1136,7 @@ async function closePositionLocked(positionAddressStr, emptyOnly = false) {
 
     const txHashes = [];
     try {
+      observe("withdrawal_build_started");
       const closeTx = await pool.removeLiquidity({
         user: wallet.publicKey,
         position: positionData.publicKey,
@@ -1103,6 +1145,7 @@ async function closePositionLocked(positionAddressStr, emptyOnly = false) {
         bps: new BN(10000), // 100%
         shouldClaimAndClose: true
       });
+      observe("withdrawal_build_completed");
       for (const tx of Array.isArray(closeTx) ? closeTx : [closeTx]) {
         txHashes.push(await sendClose(tx));
       }
@@ -1111,6 +1154,7 @@ async function closePositionLocked(positionAddressStr, emptyOnly = false) {
       // the SDK snapshot positively proves every liquidity share is zero.
       if (submittedSignature || positionIsEmpty(positionData) !== true) throw rmErr;
       console.warn(`[DLMM] removeLiquidity failed (${rmErr.message}); attempting closePositionIfEmpty for empty position ${positionAddressStr}`);
+      observe("empty_recovery_started");
       // Empty-position recovery has no combined withdrawal transaction; claim first.
       try {
         const claimTxs = await pool.claimSwapFee({

@@ -254,6 +254,15 @@ also match. Missing or mismatched hints retain wallet-wide discovery; RPC errors
 retain ordinary failover. Local metadata alone never authorizes withdrawal.
 This avoids enumerating unrelated positions for a verified known position;
 it is not proof of improved live latency or exit price.
+Optional `dlmm_close_preparations.jsonl` records each invocation's ID and position,
+lock acquisition, lookup, transaction construction, blockhash acquisition, persisted
+signature and confirmation boundaries. Monotonic elapsed times separate preparation
+from broadcast latency; wall-clock timestamps link to monitor decisions. A final
+failed/pending/refused/completed stage describes the executor result, not finalized
+cash settlement. Reconciliation and RPC retries remain inside the same invocation.
+No endpoint URLs, error bodies, private keys or signed bytes are recorded, and a
+journal failure cannot prevent withdrawal. A killed process may leave an incomplete
+sequence; this alone does not prove the process remains live or identify a root cause.
 Optional `dlmm_close_transports.jsonl` records the
 signature, bytes hash, configured endpoint count, client elapsed time and outcome.
 It stores no RPC URLs or raw transaction. Journal failure cannot block a close.
