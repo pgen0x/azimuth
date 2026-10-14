@@ -1968,14 +1968,8 @@ def main():
                         if mint_cd_key:
                             run_command(f"redis-cli expire \"{mint_cd_key}\" {escalated_secs}")
                         print(f"🔴 REPEAT LOSS #{loss_streak} in 7d — escalated {base_symbol_cd} cooldown to {escalated_secs // 3600}h")
-                else:
-                    run_command(f"redis-cli del \"sol:dlmm:loss_streak:{base_symbol_cd}\"")  # reset streak on profit
-                    # Match the auto-close path: profitable exit shortens to 15m.
-                    if realized_sol > 0 and not adverse_exit(reason_lower):
-                        run_command(f"redis-cli expire \"{cooldown_key}\" 900")
-                        if mint_cd_key:
-                            run_command(f"redis-cli expire \"{mint_cd_key}\" 900")
-                        print(f"🚫 Cooldown shortened to 15m for {base_symbol_cd} (profitable force-close)")
+                # A nonnegative pre-close mark is not a settled cash win. Keep
+                # the existing loss history and ordinary cooldown until expiry.
                 # operator_confirmed: this is the --close path, so "rug" in the
                 # reason was typed by a human looking at the pool. That IS the
                 # second opinion the automatic path has to fetch, and there is
@@ -3165,12 +3159,8 @@ def main():
                                     f"\"{strike_why[:120]}\" ex {strike_cd_secs}")
                         print(f"⛔ Turnover pool cooled {strike_cd_secs // 3600}h — {strike_why}")
                     cooldown_secs = 7200 if is_dump_close else 3600  # 2h dump, 1h other
-                    # Ordinary profitable exits may cool for only 15m. Defensive
-                    # exits keep their full cooldown even when the LP mark is positive:
-                    # OP and Instinct fast-out dumps otherwise qualified for re-entry.
-                    if (realized_sol > 0
-                            and not adverse_exit(reason_lower)):
-                        cooldown_secs = 900
+                    # This is a pre-close LP mark, before final swap cash and
+                    # account costs. It cannot authorize a shorter cooldown.
                     if realized_sol < 0:
                         # Track repeat losses within a 7-day window and escalate cooldown duration
                         run_command(f"redis-cli incr \"{loss_streak_key}\"")
@@ -3180,14 +3170,14 @@ def main():
                         if loss_streak >= 2:
                             cooldown_secs = 259200 if loss_streak >= 3 else 86400  # 3+ losses→72h, 2 losses→24h
                             print(f"🔴 REPEAT LOSS #{loss_streak} in 7d — escalating {base_symbol_cd} cooldown to {cooldown_secs // 3600}h")
-                    else:
-                        run_command(f"redis-cli del \"{loss_streak_key}\"")  # reset streak on profit
+                    # A positive/zero mark cannot reset prior losses: recent
+                    # positive marks have settled negative after swaps and costs.
                     run_command(f"redis-cli set \"{cooldown_key}\" \"{close_reason[:120]}\" ex {cooldown_secs}")
                     mint_cd_key = mint_cooldown_key(meta)
                     if mint_cd_key:
                         run_command(f"redis-cli set \"{mint_cd_key}\" \"{close_reason[:120]}\" ex {cooldown_secs}")
                     cd_label = f"{cooldown_secs // 60}m" if cooldown_secs < 3600 else f"{cooldown_secs // 3600}h"
-                    print(f"🚫 Re-entry cooldown set for {base_symbol_cd}: {cd_label} (reason: {'profitable exit' if cooldown_secs == 900 else ('dump/momentum' if is_dump_close else 'normal exit')})")
+                    print(f"🚫 Re-entry cooldown set for {base_symbol_cd}: {cd_label} (reason: {'dump/momentum' if is_dump_close else 'normal exit'})")
 
                 # Low-yield exits also cool the POOL itself for 4h (a low-yield
                 # pool cooldown): the symbol cooldown above
