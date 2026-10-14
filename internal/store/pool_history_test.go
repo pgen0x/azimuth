@@ -88,6 +88,24 @@ func TestPoolHistoryCashProvenance(t *testing.T) {
 		}
 	}
 
+	upper := -.00001
+	upperOnly := PoolHistory{Closes: 1, Upper: &upper, LastClose: now - 10, ObservedAt: float64(now), Basis: "nonpositive_cash_upper_bound"}
+	set(upperOnly)
+	if h = seen.PoolCloseHistory(ctx, "P"); h.Upper == nil || *h.Upper != upper || h.Lower != nil || h.Net != nil || h.Basis != upperOnly.Basis {
+		t.Fatal("upper-only loss lost or fabricated exact cash", h)
+	}
+	invalidUpper := []PoolHistory{upperOnly, upperOnly, upperOnly, upperOnly}
+	invalidUpper[0].Upper = &hi
+	invalidUpper[1].Lower = &lo
+	invalidUpper[2].Net = &net
+	invalidUpper[3].ObservedAt -= 1000
+	for _, c := range invalidUpper {
+		set(c)
+		if h = seen.PoolCloseHistory(ctx, "P"); h.Upper != nil || h.Net != nil {
+			t.Fatal("invalid upper-only history accepted", c)
+		}
+	}
+
 	net = 0
 	set(good)
 	if h = seen.PoolCloseHistory(ctx, "P"); h.Net == nil || *h.Net != 0 {

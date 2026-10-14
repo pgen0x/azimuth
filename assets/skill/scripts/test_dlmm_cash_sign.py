@@ -58,6 +58,23 @@ class CashSignTests(unittest.TestCase):
         facts['close']['wallet_delta_lamports']+=10
         self.assertEqual(proofs(chains,facts),[])  # Possible refund could make it positive.
 
+    def test_pool_history_preserves_upper_only_and_requires_complete_coverage(self):
+        from dlmm_accounting import pool_cash_history
+        chains, facts = fixture()
+        proof, = proofs(chains, facts)
+        ledger = dict(chains=chains, rent_refund_groups=[], nonpositive_cash_upper_bounds=[proof])
+        closes = [dict(position='p',pool='pool',ts=195,pnl_sol=1)]
+        view = pool_cash_history(closes, ledger, 200)['pool']
+        self.assertEqual(view['prior_pnl_basis'], 'nonpositive_cash_upper_bound')
+        self.assertEqual(view['prior_cash_upper_sol'], -15e-9)
+        self.assertIsNone(view['prior_cash_lower_sol'])
+        self.assertIsNone(view['prior_net_pnl_sol'])
+        for altered in (dict(ledger, nonpositive_cash_upper_bounds=[proof,proof]),
+                        dict(ledger, nonpositive_cash_upper_bounds=[])):
+            self.assertIsNone(pool_cash_history(closes, altered, 200)['pool']['prior_cash_upper_sol'])
+        closes.append(dict(position='unknown',pool='pool',ts=196,pnl_sol=0))
+        self.assertIsNone(pool_cash_history(closes,ledger,200)['pool']['prior_cash_upper_sol'])
+
     def test_only_an_upper_bound_no_exact_cash_or_rent_group(self):
         chains, facts = fixture()
         proof, = proofs(chains, facts)
