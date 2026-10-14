@@ -85,10 +85,14 @@ executor alive until the monitor timeout and delaying SOL settlement.
 
 Marked NAV = native SOL + current SPL marks/quotes + Meteora open LP balance and
 unclaimed fees + recoverable token/position account reserves. SPL marks use batched
-Jupiter prices bounded by observed timestamp and price slot; at most ten missing
+Jupiter prices bounded by observed timestamp and price slot; at most forty missing
 marks per pass fall back to full-balance quotes. Rotation processes the selected
 accounts in cursor order and advances only for attempts made, so a rate limit
-does not skip unattempted accounts. Quote marks must match the requested input
+does not skip unattempted accounts. Cached quotes must remain within the existing
+600-second freshness limit through the remaining 90-second collection window;
+near-expiry quotes enter the same bounded refresh rotation. Failed refreshes do
+not fall back to the expiring price. This does not increase the request budget
+or guarantee every asset can be valued in one pass. Quote marks must match the requested input
 mint, full raw balance, SOL output mint and ExactIn mode, have a positive integer
 output amount, and carry a valid provider context slot within 1,500 slots of the
 finalized balance observation. Slots may lead finalized RPC when the provider

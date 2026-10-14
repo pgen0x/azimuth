@@ -326,6 +326,29 @@ global.fetch=async url=>{if(url.includes('/quote?'))throw new Error('no route');
    const rejected=JSON.parse(fs.readFileSync(path.join(dir,'dlmm_nav.jsonl'),'utf8').trim().split('\n').at(-1));
    assert.equal(rejected.tokens.find(t=>t.mint==='unknown0').mark_sol,null);
  }
+ // A quote valid now but expiring inside the 90s collection window must be
+ // selected for refresh. If that refresh fails, do not revive the old mark.
+ const rotationAccounts=connection.getParsedTokenAccountsByOwner;
+ connection.getParsedTokenAccountsByOwner=async(_,o)=>({value:o.programId.toString().startsWith('Tokenkeg') ?
+   [{account:{lamports:2039280,data:{parsed:{info:{mint:'expiring',tokenAmount:{amount:'1',decimals:9}}}}}}] : []});
+ const expiringCache=()=>fs.writeFileSync(path.join(dir,'dlmm_quote_marks.json'),JSON.stringify({
+   expiring:{schema_version:2,in_amount:'1',out_lamports:'2000000',observed_at:Math.floor(Date.now()/1000)-550,slot:100}}));
+ let refreshCalls=0;
+ global.fetch=async url=>{if(url.includes('/quote?')){refreshCalls++;return {ok:true,json:async()=>({
+   inputMint:'expiring',outputMint:'So11111111111111111111111111111111111111112',swapMode:'ExactIn',
+   inAmount:'1',outAmount:'1000000',contextSlot:currentSlot})};}
+   return {ok:true,json:async()=>({totalPositions:0,pools:[],hasNext:false})};};
+ expiringCache();await collect(args);
+ const refreshedQuote=JSON.parse(fs.readFileSync(path.join(dir,'dlmm_nav.jsonl'),'utf8').trim().split('\n').at(-1));
+ assert.equal(refreshCalls,1);assert.equal(refreshedQuote.tokens[0].basis,'full_balance_quote');
+ assert.equal(refreshedQuote.tokens[0].mark_sol,.001);
+ expiringCache();
+ global.fetch=async url=>url.includes('/quote?') ? {ok:false,status:429}
+   : {ok:true,json:async()=>({totalPositions:0,pools:[],hasNext:false})};
+ await collect(args);
+ const failedRefresh=JSON.parse(fs.readFileSync(path.join(dir,'dlmm_nav.jsonl'),'utf8').trim().split('\n').at(-1));
+ assert.equal(failedRefresh.tokens[0].mark_sol,null);assert.equal(failedRefresh.nav_sol,null);
+ connection.getParsedTokenAccountsByOwner=rotationAccounts;
  // A six-decimal token must retain the exact SOL quote on the next collection.
  const previousAccounts=connection.getParsedTokenAccountsByOwner;
  connection.getParsedTokenAccountsByOwner=async(_,o)=>({value:o.programId.toString().startsWith('Tokenkeg') ? [{account:{lamports:2039280,data:{parsed:{info:{mint:'six-decimal',tokenAmount:{amount:'1000000',decimals:6}}}}}}] : []});
