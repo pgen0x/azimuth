@@ -1,6 +1,19 @@
 const assert = require('assert/strict');
-const {PublicKey} = require('@solana/web3.js');
-const {dependencyKeys, captureBank, boundedJson, allowed} = require('./dlmm_exit_bank');
+const fs = require('fs'), path = require('path'), vm = require('vm');
+// Unit fixtures exercise account graph/state checks without installing an SDK.
+// Base58/address validation remains the SDK's responsibility in production.
+class PublicKey {
+  constructor(value) { this.value = Buffer.isBuffer(value) ? value.toString('hex') : String(value); }
+  toString() { return this.value; }
+  toBuffer() { return Buffer.from(this.value, 'hex'); }
+}
+const mod = {exports: {}};
+vm.runInNewContext(fs.readFileSync(path.join(__dirname,'dlmm_exit_bank.js'),'utf8'), {
+  module: mod, Buffer, Response, console, setTimeout,
+  require: name => name === '@solana/web3.js' ? {PublicKey} : require(name),
+  fetch: () => { throw new Error('network forbidden in offline test'); },
+});
+const {dependencyKeys, captureBank, boundedJson, allowed} = mod.exports;
 const key = n => new PublicKey(Buffer.alloc(32, n)).toString();
 const loader = 'BPFLoaderUpgradeab1e11111111111111111111111';
 const account = (owner, data, executable=false) => ({owner, executable,
@@ -8,7 +21,7 @@ const account = (owner, data, executable=false) => ({owner, executable,
 const ix = (program, accounts=[]) => ({programId: program,
   accounts: accounts.map(pubkey => ({pubkey, isSigner: false, isWritable: true})), data: ''});
 (async () => {
-  assert.deepEqual(await boundedJson(new Response('{"ok":true}'),100),{ok:true});
+  assert.equal((await boundedJson(new Response('{"ok":true}'),100)).ok,true);
   await assert.rejects(boundedJson(new Response('x'.repeat(101)),100), /response_size_limit/);
   for (const method of ['sendTransaction','sendRawTransaction','requestAirdrop','simulateTransaction'])
     assert.equal(allowed.has(method), false);
