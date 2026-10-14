@@ -1522,6 +1522,7 @@ async function swapToken(inputMintStr, outputMintStr, amountFloat, maxPriceImpac
     let transaction = VersionedTransaction.deserialize(swapTransactionBuf);
     let tokenRentCloseIncluded = false;
     let ordinaryTokenRentClose = false;
+    let netRecoveryEvidence = null;
     
     const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash("confirmed");
     transaction.message.recentBlockhash = blockhash;
@@ -1575,6 +1576,16 @@ async function swapToken(inputMintStr, outputMintStr, amountFloat, maxPriceImpac
         return { success: false, aborted: true, reason: "net_recovery_below_floor",
           conservativeNetLamports: conservativeNet, minNetLamports };
       }
+      // Preserve the exact selected simulation's gate value, including any
+      // accepted rent-close variant. This is cash recovery, not position profit.
+      netRecoveryEvidence = {
+        version: 1, recorded_at: Date.now() / 1000,
+        conservative_wallet_delta_lamports: conservativeNet,
+        required_minimum_lamports: minNetLamports,
+        reserved_quote_slippage_lamports: out - minimum,
+        token_rent_close_included: tokenRentCloseIncluded,
+        basis: "unsigned_selected_transaction_simulated_wallet_delta_minus_quote_slippage; includes_account_debits_and_refunds; not_realized_proceeds_or_position_profit",
+      };
     }
     if (input_mint === "So11111111111111111111111111111111111111112") {
       await assertNativeReserve(connection, wallet, transaction);
@@ -1599,6 +1610,7 @@ async function swapToken(inputMintStr, outputMintStr, amountFloat, maxPriceImpac
       small_settlement_requote: smallSettlement && selectedSlippageBps === 300,
       token_rent_close_included: tokenRentCloseIncluded,
       ordinary_token_rent_close: ordinaryTokenRentClose,
+      ...(netRecoveryEvidence ? { net_recovery: netRecoveryEvidence } : {}),
       price_impact_pct: quoteResponse.priceImpactPct ?? null,
       basis: "provider_quote_before_broadcast; raw_token_units; not_realized_proceeds",
     });

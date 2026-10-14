@@ -554,6 +554,15 @@ coverage and selection bias and do not prove improved prospective returns.
 
 ### Swap quote evidence
 
+For swaps using the minimum-recovery gate, `swap_quote.net_recovery` records
+the selected unsigned transaction's simulated wallet delta after reserving the
+quoted slippage allowance, the required minimum, and whether an inline token
+rent close was included. Accepted rent-close variants retain their own measured
+value; rejected variants do not replace the original simulation's value.
+This includes simulated account funding and refunds, but is neither executed
+proceeds nor whole-position profit. Swaps without that gate omit this evidence.
+Recording it introduces no additional simulation or RPC request.
+
 New swap submission rows include `swap_quote`: quote receipt time, input/output
 mints, raw input/output amounts, minimum output, authorized slippage, provider
 context slot and price-impact estimate. Only these selected fields are copied;

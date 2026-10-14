@@ -330,6 +330,7 @@ vm.runInNewContext("const productionExitTransport=confirmExitTransaction;confirm
   assert.equal(quoteEvent.swap_quote.input_mint,"So11111111111111111111111111111111111111112");
   assert.equal(quoteEvent.swap_quote.output_mint,"TOKEN");
   assert.equal(quoteEvent.swap_quote.unrelatedDebug,undefined);
+  assert.equal(quoteEvent.swap_quote.net_recovery,undefined);
   // Residual recovery must cover costs and the full slippage allowance before
   // sending. Existing pending-send tests above still exercise the normal path.
   const defaultBalance = Connection.prototype.getBalanceAndContext;
@@ -511,6 +512,10 @@ vm.runInNewContext("const productionExitTransport=confirmExitTransaction;confirm
   assert.deepEqual(ordinarySimulations,[false,true]);
   assert.equal(accountReads-beforeOrdinaryReads,1); // Reuse the already checked balance/closed-position evidence.
   assert.equal(lastOrdinary().ordinary_token_rent_close,true);
+  assert.equal(lastOrdinary().net_recovery.conservative_wallet_delta_lamports,2478440);
+  assert.equal(lastOrdinary().net_recovery.required_minimum_lamports,1);
+  assert.equal(lastOrdinary().net_recovery.reserved_quote_slippage_lamports,10000);
+  assert.equal(lastOrdinary().net_recovery.token_rent_close_included,true);
   assert.equal(lastOrdinary().minimum_out_amount,"990000");assert.equal(lastOrdinary().authorized_slippage_bps,100);
   for(const failure of ['simulation','worse-sale','emergency','unknown-emergency','legacy','extension']){
     ordinarySimulations=[];ordinaryCombinedError=failure==='simulation';ordinaryWorseSale=failure==='worse-sale';
@@ -529,6 +534,8 @@ vm.runInNewContext("const productionExitTransport=confirmExitTransaction;confirm
     const before=sends;assert.equal((await ordinary()).success,true);assert.equal(sends,before+1);
     assert.equal(lastOrdinary().ordinary_token_rent_close,false);
     assert.equal(lastOrdinary().token_rent_close_included,false);
+    assert.equal(lastOrdinary().net_recovery.conservative_wallet_delta_lamports,990000);
+    assert.equal(lastOrdinary().net_recovery.token_rent_close_included,false);
     assert.deepEqual(ordinarySimulations,failure==='simulation'||failure==='worse-sale'?[false,true]:[false]);
   }
   accounts=[eligible()];inventoryProof={success:true,amount_raw:"100000000",wallet_balance_raw:"100000000",slot:10};
