@@ -787,8 +787,12 @@ including discovered upgradeable program data and the position pool's oracle
 for direct-pool swap replay even when Jupiter routes through another pool.
 Missing accounts remain explicit
 nulls. A changed program, closed position, budget overrun or more than 100
-accounts leaves the observation unmeasured. Capture stops after eight archived
-positions and never replaces an existing archive. Summary outcomes go to
+accounts leaves the observation unmeasured. Capture is limited to eight distinct positions, three banks per position,
+and 512 MiB total JSON storage. Later banks are at least ten minutes apart,
+regardless of quote profitability. A 32 MiB per-bank ceiling is reserved before
+network reads. The first bank retains `<position>.json`; later banks use
+`<position>.2.json` and `<position>.3.json`. Existing banks are never replaced.
+These sparse observations do not constitute complete exit-path coverage. Summary outcomes go to
 `dlmm_exit_bank_observations.jsonl`; collection failure preserves the ordinary
 quote. Replay still must recompute inventory/geometry at the bank slot, check
 remaining CPI dependencies and account for all costs. This is research input,
