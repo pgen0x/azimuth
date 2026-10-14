@@ -29,8 +29,9 @@ const ix = (program, accounts=[]) => ({programId: program,
   const response = {tokenLedgerInstruction: ix(key(4), [key(5)]),
     swapInstruction: ix(key(4), [key(6)]), addressLookupTableAddresses: [key(7)],
     setupInstructions: [ix(key(8), [key(9)])], cleanupInstruction: ix(key(8), [key(10)])};
-  const keys = dependencyKeys(close, response, {position: key(2)});
+  const keys = dependencyKeys(close, response, {position: key(2), oracle: key(13)});
   for (let n=1;n<=10;n++) assert(keys.includes(key(n)), `missing dependency ${n}`);
+  assert(keys.includes(key(13)), 'direct-pool oracle absent from external route');
   assert.throws(() => dependencyKeys(close, {}, {position: key(2)}), /missing_swap/);
   assert.throws(() => dependencyKeys(close, {...response,
     addressLookupTableAddresses: Array.from({length:101},(_,i)=>key(i))}, {position:key(2)}), /account_limit/);
@@ -39,9 +40,10 @@ const ix = (program, accounts=[]) => ({programId: program,
   new PublicKey(dataAddress).toBuffer().copy(programBytes, 4);
   const elf = Buffer.alloc(50); elf.writeUInt32LE(3);
   const state = {[program]:account(loader,programBytes,true),
-    [dataAddress]:account(loader,elf), [position]:account(program,Buffer.from('position'))};
+    [dataAddress]:account(loader,elf), [position]:account(program,Buffer.from('position')),
+    [key(13)]:account(program,Buffer.from('oracle'))};
   const requests = [];
-  const bank = await captureBank([program,position,key(12)], async requested => {
+  const bank = await captureBank([program,position,key(12),key(13)], async requested => {
     requests.push(requested); return {context:{slot:10+requests.length},
       value:requested.map(k=>state[k]||null)};
   }, position);
@@ -49,6 +51,8 @@ const ix = (program, accounts=[]) => ({programId: program,
   assert.equal(bank.snapshot_slot,12); assert.equal(bank.discovery_slot,11);
   assert.equal(bank.accounts[key(12)],null); // Explicit absence is replay evidence.
   assert.deepEqual(bank.accounts[dataAddress],state[dataAddress]);
+  assert(requests.every(requested => requested.includes(key(13))));
+  assert.deepEqual(bank.accounts[key(13)],state[key(13)]);
   for (const failure of ['closed','program_changed','missing_code','backwards_slot']) {
     let count=0;
     await assert.rejects(captureBank([program,position], async requested => {
