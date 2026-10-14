@@ -1147,14 +1147,14 @@ vm.runInNewContext("const productionExitTransport=confirmExitTransaction;confirm
   env.DRY_RUN="true";batchBalance=0;
   assert.equal((await reclaimEmptyAccounts(true,true)).dry_run,true);assert.equal(sends,beforeBatch+4);
   delete env.DRY_RUN;
-  tokenAccounts=[account("eligible")];batchBalance=348630923;
+  tokenAccounts=[account("eligible")];batchBalance=343630923;
   const beforeEntryRent=sends;
   const entryReady=await reclaimEmptyAccounts(true,true);
-  assert.equal(entryReady.entry_liquidity_floor_lamports,350000000);
+  assert.equal(entryReady.entry_liquidity_floor_lamports,345000000);
   assert.equal(entryReady.entry_liquidity_shortfall_lamports,1369077);
   assert.equal(entryReady.fee_lamports,5000);assert.equal(sends,beforeEntryRent+1);
-  assert.equal(batchBalance+entryReady.recovered_lamports_before_fee-entryReady.fee_lamports,350114363);
-  batchBalance=350000000-1488440+5000;
+  assert.equal(batchBalance+entryReady.recovered_lamports_before_fee-entryReady.fee_lamports,345114363);
+  batchBalance=345000000-1488440+5000;
   assert.equal((await reclaimEmptyAccounts(true,true)).fee_lamports,5000);assert.equal(sends,beforeEntryRent+2);
   batchBalance--;
   const feeCount=feeReads,signCount=signCalls;
@@ -1162,12 +1162,12 @@ vm.runInNewContext("const productionExitTransport=confirmExitTransaction;confirm
   assert.equal(stillShort.reason,"singleton_net_below_entry_floor");
   assert.equal(feeReads,feeCount+1);assert.equal(signCalls,signCount);assert.equal(sends,beforeEntryRent+2);
   assert.equal(fs.existsSync(path.join(root,"memories/dlmm_pending_rent",wallet.publicKey.toString()+".json")),false);
-  for(const balance of [350000000,350000000-1488440-1]){
+  for(const balance of [345000000,345000000-1488440-1]){
     batchBalance=balance;const beforeFee=feeReads;
     assert.equal((await reclaimEmptyAccounts(true,true)).reason,"waiting_for_second_empty_account");
     assert.equal(feeReads,beforeFee);assert.equal(sends,beforeEntryRent+2);
   }
-  batchBalance=348630923;fee=null;
+  batchBalance=343630923;fee=null;
   await assert.rejects(reclaimEmptyAccounts(true,true),/unknown or uneconomic/);
   assert.equal(signCalls,signCount);assert.equal(sends,beforeEntryRent+2);fee=5000;
   Connection.prototype.getBalanceAndContext=balanceReader;

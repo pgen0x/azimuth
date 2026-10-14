@@ -390,12 +390,13 @@ def main():
         assert "dropped 75.0%" in pipeline.predeploy_live_gate_reject(
             {"pool": "pool", "name": "test", "base_mint": "mint", "fee_tvl_ratio": 0.2}, 0.1, "5m")
     assert pipeline.compute_deploy_amount(0.30718357) == 0
-    assert pipeline.compute_deploy_amount(0.349) == 0
-    assert pipeline.compute_deploy_amount(0.349999999) == 0
-    assert pipeline.compute_deploy_amount(0.35) == 0.1
+    assert pipeline.compute_deploy_amount(0.344) == 0
+    assert pipeline.compute_deploy_amount(0.344999999) == 0
+    assert pipeline.compute_deploy_amount(0.345) == 0.1
+    assert pipeline.compute_deploy_amount(0.346556150) == 0.1
     assert pipeline.compute_deploy_amount(0.461554584) == 0.12
     assert sum(pipeline.CASH_POLICY[key] for key in ('native_reserve_lamports',
-               'entry_rent_allowance_lamports', 'minimum_entry_lamports')) == 350000000
+               'entry_rent_allowance_lamports', 'minimum_entry_lamports')) == 345000000
     assert pipeline.compute_deploy_amount((348630923+1488440-5000)/1e9) == 0.1
 
     # The risk/override paths must never execute a token swap. Only the explicit
