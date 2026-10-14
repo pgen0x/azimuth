@@ -771,3 +771,21 @@ with tempfile.TemporaryDirectory() as directory:
     except json.JSONDecodeError:pass
     else:raise AssertionError('Candidate history corruption must remain visible')
 print('Pre-entry candidate history: bounded reads, trading priority, fair rotation and no future backfill')
+
+# The optional account archive cannot extend a phase or discard the quote.
+from dlmm_shadow import archive_exit_bank
+archive_sample = dict(status='measured', inventory_source='onchain_sol_inventory',
+                      quote={'inAmount':'1'}, token_sell_raw='1')
+with patch.object(shadow_module.time, 'monotonic', return_value=100), \
+     patch.object(shadow_module.subprocess, 'run') as child:
+    assert archive_exit_bank(Path('/profile'), dict(archive_sample,token_sell_raw='0'),120) is None
+    assert archive_exit_bank(Path('/profile'), dict(archive_sample,inventory_source='indexed_position'),120) is None
+    assert archive_exit_bank(Path('/profile'), archive_sample,103)['reason']=='exit_bank_budget'
+    child.assert_not_called()
+    child.return_value = type('Result',(),{'stdout':'{"status":"archived","snapshot_slot":123}'})()
+    assert archive_exit_bank(Path('/profile'),archive_sample,110)['status']=='archived'
+    assert child.call_args.kwargs['timeout']==10
+    assert json.loads(child.call_args.kwargs['input'])['budget_ms']==10000
+    child.side_effect = shadow_module.subprocess.TimeoutExpired('node',10)
+    assert archive_exit_bank(Path('/profile'),archive_sample,110)['reason']=='exit_bank_unavailable'
+print('Optional exit bank archive preserves source restrictions and the enclosing deadline')

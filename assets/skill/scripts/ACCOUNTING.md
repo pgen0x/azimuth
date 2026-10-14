@@ -666,6 +666,25 @@ or relax the scanner's accepted/ambiguous-delivery deduplication protection.
 
 ### Forward liquidation observations
 
+After saving a measured native inventory/quote observation, the existing shadow
+collector can archive an unsigned exit bank using its remaining deadline (at
+most 15 seconds, within the existing 20-second liquidation phase). It yields
+to entry, settlement and the position's close worker. There is no new timer,
+signing key, transaction submission or RPC simulation. The SDK's optional
+compute estimate is refused by a read-only method allowlist; replay must
+measure compute use itself.
+
+`dlmm_exit_banks/<position>.json` contains SDK close instructions, Jupiter's
+ledger swap instructions, lookup tables and one final account-response bank
+including discovered upgradeable program data. Missing accounts remain explicit
+nulls. A changed program, closed position, budget overrun or more than 100
+accounts leaves the observation unmeasured. Capture stops after eight archived
+positions and never replaces an existing archive. Summary outcomes go to
+`dlmm_exit_bank_observations.jsonl`; collection failure preserves the ordinary
+quote. Replay still must recompute inventory/geometry at the bank slot, check
+remaining CPI dependencies and account for all costs. This is research input,
+not evidence of executable profit or permission to delay an emergency exit.
+
 The existing shadow job samples at most one recent, unclosed position per cycle
 in `dlmm_liquidation_quotes.jsonl`. It first makes one read-only native risk probe
 with a three-second timeout. A verified mark supplies transfer-adjusted token
