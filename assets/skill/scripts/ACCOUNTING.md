@@ -328,9 +328,12 @@ The scheduled unit passes `--batch`, which waits for at least two eligible
 accounts to share one network fee. A singleton is reclaimed immediately when
 its rent exceeds free native cash above the executor's existing 0.2 SOL reserve;
 this also avoids retaining a large account balance. It can also run when the
-measured net refund restores the pipeline's existing minimum entry liquidity:
-0.2 SOL reserve + 0.05 SOL rent allowance + 0.1 SOL minimum ticket = 0.35 SOL.
-These unchanged amounts share `dlmm_cash_policy.json` between the pipeline and
+measured net refund restores the pipeline's minimum entry liquidity:
+0.2 SOL reserve + 0.045 SOL rent allowance + 0.1 SOL minimum ticket = 0.345 SOL.
+The 0.045 SOL allowance covers the observed 0.043414 SOL position/ATA rent;
+the executor still simulates the exact transaction and enforces the 0.2 SOL
+post-entry reserve before signing. Larger actual costs can still refuse entry.
+These amounts share `dlmm_cash_policy.json` between the pipeline and
 executor. The policy is loaded on entry/maintenance paths; exit reconciliation
 does not depend on it. When the gross refund could restore entry liquidity, the
 executor reads the actual network fee and defers without signing if the net
