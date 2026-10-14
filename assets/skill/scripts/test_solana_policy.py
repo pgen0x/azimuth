@@ -310,7 +310,7 @@ def main():
                 kind = name + (' settlement' if '--settle-pending' in sys.argv else '')
                 with open(os.environ['AZIMUTH_TEST_LOG'], 'a') as out:
                     print(kind, file=out)
-                if name == 'dlmm_realized.py':
+                if name in ('dlmm_realized.py', 'dlmm_weights.py'):
                     time.sleep(10)
                 """),
             "sleep": "#!/bin/sh\nexec /bin/sleep 0.03\n",
@@ -330,11 +330,13 @@ def main():
             calls = []
             while time.monotonic() < deadline:
                 calls = log.read_text().splitlines() if log.exists() else []
-                if calls.count('dlmm_monitor.py') >= 3 and 'dlmm_realized.py' in calls:
+                if (calls.count('dlmm_monitor.py') >= 3 and 'dlmm_realized.py' in calls
+                        and 'dlmm_weights.py' in calls):
                     break
                 time.sleep(0.02)
             assert calls.count('dlmm_monitor.py') >= 3, calls
             assert calls.count('dlmm_realized.py') == 1, calls
+            assert calls.count('dlmm_weights.py') == 1, calls
             assert 'dlmm_stats.py' not in calls, calls
         finally:
             os.killpg(process.pid, signal.SIGKILL)
