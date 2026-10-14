@@ -55,3 +55,19 @@ const closes=[{position:'position',ts:200}];
 assert.deepEqual([...cashSignRefresh(events,cache,closes,'wallet',300)],['fund']);
 cache.get('fund').retained_rent_evidence=null;
 assert.deepEqual([...cashSignRefresh(events,cache,closes,'wallet',300)],[]);
+
+// Recent closes outrank the insertion order of older unresolved metadata.
+const queueEvents=new Map(),queueCache=new Map(),queueCloses=[];
+for(let n=0;n<6;n++) {
+ const signature='s'+n,position='p'+n;
+ queueEvents.set(signature,{signature,position,wallet:'wallet'});
+ queueCache.set(signature,{wallet:'wallet',wallet_delta_lamports:-25,cash_sign_evidence:null,
+  token_rent_evidence:{funded:[{account:'a'+n,mint:'mint',lamports:20}]}});
+ queueCloses.push({position,ts:200+n});
+}
+queueCloses.push({position:'p5',ts:199}); // Old duplicate cannot erase the latest close.
+assert.deepEqual([...cashSignRefresh(queueEvents,queueCache,queueCloses,'wallet',300)],['s5','s4','s3','s2']);
+queueCache.get('s5').retained_rent_evidence=null;
+assert.deepEqual([...cashSignRefresh(queueEvents,queueCache,queueCloses,'wallet',300)],['s4','s3','s2','s1']);
+queueCloses.push({position:'p0',ts:301}); // Future records never gain priority.
+assert.deepEqual([...cashSignRefresh(queueEvents,queueCache,queueCloses,'wallet',300)],['s4','s3','s2','s1']);
