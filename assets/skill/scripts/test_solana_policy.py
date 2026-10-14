@@ -428,6 +428,15 @@ def main():
     assert pipeline.risk_scaled_ticket(.1, 52, "multiday") == (.1, 1)
     assert pipeline.risk_scaled_ticket(.12, 106.788112, "turnover") == (.12, 1)
     assert pipeline.risk_scaled_ticket(.12, None, "turnover") == (.12, 1)
+    # Python min/max can turn NaN into the maximum multiplier. Invalid signal
+    # scores must be rejected before enrichment/weights or automatic sizing.
+    for invalid in [float("nan"), float("inf"), -float("inf"), "NaN", "Infinity", "75", True, {}, []]:
+        assert pipeline.risk_scaled_ticket(.1, invalid, "turnover") == (0, 0)
+        with patch.object(pipeline, "load_signal_weights", side_effect=AssertionError("invalid score reached fit")), \
+                contextlib.redirect_stdout(io.StringIO()):
+            assert pipeline.apply_batch_conviction([{"name":"invalid", "score":invalid}], "turnover") == []
+    with contextlib.redirect_stdout(io.StringIO()):
+        assert pipeline.apply_batch_conviction([{"name":"missing"}], "turnover") == []
     # Execute the actual selection+sizing block: a subminimum first candidate
     # must not consume market reads or prevent a valid runner-up from winning.
     source = Path(pipeline.__file__).read_text()
