@@ -375,7 +375,7 @@ def main():
                 ns=dict(get_active_positions=lambda:initial,
                     get_position_metadata=lambda _:existing,
                     get_wallet_address=lambda:"wallet",
-                    get_meteora_portfolio_positions=lambda _:({"position": {
+                    get_meteora_portfolio_positions=lambda _, timeout=None:({"position": {
                         "pool":"pool", "balances_sol":0.11}}, None),
                     recover_position_metadata=lambda *_:{"pair":"TOKEN-SOL", "mode":"turnover",
                         "base_mint":"TOKEN", "dev":"developer", "signal":{"holders":0},
