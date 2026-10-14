@@ -102,6 +102,17 @@ The 60-transaction per-pass fetch budget resumes from the durable wallet cache;
 coverage is incomplete until the whole interval has been fetched. Trading during a
 multi-source snapshot invalidates it. Collector services never send transactions.
 
+## Post-close cooldowns
+
+The monitor's ordinary and forced-close paths retain their normal cooldown when
+only a nonnegative pre-close LP mark is available. That mark cannot shorten the
+cooldown to 15 minutes or clear the token's existing loss streak: a positive LP
+valuation can settle to negative native cash after a swap and account funding.
+Negative marks retain the existing escalation; loss history expires through its
+existing seven-day TTL. This does not add a cash-win reset or retrospectively
+rewrite Redis history. Recenter eligibility still passes the executor's separate
+root-accounting gate, and close/settlement execution is unchanged.
+
 ## Root policy
 
 All deploy callers with a root/recenter link use the same gate before signing.

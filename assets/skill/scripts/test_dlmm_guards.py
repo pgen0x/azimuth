@@ -25,7 +25,7 @@ def main():
             assert "--empty-only" in cmd.call_args.args[0]
             queue.assert_not_called()
 
-    # Replay production eligibility and both profitable-exit cooldown shortcuts.
+    # Replay production eligibility and cooldown handling before cash settlement.
     tree = ast.parse(Path(monitor.__file__).read_text())
     # Exercise the real risk classifiers and the normal close call: an ordinary
     # close must not acquire an emergency fill allowance just because it loses.
@@ -81,7 +81,7 @@ def main():
     shortcuts = [n.test for n in ast.walk(tree) if isinstance(n, ast.If)
                  and any(isinstance(c, ast.Call) and isinstance(c.func, ast.Name)
                          and c.func.id == "adverse_exit" for c in ast.walk(n.test))]
-    assert len(shortcuts) == 2
+    assert len(shortcuts) == 0  # LP marks cannot authorize profit cooldowns
     ns = dict(mode_cd="turnover", strategy="sol_bidask", emergency_close=False,
               realized_sol=0.0015, rebalance_budget_ok=True, adverse_exit=monitor.adverse_exit)
     for reason, allowed in [("Fast-out dump exit (5m -8.6%, PnL +1.29%)", False),
@@ -97,6 +97,37 @@ def main():
     for reason in ("Low yield", "Fee pace death"):
         ns["reason_lower"] = reason.lower()
         assert not eval(compile(ast.Expression(churn), "exit-policy", "eval"), ns)
+
+    # Execute both real loss-streak branches with marked wins that later lost
+    # cash (Normie +0.000218 mark / -0.001209247 cash), zero, and repeat losses.
+    loss_branches = [n for n in ast.walk(tree) if isinstance(n, ast.If)
+                     and ast.unparse(n.test) == "realized_sol < 0"
+                     and "loss_streak" in ast.unparse(n)]
+    assert len(loss_branches) == 2
+    for branch in loss_branches:
+        for mark in (0.000218, 0.0, -0.001):
+            writes = []
+            def command(cmd):
+                writes.append(cmd)
+                return ("2" if "redis-cli get " in cmd else "", "", 0)
+            scope = dict(realized_sol=mark, run_command=command,
+                         loss_streak_key="sol:dlmm:loss_streak:NORMIE",
+                         base_symbol_cd="NORMIE", cooldown_key="cooldown",
+                         mint_cd_key="mint-cooldown", cooldown_secs=3600,
+                         pnl_key="pnl", reason_lower="take-profit")
+            with contextlib.redirect_stdout(io.StringIO()):
+                exec(compile(ast.Module(body=[branch], type_ignores=[]),
+                             "marked-profit-cooldown-replay", "exec"), scope)
+            assert not any("redis-cli del " in cmd for cmd in writes), writes
+            assert not any(cmd.endswith(" 900") for cmd in writes), writes
+            if mark >= 0:
+                assert not writes, writes
+            else:
+                assert any("redis-cli incr " in cmd for cmd in writes)
+                assert (scope["cooldown_secs"] == 86400
+                        or any(cmd.endswith(" 86400") for cmd in writes))
+    assert not any(isinstance(n, ast.Assign) and ast.unparse(n) == "cooldown_secs = 900"
+                   for n in ast.walk(tree))
 
     cli = SimpleNamespace(mode="turnover", from_batch=json.dumps([{"pool": "A"*32}]), from_signal=None)
     with patch.object(pipeline, "run_command", return_value=("1", "", 0)) as command:
