@@ -557,12 +557,16 @@ async function collect({dir, wallet, PublicKey, rpc, historyOnly=false, includeR
   const quoteMarksPath=path.join(dir,'dlmm_quote_marks.json');
   let quoteMarks={};
   try { quoteMarks=JSON.parse(fs.readFileSync(quoteMarksPath,'utf8')); } catch { /* first run */ }
+  // A cache skipped during selection must survive the remaining quote work.
+  // Otherwise it expires mid-loop, after its opportunity to be refreshed.
+  const quoteCacheRequiredAt=Math.max(now(),started+90);
   const freshQuote=info=>{
     const q=quoteMarks[info.mint];
     return q && q.schema_version===2 && q.in_amount===info.tokenAmount.amount
       && typeof q.out_lamports==='string' && /^[0-9]+$/.test(q.out_lamports)
       && Number.isFinite(Number(q.out_lamports)) && Number(q.out_lamports)>0
-      && Number.isSafeInteger(q.observed_at) && q.observed_at<=now() && now()-q.observed_at<=600
+      && Number.isSafeInteger(q.observed_at) && q.observed_at<=now()
+      && Math.max(now(),quoteCacheRequiredAt)-q.observed_at<=600
       && Number.isSafeInteger(q.slot) && q.slot>0 && Math.abs(slot-q.slot)<=QUOTE_CACHE_MAX_SLOT_LAG;
   };
   const missingAccounts=allAccounts.filter(a=>{
