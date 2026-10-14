@@ -1536,7 +1536,17 @@ async function swapToken(inputMintStr, outputMintStr, amountFloat, maxPriceImpac
     }
 
     // 3. Price-impact guard — abort before signing if impact exceeds threshold (protects large exits on low-TVL pools)
-    const impactPct = parseFloat(quoteResponse.priceImpactPct || "0") * 100;
+    // Jupiter Metis returns a decimal fraction, unlike the DLMM SDK's percent.
+    // Unknown or malformed impact must not silently become zero or NaN.
+    const impactRaw = quoteResponse.priceImpactPct;
+    const validImpactText = typeof impactRaw === "string"
+      && /^(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/.test(impactRaw);
+    const impactFraction = validImpactText ? Number(impactRaw) : NaN;
+    if (!Number.isFinite(impactFraction) || impactFraction < 0 || impactFraction > 1
+        || !Number.isFinite(maxPriceImpactPct) || maxPriceImpactPct < 0) {
+      return { success: false, aborted: true, reason: "price_impact_unmeasured" };
+    }
+    const impactPct = impactFraction * 100;
     if (impactPct > maxPriceImpactPct) {
       return {
         success: false,
