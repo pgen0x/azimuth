@@ -13,7 +13,7 @@ vm.runInNewContext(fs.readFileSync(path.join(__dirname,'dlmm_exit_bank.js'),'utf
   require: name => name === '@solana/web3.js' ? {PublicKey} : require(name),
   fetch: () => { throw new Error('network forbidden in offline test'); },
 });
-const {dependencyKeys, captureBank, boundedJson, allowed} = mod.exports;
+const {dependencyKeys, captureBank, boundedJson, allowed, archiveTarget} = mod.exports;
 const key = n => new PublicKey(Buffer.alloc(32, n)).toString();
 const loader = 'BPFLoaderUpgradeab1e11111111111111111111111';
 const account = (owner, data, executable=false) => ({owner, executable,
@@ -25,6 +25,32 @@ const ix = (program, accounts=[]) => ({programId: program,
   await assert.rejects(boundedJson(new Response('x'.repeat(101)),100), /response_size_limit/);
   for (const method of ['sendTransaction','sendRawTransaction','requestAirdrop','simulateTransaction'])
     assert.equal(allowed.has(method), false);
+  const directory = fs.mkdtempSync(path.join(require('os').tmpdir(), 'exit-bank-series-'));
+  try {
+    const now = Date.now(), position = key(20);
+    const first = archiveTarget(directory, position, now);
+    assert.equal(path.basename(first.output), position + '.json');
+    fs.writeFileSync(first.output, 'original bank');
+    fs.utimesSync(first.output, new Date(now), new Date(now));
+    assert.equal(archiveTarget(directory, position, now + 599999).status, 'archive_interval');
+    const second = archiveTarget(directory, position, now + 600001);
+    assert.equal(path.basename(second.output), position + '.2.json');
+    fs.writeFileSync(second.output, 'later bank');
+    fs.utimesSync(second.output, new Date(now + 600001), new Date(now + 600001));
+    assert.equal(archiveTarget(directory, position, now + 600002).status, 'archive_interval');
+    const third = archiveTarget(directory, position, now + 1200002);
+    assert.equal(path.basename(third.output), position + '.3.json');
+    fs.writeFileSync(third.output, 'last bank');
+    assert.equal(archiveTarget(directory, position, now + 1800003).status, 'position_archive_capacity');
+    assert.equal(fs.readFileSync(first.output, 'utf8'), 'original bank');
+    for (let n=21;n<28;n++) fs.writeFileSync(path.join(directory,key(n)+'.json'),'bank');
+    assert.equal(archiveTarget(directory,key(28),now).status,'archive_capacity');
+    fs.utimesSync(path.join(directory,key(21)+'.json'),new Date(now),new Date(now));
+    assert.equal(archiveTarget(directory,key(21),now+600001).sequence,2);
+    const large=path.join(directory,key(21)+'.json');
+    fs.truncateSync(large,481*1024*1024);
+    assert.equal(archiveTarget(directory,key(21),now+600001).status,'archive_byte_capacity');
+  } finally { fs.rmSync(directory, {recursive:true, force:true}); }
   const close = [ix(key(1), [key(2), key(3)])];
   const response = {tokenLedgerInstruction: ix(key(4), [key(5)]),
     swapInstruction: ix(key(4), [key(6)]), addressLookupTableAddresses: [key(7)],

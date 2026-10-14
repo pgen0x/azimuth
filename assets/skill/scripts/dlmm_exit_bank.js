@@ -87,6 +87,24 @@ function tradingActive(wallet, position) {
     });
   } catch { return true; }
 }
+// Bounded longitudinal evidence, independent of whether the quote looks profitable.
+// Preserve the original filename for replay consumers and never replace a bank.
+function archiveTarget(dir, position, now = Date.now()) {
+  const names = fs.existsSync(dir) ? fs.readdirSync(dir).filter(n => n.endsWith('.json')) : [];
+  const own = names.filter(n => n === position + '.json' ||
+    n === position + '.2.json' || n === position + '.3.json');
+  const positions = new Set(names.map(n => n.replace(/(?:\.[23])?\.json$/, '')));
+  if (!positions.has(position) && positions.size >= 8) return {status: 'archive_capacity'};
+  if (own.length >= 3) return {status: 'position_archive_capacity'};
+  // Reserve room for the largest allowed bank before doing any network work.
+  const bytes = names.reduce((sum, n) => sum + fs.statSync(path.join(dir, n)).size, 0);
+  if (bytes + 32*1024*1024 > 512*1024*1024) return {status: 'archive_byte_capacity'};
+  if (own.length && now - Math.max(...own.map(n => fs.statSync(path.join(dir, n)).mtimeMs)) < 600000)
+    return {status: 'archive_interval'};
+  const filename = [position + '.json', position + '.2.json', position + '.3.json']
+    .find(n => !names.includes(n));
+  return {output: path.join(dir, filename), sequence: own.length + 1};
+}
 async function capture(profile, sample, budgetMs) {
   requireThat(sample.status === 'measured' && sample.inventory_source === 'onchain_sol_inventory'
     && sample.quote && sample.quote.inAmount === sample.token_sell_raw
@@ -99,10 +117,9 @@ async function capture(profile, sample, budgetMs) {
     && BigInt(sample.native_inventory.net_x_raw) + BigInt(sample.native_inventory.net_fee_x_raw)
        === BigInt(sample.token_sell_raw), 'inventory_mismatch');
   const dir = path.join(profile, 'memories', 'dlmm_exit_banks');
-  const output = path.join(dir, position + '.json');
-  if (fs.existsSync(output)) return {status: 'already_archived'};
-  if (fs.existsSync(dir) && fs.readdirSync(dir).filter(n => n.endsWith('.json')).length >= 8)
-    return {status: 'archive_capacity'};
+  const target = archiveTarget(dir, position);
+  if (!target.output) return target;
+  const output = target.output;
   requireThat(Number.isFinite(sample.observed_at) && Date.now()/1000 - sample.observed_at >= -5
     && Date.now()/1000 - sample.observed_at <= 30, 'stale_quote_observation');
   const deadline = Date.now() + Math.min(15000, budgetMs);
@@ -167,9 +184,11 @@ async function capture(profile, sample, budgetMs) {
   fs.mkdirSync(dir, {recursive: true, mode: 0o700});
   // Publish only a complete JSON file; interrupted children leave no target.
   const temporary = output + '.' + process.pid + '.tmp';
-  fs.writeFileSync(temporary, JSON.stringify(fixture) + '\n', {flag: 'wx', mode: 0o600});
+  const serialized = JSON.stringify(fixture) + '\n';
+  requireThat(Buffer.byteLength(serialized) <= 32*1024*1024, 'archive_size_limit');
+  fs.writeFileSync(temporary, serialized, {flag: 'wx', mode: 0o600});
   try { fs.linkSync(temporary, output); } finally { fs.unlinkSync(temporary); }
-  return {status: 'archived', snapshot_slot: bank.snapshot_slot, accounts: Object.keys(bank.accounts).length,
+  return {status: 'archived', archive_sequence: target.sequence, snapshot_slot: bank.snapshot_slot, accounts: Object.keys(bank.accounts).length,
     sha256: crypto.createHash('sha256').update(fs.readFileSync(output)).digest('hex')};
 }
 if (require.main === module) {
@@ -183,4 +202,4 @@ if (require.main === module) {
     } catch { console.log(JSON.stringify({status: 'unmeasured', reason: 'exit_bank_unavailable'})); }
   });
 }
-module.exports = {dependencyKeys, captureBank, boundedJson, allowed};
+module.exports = {dependencyKeys, captureBank, boundedJson, allowed, archiveTarget};
