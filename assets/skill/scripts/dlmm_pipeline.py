@@ -1357,8 +1357,14 @@ def main():
         if missing:
             print(f"Aborting: --from-signal record missing required fields: {', '.join(missing)} (see docs/SIGNAL_SCHEMA.md)")
             sys.exit(1)
-        candidates = [signal_record]
-        print(f"Using signalled candidate {candidates[0].get('name')} ({candidates[0].get('pool')}) — discovery/screen skipped")
+        print(f"Using signalled candidate {signal_record.get('name')} ({signal_record.get('pool')}) — discovery/screen skipped")
+        # The AI forwards an original signal record, not a conviction-adjusted
+        # score. Apply the same per-candidate policy once before risk sizing.
+        # A singleton has no cross-candidate rank adjustment.
+        candidates = apply_batch_conviction([signal_record], mode)
+        if not candidates:
+            print("Signalled candidate failed conviction gates.")
+            sys.exit(0)
         pools = []
     else:
         pools = fetch_top_pools(timeframe)
@@ -1747,7 +1753,7 @@ def main():
         # the whole batch (the agent flow only ever checked its single pick).
         winner = None
         for c in valid_candidates:
-            if batch_mode:
+            if batch_mode or getattr(cli, "from_signal", None):
                 candidate_ticket, _ = risk_scaled_ticket(deploy_sol, c.get("score"), mode)
                 if candidate_ticket == 0:
                     record_pipeline_reject(PROFILE_DIR, mode, "risk_ticket_min", c.get("pool"), c.get("base_mint"), c.get("sol_is_x"), c.get("name"))
@@ -1802,9 +1808,9 @@ def main():
         others = ", ".join(c["base_symbol"] for c in valid_candidates if c is not winner) or "none"
         print(f"BATCH_PICK: {winner['base_symbol']} (score {winner['score']:.1f}) over [{others}]")
 
-    # Apply the same risk budget used during batch selection. A pool override
+    # Apply the same risk budget to both signal paths. A pool override
     # must not bypass it, and the minimum ticket must not undo the reduction.
-    if batch_mode:
+    if batch_mode or getattr(cli, "from_signal", None):
         original_deploy = deploy_sol
         deploy_sol, risk_multiplier = risk_scaled_ticket(deploy_sol, winner.get("score"), mode)
         if deploy_sol == 0:

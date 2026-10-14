@@ -1087,11 +1087,15 @@ entry refuses a sale; the live balance must still match before signing. This
 permits independently proved new lots even when earlier ledger residues remain
 unresolved, without selling old inventory or rewriting historical accounting.
 
-Batch risk sizing applies the existing conviction multiplier before selecting
+Batch and AI-selected signal risk sizing apply the existing conviction multiplier before selecting
 an executable candidate. If the rounded ticket falls below the configured
 minimum, that candidate is skipped instead of increasing its size back to the
 minimum. A valid runner-up can still be selected; an explicit pool choice in a
-batch is checked again before deployment. This enforces the existing risk
+signal is checked again before deployment. AI-selected records receive the same
+per-candidate conviction adjustments once from the original signal score;
+within-batch ranking adjustments require multiple candidates and therefore do
+not apply to a singleton. Manual discovery retains its existing sizing.
+This enforces the existing risk
 budget and does not establish profitability or protect against a high-score
 pool collapsing. It does not modify exits or existing positions.
 
