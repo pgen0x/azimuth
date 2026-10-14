@@ -993,8 +993,14 @@ forecast for that entry requires separate support, identity and timing checks.
 
 These are correlated observations of unfunded candidates, not realized position
 returns. They cannot predict bin occupancy, the actual exit time, added-liquidity
-impact or net cash profit; composition cost, principal changes, rent and execution
-costs are excluded. They do not enter position profit acceptance or change entry
+impact or net cash profit. The scorer also reports a separate `principal_sensitivity`:
+fixed inferred shares valued against terminal reserves, principal change against
+allocated capital, and principal plus fees before costs. Unallocated rounding dust
+stays in cash. A separate initial-inventory holding comparison distinguishes token
+price revaluation from relative LP inventory change. Neither comparison is executed
+profit or pure IL, especially when the inferred starting inventory contains tokens.
+Entry composition charges, added-liquidity effects, rent and execution costs remain
+excluded. They do not enter position profit acceptance or change entry
 and exit rules. This replaces the fragile manual forecast capture used in the
 earlier calibration study, whose overnight window produced no saved predictions.
 

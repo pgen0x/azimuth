@@ -145,6 +145,39 @@ class CandidateForecastTests(unittest.TestCase):
         self.assertAlmostEqual(row['modeled_fee_at_terminal_price_lamports'] /
                                row['modeled_fee_at_baseline_price_lamports'], 1.01)
 
+    def test_positive_fees_cannot_hide_principal_loss(self):
+        prediction = self.freeze()
+        terminal = sample(11800, DELTA*2)
+        for b in terminal['bins']:
+            b['y'] = '500000000'
+        row = self.score(prediction, [terminal])['results'][0]
+        sensitivity = row['principal_sensitivity']
+        spent = sum(b['paid_lamports'] for b in prediction['allocations'])
+        self.assertAlmostEqual(sensitivity['modeled_principal_change_lamports'], -spent/2, places=5)
+        self.assertGreater(row['modeled_fee_at_terminal_price_lamports'], 0)
+        self.assertLess(sensitivity['modeled_gross_change_before_costs_lamports'], 0)
+        self.assertAlmostEqual(sensitivity['modeled_gross_change_before_costs_lamports'],
+                               sensitivity['modeled_principal_change_lamports'] +
+                               row['modeled_fee_at_terminal_price_lamports'])
+        self.assertFalse(row['net_cash_profit_proved'])
+
+    def test_token_price_loss_is_distinct_from_relative_inventory_loss(self):
+        for sample_row in (self.base, self.old):
+            for b in sample_row['bins']:
+                b.update(x='1000000000000', y='0')
+        prediction = self.freeze(frozen_geometry=0)
+        terminal = sample(11800, DELTA*2, active_bin=-1, price=.000001/1.01)
+        for b in terminal['bins']:
+            b.update(x='1000000000000', y='0')
+        row = self.score(prediction, [terminal])['results'][0]
+        sensitivity = row['principal_sensitivity']
+        self.assertTrue(sensitivity['initial_inventory_includes_token_x'])
+        self.assertLess(sensitivity['modeled_principal_change_lamports'], 0)
+        self.assertEqual(sensitivity['modeled_principal_vs_initial_inventory_lamports'], 0)
+        self.assertEqual(sensitivity['modeled_initial_inventory_change_lamports'],
+                         sensitivity['modeled_principal_change_lamports'])
+        self.assertLess(sensitivity['modeled_gross_change_before_costs_lamports'], 0)
+
     def test_existing_collector_freezes_without_extra_command_and_preserves_bins_on_failure(self):
         candidates = {POOL: dict(pool=POOL, base_mint=MINT, mode='pulse', source_id='watch', source_ts=10000)}
         for fail in (False, True):
