@@ -910,8 +910,8 @@ truncated, deleted or backfilled by this read path.
 
 The existing shadow timer also observes up to three recent candidate pools per
 cycle with `candidate-bin-snapshot`. Sources are SOL-as-Y pools in reject records
-and live pipeline batch receipts from the past 30 minutes, indexed by pool
-using only the latest 64 identities across both sources.
+pipeline batch receipts and scanner observations before routing from the past
+30 minutes, indexed by pool using only the latest 64 identities across all sources.
 The phase has a ten-second ceiling, a three-second process timeout per pool and
 a four-minute retry interval. It preserves the existing 20-second liquidation
 reserve, streams its history and rotates pools by oldest attempt first.
@@ -923,6 +923,13 @@ SOL orientation, decimals, contiguous bounds and native counters are checked
 before writing `memories/dlmm_candidate_bin_samples.jsonl`. Failures remain
 unmeasured without invented counters. `request_started_at` and `collected_at`
 surround the read, and the source watch/reject ID and timestamp remain attached.
+
+Before AI health probing or dispatch, the scanner writes at most 64 unique
+public SOL-as-Y pool/mint identities to `solana_candidate_watch.jsonl` beside
+its reject journal (`SOLANA_CANDIDATE_WATCH_PATH` overrides this in both
+scanner and collector). These `scanner_before_routing` observations survive
+model failures before the pipeline is invoked. They do not establish admission,
+execution or profitability. Writes use a nonblocking lock and do not add RPCs.
 
 Before capacity/ranking checks, live `--from-batch` and `--from-signal`
 invocations append at most 64 unique public SOL-as-Y pool/mint identities to
