@@ -348,13 +348,15 @@ def main():
 
     # Run the actual monitor missing-position branch with the same three RPC verdicts.
     tree = ast.parse(Path(monitor.__file__).read_text())
-    branch = next(n for n in ast.walk(tree) if isinstance(n, ast.If)
-                  and ast.unparse(n.test) == "not bp and (not is_dry_run_stored)")
+    branches = [n for n in ast.walk(tree) if isinstance(n, ast.If)
+                and ast.unparse(n.test) == "not bp and (not is_dry_run_stored)"]
+    assert len(branches) == 2  # native recovery, then conservative cleanup
     wrapper = ast.Module(body=[ast.For(target=ast.Name(id="tick",ctx=ast.Store()),
-        iter=ast.List(elts=[ast.Constant(1)],ctx=ast.Load()),body=[branch],orelse=[])],type_ignores=[])
+        iter=ast.List(elts=[ast.Constant(1)],ctx=ast.Load()),body=branches,orelse=[])],type_ignores=[])
     for live in (True, None, False):
         commands=[]
-        ns=dict(bp=None,is_dry_run_stored=False,api_available=True,meta={"deployed_at":1},
+        ns=dict(vars(monitor), bp=None,is_dry_run_stored=False,api_available=True,meta={"deployed_at":1},
+                pool="pool",run_command_json=lambda *a, **kw: (None, "unavailable"),
                 now=10000,pos_addr="position",pair="TOKEN-SOL",position_live_onchain=lambda _:live,
                 run_command=commands.append,print=lambda *args:None)
         exec(compile(ast.fix_missing_locations(wrapper),"monitor-prune","exec"),ns)

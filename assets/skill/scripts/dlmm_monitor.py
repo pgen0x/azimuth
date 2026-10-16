@@ -2131,6 +2131,15 @@ def main():
         is_dry_run_stored = meta.get("tx_hash") == "DRY_RUN_TX_HASH"
         env_prefix = "DRY_RUN=true " if is_dry_run_stored else ""
         
+        # An indexer omission is not evidence that a tracked position is gone.
+        # Reuse one bounded native read before deciding to skip its risk checks.
+        if not bp and not is_dry_run_stored:
+            recovered_mark, _ = run_command_json(
+                f"node {shlex.quote(EXECUTOR_PATH)} pnl-onchain {shlex.quote(pool)} {shlex.quote(pos_addr)}",
+                timeout=3)
+            if verified_risk_mark(recovered_mark, pool, pos_addr, time.time()):
+                bp = {"native_prefetched": recovered_mark}
+
         if not bp and not is_dry_run_stored:
             if not api_available:
                 # API failed — cannot confirm position is gone, skip cleanup to avoid false wipe
@@ -2166,11 +2175,12 @@ def main():
         # Native inventory is the risk source of first resort. Do not wait for a
         # per-position indexer subprocess (up to 30 seconds) when it verifies.
         native_mark_valid = False
-        native_mark, native_mark_err = None, None
+        native_mark, native_mark_err = (bp or {}).get("native_prefetched"), None
         if not is_dry_run_stored:
-            native_mark, native_mark_err = run_command_json(
-                f"node {shlex.quote(EXECUTOR_PATH)} pnl-onchain {shlex.quote(pool)} {shlex.quote(pos_addr)}",
-                timeout=3)
+            if native_mark is None:
+                native_mark, native_mark_err = run_command_json(
+                    f"node {shlex.quote(EXECUTOR_PATH)} pnl-onchain {shlex.quote(pool)} {shlex.quote(pos_addr)}",
+                    timeout=3)
             native_mark_valid = verified_risk_mark(native_mark, pool, pos_addr, time.time())
         if api_available and bp and bp.get("pnl_pct") is not None:
             # Indexed metrics remain the fallback and supply the 24h fee rate.
