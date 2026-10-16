@@ -1134,3 +1134,15 @@ screen's 80–125 bin-step band retains its existing 53/44/35-bin geometry at
 steps 80/100/125. Coverage describes a price range, not a loss cap or a profit
 guarantee. Supporting correlated assets at smaller steps requires an explicit
 strategy-specific range policy, not bypassing this check.
+
+### Consistent entry bin anchor
+
+The installed DLMM SDK's `getActiveBin()` fetches pool state independently,
+while `initializePositionAndAddLiquidityByStrategy()` uses cached
+`lbPair.activeId` for the instruction's active-bin anchor. Entry refuses a
+noninteger or changed fresh bin before building or signing, so range selection
+and the SDK builder use the same anchor. A later normal scanner pass may
+reconsider the pool; this refusal does not submit a transaction or immediately
+retry a moving price. This check adds no RPC reads and does not eliminate price
+movement after the reads, replace on-chain slippage checks, or prove that
+historical out-of-range exits were caused by this mismatch.
