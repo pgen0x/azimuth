@@ -360,17 +360,21 @@ def main():
         for existing in (None, {"peak_pnl": 20, "deployed_at": 1}):
             for report_only in (False, True):
                 commands=[]
+                discovery_timeouts=[]
+                def portfolio_read(wallet, timeout):
+                    discovery_timeouts.append(timeout)
+                    return {"position": {"pool":"pool", "balances_sol":0.11}}, None
                 ns=dict(get_active_positions=lambda:initial,
                     get_position_metadata=lambda _:existing,
                     get_wallet_address=lambda:"wallet",
-                    get_meteora_portfolio_positions=lambda _:({"position": {
-                        "pool":"pool", "balances_sol":0.11}}, None),
+                    get_meteora_portfolio_positions=portfolio_read,
                     recover_position_metadata=lambda *_:{"pair":"TOKEN-SOL", "mode":"turnover",
                         "base_mint":"TOKEN", "dev":"developer", "signal":{"holders":0},
                         "deployed_at":1,"size_sol":0.1,"entry_price":2},
                     run_command=commands.append, cli=SimpleNamespace(report_only=report_only),
                     print=lambda *a:None, time=SimpleNamespace(time=lambda:10000), json=json)
                 exec(compile(recovery,"monitor-recovery","exec"),ns)
+                assert discovery_timeouts == [3 if initial else 15]
                 sets=[c for c in commands if " set " in c]
                 adds=[c for c in commands if " sadd " in c]
                 assert bool(sets) is (not report_only and existing is None)

@@ -1121,3 +1121,16 @@ and wallet-PDA initialization. PDA funding must bind the same payer, base wallet
 owner, pool and planned bin range before its SOL transfer can establish the
 principal denominator. Unsupported or mismatched initialization remains
 unmeasured; PDA fee savings must not disable independent native valuation.
+
+
+### SOL BidAsk coverage under the bin limit
+
+The Python entry path rejects SOL BidAsk candidates when the 20% minimum
+price-range coverage requires more than the existing 100-bin technical limit.
+It does not silently clamp an unsupported range into a narrower position.
+Candidates are checked before winner selection, and the geometry helper also
+rejects invalid or unsupported bin steps for other callers. The production Go
+screen's 80–125 bin-step band retains its existing 53/44/35-bin geometry at
+steps 80/100/125. Coverage describes a price range, not a loss cap or a profit
+guarantee. Supporting correlated assets at smaller steps requires an explicit
+strategy-specific range policy, not bypassing this check.
