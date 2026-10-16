@@ -451,12 +451,24 @@ def report(profile, as_of=None):
         change = nav - first["nav_sol"] - external
     rent_groups = rent_refund_groups(list(chains.values()), facts,
                                    rows(memories / "dlmm_rent_history.jsonl"), as_of)
+    recovered_closes = []
+    for c in chains.values():
+        for position, signature in c["unjournaled_close_evidence"].items():
+            entry, fact = entries.get(position, {}), facts[signature]
+            stamp = fact.get("block_time")
+            if (not entry.get("pool") or type(stamp) not in (int, float)
+                    or not math.isfinite(stamp) or not 0 < stamp <= as_of):
+                continue
+            recovered_closes.append(dict(position=position, pool=entry["pool"],
+                root_chain_id=c["root_chain_id"], ts=stamp, pnl_sol=None,
+                source="finalized_close_evidence", signature=signature))
     return {"basis": "recorded_finalized_wallet_cash_flows", "nav_sol": nav,
             "nav_snapshot": latest, "flow_adjusted_wealth_change_sol": change,
             "unvalued_external_token_inflows": unvalued_inflows,
             "note": "Wallet delta already includes network fees and net account rent movements; do not subtract fees again. LP PnL uses Meteora valuations. Neither is portfolio NAV. Rent, inventory drift and swap attribution require further reconciliation.",
             "pooled_settlements": pooled_settlements(chains.values()),
             "rent_refund_groups": rent_groups,
+            "recovered_closes": recovered_closes,
             "nonpositive_cash_upper_bounds": nonpositive_cash_upper_bounds(
                 list(chains.values()), facts, rent_groups, as_of),
             "chains": sorted(chains.values(), key=lambda c: c["root_chain_id"])}
@@ -628,7 +640,9 @@ def pool_cash_history(closes, ledger, as_of):
     never an invented split. This does not change the mark-based risk floor.
     """
     by_pool = {}
-    for row in closes:
+    # Derived closure evidence supplies missing identities/times, never marks.
+    # A real journal row takes precedence for the same pool and position.
+    for row in [*ledger.get("recovered_closes", []), *closes]:
         if (row.get("dry_run") or not row.get("pool") or not row.get("position")
                 or not as_of - 30 * 86400 <= row.get("ts", 0) <= as_of):
             continue

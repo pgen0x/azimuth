@@ -1196,3 +1196,10 @@ closure without a monitor report; pending transactions, residual inventory,
 coverage gaps and all other accounting checks still prevent settled cash.
 It does not backfill a journal, guess an exit reason or invent an LP mark.
 Nonzero settlement inventory with a missing close journal remains refused.
+
+The report also exposes derived `recovered_closes` with the recorded pool,
+position, root, finalized block time and signature. Pool cash history includes
+these identities within its existing 30-day/last-ten-close window, preferring
+actual journal rows if present. Recovered rows carry no LP PnL mark. Root
+completeness, refund ownership and cash-sign proof requirements remain in force;
+recovering an identity cannot turn unvalued inventory into a profit or loss.

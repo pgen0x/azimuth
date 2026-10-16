@@ -229,6 +229,17 @@ ledger = {"chains":[dict(root_chain_id=r,positions=[r],accounting_status="settle
 summary = pool_cash_history(closes,ledger,120)["P"]
 assert summary["prior_mark_pnl_sol"] == .03 and summary["prior_net_pnl_sol"] == -.003
 assert summary["prior_cash_roots"] == 2 and summary["prior_closes"] == 2
+recovered = deepcopy(ledger)
+recovered["recovered_closes"] = [dict(closes[0], pnl_sol=None, source="finalized_close_evidence")]
+restored = pool_cash_history(closes[1:], recovered, 120)["P"]
+assert restored["prior_closes"] == 2 and restored["prior_net_pnl_sol"] == -.003
+assert restored["prior_mark_pnl_sol"] is None
+assert pool_cash_history(closes, recovered, 120)["P"] == summary
+assert pool_cash_history(closes[1:], recovered, 99) == {}
+assert pool_cash_history(closes[1:], recovered, 120+31*86400) == {}
+incomplete_recovery = deepcopy(recovered)
+incomplete_recovery["chains"][0]["accounting_status"] = "incomplete"
+assert pool_cash_history(closes[1:], incomplete_recovery, 120)["P"]["prior_net_pnl_sol"] is None
 split = deepcopy(closes);split[1]["pool"]="Q"
 assert all(r["prior_net_pnl_sol"] is None for r in pool_cash_history(split,ledger,120).values())
 partial = deepcopy(ledger);partial["chains"][0]["positions"].append("missing-root-leg")
