@@ -328,6 +328,26 @@ with TemporaryDirectory() as root:
     write("dlmm_transaction_facts.jsonl", facts)
     proof = lambda: settlement_inventory(root,"p","TOKEN","wallet")
     assert proof() == {"success":True,"amount_raw":"0"}  # actual testicle pre-sale balances
+    # A missing close report may complete ONLY zero owned inventory, using
+    # finalized facts bound to the recorded position and wallet. Keep the
+    # accounting journal incomplete, and leave all legacy tokens untouched.
+    write("dlmm_closes.jsonl", [])
+    assert not proof()["success"]  # legacy facts lack explicit position binding
+    bound = deepcopy(facts)
+    bound[1]["event_position"] = "p"
+    write("dlmm_transaction_facts.jsonl", bound)
+    assert proof() == {"success":True,"amount_raw":"0"}
+    assert report(root)["chains"][0]["accounting_status"] == "incomplete"
+    for change in [{"event_position":"other"}, {"wallet":"other"},
+                   {"failed":True}, {"landed":False}, {"slot":0},
+                   {"slot":True}, {"position_account_closed":False},
+                   {"token_deltas_raw":{"TOKEN":"1"}, "token_post_balances_raw":{"TOKEN":"5434"}}]:
+        invalid = deepcopy(bound)
+        invalid[1].update(change)
+        write("dlmm_transaction_facts.jsonl", invalid)
+        assert not proof()["success"], change
+    write("dlmm_transaction_facts.jsonl", facts)
+    write("dlmm_closes.jsonl", [dict(position="p", ts=200, deployed_at=100, base_mint="TOKEN")])
     # A filled position adds exactly 100 raw units to 5433 old units.
     facts[1]["token_deltas_raw"]={"TOKEN":"100"}
     facts[1]["token_post_balances_raw"]={"TOKEN":"5533"}

@@ -1030,3 +1030,15 @@ and wallet-PDA initialization. PDA funding must bind the same payer, base wallet
 owner, pool and planned bin range before its SOL transfer can establish the
 principal denominator. Unsupported or mismatched initialization remains
 unmeasured; PDA fee savings must not disable independent native valuation.
+
+
+### Zero inventory after an unjournaled close
+
+Settlement may complete zero root-owned token inventory when a local close
+report is missing, only with reconciled close facts explicitly bound to every
+root position and the wallet, a positive integer slot, successful landed status,
+and proof that the position account closed. Other accounting refusal reasons
+remain enforced. This exception never authorizes selling nonzero inventory,
+touches legacy wallet tokens, creates a close report or marks cash accounting
+complete. It lets the normal settlement worker clear a stale pending marker
+after an independently proved close without inventing profit or a refund.
