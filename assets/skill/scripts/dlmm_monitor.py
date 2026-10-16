@@ -221,6 +221,20 @@ def flush_tick_observers(pending):
             print('TICK_OBSERVATION_ERROR ' + type(error).__name__)
 
 
+def observed_fee_yield(data):
+    """Unknown yield cannot become an observed zero or trigger a low-yield exit."""
+    if not isinstance(data, dict) or data.get("fee_per_tvl_24h_available") is False:
+        return None
+    raw = data.get("fee_per_tvl_24h")
+    if isinstance(raw, bool) or not isinstance(raw, (int, float, str)):
+        return None
+    try:
+        value = float(raw)
+    except (ValueError, OverflowError):
+        return None
+    return value if math.isfinite(value) and value >= 0 else None
+
+
 def get_meteora_portfolio_positions(wallet_address, *, timeout=15):
     """Returns dict keyed by position address using Meteora Portfolio HTTP API.
     More reliable than DLMM SDK getAllLbPairPositionsByUser which requires fully initialized bin arrays."""
@@ -254,7 +268,7 @@ def get_meteora_portfolio_positions(wallet_address, *, timeout=15):
                     "pnl_pct": float(pnl_pct) if pnl_pct is not None else None,
                     "pnl_sol": float(pnl_sol) if pnl_sol is not None else None,
                     "pnl_currency": "SOL",
-                    "fee_per_tvl_24h": float(pool_data.get("feePerTvl24h") or 0.0),
+                    "fee_per_tvl_24h": observed_fee_yield({"fee_per_tvl_24h": pool_data.get("feePerTvl24h")}),
                     "pool_price": float(pool_data.get("poolPrice") or 0.0),
                     "bin_step": float(pool_data.get("binStep") or 0.0),
                     "unclaimed_fees_sol": float(pool_data.get("unclaimedFeesSol") or 0.0),
@@ -1610,7 +1624,7 @@ def recover_position_metadata(pos_addr, pool):
 
 def build_report_row(pos_addr, pair, pool, meta, pool_liquidity_usd, pnl_pct, pnl_sol_actual,
                       in_range, fee_per_tvl_24h, api_available, bp, active_price, entry_price,
-                      peak_pnl, trailing_active, close_reason, now):
+                      peak_pnl, trailing_active, close_reason, now, *, fee_yield_available=True):
     """Builds one status-table row dict, shared by --report-only and live (HOLD) runs
     so both render through the same Telegram template instead of drifting per-run."""
     oor_val, _, _ = run_command(f"redis-cli get sol:dlmm:position:{pos_addr}:oor_since")
@@ -1630,11 +1644,11 @@ def build_report_row(pos_addr, pair, pool, meta, pool_liquidity_usd, pnl_pct, pn
         "pnl_sol": round(pnl_sol_actual, 9) if pnl_sol_actual is not None else None,
         "in_range": in_range,
         "oor_minutes": round(oor_minutes, 1),
-        "fee_per_tvl_24h": round(fee_per_tvl_24h, 2),
+        "fee_per_tvl_24h": round(fee_per_tvl_24h, 2) if fee_yield_available else None,
         # Deterministic days-to-breakeven: loss% / (fee% earned per 24h).
         # Computed here so the AI does NOT do this division by hand (it gets it wrong).
         # Only meaningful when underwater AND earning fees; otherwise 0 (= no breakeven concern).
-        "break_even_days": round(abs(pnl_pct) / fee_per_tvl_24h, 2) if (pnl_pct < 0 and fee_per_tvl_24h > 0) else 0.0,
+        "break_even_days": (round(abs(pnl_pct) / fee_per_tvl_24h, 2) if (pnl_pct < 0 and fee_per_tvl_24h > 0) else 0.0) if fee_yield_available else None,
         "unclaimed_fees_sol": round(bp.get("unclaimed_fees_sol", 0.0) if (api_available and bp) else 0.0, 6),
         "pool_price": active_price,
         "entry_price": entry_price,
@@ -1673,7 +1687,9 @@ def render_status_report(report_rows, sol_price_usd, trailing_trigger_pct, min_f
             risk.append("⚠️ AI hold override active")
         else:
             risk.append("✅ No AI hold override")
-        if r["fee_per_tvl_24h"] >= min_fee_tvl_24h_limit:
+        if r["fee_per_tvl_24h"] is None:
+            risk.append("⚠️ Fee/TVL unavailable")
+        elif r["fee_per_tvl_24h"] >= min_fee_tvl_24h_limit:
             risk.append(f"✅ Healthy Fee/TVL ({r['fee_per_tvl_24h']:.2f}% ≥ {min_fee_tvl_24h_limit:.0f}% min)")
         else:
             risk.append(f"⚠️ Low Fee/TVL ({r['fee_per_tvl_24h']:.2f}% < {min_fee_tvl_24h_limit:.0f}% min)")
@@ -1685,6 +1701,8 @@ def render_status_report(report_rows, sol_price_usd, trailing_trigger_pct, min_f
             summary = f"⚠️ Rule triggered: {r['triggered_rules'][0]}. AI reviewing."
         elif not r["in_range"]:
             summary = f"⏳ Out of range {r['oor_minutes']:.0f}m. Monitoring."
+        elif r["fee_per_tvl_24h"] is None:
+            summary = "Fee yield unavailable. Monitoring position risk."
         else:
             summary = "Position healthy, earning fees. No action needed."
         # Pipe-table card: rendered natively by the deliverer's Bot API 10.1
@@ -1697,6 +1715,7 @@ def render_status_report(report_rows, sol_price_usd, trailing_trigger_pct, min_f
         if sol_price_usd:
             pnl_usd = (r['pnl_sol'] * sol_price_usd) if r.get('pnl_sol') is not None else (r['size_sol'] * (r['pnl_pct'] / 100) * sol_price_usd)
             pnl_usd_str = f" (${pnl_usd:+.2f})"
+        fee_yield_text = f"{r['fee_per_tvl_24h']:.2f}%" if r['fee_per_tvl_24h'] is not None else "unavailable"
         fees_usd_str = f" (${r['unclaimed_fees_sol'] * sol_price_usd:.2f})" if sol_price_usd else ""
         size_str = f"{r['size_sol']:.4f}".rstrip('0').rstrip('.')
         warnings = [b for b in risk if b.startswith("⚠️")]
@@ -1711,7 +1730,7 @@ def render_status_report(report_rows, sol_price_usd, trailing_trigger_pct, min_f
             "|--------|-------|",
             f"| PnL | {r['pnl_pct']:+.2f}%{pnl_usd_str} · peak {r['peak_pnl']:+.2f}% |",
             f"| Range | {range_str} · age {age_str} |",
-            f"| Fee/TVL 24h | {r['fee_per_tvl_24h']:.2f}% · unclaimed {r['unclaimed_fees_sol']:.4f} SOL{fees_usd_str} |",
+            f"| Fee/TVL 24h | {fee_yield_text} · unclaimed {r['unclaimed_fees_sol']:.4f} SOL{fees_usd_str} |",
             f"| Size | {size_str} SOL @ {r['entry_price']:.8f} → {r['pool_price']:.8f} |",
         ] + [f"- {b}" for b in warnings] + [
             "",
@@ -1890,7 +1909,7 @@ def main():
                 guard_bp = guard_bp_dict.get(cli.override_close) if guard_bp_dict else None
                 if guard_bp:
                     guard_pnl_pct = guard_bp.get("pnl_pct", 0.0)
-                    guard_fee_tvl = guard_bp.get("fee_per_tvl_24h", 0.0)
+                    guard_fee_tvl = observed_fee_yield(guard_bp) or 0.0
                     guard_in_range = not guard_bp.get("is_out_of_range", False)
                     if guard_pnl_pct is not None and guard_pnl_pct < 0 and guard_fee_tvl > 0:
                         guard_break_even = round(abs(guard_pnl_pct) / guard_fee_tvl, 2)
@@ -2169,6 +2188,7 @@ def main():
         pnl_pct = 0.0
         pnl_data = None
         fee_per_tvl_24h = 0.0
+        fee_yield_available = False
 
         pnl_sol_actual = None  # Meteora-exact SOL P&L; used at close-booking instead of size*pct
         indexed_pnl_available = False
@@ -2188,10 +2208,13 @@ def main():
             in_range = not bp.get("is_out_of_range", False)
             pnl_pct = bp.get("pnl_pct", 0.0)
             pnl_sol_actual = bp.get("pnl_sol")  # exact SOL P&L from Meteora
-            fee_per_tvl_24h = bp.get("fee_per_tvl_24h", 0.0)
+            fee_yield = observed_fee_yield(bp)
+            fee_yield_available = fee_yield is not None
+            fee_per_tvl_24h = fee_yield if fee_yield_available else 0.0
             if bp.get("pool_price", 0.0) > 0:
                 active_price = bp["pool_price"]
-            print(f"Meteora Portfolio API: {pnl_pct:+.2f}% PnL | Fee/TVL 24h: {fee_per_tvl_24h:.2f}% | Range: {'🟢 In' if in_range else '🔴 Out'}")
+            fee_label = f"{fee_per_tvl_24h:.2f}%" if fee_yield_available else "unavailable"
+            print(f"Meteora Portfolio API: {pnl_pct:+.2f}% PnL | Fee/TVL 24h: {fee_label} | Range: {'🟢 In' if in_range else '🔴 Out'}")
         elif not is_dry_run_stored and not native_mark_valid:
             # Fall back to indexed metrics only when native inventory failed.
             pnl_data, pnl_err = run_command_json(f"node {EXECUTOR_PATH} pnl {pool} {pos_addr}")
@@ -2200,8 +2223,11 @@ def main():
                 pnl_pct = float(pnl_data.get("pnl_pct", 0.0))
                 pnl_sol_actual = pnl_data.get("pnl_sol")
                 in_range = pnl_data.get("in_range", True)
-                fee_per_tvl_24h = float(pnl_data.get("fee_per_tvl_24h", 0.0))
-                print(f"Executor PnL: {pnl_pct:+.2f}% | Fee/TVL 24h: {fee_per_tvl_24h:.2f}% | Range: {'🟢 In' if in_range else '🔴 Out'}")
+                fee_yield = observed_fee_yield(pnl_data)
+                fee_yield_available = fee_yield is not None
+                fee_per_tvl_24h = fee_yield if fee_yield_available else 0.0
+                fee_label = f"{fee_per_tvl_24h:.2f}%" if fee_yield_available else "unavailable"
+                print(f"Executor PnL: {pnl_pct:+.2f}% | Fee/TVL 24h: {fee_label} | Range: {'🟢 In' if in_range else '🔴 Out'}")
             else:
                 print(f"⚠️ Indexed SOL PnL unavailable for {pair}; native inventory also unavailable.")
         elif is_dry_run_stored:
@@ -2617,7 +2643,7 @@ def main():
         # another candidate should have. See MIN_FEE_TVL_24H_TIGHT_LIMIT.
         yield_limit = (min_fee_tvl_24h_tight_limit if is_tight_tp_pos
                        else min_fee_tvl_24h_limit)
-        if age_minutes >= yield_grace_minutes:
+        if age_minutes >= yield_grace_minutes and fee_yield_available:
             if fee_per_tvl_24h < yield_limit:
                 close_reason = f"Low yield (Fee/TVL 24h: {fee_per_tvl_24h:.2f}% < {yield_limit}% after {age_minutes:.1f}m)"
 
@@ -2952,7 +2978,7 @@ def main():
             report_rows.append(build_report_row(
                 pos_addr, pair, pool, meta, pool_liquidity_usd, pnl_pct, pnl_sol_actual,
                 in_range, fee_per_tvl_24h, api_available, bp, active_price, entry_price,
-                peak_pnl, trailing_active, close_reason, now,
+                peak_pnl, trailing_active, close_reason, now, fee_yield_available=fee_yield_available,
             ))
             continue
         if cli.report_only and enforce_emergency:
@@ -3409,7 +3435,7 @@ Pre-close LP mark | {pnl_pct:+.2f}% ({realized_sol:+.4f} SOL) — estimate befor
             report_rows.append(build_report_row(
                 pos_addr, pair, pool, meta, pool_liquidity_usd, pnl_pct, pnl_sol_actual,
                 in_range, fee_per_tvl_24h, api_available, bp, active_price, entry_price,
-                peak_pnl, trailing_active, close_reason, now,
+                peak_pnl, trailing_active, close_reason, now, fee_yield_available=fee_yield_available,
             ))
 
     flush_tick_observers(pending_observers)

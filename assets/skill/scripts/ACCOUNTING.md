@@ -214,7 +214,11 @@ native risk read before the missing-position branch can skip it. A verified mark
 continues through the existing risk rules and is reused without another native
 read. The two-hour cleanup grace and RPC absence requirement remain in force
 when native evidence is unavailable; an indexer omission alone cannot remove
-tracking or manufacture a close.
+tracking or manufacture a close. Missing or invalid indexed fee yield stays
+unknown: it cannot trigger the low-yield exit, and status reports show null yield
+and breakeven estimates instead of zero. A measured zero remains eligible for
+the existing age-qualified low-yield rule; native risk and fee-stall rules remain
+independent of this indexed metric.
 
 Native risk marks also expose the already-read per-bin position shares, raw
 inventory and unclaimed fees. After a normal rule-driven close attempt, the
