@@ -78,14 +78,16 @@ func (s *Seen) MarkIfNewTTL(ctx context.Context, id string, ttl time.Duration) (
 
 // PoolHistory keeps the journal mark separate from fully matched wallet cash.
 type PoolHistory struct {
-	Closes     int      `json:"prior_closes"`
-	Mark       *float64 `json:"prior_mark_pnl_sol"`
-	Net        *float64 `json:"prior_net_pnl_sol"`
-	Lower      *float64 `json:"prior_cash_lower_sol"`
-	Upper      *float64 `json:"prior_cash_upper_sol"`
-	LastClose  int64    `json:"last_close_ts"`
-	ObservedAt float64  `json:"observed_at"`
-	Basis      string   `json:"prior_pnl_basis"`
+	JournalCloses    *int     `json:"journal_closes,omitempty"`
+	JournalLastClose *int64   `json:"journal_last_close_ts,omitempty"`
+	Closes           int      `json:"prior_closes"`
+	Mark             *float64 `json:"prior_mark_pnl_sol"`
+	Net              *float64 `json:"prior_net_pnl_sol"`
+	Lower            *float64 `json:"prior_cash_lower_sol"`
+	Upper            *float64 `json:"prior_cash_upper_sol"`
+	LastClose        int64    `json:"last_close_ts"`
+	ObservedAt       float64  `json:"observed_at"`
+	Basis            string   `json:"prior_pnl_basis"`
 }
 
 func (s *Seen) PoolCloseHistory(ctx context.Context, pool string) *PoolHistory {
@@ -117,24 +119,40 @@ func (s *Seen) PoolCloseHistory(ctx context.Context, pool string) *PoolHistory {
 			total += *rec.Pnl
 		}
 	}
-	if h.Closes == 0 {
-		return nil
-	}
-	if complete {
+	if complete && h.Closes > 0 {
 		h.Mark = &total
 	}
 	raw, err := s.rdb.Get(ctx, "sol:dlmm:cash_history").Result()
 	if err != nil {
+		if h.Closes == 0 {
+			return nil
+		}
 		return h
 	}
 	var cached map[string]PoolHistory
 	if json.Unmarshal([]byte(raw), &cached) != nil {
+		if h.Closes == 0 {
+			return nil
+		}
 		return h
 	}
 	cash, ok := cached[pool]
-	if !ok || cash.LastClose != h.LastClose || cash.Closes != h.Closes ||
-		cash.ObservedAt > float64(now)+1 || cash.ObservedAt < float64(now-900) {
+	matched := cash.LastClose == h.LastClose && cash.Closes == h.Closes
+	if cash.JournalCloses != nil && cash.JournalLastClose != nil {
+		matched = *cash.JournalCloses == h.Closes && *cash.JournalLastClose == h.LastClose &&
+			cash.Closes >= h.Closes && cash.LastClose >= h.LastClose
+	}
+	if !ok || !matched || cash.Closes < 1 || cash.Closes > 10 || cash.LastClose > now ||
+		cash.LastClose < now-30*86400 || cash.ObservedAt > float64(now)+1 || cash.ObservedAt < float64(now-900) {
+		if h.Closes == 0 {
+			return nil
+		}
 		return h
+	}
+	// The cache binds to the original journal separately from proved recovered
+	// closures. Recovered closures carry no invented LP marks.
+	if cash.JournalCloses != nil && cash.JournalLastClose != nil {
+		h.Closes, h.LastClose, h.Mark = cash.Closes, cash.LastClose, cash.Mark
 	}
 	if cash.Basis == "matched_refund_cash" && cash.Net != nil {
 		h.Net, h.Basis = cash.Net, cash.Basis
