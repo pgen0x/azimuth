@@ -1145,3 +1145,12 @@ retryable result without signing. The exclusion expires automatically; it does
 not permanently blacklist a venue or prove that another route would have been
 profitable. Failed instruction transfers revert, but their network fees
 remain paid, which is why a repeated failing route is worth excluding.
+
+### Unknown exit liquidity
+
+The exit-side reader preserves unknown liquidity instead of coercing a
+missing field to zero. Missing, boolean, negative and nonfinite depth cannot
+trigger a thin-pool exit; an explicit zero still can. Invalid momentum fields
+do not erase independently valid liquidity. Solana pool identity uses exact,
+case-sensitive addresses, and an explicitly different chain is rejected.
+These checks preserve existing risk thresholds and add no network requests.
