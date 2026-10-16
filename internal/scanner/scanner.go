@@ -1136,6 +1136,7 @@ func (s *Scanner) pollMode(ctx context.Context, mp meteora.ModeParams) {
 
 	sent := 0
 	if len(batch) > 0 {
+		recordSolanaWatch(mp.Mode, batch)
 		// Choose one owner BEFORE dispatch. Never retry an accepted or ambiguous
 		// webhook through direct deploy: a late Hermes turn could still execute.
 		useDirect := s.dep.Enabled()

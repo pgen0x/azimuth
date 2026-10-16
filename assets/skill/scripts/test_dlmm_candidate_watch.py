@@ -184,6 +184,24 @@ class CandidateWatchTests(unittest.TestCase):
              contextlib.redirect_stdout(io.StringIO()):
             pipeline.main()
 
+    def test_scanner_watch_collected_without_pipeline_or_rejection(self):
+        rejects = self.profile / 'rejects.jsonl'
+        rejects.write_text('')
+        (self.profile / 'solana_candidate_watch.jsonl').write_text(json.dumps(dict(
+            ts=10000, pool=POOL, mode='pulse', id='watch:scanner-test',
+            source='scanner_before_routing', candidate=dict(base_mint=MINT, sol_is_x=False)))+'\n')
+        with patch.object(shadow.time, 'time', return_value=10000), \
+             patch.object(shadow.time, 'monotonic', return_value=0), \
+             patch.object(shadow.subprocess, 'check_output', return_value=json.dumps(snapshot()).encode()) as read, \
+             patch.object(shadow, 'collect_liquidation', return_value=0):
+            result = shadow.collect(self.profile, rejects)
+        self.assertEqual(result['rejects_total'], 0)
+        self.assertEqual(result['outcomes_attempted'], 0)
+        self.assertEqual(result['candidate_bin_snapshots_observed'], 1)
+        self.assertEqual(read.call_count, 1)
+        sample = shadow.rows(self.profile / 'memories/dlmm_candidate_bin_samples.jsonl')[0]
+        self.assertEqual(sample['source_id'], 'watch:scanner-test')
+
     def test_actual_collector_watch_is_not_a_reject_or_late_forecast(self):
         with patch.object(watch.time, 'time', return_value=10000):
             watch.record_pipeline_candidates(self.profile, cli([candidate()]))

@@ -151,8 +151,10 @@ func TestAIHealthProbeCachedForPollInterval(t *testing.T) {
 func testEntryRouting(t *testing.T, healthCmd string, status int, wantWebhook, wantDirect bool) {
 	t.Setenv("SOLANA_DELIVERY_PATH", filepath.Join(t.TempDir(), "deliveries.jsonl"))
 	t.Helper()
-	pool := meteora.Pool{PoolAddress: "directPoolAddress", Name: "DIRECT-SOL", TVL: 20_000, ActiveTVL: 20_000,
-		Volatility: 2, TokenX: meteora.Token{Address: "direct", Symbol: "DIRECT"},
+	watchPath := filepath.Join(t.TempDir(), "watch.jsonl")
+	t.Setenv("SOLANA_CANDIDATE_WATCH_PATH", watchPath)
+	pool := meteora.Pool{PoolAddress: "CqJVXBTY644ZBtPCkbaqV7Nu8Qzau2A4sChtpkvQQLLi", Name: "DIRECT-SOL", TVL: 20_000, ActiveTVL: 20_000,
+		Volatility: 2, TokenX: meteora.Token{Address: "EkFRff9a2jKztJHML1LG9FRmEkPJDR6XAYp3uCPdpump", Symbol: "DIRECT"},
 		TokenY: meteora.Token{Address: meteora.SolMint, Symbol: "SOL"}}
 	discovery, err := json.Marshal(map[string]any{"data": []meteora.Pool{pool}})
 	if err != nil {
@@ -182,6 +184,10 @@ func testEntryRouting(t *testing.T, healthCmd string, status int, wantWebhook, w
 		fwd: webhook.New("https://webhook.test", "test"),
 	}
 	s.pollMode(context.Background(), meteora.ModeParams{Mode: "turnover", Timeframe: "30m", TfMinutes: 30})
+	watchData, watchErr := os.ReadFile(watchPath)
+	if watchErr != nil || !strings.Contains(string(watchData), "scanner_before_routing") {
+		t.Fatal("routing lost discovery watch", watchErr)
+	}
 	if hitWebhook != wantWebhook {
 		t.Fatalf("webhook called=%v, want %v", hitWebhook, wantWebhook)
 	}

@@ -825,8 +825,12 @@ def collect(profile, reject_file):
         index_candidate(candidates,row,source_now)
     # Batch receipts are watch inputs, never rejected-candidate outcome IDs.
     # The same 30m/64-pool index and later three-read budget cover both sources.
-    for row in iter_rows(memory/WATCH_FILENAME):
-        index_candidate(candidates,row,source_now)
+    watch_files = [memory/WATCH_FILENAME,
+                   Path(os.environ.get('SOLANA_CANDIDATE_WATCH_PATH') or
+                        str(Path(reject_file).with_name('solana_candidate_watch.jsonl'))) ]
+    for watch_file in watch_files:
+        for row in iter_rows(watch_file):
+            index_candidate(candidates,row,source_now)
     # Read completions after indexing the reject journal, as before. A second
     # streaming pass processes only the unfinished first-seen IDs.
     done={r['id'] for r in iter_rows(memory/'dlmm_reject_outcomes.jsonl')}
