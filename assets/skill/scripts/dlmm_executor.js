@@ -695,6 +695,7 @@ async function deployPosition(poolAddressStr, amountX, amountY, binsBelow, binsA
           entry_bin: activeBin.binId, entry_price: pool.fromPricePerLamport(Number(activeBin.price)),
           bins_below: binsBelow, bins_above: binsAbove, bin_step: Number(pool.lbPair.binStep),
           amount_x: amountX, amount_y: amountY, position_creation: positionCreation,
+          position_pda_history_outcome: pdaHistory?.reason || "not_started_or_unavailable",
           deployed_at: Math.floor(Date.now() / 1000),
         }), { mode: 0o600, flag: positionCreation.kind === "wallet_pda" ? "wx" : "w" });
         const send = async (tx, signers, fallback = null) => {

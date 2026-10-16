@@ -1166,3 +1166,14 @@ trigger a thin-pool exit; an explicit zero still can. Invalid momentum fields
 do not erase independently valid liquidity. Solana pool identity uses exact,
 case-sensitive addresses, and an explicitly different chain is rejected.
 These checks preserve existing risk thresholds and add no network requests.
+
+### Position PDA history diagnostics
+
+Entry provenance retains `position_pda_history_outcome`, a fixed reason code
+from the optional lookup (`unused`, `history_exists`, `http_error`, `rpc_error`,
+`invalid_history_response`, `history_read_failed`, `history_timeout`,
+`wait_window_elapsed`, `cancelled`, or `not_started_or_unavailable`). No endpoint
+or raw error is retained. This describes the history lookup, not every possible
+rewrite or simulation fallback: `unused` with keypair creation still requires
+examining later checks. The existing 300 ms wait window, background lifetime,
+single lookup and unsigned fallback remain; no retry or additional RPC is added.
