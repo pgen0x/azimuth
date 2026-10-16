@@ -402,7 +402,10 @@ def report(profile, as_of=None):
             c["reasons"].append("external_token_inflow_requires_attribution")
         if c["pending_signatures"]:
             c["reasons"].append("unresolved_transactions")
-        if any(p not in closes for p in c["positions"]):
+        recovered_closes = {p: proved_recorded_close(p, events, facts)
+                            for p in c["positions"] if p not in closes}
+        c["unjournaled_close_evidence"] = {p: signature for p, signature in recovered_closes.items() if signature}
+        if any(not signature for signature in recovered_closes.values()):
             c["reasons"].append("open_or_unjournaled_positions")
         if c["token_deltas_raw"]:
             c["reasons"].append("token_inventory_requires_valuation")
@@ -460,6 +463,25 @@ def report(profile, as_of=None):
 
 
 
+def proved_recorded_close(position, events, facts):
+    """Finalized account deletion can prove closure despite a missing report."""
+    records = [(e, facts.get(e.get("signature"), {})) for e in events
+               if e.get("position") == position]
+    valid = [(e, f) for e, f in records
+             if isinstance(e.get("wallet"), str) and e["wallet"]
+             and f.get("wallet") == e["wallet"] and f.get("failed") is False
+             and f.get("landed") is not False
+             and type(f.get("slot")) is int and f["slot"] > 0]
+    deploys = [(e, f) for e, f in valid if e.get("kind") == "deploy"]
+    if not deploys or len({e.get("wallet") for e, _ in records}) != 1:
+        return None
+    latest_deploy = max(f["slot"] for _, f in deploys)
+    closed = [(e, f) for e, f in valid if e.get("kind") == "close"
+              and f.get("event_position") == position
+              and f.get("position_account_closed") is True and f["slot"] >= latest_deploy]
+    return max(closed, key=lambda pair: pair[1]["slot"])[0]["signature"] if closed else None
+
+
 def settlement_inventory(profile, position, mint, wallet):
     """Authorize only finalized closed-root inventory, never the wallet balance."""
     ledger = report(profile)
@@ -470,7 +492,8 @@ def settlement_inventory(profile, position, mint, wallet):
     c = matches[0]
     if c["pending_signatures"]:
         return dict(refusal, pending_signatures=c["pending_signatures"])
-    unjournaled = "open_or_unjournaled_positions" in c["reasons"]
+    unjournaled = ("open_or_unjournaled_positions" in c["reasons"]
+                   or bool(c.get("unjournaled_close_evidence")))
     if set(c["reasons"]) - {"token_inventory_requires_valuation", "wallet_wide_coverage_not_verified",
                             "open_or_unjournaled_positions"}:
         return refusal

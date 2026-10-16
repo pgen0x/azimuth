@@ -1040,5 +1040,13 @@ root position and the wallet, a positive integer slot, successful landed status,
 and proof that the position account closed. Other accounting refusal reasons
 remain enforced. This exception never authorizes selling nonzero inventory,
 touches legacy wallet tokens, creates a close report or marks cash accounting
-complete. It lets the normal settlement worker clear a stale pending marker
+complete by itself. It lets the normal settlement worker clear a stale pending marker
 after an independently proved close without inventing profit or a refund.
+
+Accounting separately records `unjournaled_close_evidence` when a successful
+recorded close has wallet/position-bound finalized deletion evidence and its
+slot is at least the latest successful deployment slot. This can establish
+closure without a monitor report; pending transactions, residual inventory,
+coverage gaps and all other accounting checks still prevent settled cash.
+It does not backfill a journal, guess an exit reason or invent an LP mark.
+Nonzero settlement inventory with a missing close journal remains refused.
