@@ -37,6 +37,7 @@ const pool = {
 };
 let reservePost = 300000000, reserveError = null, reserveChanged = false, reserveReads = 0;
 class Connection {
+  async getMultipleAccountsInfoAndContext() { throw new Error("unexpected account batch read"); }
   constructor(endpoint = "fake-rpc-1", options = {}) { this.rpcEndpoint = endpoint; this.rpcOptions = options; }
   async getBalanceAndContext() { return {context:{slot:10},value:300000000+(++reserveReads%2===0 && reserveChanged ? 1 : 0)}; }
   async simulateTransaction() { return {context:{slot:10},value:{err:reserveError,accounts:[{lamports:reservePost}]}}; }
