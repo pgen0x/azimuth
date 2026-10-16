@@ -639,6 +639,11 @@ def pool_cash_history(closes, ledger, as_of):
     Keep marks separate. Cross-pool cleanup fees produce a conservative range,
     never an invented split. This does not change the mark-based risk floor.
     """
+    journal_by_pool = {}
+    for row in closes:
+        if (not row.get("dry_run") and row.get("pool") and row.get("position")
+                and as_of - 30 * 86400 <= row.get("ts", 0) <= as_of):
+            journal_by_pool.setdefault(row["pool"], {})[row["position"]] = row
     by_pool = {}
     # Derived closure evidence supplies missing identities/times, never marks.
     # A real journal row takes precedence for the same pool and position.
@@ -696,7 +701,10 @@ def pool_cash_history(closes, ledger, as_of):
         exact = complete and not upper_only and round(lower, 9) == round(upper, 9)
         marks = [r.get("pnl_sol") for r in selected]
         valid_marks = all(not isinstance(v, bool) and isinstance(v, (int, float)) and math.isfinite(v) for v in marks)
+        journal = sorted(journal_by_pool.get(pool, {}).values(), key=lambda r: r["ts"], reverse=True)[:10]
         result[pool] = {
+            "journal_closes": len(journal),
+            "journal_last_close_ts": journal[0]["ts"] if journal else 0,
             "prior_closes": len(selected), "last_close_ts": selected[0]["ts"],
             "prior_mark_pnl_sol": sum(marks) if valid_marks else None,
             "prior_net_pnl_sol": round(lower, 9) if exact else None,
