@@ -245,9 +245,10 @@ class SuspectRiskTests(unittest.TestCase):
                     active_bin=-470, lower_bin=-465, upper_bin=-430, in_range=False,
                     unclaimed_fees_sol=.001, pool_price=.9, **changes)
 
-    def replay(self, verify, *, age=1, prior=False, indexed=-100, portfolio=True, adopted=False, indexed_failure=False):
+    def replay(self, verify, *, age=1, prior=False, indexed=-100, portfolio=True, adopted=False, indexed_failure=False, omitted=False):
         source = Path(monitor.__file__).read_text()
-        code = textwrap.dedent(source[source.index("        # Get current pool price"):
+        start = "        # An indexer omission is not evidence" if omitted else "        # Get current pool price"
+        code = textwrap.dedent(source[source.index(start):
                                       source.index("        # Pool aggregates do not include")])
         calls = []
         scope = dict(vars(monitor), now=time.time(), meta=dict(deployed_at=time.time()-age*60,
@@ -258,6 +259,8 @@ class SuspectRiskTests(unittest.TestCase):
                      entry_price=1.0, bins_below=35,
                      pnl_pct=indexed, pnl_sol_actual=-.1, in_range=True, active_bin=-430,
                      pnl_data=None, stop_loss_pct=-8, fee_per_tvl_24h=1)
+        if omitted:
+            scope['bp'] = None
         def read(command, **kwargs):
             calls.append(command)
             if " pnl-onchain " in command:
@@ -283,6 +286,29 @@ class SuspectRiskTests(unittest.TestCase):
                                               source.index("        # 3. Pumped Far Above")])
                 exec(compile(risk, monitor.__file__, "exec"), scope)
         return scope, calls
+
+    def test_indexer_omission_cannot_hide_native_emergency(self):
+        for api_available in (True, False):
+            with self.subTest(api_available=api_available):
+                scope, calls = self.replay(self.mark(pct=-60), omitted=True, portfolio=api_available)
+                self.assertTrue(scope.get('guard_passed'))
+                self.assertTrue(scope['emergency_close'])
+                self.assertEqual(sum(' pnl-onchain ' in c for c in calls), 1)
+                self.assertFalse(any('srem sol:dlmm:active_positions' in c or f'del \"sol:dlmm:position:{POSITION}\"' in c for c in calls))
+
+    def test_old_omitted_position_with_valid_native_mark_is_still_managed(self):
+        scope, calls = self.replay(self.mark(pct=.1), omitted=True, age=180)
+        self.assertTrue(scope.get('guard_passed'))
+        self.assertFalse(scope['emergency_close'])
+        self.assertEqual(scope['pnl_pct'], .1)
+        self.assertEqual(sum(' pnl-onchain ' in c for c in calls), 1)
+
+    def test_unproved_omitted_position_keeps_grace_without_close(self):
+        for mark in (None, dict(self.mark(), pool='wrong'), dict(self.mark(), observed_at=1)):
+            scope, calls = self.replay(mark, omitted=True)
+            self.assertFalse(scope.get('guard_passed', False))
+            self.assertEqual(sum(' pnl-onchain ' in c for c in calls), 1)
+            self.assertFalse(any('srem sol:dlmm:active_positions' in c or f'del \"sol:dlmm:position:{POSITION}\"' in c for c in calls))
 
     def test_native_emergency_skips_optional_market_fetch_but_keeps_rug_detection(self):
         source = Path(monitor.__file__).read_text()

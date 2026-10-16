@@ -197,6 +197,13 @@ the same pre-entry capital and bin snapshots. The holding-period comparison is
 gross and has an outcome-defined duration; it does not simulate the alternative
 exit policy, fill the unobserved gap, or establish executed IL or net profit.
 
+A tracked position omitted by the indexer receives one bounded three-second
+native risk read before the missing-position branch can skip it. A verified mark
+continues through the existing risk rules and is reused without another native
+read. The two-hour cleanup grace and RPC absence requirement remain in force
+when native evidence is unavailable; an indexer omission alone cannot remove
+tracking or manufacture a close.
+
 Native risk marks also expose the already-read per-bin position shares, raw
 inventory and unclaimed fees. After a normal rule-driven close attempt, the
 monitor appends that decision-time observation to
