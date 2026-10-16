@@ -1240,3 +1240,14 @@ unknown data keeps the existing entry behavior. Evidence and the configured
 floor are retained in `entry_live_gates`. This adds no HTTP calls and cannot
 prevent liquidity disappearing after the observation. Historical thin-pool
 exits alone do not prove the same liquidity was available to read before entry.
+
+### Position PDA history diagnostics
+
+Entry provenance retains `position_pda_history_outcome`, a fixed reason code
+from the optional lookup (`unused`, `history_exists`, `http_error`, `rpc_error`,
+`invalid_history_response`, `history_read_failed`, `history_timeout`,
+`wait_window_elapsed`, `cancelled`, or `not_started_or_unavailable`). No endpoint
+or raw error is retained. This describes the history lookup, not every possible
+rewrite or simulation fallback: `unused` with keypair creation still requires
+examining later checks. The existing 300 ms wait window, background lifetime,
+single lookup and unsigned fallback remain; no retry or additional RPC is added.

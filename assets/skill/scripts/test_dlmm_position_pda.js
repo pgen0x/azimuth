@@ -113,6 +113,7 @@ const flush=async()=>{for(let i=0;i<8;i++)await Promise.resolve();};
   concurrent.history=beginPositionPdaHistory(concurrent,fetchFn);
   assert.ok(await preparePositionPda(concurrent,()=>{throw new Error('No second lookup');}));
   assert.equal(requests,previous+1);
+  assert.equal(concurrent.history.reason,'unused');
   assert.equal(await preparePositionPda({...setup(),history:null},fetchFn),null);assert.equal(requests,previous+1);
   assert.equal(await preparePositionPda({...setup(),history:{address:'other',read:Promise.resolve(true)}},fetchFn),null);
   for(const mutate of [x=>x.lower=-(2**31)-1,x=>x.upper=2**31,x=>x.upper=x.lower+70,
@@ -127,8 +128,12 @@ const flush=async()=>{for(let i=0;i<8;i++)await Promise.resolve();};
   const file=path.join(root,f.pda+'.json');fs.writeFileSync(file,'existing provenance');
   const count=requests;assert.equal(await preparePositionPda(setup(),fetchFn),null);assert.equal(requests,count);
   assert.equal(fs.readFileSync(file,'utf8'),'existing provenance');fs.unlinkSync(file);
-  for(const data of [{result:[{signature:'previous'}]},{result:null},{error:{message:'secret'}}]){
-    assert.equal(await preparePositionPda(setup(),async()=>({ok:true,json:async()=>data})),null);
+  for(const [data,reason] of [[{result:[{signature:'previous'}]},'history_exists'],[{result:null},'invalid_history_response'],[{error:{message:'secret'}},'rpc_error']]){
+    const candidate=setup();
+    candidate.history=beginPositionPdaHistory(candidate,async()=>({ok:true,json:async()=>data}));
+    assert.equal(await preparePositionPda(candidate),null);
+    assert.equal(candidate.history.reason,reason);
+    assert.ok(!JSON.stringify(candidate.history).includes('secret'));
   }
   assert.equal(await preparePositionPda(setup(),async()=>{throw new Error('secret URL');}),null);
   const unavailable=setup();unavailable.pool.program.methods.initializePositionPda=()=>{throw new Error('unsupported');};
@@ -175,12 +180,14 @@ const flush=async()=>{for(let i=0;i<8;i++)await Promise.resolve();};
   assert.equal(pendingClock.timerCount(),0);
   pendingClock.advance(300);pendingClock.respond({result:[]});await flush();
   assert.equal(await pending.history.read,false);
+  assert.equal(pending.history.reason,'wait_window_elapsed');
   assert.equal(await pendingClock.preparePositionPda(pending),null);
   assert.equal(pendingClock.state.requests,1);
   const abandonedClock=clockedHelper(),abandoned=setup();
   const abandonedHistory=abandonedClock.beginPositionPdaHistory(abandoned,abandonedClock.fetch);
   abandonedClock.advance(2999);assert.equal(abandonedClock.state.signal.aborted,false);
   abandonedClock.advance(1);assert.equal(await abandonedHistory.read,false);
+  assert.equal(abandonedHistory.reason,'history_timeout');
   assert.equal(abandonedClock.state.signal.aborted,true);assert.equal(abandonedClock.timerCount(),0);
   console.log('position PDA identity, unsigned rewrite, bounded history and fallback checks passed');
 })().catch(error=>{console.error(error);process.exitCode=1;}).finally(()=>fs.rmSync(root,{recursive:true,force:true}));
