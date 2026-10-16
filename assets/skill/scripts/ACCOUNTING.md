@@ -1177,3 +1177,14 @@ or raw error is retained. This describes the history lookup, not every possible
 rewrite or simulation fallback: `unused` with keypair creation still requires
 examining later checks. The existing 300 ms wait window, background lifetime,
 single lookup and unsigned fallback remain; no retry or additional RPC is added.
+
+### Zero inventory after an unjournaled close
+
+Settlement may complete zero root-owned token inventory when a local close
+report is missing, only with reconciled close facts explicitly bound to every
+root position and the wallet, a positive integer slot, successful landed status,
+and proof that the position account closed. Other accounting refusal reasons
+remain enforced. This exception never authorizes selling nonzero inventory,
+touches legacy wallet tokens, creates a close report or marks cash accounting
+complete. It lets the normal settlement worker clear a stale pending marker
+after an independently proved close without inventing profit or a refund.

@@ -470,7 +470,9 @@ def settlement_inventory(profile, position, mint, wallet):
     c = matches[0]
     if c["pending_signatures"]:
         return dict(refusal, pending_signatures=c["pending_signatures"])
-    if set(c["reasons"]) - {"token_inventory_requires_valuation", "wallet_wide_coverage_not_verified"}:
+    unjournaled = "open_or_unjournaled_positions" in c["reasons"]
+    if set(c["reasons"]) - {"token_inventory_requires_valuation", "wallet_wide_coverage_not_verified",
+                            "open_or_unjournaled_positions"}:
         return refusal
     memories = Path(profile) / "memories"
     entry = json.loads((memories / "dlmm_entries" / (position + ".json")).read_text())
@@ -484,6 +486,18 @@ def settlement_inventory(profile, position, mint, wallet):
     raw = int(c["token_deltas_raw"].get(mint, 0))
     if raw < 0:
         return refusal
+    if unjournaled:
+        # A crashed reporter must not strand a proved zero-token settlement.
+        # This exception never authorizes a sale or marks accounting complete.
+        if raw != 0 or not c["positions"] or not all(any(
+                e.get("kind") == "close" and e.get("position") == p
+                and (f := facts.get(e["signature"], {})).get("wallet") == wallet
+                and f.get("event_position") == p
+                and f.get("failed") is False and f.get("landed") is not False
+                and f.get("position_account_closed") is True
+                and type(f.get("slot")) is int and f["slot"] > 0
+                for e in events) for p in c["positions"]):
+            return refusal
     # Zero owned inventory completes settlement without touching legacy tokens.
     if raw == 0:
         return {"success": True, "amount_raw": "0"}
