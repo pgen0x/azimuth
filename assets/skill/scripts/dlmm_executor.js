@@ -8,6 +8,7 @@ const fs = require("fs");
 const path = require("path");
 const net = require("net");
 const riskMark = require("./dlmm_risk_mark");
+const {deduplicateAccountReads} = require("./dlmm_rpc_accounts");
 
 // Resolved from the invoked path (process.argv[1]), NOT __dirname — Node always
 // realpaths __dirname/__filename through symlinks, which would resolve to this repo
@@ -77,6 +78,7 @@ async function runWithFailover(fn) {
     try {
       const connection = new Connection(rpcUrl, { commitment: "confirmed", disableRetryOnRateLimit: true,
         fetch: (url, options) => fetch(url, { ...options, signal: AbortSignal.timeout(8000) }) });
+      deduplicateAccountReads(connection);
       return await fn(connection);
     } catch (err) {
       if (err.riskMarkUnavailable || err.message?.startsWith("ENTRY REFUSED:") || err.message?.startsWith("Rent reclaim refused:")) throw err;

@@ -23,6 +23,7 @@ function fixture(plans, urls = ['rpc-1','rpc-2'], kind = 'close') {
     now=end;await flush();
   };
   class Connection {
+    async getMultipleAccountsInfoAndContext() { throw new Error("unexpected account batch read"); }
     constructor(url,options){this.url=url;this.options=options;}
     async sendRawTransaction(bytes,options){
       sends.push({url:this.url,at:now,bytes:bytes.toString('hex'),options:{...options}});
