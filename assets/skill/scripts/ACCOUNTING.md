@@ -1159,3 +1159,10 @@ unknown data keeps the existing entry behavior. Evidence and the configured
 floor are retained in `entry_live_gates`. This adds no HTTP calls and cannot
 prevent liquidity disappearing after the observation. Historical thin-pool
 exits alone do not prove the same liquidity was available to read before entry.
+
+The exit-side reader also preserves unknown liquidity instead of coercing a
+missing field to zero. Missing, boolean, negative and nonfinite depth cannot
+trigger a thin-pool exit; an explicit zero still can. Invalid momentum fields
+do not erase independently valid liquidity. Solana pool identity uses exact,
+case-sensitive addresses, and an explicitly different chain is rejected.
+These checks preserve existing risk thresholds and add no network requests.

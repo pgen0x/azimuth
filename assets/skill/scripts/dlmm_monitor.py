@@ -1091,17 +1091,27 @@ def get_pool_liquidity_usd(pool, base_mint):
                 continue
             match = None
             for p in pairs:
-                if (p.get("pairAddress") or "").lower() == pool.lower():
+                if p.get("pairAddress") == pool and p.get("chainId", "solana") == "solana":
                     match = p
                     break
             if match is None:
                 continue
-            liq = float((match.get("liquidity") or {}).get("usd") or 0.0)
+            def finite_market_number(value):
+                if value is None or isinstance(value, bool):
+                    return None
+                try:
+                    number = float(value)
+                    return number if math.isfinite(number) else None
+                except (TypeError, ValueError):
+                    return None
+            liq = finite_market_number((match.get("liquidity") or {}).get("usd"))
+            if liq is not None and liq < 0:
+                liq = None
             changes = match.get("priceChange") or {}
             h1_raw = changes.get("h1")
-            h1 = float(h1_raw) if h1_raw is not None else None
+            h1 = finite_market_number(h1_raw)
             m5_raw = changes.get("m5")
-            m5 = float(m5_raw) if m5_raw is not None else None
+            m5 = finite_market_number(m5_raw)
             # Drop an impossible reading rather than the whole response: the
             # liquidity figure beside it is still usable, and every caller
             # already treats None as "unknown, do not act".
