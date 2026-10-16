@@ -1146,3 +1146,16 @@ reconsider the pool; this refusal does not submit a transaction or immediately
 retry a moving price. This check adds no RPC reads and does not eliminate price
 movement after the reads, replace on-chain slippage checks, or prove that
 historical out-of-range exits were caused by this mismatch.
+
+### Entry liquidity versus the exit floor
+
+The predeploy gate reuses its existing DexScreener token response to inspect
+the exact Solana pool's liquidity, while momentum retains its deepest-venue
+selection. Known liquidity below the monitor's configured
+`MIN_EXIT_LIQUIDITY_USD` rejects that candidate before further entry checks.
+Pool addresses are case-sensitive. A different venue, missing liquidity,
+negative value, boolean or nonfinite value cannot establish pool depth;
+unknown data keeps the existing entry behavior. Evidence and the configured
+floor are retained in `entry_live_gates`. This adds no HTTP calls and cannot
+prevent liquidity disappearing after the observation. Historical thin-pool
+exits alone do not prove the same liquidity was available to read before entry.

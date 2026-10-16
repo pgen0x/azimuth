@@ -13,7 +13,7 @@ import shlex
 from pathlib import Path
 from local_indicators import check_local_indicators
 from tz_util import local_time_str
-from dlmm_monitor import position_live_onchain
+from dlmm_monitor import position_live_onchain, load_soul_dlmm_params as load_exit_params
 from dlmm_weights import ranking_weight_context
 from dlmm_candidate_watch import record_pipeline_candidates
 
@@ -722,12 +722,19 @@ def predeploy_live_gate_reject(candidate, deploy_sol, timeframe):
     base_mint = candidate.get("base_mint", "")
     if not base_mint:
         return "base mint unavailable"
-    m5, h1, h6, h24 = get_momentum(base_mint)
+    pool_evidence = {"pool_liquidity_usd": None}
+    m5, h1, h6, h24 = get_momentum(base_mint, pool=candidate["pool"], evidence=pool_evidence)
+    exit_floor = load_exit_params()["MIN_EXIT_LIQUIDITY_USD"]
     checks = candidate["entry_live_gates"] = {
         "observed_at": int(time.time()), "checked_deploy_sol": deploy_sol, "fee_timeframe": timeframe,
         "m5_pct": m5, "h1_pct": h1, "h6_pct": h6, "h24_pct": h24,
         "screened_fee_tvl_ratio": None, "live_fee_tvl_ratio": None, "price_impact_pct": None,
+        "pool_liquidity_usd": pool_evidence["pool_liquidity_usd"],
+        "exit_liquidity_floor_usd": exit_floor,
     }
+    liquidity = pool_evidence["pool_liquidity_usd"]
+    if liquidity is not None and liquidity < exit_floor:
+        return f"pool liquidity ${liquidity:,.0f} below exit floor ${exit_floor:,.0f}"
     if m5 is not None:
         print(f"Pre-deploy momentum check {candidate['name']}: 5m price change = {m5:+.2f}%")
         if m5 < -5.0:
@@ -784,7 +791,7 @@ DEV_BLOCKLIST_MAX = int(os.environ.get("DEV_BLOCKLIST_MAX", "12"))
 MINT_BLACKLIST_MAX = int(os.environ.get("MINT_BLACKLIST_MAX", "20"))
 
 
-def get_momentum(mint):
+def get_momentum(mint, *, pool=None, evidence=None):
     """Returns (m5_pct, h1_pct, h6_pct, h24_pct) price change from DexScreener, or
     (None, None, None, None) on failure. Screens ALL candidates, not just the winner.
 
@@ -803,6 +810,22 @@ def get_momentum(mint):
         with urllib.request.urlopen(req, timeout=8) as resp:
             data = json.loads(resp.read())
         pairs = data.get("pairs") or []
+        # Reuse this response for entry/exit consistency. Momentum still uses
+        # the deepest venue, but only the exact Solana pool can prove depth.
+        if pool is not None and evidence is not None:
+            evidence["pool_liquidity_usd"] = None
+            for pair in pairs:
+                if pair.get("chainId") != "solana" or pair.get("pairAddress") != pool:
+                    continue
+                value = (pair.get("liquidity") or {}).get("usd")
+                try:
+                    if value is not None and not isinstance(value, bool):
+                        value = float(value)
+                        if math.isfinite(value) and value >= 0:
+                            evidence["pool_liquidity_usd"] = value
+                except (TypeError, ValueError):
+                    pass
+                break
         if not pairs:
             return None, None, None, None
         deepest = max(pairs, key=lambda p: float((p.get("liquidity") or {}).get("usd") or 0.0))
