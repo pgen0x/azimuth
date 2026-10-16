@@ -1155,13 +1155,18 @@ def sol_bidask_bins(bin_step):
     downside. Bins compound: price after n down-bins = (1+step)^-n, so
     n = ln(1-coverage) / -ln(1+step). Clamped to the deployable band, then
     re-widened if that clamp left the range under SOL_BIDASK_MIN_COVERAGE."""
-    step = max(bin_step, 1) / 10000.0
+    if type(bin_step) not in (int, float) or not math.isfinite(bin_step) or bin_step <= 0:
+        raise ValueError("SOL BidAsk requires a finite positive bin step")
+    step = bin_step / 10000.0
     def bins_for(coverage):
         return int(math.ceil(math.log(1.0 - coverage) / -math.log1p(step)))
     bins = max(MIN_BINS_BELOW, min(MAX_BINS_BELOW, bins_for(SOL_BIDASK_COVERAGE)))
     floor_bins = bins_for(SOL_BIDASK_MIN_COVERAGE)
+    if floor_bins > BINS_BELOW_HARD_MAX:
+        raise ValueError(f"SOL BidAsk minimum {SOL_BIDASK_MIN_COVERAGE:.0%} coverage requires "
+                         f"{floor_bins} bins, above the {BINS_BELOW_HARD_MAX}-bin limit")
     if bins < floor_bins:
-        bins = min(BINS_BELOW_HARD_MAX, floor_bins)
+        bins = floor_bins
     return bins
 
 def select_batch_strategy(c, mode):
@@ -1662,6 +1667,15 @@ def main():
             mom_adj += max(-5.0, min(5.0, m5)) * 0.5
         c["score"] += mom_adj
         c["momentum_adj"] = round(mom_adj, 1)
+        intended_strategy = cli.strategy or (select_batch_strategy(c, mode) if batch_mode
+                                             else params.get("STRATEGY", "spot"))
+        if intended_strategy == "sol_bidask":
+            try:
+                sol_bidask_bins(c.get("bin_step", 100))
+            except ValueError as error:
+                record_pipeline_reject(PROFILE_DIR, mode, "strategy_geometry", c.get("pool"), c.get("base_mint"), c.get("sol_is_x"), c.get("name"))
+                print(f"Skipping {c['name']} - {error}")
+                continue
         valid_candidates.append(c)
 
     if not valid_candidates:
