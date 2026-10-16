@@ -721,6 +721,13 @@ async function deployPosition(poolAddressStr, amountX, amountY, binsBelow, binsA
         const pool = await DLMM.create(connection, new PublicKey(poolAddressStr));
         if (!dry) await assertNoTokenExposure(pool, wallet);
         const activeBin = await pool.getActiveBin();
+        // getActiveBin fetches fresh state, while the SDK liquidity builder
+        // uses lbPair.activeId cached at pool creation. Never combine a range
+        // from one anchor with liquidity amounts/slippage from another.
+        if (!Number.isSafeInteger(activeBin.binId)
+            || activeBin.binId !== pool.lbPair.activeId) {
+          throw new Error("ENTRY REFUSED: active bin changed during entry preparation");
+        }
         const minBinId = activeBin.binId - binsBelow;
         const maxBinId = activeBin.binId + binsAbove;
         const tokenXDecimals = await getTokenDecimals(connection, pool.lbPair.tokenXMint);

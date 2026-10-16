@@ -20,7 +20,7 @@ const key = (value) => ({ toString: () => value });
 const wallet = { publicKey: key(`test-wallet-${worker ? "swap" : process.pid}`) };
 const transaction = () => ({ signature: Buffer.from([1]), sign(...signers) {signCalls++;lastSignedKeys=signers.map(s=>s.publicKey.toString());}, compileMessage() { return {}; }, serialize() { return Buffer.from(this.recentBlockhash); } });
 const pool = {
-  pubkey: key("pool"), lbPair: { tokenXMint: key("TOKEN"), tokenYMint: key("So11111111111111111111111111111111111111112"), binStep: 100 },
+  pubkey: key("pool"), lbPair: { activeId: 0, tokenXMint: key("TOKEN"), tokenYMint: key("So11111111111111111111111111111111111111112"), binStep: 100 },
   program: { account: {
     positionV2: { all: async () => { reads++; return positions; } },
     lbPair: { fetch: async () => ({ tokenXMint: key("TOKEN"), tokenYMint: key("SOL") }) },
@@ -239,7 +239,7 @@ vm.runInNewContext("const productionExitTransport=confirmExitTransaction;confirm
     await assert.rejects(snapshot("pool"), /RPC endpoints failed/);
     pool.lbPair.tokenYMint = key("So11111111111111111111111111111111111111112");
     pool.getActiveBin = previousActive;
-    delete pool.getBinsBetweenLowerAndUpperBound; delete pool.lbPair.activeId;
+    delete pool.getBinsBetweenLowerAndUpperBound;
     delete pool.tokenX; delete pool.tokenY;
     vm.runInNewContext("getWallet = candidateOriginalWallet;", sandbox);
   }
@@ -993,6 +993,19 @@ vm.runInNewContext("const productionExitTransport=confirmExitTransaction;confirm
   execFileSync(process.execPath, ["-e", code]);
   await release();
   await (await acquireDeployLock(wallet.publicKey.toString()))();
+  // A fresh range anchor must agree with the cached SDK instruction anchor.
+  // Both directions and malformed reads refuse before any build or signature.
+  const originalActiveRead = pool.getActiveBin;
+  const beforeDrift = {builds, sends, signCalls};
+  for (const binId of [-1, 1, NaN, undefined]) {
+    pool.getActiveBin = async () => ({binId, price: "1"});
+    const refused = await deploy();
+    assert.equal(refused.success, false);
+    assert.match(refused.error, /active bin changed/);
+    assert.deepEqual({builds, sends, signCalls}, beforeDrift);
+    assert.ok(!fs.existsSync(marker));
+  }
+  pool.getActiveBin = originalActiveRead;
   const parallel = await Promise.allSettled([deploy(), deploy()]);
   assert.equal(parallel.filter((r) => r.status === "fulfilled" && r.value.success).length, 1);
   assert.equal(lastSlippage, 10);
@@ -1000,7 +1013,8 @@ vm.runInNewContext("const productionExitTransport=confirmExitTransaction;confirm
   assert.equal(lastMaxRetries, 20);
   assert.equal((await deploy()).pending, true); // prior blockhash still valid
   assert.equal(sends, 1);
-  const provenance = JSON.parse(fs.readFileSync(path.join(root, "memories/dlmm_entries/position-1.json")));
+  const deployedPosition = parallel.find(r => r.status === "fulfilled" && r.value.success).value.position;
+  const provenance = JSON.parse(fs.readFileSync(path.join(root, "memories/dlmm_entries", `${deployedPosition}.json`)));
   assert.deepEqual(provenance.signal.entry_live_gates, entryGates);
   assert.equal(provenance.dev, "developer");
   assert.equal(provenance.signal.holders, 0); assert.equal(provenance.signal.unique_traders, 100);
