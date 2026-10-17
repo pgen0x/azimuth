@@ -116,8 +116,14 @@ def validate_candidate_snapshot(sample, pool, mint):
             or type(sample.get('decimals_y')) is not int or sample['decimals_y'] != 9):
         raise ValueError('invalid_candidate_identity_or_mark')
     lower, upper, anchor = (sample.get(k) for k in ('lower_bin', 'upper_bin', 'anchor_bin'))
+    shift = sample.get('range_shift', 0)
+    if type(shift) is not int or not 0 <= shift <= 16:
+        raise ValueError('invalid_candidate_shift')
+    if shift and (any(type(v) is not int for v in (lower, upper, anchor))
+                  or lower != anchor-69-shift or upper != anchor+16-shift):
+        raise ValueError('invalid_candidate_shifted_range')
     if (any(type(v) is not int or not -(2**31) <= v < 2**31 for v in (lower, upper, anchor, sample.get('active_bin')))
-            or not 0 <= anchor - lower <= 69 or not 0 <= upper - anchor <= 16):
+            or not 0 <= anchor - lower <= 69+shift or not 0 <= upper - anchor <= 16):
         raise ValueError('invalid_candidate_range')
     bins = sample.get('bins')
     if not isinstance(bins, list) or len(bins) != upper - lower + 1:
@@ -417,6 +423,8 @@ def collect_candidate_bins(profile, candidates, deadline):
             fields = ('ts', 'active_bin', 'anchor_bin', 'lower_bin', 'upper_bin', 'price',
                       'decimals_x', 'decimals_y', 'sol_is_x', 'token_x_mint', 'token_y_mint', 'bins')
             record.update({k: sample[k] for k in fields})
+            if 'range_shift' in sample:
+                record['range_shift'] = sample['range_shift']
             if type(sample.get('bin_step')) is int and 0 < sample['bin_step'] <= 10000:
                 record['bin_step'] = sample['bin_step']
             record['canonical_liquidity'] = retain_canonical_snapshot(
