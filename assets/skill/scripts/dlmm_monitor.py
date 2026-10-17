@@ -1367,7 +1367,7 @@ def settle_pending():
                 f"DLMM_SETTLEMENT_POSITION={shlex.quote(pos)} node {EXECUTOR_PATH} swap {shlex.quote(mint)} SOL {shlex.quote('raw:' + bal['amount_raw'])} 15 {slippage_bps} 1{small_settlement_option}", timeout=90)
             if not result or not result.get("success"):
                 reason = (result or {}).get("reason")
-                if reason in ("swap_no_route", "net_recovery_below_floor") and not result.get("pending"):
+                if reason in ("swap_no_route", "net_recovery_below_floor", "swap_quote_threshold_unavailable") and not result.get("pending"):
                     item.update(state="deferred", reason=reason, remaining_raw=bal["amount_raw"])
                     with open(path + ".tmp", "w") as out:
                         json.dump(item, out)

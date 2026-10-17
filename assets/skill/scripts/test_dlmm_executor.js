@@ -568,13 +568,13 @@ vm.runInNewContext("const productionExitTransport=confirmExitTransaction;confirm
   const atomicFetch = sandbox.fetch, atomicSimulation = Connection.prototype.simulateTransaction;
   const originalTimer = sandbox.setTimeout;
   const quoteCalls = [], quoteDelays = [], swapRequests = [];
-  let quotedOutputs = ["250000", "250000"], quoteAlter = null, quoteFailure = null;
+  let quotedOutputs = ["250000", "250000"], quoteAlter = null, quoteFailure = null, quoteErrorCode = "NO_ROUTES_FOUND";
   sandbox.setTimeout = (callback, delay) => { quoteDelays.push(delay); return setTimeout(callback, 0); };
   sandbox.fetch = async (url, options) => {
     if (url.includes("/quote?")) {
       const bps = Number(new URL(url).searchParams.get("slippageBps"));
       const i = quoteCalls.length; quoteCalls.push(bps);
-      if (quoteFailure && i === 1) return {ok:false,status:quoteFailure,text:async()=>JSON.stringify({errorCode:"NO_ROUTES_FOUND"})};
+      if (quoteFailure && i === 1) return {ok:false,status:quoteFailure,text:async()=>JSON.stringify({errorCode:quoteErrorCode})};
       const out = quotedOutputs[Math.min(i, quotedOutputs.length-1)];
       const q = {inputMint:"TOKEN",outputMint:"So11111111111111111111111111111111111111112",
         inAmount:"100000000",outAmount:out,swapMode:"ExactIn",slippageBps:bps,
@@ -589,7 +589,7 @@ vm.runInNewContext("const productionExitTransport=confirmExitTransaction;confirm
   const settlementSol = "So11111111111111111111111111111111111111112";
   const smallRecovery = () => swapToken("TOKEN",settlementSol,"raw:100000000",15,100,1,true);
   const resetSmall = (outputs=["250000","250000"]) => {
-    quotedOutputs=outputs;quoteCalls.length=0;quoteDelays.length=0;swapRequests.length=0;quoteAlter=null;quoteFailure=null;
+    quotedOutputs=outputs;quoteCalls.length=0;quoteDelays.length=0;swapRequests.length=0;quoteAlter=null;quoteFailure=null;quoteErrorCode="NO_ROUTES_FOUND";
   };
   let smallResult = await smallRecovery();
   assert.equal(smallResult.success,true);assert.deepEqual(quoteCalls,[100,300]);assert.deepEqual(quoteDelays,[2100]);
@@ -625,6 +625,11 @@ vm.runInNewContext("const productionExitTransport=confirmExitTransaction;confirm
   resetSmall();quoteFailure=400;
   assert.equal((await smallRecovery()).reason,"swap_no_route");assert.equal(swapRequests.length,0);
   resetSmall();quoteFailure=429;
+  await assert.rejects(smallRecovery(),/429/);assert.equal(swapRequests.length,0);
+  resetSmall();quoteFailure=400;quoteErrorCode="CANNOT_COMPUTE_OTHER_AMOUNT_THRESHOLD";
+  assert.equal((await smallRecovery()).reason,"swap_quote_threshold_unavailable");
+  assert.equal(swapRequests.length,0);
+  resetSmall();quoteFailure=429;quoteErrorCode="CANNOT_COMPUTE_OTHER_AMOUNT_THRESHOLD";
   await assert.rejects(smallRecovery(),/429/);assert.equal(swapRequests.length,0);
   for (const impact of [undefined,null,false,""," ","NaN","Infinity","0.01junk","-0.1","1.01",{},[]]) {
     resetSmall();quoteAlter=q=>q.priceImpactPct=impact;
@@ -789,6 +794,8 @@ vm.runInNewContext("const productionExitTransport=confirmExitTransaction;confirm
     try { await assert.rejects(deploy(), /BUSY/); } finally { await unlock(); }
   }
   fs.writeFileSync(path.join(settlementDir, "position.json"), JSON.stringify({state:"deferred",reason:"unknown"}));
+  await assert.rejects(deploy(), /awaiting verified SOL settlement/);
+  fs.writeFileSync(path.join(settlementDir, "position.json"), JSON.stringify({state:"deferred",reason:"swap_quote_threshold_unavailable"}));
   await assert.rejects(deploy(), /awaiting verified SOL settlement/);
   fs.rmSync(settlementDir, { recursive: true });
   assert.equal(sends, 0);
