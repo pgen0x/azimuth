@@ -1233,3 +1233,19 @@ and retries after the existing 900-second deferred interval. This is not an
 executable quote or proof of dust value, so this reason does not qualify for the
 entry exception granted to no-route/verified uneconomic settlements. Only a
 subsequent verified zero owned inventory can complete settlement.
+
+### Entry-bound forecast references
+
+Immediately before signing the first deployment transaction, the executor saves
+`fee_forecast_reference` with entry provenance. This reads at most the final
+256 KiB of the local candidate forecast journal, with no RPC or model call.
+Only committed v2 records already recorded at that time qualify. Pool, token,
+mode, bin step, exact contiguous bin range, 0.1 SOL capital and mode horizon must
+match; the baseline may be at most 600 seconds old. Unsupported entries, missing
+journals, partial records and missing matches remain explicitly unmeasured.
+
+A `matched_reference` stores the forecast ID and SHA-256 of the exact journal
+line. It is not a validated forecast or an entry approval: downstream evaluation
+must independently rebuild the bound forecast and compare against settled cash.
+The observation does not change entry eligibility, sizing, stops or reserve
+policy. A bounded-tail miss is not evidence that no older matching record exists.
