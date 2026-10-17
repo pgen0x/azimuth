@@ -616,6 +616,16 @@ vm.runInNewContext("const productionExitTransport=confirmExitTransaction;confirm
   assert.equal((await swapToken("TOKEN",settlementSol,"raw:100000000",15,300,1)).success,true);
   assert.deepEqual(quoteCalls,[300,0]);
   assert.equal(swapRequests[0].quoteResponse.slippageBps,0);
+  resetSmall(["1"]);quoteFailure=400;quoteFailureIndex=0;quoteErrorCode="CANNOT_COMPUTE_OTHER_AMOUNT_THRESHOLD";
+  quoteAlter=q=>q.priceImpactPct="0.262";
+  assert.equal((await swapToken("TOKEN",settlementSol,"raw:100000000",15,300,1)).success,true);
+  for (const impact of ["0.5","0.9",null,"invalid"]) {
+    resetSmall(["1"]);quoteFailure=400;quoteFailureIndex=0;quoteErrorCode="CANNOT_COMPUTE_OTHER_AMOUNT_THRESHOLD";
+    quoteAlter=q=>q.priceImpactPct=impact;
+    const previous=sends;
+    assert.equal((await swapToken("TOKEN",settlementSol,"raw:100000000",15,300,1)).success,false);
+    assert.equal(sends,previous);assert.equal(swapRequests.length,0);
+  }
   const smallSends = sends;
   resetSmall(["250000","250001"]);
   assert.equal((await smallRecovery()).reason,"small_settlement_value_changed");assert.equal(swapRequests.length,0);

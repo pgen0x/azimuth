@@ -1101,7 +1101,10 @@ recovering an identity cannot turn unvalued inventory into a profit or loss.
 Jupiter HTTP 400 `CANNOT_COMPUTE_OTHER_AMOUNT_THRESHOLD` triggers one paced
 zero-slippage requote only for proved owned settlement inventory with an explicit
 net recovery floor. The fallback must quote exactly one lamport in ExactIn mode,
-with a one-lamport minimum and zero slippage. The executor still checks inventory,
+with a one-lamport minimum and zero slippage. For this fallback alone, a known
+price impact below 50% may exceed the ordinary percentage ceiling: the inferred
+absolute impact on a one-lamport output is less than one lamport. Unknown impact
+and impact at or above 50% still refuse; ordinary swaps retain their limits. The executor still checks inventory,
 price impact and exact unsigned simulation, including an eligible atomic token
 account close, before any send. Rent recovery is not trading profit. A changed or
 invalid fallback remains `swap_quote_threshold_unavailable`: inventory stays
