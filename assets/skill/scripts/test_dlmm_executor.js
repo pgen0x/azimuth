@@ -54,6 +54,12 @@ class Connection {
   async getLatestBlockhash() { return { blockhash: "exact-blockhash", lastValidBlockHeight: 150 }; }
   async sendRawTransaction(raw, options) {
     const event=JSON.parse(fs.readFileSync(path.join(root,"memories/dlmm_transactions.jsonl"),"utf8").trim().split("\n").at(-1));
+    if (event.kind === "deploy") {
+      const entry = JSON.parse(fs.readFileSync(path.join(root, "memories/dlmm_entries", `${event.position}.json`)));
+      assert.equal(entry.fee_forecast_reference.net_cash_profit_proved, false);
+      assert.ok(entry.fee_forecast_reference.recorded_at <= sandbox.Date.now() / 1000);
+      assert.ok(["unmeasured", "matched_reference"].includes(entry.fee_forecast_reference.status));
+    }
     if (event.kind === "swap") {
       const pending=JSON.parse(fs.readFileSync(path.join(root,'memories/dlmm_pending_swaps',
         `${event.wallet}-${event.swap_quote.input_mint}-${event.swap_quote.output_mint}.json`)));

@@ -755,14 +755,24 @@ async function deployPosition(poolAddressStr, amountX, amountY, binsBelow, binsA
         try { snapshots = await entryBinSnapshots(pool, minBinId, maxBinId, studySide); }
         catch { console.warn("[SHADOW] Entry bin snapshot unavailable"); }
 
-        const persistEntry = () => fs.writeFileSync(path.join(entryDir, `${newPosition.publicKey}.json`), JSON.stringify({
-          ...context, ...snapshots, root_chain_id: context.root_chain_id || context.recenter_of || newPosition.publicKey.toString(),
-          pool: poolAddressStr, position: newPosition.publicKey.toString(),
-          entry_bin: activeBin.binId, entry_price: pool.fromPricePerLamport(Number(activeBin.price)),
-          bins_below: binsBelow, bins_above: binsAbove, bin_step: Number(pool.lbPair.binStep),
-          amount_x: amountX, amount_y: amountY, position_creation: positionCreation,
-          deployed_at: Math.floor(Date.now() / 1000),
-        }), { mode: 0o600, flag: positionCreation.kind === "wallet_pda" ? "wx" : "w" });
+        const persistEntry = () => {
+          const recordedAt = Date.now() / 1000;
+          const feeForecast = require("./dlmm_entry_forecast").entryForecastReference(
+            path.join(PROFILE_DIR, "memories", "dlmm_candidate_fee_forecasts.jsonl"), {
+              pool: poolAddressStr, base_mint: pool.lbPair.tokenXMint.toString(), mode: context.mode,
+              token_y_mint: pool.lbPair.tokenYMint.toString(), strategy: strategyTypeStr,
+              amount_x: amountX, amount_y: amountY, entry_bin: activeBin.binId,
+              bins_below: binsBelow, bins_above: binsAbove, bin_step: Number(pool.lbPair.binStep),
+            }, recordedAt);
+          fs.writeFileSync(path.join(entryDir, `${newPosition.publicKey}.json`), JSON.stringify({
+            ...context, ...snapshots, root_chain_id: context.root_chain_id || context.recenter_of || newPosition.publicKey.toString(),
+            pool: poolAddressStr, position: newPosition.publicKey.toString(),
+            entry_bin: activeBin.binId, entry_price: pool.fromPricePerLamport(Number(activeBin.price)),
+            bins_below: binsBelow, bins_above: binsAbove, bin_step: Number(pool.lbPair.binStep),
+            amount_x: amountX, amount_y: amountY, position_creation: positionCreation,
+            deployed_at: Math.floor(recordedAt), fee_forecast_reference: feeForecast,
+          }), { mode: 0o600, flag: positionCreation.kind === "wallet_pda" ? "wx" : "w" });
+        };
         const send = async (tx, signers, fallback = null) => {
           const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash("confirmed");
           const simulate = async candidate => {
