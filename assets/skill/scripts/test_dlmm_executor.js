@@ -229,6 +229,22 @@ vm.runInNewContext("const productionExitTransport=confirmExitTransaction;confirm
       await assert.rejects(snapshot("pool", below, above), /bounds/);
     }
     assert.equal(candidateCreates, 3);
+    deps["@meteora-ag/dlmm"].getBinArrayIndexesCoverage = (lo, hi) =>
+      Array.from({length: Math.floor(Number(hi.value)/70)-Math.floor(Number(lo.value)/70)+1}, (_, i) => Math.floor(Number(lo.value)/70)+i);
+    pool.lbPair.activeId = -634;
+    const beforeReads = binReads;
+    const shifted = await snapshot("pool", 69, 16, -597);
+    assert.equal(shifted.anchor_bin, -597);
+    assert.equal(shifted.lower_bin, -682); assert.equal(shifted.upper_bin, -597);
+    assert.equal(shifted.range_shift, 16); assert.equal(shifted.bins.length, 86);
+    assert.equal(binReads, beforeReads+1);
+    assert.ok(shifted.bins.some(b => b.id === -678));
+    pool.lbPair.activeId = -37;
+    const boundary = await snapshot("pool", 69, 16, 0);
+    assert.equal(boundary.lower_bin, -70); assert.equal(boundary.range_shift, 1);
+    pool.lbPair.activeId = 0;
+    delete deps["@meteora-ag/dlmm"].getBinArrayIndexesCoverage;
+
     delete env.SOLANA_PUBLIC_KEY;
     await assert.rejects(snapshot("pool"), /SOLANA_PUBLIC_KEY/);
     env.SOLANA_PUBLIC_KEY = wallet.publicKey.toString();

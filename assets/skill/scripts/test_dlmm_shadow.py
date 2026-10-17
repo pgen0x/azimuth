@@ -672,6 +672,15 @@ for bad in [dict(candidate_source(),ts=10101),dict(candidate_source(),ts=8299),
             dict(candidate_source(),candidate=dict(base_mint=candidate_mint,sol_is_x=True))]:
     empty={};index_candidate(empty,bad,10100);assert empty=={}
 validate_candidate_snapshot(candidate_sample(),candidate_pool,candidate_mint)
+shifted = candidate_sample()
+shifted.update(anchor_bin=-597, lower_bin=-682, upper_bin=-597, active_bin=-634, range_shift=16)
+shifted['bins'] = [dict(b, id=-682+i) for i,b in enumerate(shifted['bins'])]
+validate_candidate_snapshot(shifted,candidate_pool,candidate_mint)
+for bad_shift in [True, -1, 17, 1.5]:
+    try: validate_candidate_snapshot(dict(shifted, range_shift=bad_shift),candidate_pool,candidate_mint)
+    except ValueError: pass
+    else: raise AssertionError(bad_shift)
+
 for change in [dict(pool='other'),dict(token_x_mint='other'),dict(token_y_mint='other'),
                dict(sol_is_x=True),dict(decimals_x=True),dict(decimals_y=6),dict(price=float('nan')),
                dict(anchor_bin=1),dict(upper_bin=17),dict(bins=candidate_sample()['bins'][:-1])]:

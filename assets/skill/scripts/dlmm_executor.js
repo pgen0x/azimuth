@@ -1863,7 +1863,21 @@ async function candidateBinSnapshot(poolAddress, below = 69, above = 16, fixedAn
     }
     const anchor = fixedAnchor === null ? pool.lbPair.activeId : fixedAnchor;
     if (!Number.isSafeInteger(anchor)) throw new Error("Invalid candidate active bin");
-    const snapshot = await binSnapshot(pool, anchor - below, anchor + above, mayRead);
+    let lower = anchor - below, upper = anchor + above, rangeShift = 0;
+    // Reuse spare upside coverage for a falling active bin, preserving every
+    // original downside bin and the frozen anchor. Never add bin-array accounts.
+    if (fixedAnchor !== null && below === 69 && above === 16
+        && Number.isSafeInteger(pool.lbPair.activeId) && pool.lbPair.activeId < anchor
+        && DLMM.getBinArrayIndexesCoverage) {
+      const indexes = (lo, hi) => DLMM.getBinArrayIndexesCoverage(new BN(lo), new BN(hi)).map(String).join(',');
+      const originalIndexes = indexes(lower, upper);
+      for (let shift = Math.min(16, anchor - pool.lbPair.activeId); shift > 0; shift--) {
+        if (indexes(lower - shift, upper - shift) === originalIndexes) {
+          lower -= shift; upper -= shift; rangeShift = shift; break;
+        }
+      }
+    }
+    const snapshot = await binSnapshot(pool, lower, upper, mayRead);
     if (snapshot.status === "deferred") return snapshot;
     let canonical;
     try {
@@ -1876,7 +1890,7 @@ async function candidateBinSnapshot(poolAddress, below = 69, above = 16, fixedAn
     return {...snapshot, status: "observed", pool: address.toString(),
       bin_step: Number(pool.lbPair.binStep), canonical_liquidity: canonical,
       token_x_mint: tokenX, token_y_mint: tokenY, anchor_bin: anchor,
-      lower_bin: anchor - below, upper_bin: anchor + above,
+      lower_bin: lower, upper_bin: upper, ...(rangeShift ? {range_shift: rangeShift} : {}),
       basis: "native_candidate_pool_bin_state_not_position_return"};
   });
 }
