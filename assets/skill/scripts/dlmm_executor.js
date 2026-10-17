@@ -1555,8 +1555,14 @@ async function swapToken(inputMintStr, outputMintStr, amountFloat, maxPriceImpac
             return { success: false, aborted: true, reason: "swap_no_route" };
           }
           if (quoteRes.status === 400 && code === "CANNOT_COMPUTE_OTHER_AMOUNT_THRESHOLD") {
-            // No executable quote: preserve inventory and back off. This error
-            // alone proves neither dust valuation nor a completed settlement.
+            // A one-lamport output cannot retain a positive rounded threshold
+            // at nonzero slippage. Requote once with a STRICTER zero allowance;
+            // owned inventory and exact net-cash simulation remain mandatory.
+            if (inventory && minNetLamports !== null && bps > 0 && !slippageLadder.includes(0)) {
+              await new Promise(resolve => setTimeout(resolve, 2100));
+              slippageLadder.push(0);
+              continue;
+            }
             return { success: false, aborted: true, reason: "swap_quote_threshold_unavailable" };
           }
           lastErr = `Jupiter quote API error: ${quoteRes.status} ${body}`;
@@ -1565,6 +1571,10 @@ async function swapToken(inputMintStr, outputMintStr, amountFloat, maxPriceImpac
         const q = await quoteRes.json();
         if (inventory && (q?.inputMint !== input_mint || q?.outputMint !== output_mint || q?.inAmount !== amountRaw)) {
           return { success: false, aborted: true, reason: "settlement_quote_mismatch" };
+        }
+        if (bps === 0 && slippageBps !== 0 && (q?.outAmount !== "1" || q?.otherAmountThreshold !== "1"
+            || q?.swapMode !== "ExactIn" || q?.slippageBps !== 0)) {
+          return { success: false, aborted: true, reason: "swap_quote_threshold_unavailable" };
         }
         if (!q || !q.outAmount || q.outAmount === "0") {
           lastErr = `Jupiter returned empty quote at slippage ${bps}bps (no route/liquidity)`;

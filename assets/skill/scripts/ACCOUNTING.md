@@ -1098,9 +1098,12 @@ actual journal rows if present. Recovered rows carry no LP PnL mark. Root
 completeness, refund ownership and cash-sign proof requirements remain in force;
 recovering an identity cannot turn unvalued inventory into a profit or loss.
 
-Jupiter HTTP 400 `CANNOT_COMPUTE_OTHER_AMOUNT_THRESHOLD` is recorded as
-`swap_quote_threshold_unavailable`. Settlement retains the owned token amount
-and retries after the existing 900-second deferred interval. This is not an
-executable quote or proof of dust value, so this reason does not qualify for the
-entry exception granted to no-route/verified uneconomic settlements. Only a
-subsequent verified zero owned inventory can complete settlement.
+Jupiter HTTP 400 `CANNOT_COMPUTE_OTHER_AMOUNT_THRESHOLD` triggers one paced
+zero-slippage requote only for proved owned settlement inventory with an explicit
+net recovery floor. The fallback must quote exactly one lamport in ExactIn mode,
+with a one-lamport minimum and zero slippage. The executor still checks inventory,
+price impact and exact unsigned simulation, including an eligible atomic token
+account close, before any send. Rent recovery is not trading profit. A changed or
+invalid fallback remains `swap_quote_threshold_unavailable`: inventory stays
+explicit, retries back off 900 seconds, and entry remains blocked. Only verified
+zero owned inventory completes settlement.

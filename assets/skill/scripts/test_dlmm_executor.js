@@ -568,13 +568,13 @@ vm.runInNewContext("const productionExitTransport=confirmExitTransaction;confirm
   const atomicFetch = sandbox.fetch, atomicSimulation = Connection.prototype.simulateTransaction;
   const originalTimer = sandbox.setTimeout;
   const quoteCalls = [], quoteDelays = [], swapRequests = [];
-  let quotedOutputs = ["250000", "250000"], quoteAlter = null, quoteFailure = null, quoteErrorCode = "NO_ROUTES_FOUND";
+  let quotedOutputs = ["250000", "250000"], quoteAlter = null, quoteFailure = null, quoteErrorCode = "NO_ROUTES_FOUND", quoteFailureIndex = 1;
   sandbox.setTimeout = (callback, delay) => { quoteDelays.push(delay); return setTimeout(callback, 0); };
   sandbox.fetch = async (url, options) => {
     if (url.includes("/quote?")) {
       const bps = Number(new URL(url).searchParams.get("slippageBps"));
       const i = quoteCalls.length; quoteCalls.push(bps);
-      if (quoteFailure && i === 1) return {ok:false,status:quoteFailure,text:async()=>JSON.stringify({errorCode:quoteErrorCode})};
+      if (quoteFailure && i === quoteFailureIndex) return {ok:false,status:quoteFailure,text:async()=>JSON.stringify({errorCode:quoteErrorCode})};
       const out = quotedOutputs[Math.min(i, quotedOutputs.length-1)];
       const q = {inputMint:"TOKEN",outputMint:"So11111111111111111111111111111111111111112",
         inAmount:"100000000",outAmount:out,swapMode:"ExactIn",slippageBps:bps,
@@ -589,7 +589,7 @@ vm.runInNewContext("const productionExitTransport=confirmExitTransaction;confirm
   const settlementSol = "So11111111111111111111111111111111111111112";
   const smallRecovery = () => swapToken("TOKEN",settlementSol,"raw:100000000",15,100,1,true);
   const resetSmall = (outputs=["250000","250000"]) => {
-    quotedOutputs=outputs;quoteCalls.length=0;quoteDelays.length=0;swapRequests.length=0;quoteAlter=null;quoteFailure=null;quoteErrorCode="NO_ROUTES_FOUND";
+    quotedOutputs=outputs;quoteCalls.length=0;quoteDelays.length=0;swapRequests.length=0;quoteAlter=null;quoteFailure=null;quoteErrorCode="NO_ROUTES_FOUND";quoteFailureIndex=1;
   };
   let smallResult = await smallRecovery();
   assert.equal(smallResult.success,true);assert.deepEqual(quoteCalls,[100,300]);assert.deepEqual(quoteDelays,[2100]);
@@ -607,6 +607,15 @@ vm.runInNewContext("const productionExitTransport=confirmExitTransaction;confirm
   assert.equal((await smallRecovery()).success,true); // Exact 15% ceiling.
   resetSmall();quoteAlter=q=>q.priceImpactPct="1.5e-1";
   assert.equal((await smallRecovery()).success,true); // Same fraction in exponent notation.
+  resetSmall(["250000","250000","1"]);quoteFailure=400;quoteErrorCode="CANNOT_COMPUTE_OTHER_AMOUNT_THRESHOLD";
+  assert.equal((await smallRecovery()).success,true);
+  assert.deepEqual(quoteCalls,[100,300,0]);
+  assert.equal(swapRequests[0].quoteResponse.otherAmountThreshold,"1");
+  assert.equal(swapRequests[0].quoteResponse.slippageBps,0);
+  resetSmall(["1"]);quoteFailure=400;quoteFailureIndex=0;quoteErrorCode="CANNOT_COMPUTE_OTHER_AMOUNT_THRESHOLD";
+  assert.equal((await swapToken("TOKEN",settlementSol,"raw:100000000",15,300,1)).success,true);
+  assert.deepEqual(quoteCalls,[300,0]);
+  assert.equal(swapRequests[0].quoteResponse.slippageBps,0);
   const smallSends = sends;
   resetSmall(["250000","250001"]);
   assert.equal((await smallRecovery()).reason,"small_settlement_value_changed");assert.equal(swapRequests.length,0);
@@ -629,6 +638,14 @@ vm.runInNewContext("const productionExitTransport=confirmExitTransaction;confirm
   resetSmall();quoteFailure=400;quoteErrorCode="CANNOT_COMPUTE_OTHER_AMOUNT_THRESHOLD";
   assert.equal((await smallRecovery()).reason,"swap_quote_threshold_unavailable");
   assert.equal(swapRequests.length,0);
+  assert.deepEqual(quoteCalls,[100,300,0]);
+  resetSmall(["250000","250000","1"]);quoteFailure=400;quoteErrorCode="CANNOT_COMPUTE_OTHER_AMOUNT_THRESHOLD";
+  const beforeDustSend=sends;
+  assert.equal((await swapToken("TOKEN",settlementSol,"raw:100000000",15,100,1000000000,true)).reason,"net_recovery_below_floor");
+  assert.equal(sends,beforeDustSend);
+  resetSmall(["250000","250000","1"]);quoteFailure=400;quoteErrorCode="CANNOT_COMPUTE_OTHER_AMOUNT_THRESHOLD";
+  quoteAlter=(q,i)=>{if(i===2)q.otherAmountThreshold="0";};
+  assert.equal((await smallRecovery()).reason,"swap_quote_threshold_unavailable");assert.equal(swapRequests.length,0);
   resetSmall();quoteFailure=429;quoteErrorCode="CANNOT_COMPUTE_OTHER_AMOUNT_THRESHOLD";
   await assert.rejects(smallRecovery(),/429/);assert.equal(swapRequests.length,0);
   for (const impact of [undefined,null,false,""," ","NaN","Infinity","0.01junk","-0.1","1.01",{},[]]) {
