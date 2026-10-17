@@ -11,6 +11,7 @@ import re
 import math
 import shlex
 from pathlib import Path
+from dlmm_pool_cash_gate import negative_pool_cash
 from local_indicators import check_local_indicators
 from tz_util import local_time_str
 from dlmm_monitor import position_live_onchain, load_soul_dlmm_params as load_exit_params
@@ -1561,6 +1562,13 @@ def main():
     open_base_mints = {op.get("base_mint") for op in open_pos if op.get("base_mint")}
     open_base_symbols = {op.get("base_symbol", "").upper() for op in open_pos if op.get("base_symbol")}
 
+    # One local cache read per batch; the per-pool gate binds it to the live
+    # close journal below. Missing/stale cash leaves existing checks intact.
+    cash_raw, _, cash_code = run_command('redis-cli get "sol:dlmm:cash_history"', timeout=2)
+    try:
+        cash_history_cache = json.loads(cash_raw) if cash_code == 0 else {}
+    except (ValueError, TypeError):
+        cash_history_cache = {}
     valid_candidates = []
     for c in candidates:
         if c["pool"] in open_pools:
@@ -1632,7 +1640,11 @@ def main():
         # sol:dlmm:history:pool:<pool> by the monitor. Two or more past closes
         # netting at or below POOL_MEMORY_NET_FLOOR_PCT = this pool has really
         # cost us — hard skip. No history (fresh pool) passes untouched.
-        hist_raw, _, _ = run_command(f"redis-cli lrange \"sol:dlmm:history:pool:{c['pool']}\" 0 9")
+        hist_raw, _, hist_code = run_command(f"redis-cli lrange \"sol:dlmm:history:pool:{c['pool']}\" 0 9")
+        cash_loss = negative_pool_cash(cash_history_cache, c['pool'], hist_raw, time.time()) if hist_code == 0 else None
+        if cash_loss is not None:
+            print(f"Skipping {c['name']} - pool cash memory: {cash_loss['closes']} closes, net cash upper bound {cash_loss['cash_upper_sol']:+.9f} SOL")
+            continue
         if hist_raw and hist_raw != "(nil)":
             past_pnls = []
             for line in hist_raw.splitlines():

@@ -1251,3 +1251,16 @@ or raw error is retained. This describes the history lookup, not every possible
 rewrite or simulation fallback: `unused` with keypair creation still requires
 examining later checks. The existing 300 ms wait window, background lifetime,
 single lookup and unsigned fallback remain; no retry or additional RPC is added.
+
+### Repeat-entry cash loss refusal
+
+The pipeline now rejects a pool with at least two closes in its last-ten,
+30-day history when the proved aggregate cash upper bound is strictly negative.
+It reads the local cash-history cache once per batch and binds each pool to the
+current Redis close count and latest timestamp, including the separate original
+journal binding for recovered closes. Evidence must be at most 900 seconds old,
+cover every selected root, and use an exact, bounded or upper-only cash basis.
+Unknown, stale, ambiguous or changed history does not trigger this cash refusal;
+existing mark-loss and other entry gates still apply. This is a risk control,
+not a claim that historical rejected trades would have lost or future entries
+will profit. The same rule applies to direct and agent-selected pipeline calls.
