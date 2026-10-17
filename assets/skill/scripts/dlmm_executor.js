@@ -1582,7 +1582,14 @@ async function swapToken(inputMintStr, outputMintStr, amountFloat, maxPriceImpac
       return { success: false, aborted: true, reason: "price_impact_unmeasured" };
     }
     const impactPct = impactFraction * 100;
-    if (impactPct > maxPriceImpactPct) {
+    // A strict one-lamport dust recovery can lose less than one additional
+    // lamport to quoted impact (<50%), while atomically returning owned rent.
+    // This never relaxes ordinary swap limits or bypasses net-cash simulation.
+    const oneLamportRecovery = inventory && minNetLamports !== null && slippageBps > 0
+      && selectedSlippageBps === 0 && quoteResponse.outAmount === "1"
+      && quoteResponse.otherAmountThreshold === "1" && quoteResponse.slippageBps === 0
+      && quoteResponse.swapMode === "ExactIn" && impactFraction < 0.5;
+    if (impactPct > maxPriceImpactPct && !oneLamportRecovery) {
       return {
         success: false,
         aborted: true,
@@ -1593,7 +1600,7 @@ async function swapToken(inputMintStr, outputMintStr, amountFloat, maxPriceImpac
       };
     }
     if (impactPct > 1) {
-      console.warn(`[DLMM] Swap price impact ${impactPct.toFixed(2)}% (within ${maxPriceImpactPct}% limit)`);
+      console.warn(`[DLMM] Swap price impact ${impactPct.toFixed(2)}% (${oneLamportRecovery && impactPct > maxPriceImpactPct ? "strict one-lamport recovery; exact net-cash simulation required" : `within ${maxPriceImpactPct}% limit`})`);
     }
     } catch (err) {
       throw new Error(`Failed to fetch quote from Jupiter: ${err.message}`);
