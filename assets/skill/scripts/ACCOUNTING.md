@@ -976,6 +976,11 @@ read even if the ordinary 30-minute candidate watch has expired. Due terminal
 observations receive priority within the same 64-pool, three-request and
 10-second phase limits; the 240-second per-pool pacing and trading deferral
 remain in force. A terminal-only observation does not create another forecast.
+When the pool also has a fresh discovery/watch input, the same terminal read may
+supply a new baseline without another RPC. The forecast validator still requires
+complete current planned bins and prior history; a changed anchor may leave it
+unmeasured. This prevents terminal scoring from silently suppressing fresh
+candidate forecasts while preventing expired watches from renewing themselves.
 Already observed terminal windows are skipped. This reduces dependence on
 continued candidate selection, but does not guarantee coverage under the
 shared request budget or recover missing historical observations.
