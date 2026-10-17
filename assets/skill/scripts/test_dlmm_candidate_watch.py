@@ -95,6 +95,31 @@ class CandidateWatchTests(unittest.TestCase):
                 else:
                     read.assert_not_called()  # valid covering history completes the terminal
 
+    def test_live_candidate_terminal_read_can_freeze_next_prediction(self):
+        forecast_file = self.profile/'memories'/shadow.FORECAST_FILE
+        shadow.append(forecast_file, self.due_forecast())
+        prior = dict(snapshot(), ts=9700, collected_at=9701, status='observed',
+                     base_mint=MINT, mode='turnover', bin_step=100)
+        prior['bins'] = [dict(b, y='1000000000', supply=str(1000000000 * 2**64)) for b in prior['bins']]
+        shadow.append(self.profile/'memories/dlmm_candidate_bin_samples.jsonl', prior)
+        current = dict(snapshot(), bin_step=100)
+        current['bins'] = [dict(b, fee_y='100') for b in prior['bins']]
+        candidates = {POOL: dict(pool=POOL,base_mint=MINT,mode='turnover',
+                                source_id='watch:new',source_ts=9900)}
+        with patch.object(shadow.time,'time',return_value=10000), \
+             patch.object(shadow.time,'monotonic',return_value=0), \
+             patch.object(shadow.subprocess,'check_output',return_value=json.dumps(current).encode()) as read:
+            result = shadow.collect_candidate_bins(self.profile,candidates,40)
+        self.assertEqual(read.call_count,1)
+        self.assertEqual(result['candidate_bin_snapshots_observed'],1)
+        self.assertEqual(result['candidate_fee_forecasts_frozen'],1)
+        records=shadow.rows(forecast_file)
+        self.assertEqual(len(records),2)
+        self.assertEqual(records[0]['id'],'frozen-test')
+        self.assertEqual(records[1]['baseline_ts'],10000)
+        self.assertEqual(records[1]['horizon_target_ts'],13600)
+        self.assertLess(records[1]['recorded_at'],records[1]['horizon_target_ts'])
+
     def test_terminal_watch_rejects_late_future_expired_and_invalid_identity(self):
         for changes in (dict(version=0), dict(version=3), dict(version=True),
                         dict(version=2.0), dict(version='2'),

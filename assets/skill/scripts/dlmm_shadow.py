@@ -438,8 +438,9 @@ def collect_candidate_bins(profile, candidates, deadline):
                     result.setdefault('reject_brackets_errors', []).append('append:refused')
             except OSError as error:
                 result.setdefault('reject_brackets_errors', []).append('append:' + type(error).__name__)
-        # A terminal-only bracket watch is not a discovery candidate and never forecasts.
-        if (record['status'] == 'observed' and not candidate.get('terminal_only') and not terminal_due
+        # A due terminal read can also supply a new baseline for a still-live
+        # discovery candidate. Old terminal-only watches must never self-renew.
+        if (record['status'] == 'observed' and not candidate.get('terminal_only')
                 and 0 <= record['collected_at'] - candidate['source_ts'] <= CANDIDATE_MAX_AGE_SECONDS):
             try:
                 from dlmm_fee_forecast import candidate_fee_forecast, BASIS
