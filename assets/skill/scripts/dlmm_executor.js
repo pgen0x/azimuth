@@ -1496,6 +1496,11 @@ async function swapToken(inputMintStr, outputMintStr, amountFloat, maxPriceImpac
           if (quoteRes.status === 400 && ["COULD_NOT_FIND_ANY_ROUTE", "NO_ROUTES_FOUND", "TOKEN_NOT_TRADABLE"].includes(code)) {
             return { success: false, aborted: true, reason: "swap_no_route" };
           }
+          if (quoteRes.status === 400 && code === "CANNOT_COMPUTE_OTHER_AMOUNT_THRESHOLD") {
+            // No executable quote: preserve inventory and back off. This error
+            // alone proves neither dust valuation nor a completed settlement.
+            return { success: false, aborted: true, reason: "swap_quote_threshold_unavailable" };
+          }
           lastErr = `Jupiter quote API error: ${quoteRes.status} ${body}`;
           continue;
         }

@@ -286,7 +286,7 @@ def main():
         path.unlink()
         # Route/fee failures remain inventory, with backoff and no global entry
         # block. Unknown RPC failures must remain pending instead.
-        for reason in ("swap_no_route", "net_recovery_below_floor", "net_recovery_unmeasured"):
+        for reason in ("swap_no_route", "net_recovery_below_floor", "swap_quote_threshold_unavailable", "net_recovery_unmeasured"):
             monitor.queue_settlement("position")
             with patch.object(monitor, "run_command_json", side_effect=[({"success": True, "amount_raw": "1"}, None), ({"success": False, "reason": reason}, None)]) as run:
                 monitor.settle_pending()
