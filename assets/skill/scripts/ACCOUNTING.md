@@ -1277,3 +1277,17 @@ Unknown, stale, ambiguous or changed history does not trigger this cash refusal;
 existing mark-loss and other entry gates still apply. This is a risk control,
 not a claim that historical rejected trades would have lost or future entries
 will profit. The same rule applies to direct and agent-selected pipeline calls.
+
+### Event alerts outside settlement
+
+The monitor persists event alerts in `memories/dlmm_alert_outbox` before
+continuing. A separate loop worker delivers one message per tick with a 30-second
+timeout and an exclusive delivery lock. Alert delivery cannot delay completion of
+the risk scan or startup of the settlement worker. Failed or timed-out deliveries
+remain queued across restarts; a timeout after remote acceptance can cause a
+duplicate on retry. An empty `DLMM_ALERT_TARGET` disables delivery. Queue files
+contain the original configured destination and message, with mode 0600.
+
+This removes a potential scheduling delay, not the requirement to prove a close,
+reconcile owned inventory, or simulate settlement recovery. It does not prove
+that an earlier swap would have obtained a better price.

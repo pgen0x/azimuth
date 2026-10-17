@@ -43,6 +43,11 @@ while true; do
         "$PYTHON" "$SCRIPT_DIR/dlmm_monitor.py" --settle-pending &
         settlement_pid=$!
     fi
+    # Event delivery has its own bounded worker; never hold up settlement/risk.
+    if [ -z "${alert_pid:-}" ] || ! kill -0 "$alert_pid" 2>/dev/null; then
+        "$PYTHON" "$SCRIPT_DIR/dlmm_alerts.py" &
+        alert_pid=$!
+    fi
     # Daily scoreboard — deterministic dlmm_stats.py card via `hermes send`
     # (zero LLM). Hour + timezone are operator-set (profile .env): DLMM_TZ
     # (IANA name, empty = system zone) and DLMM_STATS_HOUR (00-23, default 09).

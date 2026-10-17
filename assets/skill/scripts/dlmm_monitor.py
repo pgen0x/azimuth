@@ -649,31 +649,12 @@ def maybe_blacklist_rug(meta, pnl_pct, rug_event=None, live_liquidity_usd=None,
                   f"({offenses} distinct mints; {reason})")
 
 def send_event_alert(text):
-    """Push an event alert straight to the operator via `hermes send` — script-side
-    platform delivery that reuses the gateway's credentials (no LLM, no agent loop),
-    so trade events land in seconds instead of waiting for the next cron report.
-    Target comes from DLMM_ALERT_TARGET in the profile .env ("telegram",
-    "telegram:<chat_id>", "discord:#ops", ...); set it empty to disable alerts.
-    Best-effort: a delivery failure must never break the monitor tick."""
-    target = os.environ.get("DLMM_ALERT_TARGET", "telegram")
-    if not target:
-        return
-    import tempfile
-    path = None
+    """Persist operator alerts; network delivery must not delay settlement."""
     try:
-        with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as tf:
-            tf.write(text)
-            path = tf.name
-        subprocess.run(["hermes", "send", "-t", target, "-f", path, "-q"],
-                       timeout=30, capture_output=True)
-    except Exception as e:
-        print(f"⚠️ Event alert delivery failed (non-fatal): {e}")
-    finally:
-        if path:
-            try:
-                os.unlink(path)
-            except OSError:
-                pass
+        from dlmm_alerts import enqueue
+        enqueue(PROFILE_DIR, os.environ.get("DLMM_ALERT_TARGET", "telegram"), text)
+    except (OSError, ValueError) as exc:
+        print(f"⚠️ Event alert enqueue failed (non-fatal): {exc}")
 
 
 def trailing_floor_pct(peak_pnl, trailing_drop_pct):
