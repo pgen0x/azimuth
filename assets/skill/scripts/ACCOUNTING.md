@@ -1244,3 +1244,12 @@ line. It is not a validated forecast or an entry approval: downstream evaluation
 must independently rebuild the bound forecast and compare against settled cash.
 The observation does not change entry eligibility, sizing, stops or reserve
 policy. A bounded-tail miss is not evidence that no older matching record exists.
+
+Run `python3 dlmm_entry_forecast_evaluation.py --profile PROFILE --start UNIX_TS`
+for a read-only join of these references with per-position cash acceptance. The
+evaluator checks the exact journal-line hash, independently rebuilds the forecast
+from its hashed input snapshots, and checks entry time, capital and exact range.
+Missing or invalid references do not remove positions from cash acceptance. The
+report keeps modeled fee and settled cash separate: their ratio is not forecast
+accuracy, and a verified reference is not evidence of profit. Existing entries
+without a saved reference remain unmeasured; this command never backfills them.
