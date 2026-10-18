@@ -345,6 +345,11 @@ def report(profile, as_of=None):
     # Settlements can only consume inventory established by earlier finalized
     # transactions. Missing facts remain unresolved and cannot supply inventory.
     events = sorted(events, key=lambda e:(facts.get(e["signature"], {}).get("slot", float("inf")), e.get("ts", 0)))
+    # Retain every row (including duplicates) for the existing proof checks,
+    # but avoid rescanning the entire wallet journal for each position.
+    events_by_position = {}
+    for event in events:
+        events_by_position.setdefault(event.get("position"), []).append(event)
     seen = {}
     for event in events:
         signature = event["signature"]
@@ -402,7 +407,7 @@ def report(profile, as_of=None):
             c["reasons"].append("external_token_inflow_requires_attribution")
         if c["pending_signatures"]:
             c["reasons"].append("unresolved_transactions")
-        recovered_closes = {p: proved_recorded_close(p, events, facts)
+        recovered_closes = {p: proved_recorded_close(p, events_by_position.get(p, []), facts)
                             for p in c["positions"] if p not in closes}
         c["unjournaled_close_evidence"] = {p: signature for p, signature in recovered_closes.items() if signature}
         if any(not signature for signature in recovered_closes.values()):
@@ -419,11 +424,12 @@ def report(profile, as_of=None):
                 or as_of - coverage.get("ts", 0) > 600):
             c["reasons"].append("wallet_wide_coverage_not_verified")
         for position in c["positions"]:
-            kinds = {e.get("kind") for e in events if e.get("position") == position and e.get("signature") in facts
+            position_events = events_by_position.get(position, [])
+            kinds = {e.get("kind") for e in position_events if e.get("signature") in facts
                      and facts[e["signature"]].get("landed") is not False and not facts[e["signature"]].get("failed")}
             if not {"deploy", "close"} <= kinds or not any(
-                    facts[e["signature"]].get("position_account_closed") for e in events
-                    if e.get("position") == position and e.get("signature") in facts):
+                    facts[e["signature"]].get("position_account_closed") for e in position_events
+                    if e.get("signature") in facts):
                 c["reasons"].append("entry_or_close_evidence_missing")
                 break
         if c["root_chain_id"] == "unattributed":
