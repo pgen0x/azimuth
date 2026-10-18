@@ -385,17 +385,23 @@ def collect_candidate_bins(profile, candidates, deadline):
         except OSError as error:
             result.setdefault('reject_brackets_errors', []).append('append:' + type(error).__name__)
     executor = profile/'skills/solana-dlmm/scripts/dlmm_executor.js'
-    order = sorted(candidates, key=lambda p: (
-        0 if candidates[p].get('bracket_priority') else 1,
-        candidates[p].get('terminal_target_ts', float('inf')) if p not in terminal_done else float('inf'),
-        latest.get(p, 0), -candidates[p]['source_ts'], p))
-    for pool in order:
+    pending = [(pool, False) for pool in sorted(candidates, key=lambda p: (
+            0 if candidates[p].get('bracket_priority') else 1,
+            candidates[p].get('terminal_target_ts', float('inf')) if p not in terminal_done else float('inf'),
+            latest.get(p, 0), -candidates[p]['source_ts'], p))]
+    for task_index, (pool, refresh_baseline) in enumerate(pending):
         if time.monotonic() >= phase_end:
             result['candidate_bin_budget_exhausted'] = True
             break
         if result['candidate_bin_snapshots_attempted'] >= 3:
             break
-        candidate = candidates[pool]
+        candidate = dict(candidates[pool])
+        if refresh_baseline:
+            candidate.pop('terminal_target_ts', None)
+            candidate.pop('terminal_anchor_bin', None)
+            for key in ('bracket_id', 'bracket_gate', 'bracket_phase', 'bracket_priority'):
+                candidate.pop(key, None)  # a fresh baseline is not another bracket completion
+            candidate['baseline_refresh_after_terminal'] = True
         terminal_due = (pool not in terminal_done and 'terminal_target_ts' in candidate
                         and candidate['terminal_target_ts'] <= time.time() <= candidate['terminal_target_ts']+600)
         if (time.time() - latest.get(pool, 0) < 240
@@ -446,6 +452,29 @@ def collect_candidate_bins(profile, candidates, deadline):
                     result.setdefault('reject_brackets_errors', []).append('append:refused')
             except OSError as error:
                 result.setdefault('reject_brackets_errors', []).append('append:' + type(error).__name__)
+        if (terminal_due and record['status'] == 'observed'
+                and not candidate.get('terminal_only')
+                and 0 <= record['collected_at'] - candidate['source_ts'] <= CANDIDATE_MAX_AGE_SECONDS
+                and type(record.get('bin_step')) is int):
+            from dlmm_pipeline import sol_bidask_bins
+            try:
+                below = sol_bidask_bins(record['bin_step'])
+            except ValueError:
+                below = -1
+            planned = set(range(record['active_bin']-below, record['active_bin']+1))
+            if 0 <= below < 70 and not planned <= {b['id'] for b in record['bins']}:
+                # Preserve due terminal observations first. Refresh the live
+                # baseline ahead of ordinary reads, within the same 3-read/time
+                # budget; a full terminal queue can still exhaust that budget.
+                insert_at = task_index + 1
+                while insert_at < len(pending):
+                    other, refresh = pending[insert_at]
+                    target = candidates[other].get('terminal_target_ts')
+                    if (refresh or other in terminal_done or target is None
+                            or not target <= time.time() <= target+600):
+                        break
+                    insert_at += 1
+                pending.insert(insert_at, (pool, True))
         # A due terminal read can also supply a new baseline for a still-live
         # discovery candidate. Old terminal-only watches must never self-renew.
         if (record['status'] == 'observed' and not candidate.get('terminal_only')
