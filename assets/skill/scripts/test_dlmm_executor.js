@@ -933,6 +933,13 @@ vm.runInNewContext("const productionExitTransport=confirmExitTransaction;confirm
   assert.equal(provenance.mode, "turnover"); assert.equal(provenance.recenter_of, "root");
   assert.equal(provenance.pool, "pool");
   assert.equal(provenance.bin_step, 100);
+  assert.equal(provenance.entry_bin, 0);
+  assert.equal(provenance.pre_sign_bin_check.active_bin, -1);
+  assert.equal(provenance.pre_sign_bin_check.lower_bin, -20);
+  assert.equal(provenance.pre_sign_bin_check.upper_bin, 0);
+  assert.ok(Number.isFinite(provenance.pre_sign_bin_check.observed_at));
+  assert.equal(provenance.pre_sign_bin_check.basis,
+    "rpc_read_before_first_transaction_signing; not_landed_bin");
   height = 151;
   positions = [{ publicKey: key("existing"), account: { lbPair: key("pool") } }];
   assert.match((await deploy()).error, /pool already has position/); assert.equal(sends, 1);

@@ -691,7 +691,7 @@ async function deployPosition(poolAddressStr, amountX, amountY, binsBelow, binsA
         try { snapshots = await entryBinSnapshots(pool, minBinId, maxBinId, studySide); }
         catch { console.warn("[SHADOW] Entry bin snapshot unavailable"); }
 
-        const persistEntry = () => {
+        const persistEntry = (preSignBinCheck) => {
           const recordedAt = Date.now() / 1000;
           const feeForecast = require("./dlmm_entry_forecast").entryForecastReference(
             path.join(PROFILE_DIR, "memories", "dlmm_candidate_fee_forecasts.jsonl"), {
@@ -708,6 +708,7 @@ async function deployPosition(poolAddressStr, amountX, amountY, binsBelow, binsA
             amount_x: amountX, amount_y: amountY, position_creation: positionCreation,
             position_pda_history_outcome: pdaHistory?.reason || "not_started_or_unavailable",
             deployed_at: Math.floor(recordedAt), fee_forecast_reference: feeForecast,
+            pre_sign_bin_check: preSignBinCheck,
           }), { mode: 0o600, flag: positionCreation.kind === "wallet_pda" ? "wx" : "w" });
         };
         const send = async (tx, signers, fallback = null) => {
@@ -733,14 +734,18 @@ async function deployPosition(poolAddressStr, amountX, amountY, binsBelow, binsA
           // A SOL-only ladder already outside the active bin starts idle and
           // still pays entry/close fees. Recheck before persistence/signing;
           // this does not guarantee the bin cannot move after submission.
+          let preSignBinCheck = null;
           if (studySide) {
             const latestBin = await pool.getActiveBin();
             if (!Number.isSafeInteger(latestBin.binId)
                 || latestBin.binId < minBinId || latestBin.binId > maxBinId) {
               throw new Error("ENTRY REFUSED: active bin left planned SOL BidAsk range before signing");
             }
+            preSignBinCheck = { active_bin: latestBin.binId, lower_bin: minBinId,
+              upper_bin: maxBinId, observed_at: Date.now() / 1000,
+              basis: "rpc_read_before_first_transaction_signing; not_landed_bin" };
           }
-          if (!submitted) persistEntry();
+          if (!submitted) persistEntry(preSignBinCheck);
           tx.sign(...signers);
           const raw = tx.serialize();
           const signature = bs58.encode(tx.signature);
