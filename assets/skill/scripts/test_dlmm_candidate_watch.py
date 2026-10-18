@@ -93,6 +93,61 @@ class CandidateWatchTests(unittest.TestCase):
         self.assertEqual(records[1]['horizon_target_ts'],13600)
         self.assertLess(records[1]['recorded_at'],records[1]['horizon_target_ts'])
 
+    def test_live_terminal_missing_current_bins_refreshes_without_replacing_terminal(self):
+        shadow.append(self.profile/'memories'/shadow.FORECAST_FILE, self.due_forecast())
+        terminal = dict(snapshot(), active_bin=50, bin_step=100)
+        fresh = dict(terminal, anchor_bin=50, lower_bin=-19, upper_bin=66,
+                     bins=[dict(b, id=b['id']+50) for b in snapshot()['bins']])
+        candidates = {POOL: dict(pool=POOL, base_mint=MINT, mode='turnover',
+                                source_id='watch:new', source_ts=9900)}
+        with patch.object(shadow.time, 'time', return_value=10000), \
+             patch.object(shadow.time, 'monotonic', return_value=0), \
+             patch.object(shadow.subprocess, 'check_output',
+                          side_effect=[json.dumps(terminal).encode(), json.dumps(fresh).encode()]) as read:
+            result = shadow.collect_candidate_bins(self.profile, candidates, 40)
+        self.assertEqual(result['candidate_bin_snapshots_observed'], 2)
+        self.assertEqual(read.call_args_list[0].args[0][-1], '0')
+        self.assertEqual(read.call_args_list[1].args[0][-1], '16')
+        saved = shadow.rows(self.profile/'memories/dlmm_candidate_bin_samples.jsonl')
+        self.assertEqual([s['anchor_bin'] for s in saved], [0, 50])
+        self.assertIn('terminal_target_ts', saved[0])
+        self.assertNotIn('terminal_target_ts', saved[1])
+        self.assertTrue(saved[1]['baseline_refresh_after_terminal'])
+        # No prior current geometry: the new sample is evidence for a future
+        # forecast, never a fabricated immediately usable prediction.
+        self.assertEqual(result['candidate_fee_forecasts_frozen'], 0)
+
+    def test_baseline_refresh_never_displaces_due_terminals_or_exceeds_read_cap(self):
+        pools = [POOL, POOL[:-1]+'j', POOL[:-1]+'k']
+        candidates = {}
+        for pool in pools:
+            shadow.append(self.profile/'memories'/shadow.FORECAST_FILE,
+                          self.due_forecast(pool=pool, id='frozen-'+pool))
+            candidates[pool] = dict(pool=pool, base_mint=MINT, mode='turnover',
+                                    source_id='watch:new', source_ts=9900)
+        def terminal(command, **kwargs):
+            self.assertEqual(command[-1], '0')
+            return json.dumps(dict(snapshot(), pool=command[3], active_bin=50, bin_step=100)).encode()
+        with patch.object(shadow.time, 'time', return_value=10000), \
+             patch.object(shadow.time, 'monotonic', return_value=0), \
+             patch.object(shadow.subprocess, 'check_output', side_effect=terminal) as read:
+            result = shadow.collect_candidate_bins(self.profile, candidates, 40)
+        self.assertEqual(read.call_count, 3)
+        self.assertEqual(result['candidate_bin_snapshots_observed'], 3)
+        saved = shadow.rows(self.profile/'memories/dlmm_candidate_bin_samples.jsonl')
+        self.assertEqual({r['pool'] for r in saved}, set(pools))
+        self.assertTrue(all('terminal_target_ts' in r for r in saved))
+
+    def test_expired_terminal_cannot_request_new_baseline_after_price_move(self):
+        shadow.append(self.profile/'memories'/shadow.FORECAST_FILE, self.due_forecast())
+        with patch.object(shadow.time, 'time', return_value=10000), \
+             patch.object(shadow.time, 'monotonic', return_value=0), \
+             patch.object(shadow.subprocess, 'check_output',
+                          return_value=json.dumps(dict(snapshot(), active_bin=50, bin_step=100)).encode()) as read:
+            result = shadow.collect_candidate_bins(self.profile, {}, 40)
+        self.assertEqual(read.call_count, 1)
+        self.assertEqual(result['candidate_fee_forecasts_frozen'], 0)
+
     def test_terminal_watch_rejects_late_future_expired_and_invalid_identity(self):
         for changes in (dict(version=0), dict(version=3), dict(version=True),
                         dict(version=2.0), dict(version='2'),
