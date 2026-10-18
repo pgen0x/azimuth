@@ -898,7 +898,27 @@ vm.runInNewContext("const productionExitTransport=confirmExitTransaction;confirm
     assert.ok(!fs.existsSync(marker));
   }
   pool.getActiveBin = originalActiveRead;
+  // The initial anchor can agree, then become stale during build/simulation.
+  // Refuse either side of the funded range, or an invalid fresh observation,
+  // without sending, signing or recording a position as deployed.
+  for (const movedBin of [3, -21, NaN]) {
+    let activeReads = 0;
+    pool.getActiveBin = async () => ({binId: ++activeReads === 1 ? 0 : movedBin, price: "1"});
+    const before = {sends, signCalls};
+    const entries = path.join(root, "memories/dlmm_entries");
+    const priorFiles = fs.existsSync(entries) ? fs.readdirSync(entries).sort() : [];
+    const refused = await deploy();
+    assert.equal(refused.success, false);
+    assert.match(refused.error, /left planned SOL BidAsk range before signing/);
+    assert.deepEqual({sends, signCalls}, before);
+    assert.deepEqual(fs.readdirSync(entries).sort(), priorFiles);
+    assert.ok(!fs.existsSync(marker));
+  }
+  pool.getActiveBin = originalActiveRead;
+  let validRangeReads = 0;
+  pool.getActiveBin = async () => ({binId: ++validRangeReads === 1 ? 0 : -1, price: "1"});
   const parallel = await Promise.allSettled([deploy(), deploy()]);
+  pool.getActiveBin = originalActiveRead;
   assert.equal(parallel.filter((r) => r.status === "fulfilled" && r.value.success).length, 1);
   assert.equal(lastSlippage, 10);
   assert.equal(sends, 1);
