@@ -382,19 +382,23 @@ def main():
          patch.object(pipeline, "get_momentum", return_value=(0, 0, 0, 0)):
         assert "dropped 75.0%" in pipeline.predeploy_live_gate_reject(
             {"pool": "pool", "name": "test", "base_mint": "mint", "fee_tvl_ratio": 0.2}, 0.1, "5m")
-    assert pipeline.compute_deploy_amount(0.30718357) == 0
-    assert pipeline.compute_deploy_amount(0.344) == 0
-    assert pipeline.compute_deploy_amount(0.344999999) == 0
-    assert pipeline.compute_deploy_amount(0.345) == 0.1
+    # Two 0.1 SOL entries fit this wallet with 0.045 SOL rent allowance each.
+    assert pipeline.compute_deploy_amount(0.342863115) == 0.1
+    assert pipeline.compute_deploy_amount(0.342863115 - 0.145) == 0.1
+    assert pipeline.compute_deploy_amount(0.342863115 - 2 * 0.145) == 0
+    assert pipeline.compute_deploy_amount(0.30718357) == 0.1
+    assert pipeline.compute_deploy_amount(0.344) == 0.1
+    assert pipeline.compute_deploy_amount(0.164999999) == 0
+    assert pipeline.compute_deploy_amount(0.165) == 0.1
     assert pipeline.compute_deploy_amount(0.346556150) == 0.1
-    assert pipeline.compute_deploy_amount(0.461554584) == 0.12
+    assert pipeline.compute_deploy_amount(0.461554584) == 0.1
     assert sum(pipeline.CASH_POLICY[key] for key in ('native_reserve_lamports',
-               'entry_rent_allowance_lamports', 'minimum_entry_lamports')) == 345000000
+               'entry_rent_allowance_lamports', 'minimum_entry_lamports')) == 165000000
     assert pipeline.compute_deploy_amount((348630923+1488440-5000)/1e9) == 0.1
 
     # Both real CLI capital gates must agree with the shared policy. An empty
     # batch stops after these gates, before any candidate/trade path can run.
-    for balance, passed in [(0.344999999, False), (0.345, True), (0.346556150, True)]:
+    for balance, passed in [(0.164999999, False), (0.165, True), (0.342863115, True)]:
         with patch.object(sys, "argv", ["dlmm_pipeline.py", "--mode", "turnover", "--from-batch", "[]"]), \
                 patch.object(pipeline, "record_pipeline_candidates"), \
                 patch.object(pipeline, "load_soul_dlmm_params", return_value={**pipeline.MODE_DEFAULTS["turnover"], "MIN_ORGANIC_SCORE": 60}), \
