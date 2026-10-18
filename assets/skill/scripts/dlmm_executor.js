@@ -762,14 +762,14 @@ async function deployPosition(poolAddressStr, amountX, amountY, binsBelow, binsA
         try { snapshots = await entryBinSnapshots(pool, minBinId, maxBinId, studySide); }
         catch { console.warn("[SHADOW] Entry bin snapshot unavailable"); }
 
-        const persistEntry = () => fs.writeFileSync(path.join(entryDir, `${newPosition.publicKey}.json`), JSON.stringify({
+        const persistEntry = (preSignBinCheck) => fs.writeFileSync(path.join(entryDir, `${newPosition.publicKey}.json`), JSON.stringify({
           ...context, ...snapshots, root_chain_id: context.root_chain_id || context.recenter_of || newPosition.publicKey.toString(),
           pool: poolAddressStr, position: newPosition.publicKey.toString(),
           entry_bin: activeBin.binId, entry_price: pool.fromPricePerLamport(Number(activeBin.price)),
           bins_below: binsBelow, bins_above: binsAbove, bin_step: Number(pool.lbPair.binStep),
           amount_x: amountX, amount_y: amountY, position_creation: positionCreation,
           position_pda_history_outcome: pdaHistory?.reason || "not_started_or_unavailable",
-          deployed_at: Math.floor(Date.now() / 1000),
+          deployed_at: Math.floor(Date.now() / 1000), pre_sign_bin_check: preSignBinCheck,
         }), { mode: 0o600, flag: positionCreation.kind === "wallet_pda" ? "wx" : "w" });
         const send = async (tx, signers, fallback = null) => {
           const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash("confirmed");
@@ -794,14 +794,18 @@ async function deployPosition(poolAddressStr, amountX, amountY, binsBelow, binsA
           // A SOL-only ladder already outside the active bin starts idle and
           // still pays entry/close fees. Recheck before persistence/signing;
           // this does not guarantee the bin cannot move after submission.
+          let preSignBinCheck = null;
           if (studySide) {
             const latestBin = await pool.getActiveBin();
             if (!Number.isSafeInteger(latestBin.binId)
                 || latestBin.binId < minBinId || latestBin.binId > maxBinId) {
               throw new Error("ENTRY REFUSED: active bin left planned SOL BidAsk range before signing");
             }
+            preSignBinCheck = { active_bin: latestBin.binId, lower_bin: minBinId,
+              upper_bin: maxBinId, observed_at: Date.now() / 1000,
+              basis: "rpc_read_before_first_transaction_signing; not_landed_bin" };
           }
-          if (!submitted) persistEntry();
+          if (!submitted) persistEntry(preSignBinCheck);
           tx.sign(...signers);
           const raw = tx.serialize();
           const signature = bs58.encode(tx.signature);
