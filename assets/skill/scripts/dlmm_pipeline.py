@@ -540,7 +540,7 @@ def compute_deploy_amount(wallet_sol):
     deployable = max(0.0, wallet_sol - reserve)
     dynamic = deployable * pct
     if dynamic < floor:
-        return max(minimum, round(dynamic, 2)) if wallet_sol - reserve >= minimum else 0.0
+        return minimum  # Small wallets keep a minimum-sized ticket, preserving room for other positions.
     result = min(ceil, dynamic)
     return round(result, 2)
 
@@ -1319,8 +1319,9 @@ def main():
 
     sol_balance = get_wallet_sol_balance()
     # Hard gate: abort entire pipeline (including analyze-only) if wallet too thin to deploy anything useful
-    if sol_balance < 0.25 and os.environ.get("DRY_RUN") != "true":
-        print(f"[SKIP] Wallet {sol_balance:.3f} SOL < 0.25 SOL minimum — aborting pipeline (no SOL to deploy)")
+    entry_floor = sum(CASH_POLICY[key] for key in ("native_reserve_lamports", "entry_rent_allowance_lamports", "minimum_entry_lamports")) / 1e9
+    if sol_balance < entry_floor and os.environ.get("DRY_RUN") != "true":
+        print(f"[SKIP] Wallet {sol_balance:.3f} SOL < {entry_floor:.3f} SOL entry minimum including reserve and rent")
         defer_capacity_signals(cli)
         sys.exit(0)
     deploy_sol = compute_deploy_amount(sol_balance)
