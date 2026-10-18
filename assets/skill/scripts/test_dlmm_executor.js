@@ -1362,6 +1362,17 @@ vm.runInNewContext("const productionExitTransport=confirmExitTransaction;confirm
   assert.equal((await recover(1)).reason, 'swap_route_cooldown_no_route');
   sandbox.fetch = async () => ({ok:true,json:async()=>({routePlan:[{swapInfo:{label:'Hadron'}}]})});
   assert.equal((await recover(1)).reason, 'swap_route_exclusion_unverified');
+  sandbox.fetch = async url => {
+    assert.equal(new URL(url).searchParams.get('excludeDexes'), 'Hadron');
+    return {ok:true,json:async()=>({inputMint:'TOKEN',
+      outputMint:'So11111111111111111111111111111111111111112', inAmount:'100000000',
+      outAmount:'5000',otherAmountThreshold:'4950',priceImpactPct:'0.06',
+      routePlan:[{swapInfo:{label:'Pump.fun Amm'}}]})};
+  };
+  const unsafeAlternative = await recover(1);
+  assert.equal(unsafeAlternative.reason, 'price_impact_exceeded');
+  assert.equal(unsafeAlternative.priceImpactPct, 6);
+  assert.equal(unsafeAlternative.maxPriceImpactPct, 5);
   assert.equal(sends, sendsBeforeRoute);
   fs.rmSync(routePending+'.route', {force:true});
   delete env.DLMM_SETTLEMENT_POSITION;
