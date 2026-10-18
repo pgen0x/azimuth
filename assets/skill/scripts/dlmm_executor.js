@@ -790,6 +790,17 @@ async function deployPosition(poolAddressStr, amountX, amountY, binsBelow, binsA
             signers = [wallet, newPosition];
             await simulate(tx);
           }
+          // Snapshot/build/simulation can outlive the range selected above.
+          // A SOL-only ladder already outside the active bin starts idle and
+          // still pays entry/close fees. Recheck before persistence/signing;
+          // this does not guarantee the bin cannot move after submission.
+          if (studySide) {
+            const latestBin = await pool.getActiveBin();
+            if (!Number.isSafeInteger(latestBin.binId)
+                || latestBin.binId < minBinId || latestBin.binId > maxBinId) {
+              throw new Error("ENTRY REFUSED: active bin left planned SOL BidAsk range before signing");
+            }
+          }
           if (!submitted) persistEntry();
           tx.sign(...signers);
           const raw = tx.serialize();
