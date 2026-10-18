@@ -1291,3 +1291,20 @@ contain the original configured destination and message, with mode 0600.
 This removes a potential scheduling delay, not the requirement to prove a close,
 reconcile owned inventory, or simulate settlement recovery. It does not prove
 that an earlier swap would have obtained a better price.
+
+#### Confirmed Hadron slippage retry
+
+For an owned token-to-SOL settlement whose quote uses only Hadron, the signed
+transaction marker records the Jupiter instruction index and position. A
+confirmed or finalized Jupiter `6001` failure at that index temporarily excludes
+Hadron from quotes for the same wallet, token pair and position for five minutes.
+Timeouts, other program errors, mixed routes and other positions do not activate
+this exclusion. The quote journal records route labels and requested exclusions.
+
+Alternative quotes retain the caller's slippage, price-impact, ownership and
+net-recovery checks. An absent alternative or an ignored exclusion returns a
+retryable result without signing. The exclusion expires automatically; it does
+not permanently blacklist a venue or prove that another route would have been
+profitable. This addresses repeated paid retries observed on TSI, whose four
+Hadron failures produced instruction outputs about 4.928% below their quotes.
+Failed instruction transfers reverted; their network fees remained paid.
