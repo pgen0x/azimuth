@@ -842,6 +842,12 @@ vm.runInNewContext("const productionExitTransport=confirmExitTransaction;confirm
   const reconciled = await reconcilePendingSwap(new Connection(), swapMarker);
   assert.equal(reconciled.success, true); assert.equal(reconciled.txHash, "swap-sig");
   assert.ok(!fs.existsSync(swapMarker));
+  fs.writeFileSync(swapMarker, JSON.stringify({signature:'route-failure', lastValidBlockHeight:150,
+    routeContext:{position:'test-route',dex:'Hadron',jupiter_instruction:2}}));
+  signatureStatus = {confirmationStatus:'confirmed',err:{InstructionError:[2,{Custom:6001}]}};
+  assert.equal(await reconcilePendingSwap(new Connection(), swapMarker), null);
+  assert.equal(require('./dlmm_route_retry').excluded(swapMarker, 'test-route'), 'Hadron');
+  fs.rmSync(swapMarker+'.route');
   fs.writeFileSync(swapMarker, JSON.stringify({ signature: "expired", lastValidBlockHeight: 150 }));
   signatureStatus = null; height = 151;
   assert.equal(await reconcilePendingSwap(new Connection(), swapMarker), null);
@@ -1336,6 +1342,31 @@ vm.runInNewContext("const productionExitTransport=confirmExitTransaction;confirm
     fs.rmSync(settleDir,{recursive:true,force:true});
     sandbox.fetch=originalFetch;Connection.prototype.simulateTransaction=originalSim;
   }
+  // A route-specific confirmed failure changes only the next owned quote.
+  const routeRetry = require('./dlmm_route_retry');
+  const routePending = path.join(root, 'memories/dlmm_pending_swaps', `${wallet.publicKey}-TOKEN-So11111111111111111111111111111111111111112.json`);
+  fs.rmSync(routePending, {force: true});
+  fs.mkdirSync(path.dirname(routePending), {recursive: true});
+  env.DLMM_SETTLEMENT_POSITION = 'route-position';
+  sandbox.routeInventory = async () => ({success:true, amount_raw:'100000000', wallet_balance_raw:'100000000'});
+  vm.runInNewContext('const inventoryBeforeRouteTest = settlementInventory; settlementInventory = routeInventory;', sandbox);
+  routeRetry.recordFailure(routePending, {position:'route-position', dex:'Hadron', jupiter_instruction:2}, {InstructionError:[2,{Custom:6001}]});
+  const fetchBeforeRoute = sandbox.fetch;
+  const sendsBeforeRoute = sends;
+  sandbox.fetch = async url => {
+    const u = new URL(url);
+    assert.equal(u.searchParams.get('excludeDexes'), 'Hadron');
+    assert.equal(u.searchParams.get('slippageBps'), '100');
+    return {ok:false, status:400, text:async()=>JSON.stringify({errorCode:'NO_ROUTES_FOUND'})};
+  };
+  assert.equal((await recover(1)).reason, 'swap_route_cooldown_no_route');
+  sandbox.fetch = async () => ({ok:true,json:async()=>({routePlan:[{swapInfo:{label:'Hadron'}}]})});
+  assert.equal((await recover(1)).reason, 'swap_route_exclusion_unverified');
+  assert.equal(sends, sendsBeforeRoute);
+  fs.rmSync(routePending+'.route', {force:true});
+  delete env.DLMM_SETTLEMENT_POSITION;
+  sandbox.fetch = fetchBeforeRoute;
+  vm.runInNewContext('settlementInventory = inventoryBeforeRouteTest;', sandbox);
   // Exercise the real CLI parser, not a copy of its option handling.
   let cliSwapArgs;
   sandbox.captureCLISwap = async (...args) => {cliSwapArgs=args;return {success:true};};

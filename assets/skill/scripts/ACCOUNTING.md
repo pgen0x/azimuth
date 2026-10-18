@@ -1110,3 +1110,19 @@ account close, before any send. Rent recovery is not trading profit. A changed o
 invalid fallback remains `swap_quote_threshold_unavailable`: inventory stays
 explicit, retries back off 900 seconds, and entry remains blocked. Only verified
 zero owned inventory completes settlement.
+
+### Confirmed Hadron slippage retry
+
+For an owned token-to-SOL settlement whose quote uses only Hadron, the signed
+transaction marker records the Jupiter instruction index and position. A
+confirmed or finalized Jupiter `6001` failure at that index temporarily excludes
+Hadron from quotes for the same wallet, token pair and position for five minutes.
+Timeouts, other program errors, mixed routes and other positions do not activate
+this exclusion. The quote journal records route labels and requested exclusions.
+
+Alternative quotes retain the caller's slippage, price-impact, ownership and
+net-recovery checks. An absent alternative or an ignored exclusion returns a
+retryable result without signing. The exclusion expires automatically; it does
+not permanently blacklist a venue or prove that another route would have been
+profitable. Failed instruction transfers revert, but their network fees
+remain paid, which is why a repeated failing route is worth excluding.

@@ -156,6 +156,7 @@ async function confirmSignedTransaction(connection, strategy, raw, options = CON
       if (!status.err) throw new Error("Transaction confirmation unmeasured");
       const error = new Error(`Transaction failed: ${JSON.stringify(status.err)}`);
       error.transactionFailed = true;
+      error.chainError = status.err;
       throw error;
     }
     const remaining = deadline - Date.now();
@@ -409,6 +410,8 @@ async function reconcilePendingSwap(connection, pendingPath, label = "Swap") {
     [pending.signature], { searchTransactionHistory: true }
   )).value[0];
   if (status?.err) {
+    if (["confirmed", "finalized"].includes(status.confirmationStatus))
+      require("./dlmm_route_retry").recordFailure(pendingPath, pending.routeContext, status.err);
     fs.rmSync(pendingPath, { force: true });
     return null;
   }
@@ -1520,7 +1523,7 @@ async function swapToken(inputMintStr, outputMintStr, amountFloat, maxPriceImpac
     }
 
     // Fetch quote outside runWithFailover as it's a HTTP call to Jupiter, then execute/send via standard RPC rotation
-    let quoteResponse, quoteObservedAt, inputRaw, selectedSlippageBps = slippageBps;
+    let quoteResponse, quoteObservedAt, inputRaw, excludedDex = "", selectedSlippageBps = slippageBps;
     try {
     // 1. Get input decimals
     let decimals = 9;
@@ -1536,6 +1539,7 @@ async function swapToken(inputMintStr, outputMintStr, amountFloat, maxPriceImpac
       return { success: false, aborted: true, reason: "settlement_amount_mismatch" };
     }
     inputRaw = amountRaw;
+    excludedDex = require("./dlmm_route_retry").excluded(pendingPath, process.env.DLMM_SETTLEMENT_POSITION);
 
     // 2. Fetch a quote within the authorized slippage limit.
     // The explicit small-settlement allowance caps another 200 bps at the
@@ -1545,14 +1549,14 @@ async function swapToken(inputMintStr, outputMintStr, amountFloat, maxPriceImpac
     let lastErr = null;
     for (const bps of slippageLadder) {
       try {
-        const quoteUrl = `https://api.jup.ag/swap/v1/quote?inputMint=${input_mint}&outputMint=${output_mint}&amount=${amountRaw}&slippageBps=${bps}`;
+        const quoteUrl = `https://api.jup.ag/swap/v1/quote?inputMint=${input_mint}&outputMint=${output_mint}&amount=${amountRaw}&slippageBps=${bps}${excludedDex ? `&excludeDexes=${encodeURIComponent(excludedDex)}` : ""}`;
         const quoteRes = await fetch(quoteUrl, { signal: AbortSignal.timeout(8000) });
         if (!quoteRes.ok) {
           const body = await quoteRes.text();
           let code;
           try { code = JSON.parse(body).errorCode; } catch { /* Non-JSON failures remain unknown. */ }
           if (quoteRes.status === 400 && ["COULD_NOT_FIND_ANY_ROUTE", "NO_ROUTES_FOUND", "TOKEN_NOT_TRADABLE"].includes(code)) {
-            return { success: false, aborted: true, reason: "swap_no_route" };
+            return { success: false, aborted: true, reason: excludedDex ? "swap_route_cooldown_no_route" : "swap_no_route" };
           }
           if (quoteRes.status === 400 && code === "CANNOT_COMPUTE_OTHER_AMOUNT_THRESHOLD") {
             // A one-lamport output cannot retain a positive rounded threshold
@@ -1569,6 +1573,10 @@ async function swapToken(inputMintStr, outputMintStr, amountFloat, maxPriceImpac
           continue;
         }
         const q = await quoteRes.json();
+        if (excludedDex && (!Array.isArray(q?.routePlan) || !q.routePlan.length
+            || q.routePlan.some(r => !r?.swapInfo?.label || r.swapInfo.label === excludedDex))) {
+          return { success: false, aborted: true, reason: "swap_route_exclusion_unverified" };
+        }
         if (inventory && (q?.inputMint !== input_mint || q?.outputMint !== output_mint || q?.inAmount !== amountRaw)) {
           return { success: false, aborted: true, reason: "settlement_quote_mismatch" };
         }
@@ -1784,11 +1792,12 @@ async function swapToken(inputMintStr, outputMintStr, amountFloat, maxPriceImpac
     // 5. Send and confirm
     const rawTransaction = transaction.serialize();
     const signedTxid = bs58.encode(transaction.signatures[0]);
+    const routeContext = require("./dlmm_route_retry").context(quoteResponse, transaction, process.env.DLMM_SETTLEMENT_POSITION);
     fs.mkdirSync(pendingDir, { recursive: true, mode: 0o700 });
     const markerTmp = `${pendingPath}.${process.pid}.tmp`;
     fs.writeFileSync(markerTmp, JSON.stringify({ signature: signedTxid, blockhash,
       lastValidBlockHeight, inputMint: input_mint, outputMint: output_mint,
-      inputAmount: quoteResponse.inAmount, outputAmount: quoteResponse.outAmount }), { mode: 0o600 });
+      inputAmount: quoteResponse.inAmount, outputAmount: quoteResponse.outAmount, routeContext }), { mode: 0o600 });
     fs.renameSync(markerTmp, pendingPath);
     const txid = signedTxid;
     recordSubmission(wallet, process.env.DLMM_SETTLEMENT_POSITION, "swap", signedTxid, lastValidBlockHeight, {
@@ -1796,6 +1805,9 @@ async function swapToken(inputMintStr, outputMintStr, amountFloat, maxPriceImpac
       in_amount: quoteResponse.inAmount, out_amount: quoteResponse.outAmount,
       minimum_out_amount: quoteResponse.otherAmountThreshold ?? null,
       authorized_slippage_bps: selectedSlippageBps, context_slot: quoteResponse.contextSlot ?? null,
+      excluded_dexes: excludedDex ? [excludedDex] : [],
+      route_labels: (Array.isArray(quoteResponse.routePlan) ? quoteResponse.routePlan : []).slice(0, 16).map(r => r?.swapInfo?.label)
+        .filter(label => typeof label === "string").map(label => label.slice(0, 80)),
       small_settlement_requote: smallSettlement && selectedSlippageBps === 300,
       token_rent_close_included: tokenRentCloseIncluded,
       ordinary_token_rent_close: ordinaryTokenRentClose,
@@ -1811,6 +1823,7 @@ async function swapToken(inputMintStr, outputMintStr, amountFloat, maxPriceImpac
       else await confirmSignedTransaction(connection, strategy, rawTransaction, options);
     } catch (err) {
       if (err.transactionFailed) {
+        require("./dlmm_route_retry").recordFailure(pendingPath, routeContext, err.chainError);
         fs.rmSync(pendingPath, { force: true });
         return { success: false, txHash: txid, error: err.message };
       }
@@ -1833,6 +1846,7 @@ async function swapToken(inputMintStr, outputMintStr, amountFloat, maxPriceImpac
           error: `Swap confirmation pending: ${err.message}` };
       }
       if (status.err) {
+        require("./dlmm_route_retry").recordFailure(pendingPath, routeContext, status.err);
         fs.rmSync(pendingPath, { force: true });
         return { success: false, txHash: txid,
           error: `Swap failed: ${JSON.stringify(status.err)}` };
