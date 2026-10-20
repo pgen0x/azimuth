@@ -96,10 +96,10 @@ func TestAIPrimaryFallbackBeforeDispatch(t *testing.T) {
 		status          int
 		webhook, direct bool
 	}{
-		{"healthy", "/bin/true", 200, true, false},
-		{"model_unavailable", "/bin/false", 200, false, true},
+		{"healthy", "true", 200, true, false},
+		{"model_unavailable", "false", 200, false, true},
 		{"probe_missing", "/nonexistent/probe", 200, false, true},
-		{"ambiguous_webhook_failure", "/bin/true", 504, true, false},
+		{"ambiguous_webhook_failure", "true", 504, true, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			testEntryRouting(t, tc.command, tc.status, tc.webhook, tc.direct)
@@ -150,7 +150,7 @@ func testEntryRouting(t *testing.T, healthCmd string, status int, wantWebhook, w
 	}
 	if wantWebhook && status >= 400 {
 		// Model failure on the next poll must not replay an ambiguous delivery.
-		s.cfg.AIHealthCmd = "/bin/false"
+		s.cfg.AIHealthCmd = "false"
 		s.pollMode(context.Background(), meteora.ModeParams{Mode: "turnover", Timeframe: "30m", TfMinutes: 30})
 		if _, err := os.Stat(marker); !os.IsNotExist(err) {
 			t.Fatal("ambiguous webhook was replayed through direct deploy")
