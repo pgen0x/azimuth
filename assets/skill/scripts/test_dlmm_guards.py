@@ -322,6 +322,26 @@ def main():
         assert again.call_count == 2
         path.unlink()
 
+    # Previously deferred dust must not consume the only settlement slot while
+    # an executable exit is pending. Keep retry fairness within pending exits,
+    # then retry deferred inventory once those exits have cleared.
+    with tempfile.TemporaryDirectory() as tmp, patch.object(monitor, "SETTLEMENT_DIR", tmp), \
+         patch.object(monitor, "get_wallet_address", return_value="wallet"), \
+         patch.object(monitor, "position_live_onchain", return_value=False), \
+         patch.object(monitor, "get_meteora_portfolio_positions", return_value=({}, None)), \
+         patch.object(monitor, "run_command", return_value=("1", "", 0)):
+        markers = [dict(position="dust", mint="DUST", state="deferred", last_attempt=0),
+                   dict(position="exitB", mint="B", state="pending", last_attempt=20),
+                   dict(position="exitA", mint="A", state="pending", last_attempt=10)]
+        for marker in markers:
+            Path(tmp, marker["position"] + ".json").write_text(json.dumps(marker))
+        for expected in ("exitA", "exitB", "dust"):
+            with patch.object(monitor, "run_command_json", return_value=({"success": True, "amount_raw": "0"}, None)) as run:
+                monitor.settle_pending()
+            assert run.call_count == 1
+            assert f"settlement-balance {expected} " in run.call_args.args[0]
+            assert not Path(tmp, expected + ".json").exists()
+
     # Empty indexer results never authorize deletion of a live/unknown position,
     # including orphan metadata and its risk-state keys.
     class EmptyPortfolio:

@@ -1179,3 +1179,16 @@ contain the original configured destination and message, with mode 0600.
 This removes a potential scheduling delay, not the requirement to prove a close,
 reconcile owned inventory, or simulate settlement recovery. It does not prove
 that an earlier swap would have obtained a better price.
+
+### Settlement retry ordering
+
+Pending exits take the worker's single settlement attempt before inventory
+previously deferred for missing routes or uneconomic recovery. Within each
+class, the oldest attempt still runs first. Deferred inventory retains its
+15-minute retry backoff and is retried when no pending exit consumes the slot;
+continuous pending exits can postpone it further. Ownership, pending-signature,
+slippage, and positive-recovery checks are unchanged.
+
+This stops a deferred no-route retry from running between attempts of a pending
+exit. It does not prove a particular saving or eliminate simulation, RPC, or
+market delays.
