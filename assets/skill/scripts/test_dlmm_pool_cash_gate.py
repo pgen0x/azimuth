@@ -45,13 +45,18 @@ class PipelineCashGateIntegrationTests(unittest.TestCase):
                   last_close_ts=now-10,observed_at=now-1,prior_roots=2,prior_cash_roots=2,
                   prior_pnl_basis='matched_refund_cash',prior_net_pnl_sol=-.00005,
                   prior_cash_lower_sol=-.00005,prior_cash_upper_sol=-.00005)
-        journal='\n'.join(json.dumps(dict(ts=now-i,pnl_pct=1)) for i in (10,20))
+        journal='\n'.join(json.dumps(dict(ts=now-i,pnl_pct=1,position=str(i),root_chain_id=str(i))) for i in (10,20))
         candidate=dict(pool='pool',name='TOKEN-SOL',base_mint='mint',base_symbol='TOKEN',
                        tvl=50000,volatility=2,score=80,sol_is_x=False,bin_step=100)
-        for flag in ('--from-batch','--from-signal'):
+        for flag, individual in [(f, i) for f in ('--from-batch','--from-signal') for i in (False, True)]:
             for stale in (False,True):
                 with self.subTest(flag=flag,stale=stale), contextlib.ExitStack() as stack:
                     record=dict(cash,observed_at=now-901 if stale else now-1)
+                    if individual:
+                        record.update(prior_pnl_basis='pre_swap_mark_only', prior_cash_roots=0,
+                                      prior_net_pnl_sol=None, prior_cash_lower_sol=None, prior_cash_upper_sol=None,
+                                      recent_position_cash_losses=[dict(position=str(i),root=str(i),ts=now-i,
+                                                                        cash_upper_lamports=-10) for i in (10,20)])
                     def command(cmd, **kwargs):
                         if 'sol:dlmm:cash_history' in cmd:
                             self.assertEqual(kwargs.get('timeout'),2)

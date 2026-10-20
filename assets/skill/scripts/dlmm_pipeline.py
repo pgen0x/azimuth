@@ -1644,8 +1644,12 @@ def main():
         hist_raw, _, hist_code = run_command(f"redis-cli lrange \"sol:dlmm:history:pool:{c['pool']}\" 0 9")
         cash_loss = negative_pool_cash(cash_history_cache, c['pool'], hist_raw, time.time()) if hist_code == 0 else None
         if cash_loss is not None:
-            record_pipeline_reject(PROFILE_DIR, mode, "pool_cash_upper_bound", c.get("pool"), c.get("base_mint"), c.get("sol_is_x"), c.get("name"))
-            print(f"Skipping {c['name']} - pool cash memory: {cash_loss['closes']} closes, net cash upper bound {cash_loss['cash_upper_sol']:+.9f} SOL")
+            if cash_loss.get("scope") == "each_of_latest_two":
+                record_pipeline_reject(PROFILE_DIR, mode, "pool_cash_two_negative", c.get("pool"), c.get("base_mint"), c.get("sol_is_x"), c.get("name"))
+                print(f"Skipping {c['name']} - pool cash memory: latest two positions each proved net-negative after costs")
+            else:
+                record_pipeline_reject(PROFILE_DIR, mode, "pool_cash_upper_bound", c.get("pool"), c.get("base_mint"), c.get("sol_is_x"), c.get("name"))
+                print(f"Skipping {c['name']} - pool cash memory: {cash_loss['closes']} closes, net cash upper bound {cash_loss['cash_upper_sol']:+.9f} SOL")
             continue
         if hist_raw and hist_raw != "(nil)":
             past_pnls = []

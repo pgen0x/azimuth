@@ -22,6 +22,26 @@ def negative_pool_cash(cache, pool, journal_text, now):
             if now - 30*86400 <= row['ts'] <= now:
                 journal.append(row)
         latest = max((r['ts'] for r in journal), default=0)
+        # This independent proof requires both newest journal positions to be
+        # individually negative. It never substitutes zero for older unknowns.
+        recent = cash.get('recent_position_cash_losses')
+        ordered = sorted(journal, key=lambda row: row['ts'], reverse=True)
+        if (isinstance(recent, list) and len(recent) == 2 and len(ordered) >= 2
+                and finite(cash.get('observed_at')) and 0 <= now-cash['observed_at'] <= 900
+                and type(cash.get('journal_closes')) is int and cash['journal_closes'] == len(journal)
+                and cash.get('journal_last_close_ts') == latest
+                and ordered[0]['ts'] != ordered[1]['ts']
+                and all(isinstance(proof, dict) and isinstance(proof.get('position'), str)
+                        and proof['position'] and proof['position'] == row.get('position')
+                        and proof.get('root') == (row.get('root_chain_id') or row.get('recenter_of') or row.get('position'))
+                        and proof.get('ts') == row['ts']
+                        and type(proof.get('cash_upper_lamports')) is int
+                        and -2**53 < proof['cash_upper_lamports'] < 0
+                        for proof, row in zip(recent, ordered[:2]))
+                and len({proof['root'] for proof in recent}) == 2):
+            return dict(closes=2, basis='latest_two_individual_cash_losses',
+                        cash_upper_sol=max(p['cash_upper_lamports'] for p in recent)/1e9,
+                        scope='each_of_latest_two')
         count = cash['prior_closes']
         if (type(count) is not int or not 2 <= count <= 10
                 or type(cash['journal_closes']) is not int

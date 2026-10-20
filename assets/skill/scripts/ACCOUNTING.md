@@ -1264,3 +1264,22 @@ Unknown, stale, ambiguous or changed history does not trigger this cash refusal;
 existing mark-loss and other entry gates still apply. This is a risk control,
 not a claim that historical rejected trades would have lost or future entries
 will profit. The same rule applies to direct and agent-selected pipeline calls.
+
+### Two recent individually proved pool losses
+
+Pool memory also refuses a repeat entry when each of the two newest closed
+positions on that pool has a strictly negative cash upper bound after matched
+rent refunds. Older incomplete inventory stays unknown; this rule makes no
+claim about the pool's lifetime or thirty-day aggregate profit.
+
+The two proofs bind position, root, and close timestamp to the latest live
+journal records. Both must be single-position, settled roots with unambiguous
+refund ownership. Shared cleanup fees retain individual conservative bounds;
+those bounds are never summed. A newer recovered close absent from the live
+journal, zero/positive/unknown outcome, tied close timestamps, or a stale cache
+prevents this new refusal. The existing aggregate-loss rule remains available.
+
+It targets pools with repeated small net losses despite older attribution gaps.
+It is an entry risk constraint, not proof of improved trading returns: it can
+also skip a future winner. Forward evaluation must retain rejected candidates
+and all executed losses rather than claiming saved money from rejection alone.
