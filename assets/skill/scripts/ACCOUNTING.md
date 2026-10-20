@@ -1308,3 +1308,16 @@ not permanently blacklist a venue or prove that another route would have been
 profitable. This addresses repeated paid retries observed on TSI, whose four
 Hadron failures produced instruction outputs about 4.928% below their quotes.
 Failed instruction transfers reverted; their network fees remained paid.
+
+### Settlement retry ordering
+
+Pending exits take the worker's single settlement attempt before inventory
+previously deferred for missing routes or uneconomic recovery. Within each
+class, the oldest attempt still runs first. Deferred inventory retains its
+15-minute retry backoff and is retried when no pending exit consumes the slot;
+continuous pending exits can postpone it further. Ownership, pending-signature,
+slippage, and positive-recovery checks are unchanged.
+
+This addresses the October 20 COMPUTE exit, where an OMNI no-route retry ran
+between pending COMPUTE attempts. It removes that queue interference; it does
+not prove a particular saving or eliminate simulation, RPC, or market delays.

@@ -1328,7 +1328,11 @@ def settle_pending():
                 candidates.append((item.get("last_attempt", 0), path, item))
             except (OSError, ValueError) as exc:
                 print(f"⚠️ Invalid settlement marker {name}: {exc}")
-    for _, path, item in sorted(candidates):
+    # Previously unrouteable/uneconomic inventory must not displace a pending
+    # exit from this worker's single attempt. Preserve oldest-attempt fairness
+    # within each class; deferred inventory retains its 15-minute backoff.
+    for _, path, item in sorted(candidates, key=lambda candidate: (
+            candidate[2].get("state") == "deferred", candidate[0], candidate[1])):
         pos, mint = item["position"], item["mint"]
         # Keep unavailable/uneconomic inventory explicit and retry at a bounded
         # cadence. It is neither settled nor valued at zero.
