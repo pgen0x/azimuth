@@ -58,6 +58,10 @@ def entry_eligible(entry, rule):
     gates=signal.get('entry_live_gates') or {}
     stamp=gates.get('observed_at');deployed=entry.get('deployed_at')
     if not finite(stamp) or not finite(deployed) or not 0 <= deployed-stamp <= 120:return False
+    if 'min_pool_fee_pct' in rule:
+        pool_fee=signal.get('fee_pct')
+        if not finite(pool_fee) or pool_fee < rule['min_pool_fee_pct']:return False
+        if set(rule)=={'min_pool_fee_pct'}:return True
     fee=gates.get('live_fee_tvl_ratio');traders=signal.get('unique_traders')
     minutes={'5m':5,'30m':30}.get(gates.get('fee_timeframe'))
     if not minutes or not finite(fee) or not finite(traders):return False
