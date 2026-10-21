@@ -1414,6 +1414,15 @@ request/observation timestamps in `dlmm_candidate_price_paths.jsonl`. This is
 prospective sampled price movement, not fee evidence, exact intraminute OHLC,
 finalized accounting, or an entry gate. Existing sparse history is not backfilled.
 
+`dlmm_price_path_features.py --input <price-path-journal> --cutoff <unix-time>`
+computes read-only movement diagnostics using only records collected by that
+cutoff. It requires at least ten minutes of history, gaps no larger than three
+minutes, and a latest observation no older than two minutes. Duplicate slots do
+not extend history; conflicting same-slot values, regressing slots, or changing
+bin steps invalidate the path. Request/observation/collection timing must be
+ordered and bounded. Observed drawdown and range remain lower bounds between
+samples. These features neither prove net profitability nor change live entry.
+
 `dlmm_net_execution_stress.py --source <search/result.json> --quotes
 <memories/dlmm_liquidation_quotes.jsonl> --output <new-report.json>` evaluates
 the already selected training and validation exits under 0%, 1%, 3%, and 5%
