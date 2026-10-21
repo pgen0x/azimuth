@@ -1423,6 +1423,16 @@ bin steps invalidate the path. Request/observation/collection timing must be
 ordered and bounded. Observed drawdown and range remain lower bounds between
 samples. These features neither prove net profitability nor change live entry.
 
+The frozen `net-path-20261021-v1` paired dry run tests that history against actual
+future entries: absolute observed net movement must be at most one quarter of
+the deployed width, and observed span at most half. It keeps the live exit policy
+to isolate entry selection. Missing history skips the hypothetical entry; skips
+are not wins. Per-entry evidence is cut off at the recorded deployment second,
+hashed, and frozen on first evaluation. Later observations cannot change the
+decision. Both exit policies are empty, so this comparison needs no new native
+inventory or sell quotes. It remains asynchronous shadow eligibility with
+finalized cash as the outcome, not a live gate or proof of profitable selection.
+
 `dlmm_net_execution_stress.py --source <search/result.json> --quotes
 <memories/dlmm_liquidation_quotes.jsonl> --output <new-report.json>` evaluates
 the already selected training and validation exits under 0%, 1%, 3%, and 5%

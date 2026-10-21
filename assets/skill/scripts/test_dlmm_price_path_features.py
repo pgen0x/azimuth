@@ -1,5 +1,5 @@
 import unittest
-from dlmm_price_path_features import features
+from dlmm_price_path_features import features, assess_entry
 
 
 class PricePathFeaturesTests(unittest.TestCase):
@@ -33,6 +33,18 @@ class PricePathFeaturesTests(unittest.TestCase):
     def test_late_collection_and_wrong_identity_are_not_predecision_data(self):
         self.assertEqual(self.check([dict(r,collected_at=2000) for r in self.rows])['samples'],0)
         self.assertEqual(self.check([dict(r,base_mint='other') for r in self.rows])['samples'],0)
+
+    def test_entry_filter_uses_fixed_geometry_and_preentry_cutoff(self):
+        e=dict(pool='p',base_mint='m',deployed_at=1601,bins_below=44,bins_above=0,
+               bin_step=100,strategy='sol_bidask',sol_is_x=False)
+        rule={'max_net_width_fraction':.25,'max_span_width_fraction':.5}
+        result=assess_entry(e,self.rows,rule)
+        self.assertTrue(result['qualifies'])
+        future=dict(self.rows[-1],slot=1000,active_bin=-100,collected_at=2000)
+        self.assertEqual(assess_entry(e,self.rows+[future],rule),result)
+        self.assertFalse(assess_entry(dict(e,bin_step=80),self.rows,rule)['qualifies'])
+        self.assertFalse(assess_entry(dict(e,bins_below=4),self.rows,rule)['qualifies'])
+        self.assertFalse(assess_entry(e,[],rule)['qualifies'])
 
 
 if __name__=='__main__':unittest.main()
