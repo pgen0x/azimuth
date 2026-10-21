@@ -1373,3 +1373,21 @@ stay unmeasured. Closed pairs are reconciled in `dry-summary.json`; the current
 strategy uses actual cash, and alternate earlier exits stay explicitly modeled.
 A config hash prevents silent parameter changes mid-experiment. Use a new output
 directory for a new protocol. The daily report is not a performance guarantee.
+
+`dlmm_net_search.py` searches a fixed 29-policy exit grid on the October 18–19
+UTC training interval, selecting only from training net returns under an extra
+100,000-lamport cost per modeled exit. At least ten evaluated entries and three
+modeled exits are required for ranking. The winner is frozen to disk before
+loading the October 20-to-original-experiment-freeze challenge period.
+`--entry-stage` then explores twelve pre-entry fee/activity filters around that
+training-selected exit. This second stage reuses an already inspected challenge
+period and must not be described as independent validation. Neither historical
+selection can authorize live promotion.
+
+Both selected configurations run under the read-only `azimuth-sol-net-research@`
+timer template, independently of the original experiment. New entries after each
+config freeze are paired with the current trader. An entry-filter rejection is
+recorded as a skipped trade with zero trading cash flow, not a profitable exit;
+the baseline still retains its realized result. Missing pre-entry features do
+not qualify. Skips do not simulate reinvestment of freed capital. Live strategy
+parameters are unchanged; prospective outcomes may disprove either candidate.
