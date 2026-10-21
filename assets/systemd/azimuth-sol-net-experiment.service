@@ -1,0 +1,9 @@
+[Unit]
+Description=Azimuth paired net exit experiment (read-only quotes; no trading)
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 %h/.hermes/profiles/solanza/skills/solana-dlmm/scripts/dlmm_net_experiment.py dry-tick --profile %h/.hermes/profiles/solanza --output %h/.local/state/azimuth/optimization/net-experiment-20261021-v1
+TimeoutStartSec=45
+UMask=0077
+NoNewPrivileges=true
