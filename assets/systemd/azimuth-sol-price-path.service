@@ -1,0 +1,9 @@
+[Unit]
+Description=Azimuth native candidate price paths (research only)
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 __PROFILE__/skills/solana-dlmm/scripts/dlmm_price_path.py --profile __PROFILE__
+TimeoutStartSec=40
+UMask=0077
+NoNewPrivileges=true
