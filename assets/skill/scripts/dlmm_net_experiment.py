@@ -211,18 +211,26 @@ def dry_tick(profile, output):
     closed={r['position'] for r in rows(memory/'dlmm_closes.jsonl') if r.get('position') and not r.get('dry_run')}
     wallets={r['position']:r['wallet'] for r in rows(memory/'dlmm_transactions.jsonl') if r.get('kind')=='deploy'}
     active=[]
+    path_rows=None
     for f in (memory/'dlmm_entries').glob('*.json'):
         e=json.loads(f.read_text())
         if e.get('deployed_at',0) < config['frozen_at'] or e['position'] not in wallets:continue
         pos=e['position'];row=state['positions'].setdefault(pos,dict(entry=e,last_observed=0,decisions={}))
-        if not entry_eligible(e,config.get('entry_filter')):
+        if config.get('price_path_filter') and 'entry_path_evidence' not in row:
+            from dlmm_price_path_features import assess_entry
+            if path_rows is None:path_rows=list(rows(memory/'dlmm_candidate_price_paths.jsonl'))
+            row['entry_path_evidence']=dict(assess_entry(row['entry'],path_rows,config['price_path_filter']),
+                                            evaluated_at=now)
+        eligible=entry_eligible(row['entry'],config.get('entry_filter'))
+        if config.get('price_path_filter'):eligible=eligible and row['entry_path_evidence']['qualifies']
+        if not eligible:
             for name in config['strategies']:
                 if name != 'current':
                     row['decisions'].setdefault(name,dict(observed_at=now,reason='entry_filter_skip',modeled_net_lamports=0))
         if pos in closed:row['closed_observed_at']=row.get('closed_observed_at',now)
         else:active.append(row)
     attempted=0
-    if active:
+    if active and any(config['strategies'].values()):
         row=min(active,key=lambda r:r['last_observed']);e=row['entry'];deadline=time.monotonic()+20
         def fetch(url):
             with urllib.request.urlopen(urllib.request.Request(url,headers={'User-Agent':'azimuth-dry-net/1'}),

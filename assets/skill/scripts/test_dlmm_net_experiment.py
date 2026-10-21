@@ -58,4 +58,25 @@ class NetExperimentTests(unittest.TestCase):
                 config['cost_budget_lamports']=30000;experiment.write(out/'config.json',config)
                 with self.assertRaisesRegex(ValueError,'Frozen'):experiment.dry_tick(root,out)
 
+    def test_price_filter_evidence_frozen_and_current_exit_needs_no_quote(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);memory=root/'memories';(memory/'dlmm_entries').mkdir(parents=True)
+            out=root/'experiment';out.mkdir()
+            experiment.write(out/'config.json',dict(frozen_at=100,
+                strategies={'current':{},'stable_path_current_exit':{}},cost_budget_lamports=25000,
+                price_path_filter={'max_net_width_fraction':.25,'max_span_width_fraction':.5}))
+            (memory/'dlmm_entries/p.json').write_text(json.dumps(dict(self.entry,deployed_at=101,pool='pool')))
+            (memory/'dlmm_transactions.jsonl').write_text(json.dumps(dict(kind='deploy',position='p',wallet='w'))+'\n')
+            with patch('dlmm_price_path_features.assess_entry',return_value={'qualifies':False,'status':'unmeasured'}) as assess, \
+                 patch.object(experiment,'read_native_risk_mark') as native,patch.object(experiment,'dry_summary'):
+                experiment.dry_tick(root,out)
+                before=json.loads((out/'dry-state.json').read_text())['positions']['p']
+                assess.return_value={'qualifies':True,'status':'measured'}
+                experiment.dry_tick(root,out)
+                after=json.loads((out/'dry-state.json').read_text())['positions']['p']
+                self.assertEqual(before['entry_path_evidence'],after['entry_path_evidence'])
+                self.assertEqual(before['decisions'],after['decisions'])
+                self.assertNotIn('current',after['decisions'])
+                self.assertEqual(assess.call_count,1);native.assert_not_called()
+
 if __name__=='__main__':unittest.main()

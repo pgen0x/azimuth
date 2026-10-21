@@ -2,7 +2,27 @@
 import argparse
 import json
 import math
+import hashlib
 from pathlib import Path
+
+
+def assess_entry(entry, rows, rule):
+    """Research-only eligibility, conservatively cut off at entry's recorded second."""
+    cutoff=entry.get('deployed_at');width=entry.get('bins_below')
+    if (type(cutoff) not in (int,float) or not math.isfinite(cutoff)
+            or type(width) is not int or width<=0 or entry.get('bins_above')!=0
+            or entry.get('strategy')!='sol_bidask' or entry.get('sol_is_x') is not False):
+        return dict(qualifies=False,status='unmeasured',reason='unsupported_entry_geometry')
+    if rule != {'max_net_width_fraction':.25,'max_span_width_fraction':.5}:
+        raise ValueError('Unsupported frozen price-path hypothesis')
+    source=[r for r in rows if r.get('pool')==entry.get('pool') and r.get('base_mint')==entry.get('base_mint')
+            and type(r.get('collected_at')) in (int,float) and cutoff-1800<=r['collected_at']<=cutoff]
+    result=features(source,entry['pool'],entry['base_mint'],cutoff)
+    matches=result['status']=='measured' and result['bin_step']==entry.get('bin_step')
+    return dict(result,qualifies=bool(matches and abs(result['net_bins'])<=width*.25
+                                     and result['observed_span_bins']<=width*.5),
+                width=width,rule=rule,
+                evidence_sha256=hashlib.sha256(json.dumps(source,sort_keys=True,allow_nan=False).encode()).hexdigest())
 
 
 def features(rows, pool, mint, cutoff):
