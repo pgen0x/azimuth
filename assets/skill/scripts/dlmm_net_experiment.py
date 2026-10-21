@@ -51,6 +51,19 @@ def trigger(quote, entry, policy, cost, start):
     return None
 
 
+def entry_eligible(entry, rule):
+    """Only recorded pre-entry features; unknown measurements do not qualify."""
+    if not rule:return True
+    signal=entry.get('signal') or {}
+    gates=signal.get('entry_live_gates') or {}
+    stamp=gates.get('observed_at');deployed=entry.get('deployed_at')
+    if not finite(stamp) or not finite(deployed) or not 0 <= deployed-stamp <= 120:return False
+    fee=gates.get('live_fee_tvl_ratio');traders=signal.get('unique_traders')
+    minutes={'5m':5,'30m':30}.get(gates.get('fee_timeframe'))
+    if not minutes or not finite(fee) or not finite(traders):return False
+    return fee*60/minutes >= rule['fee_tvl_pct_per_hour'] and traders >= rule['min_traders']
+
+
 def known_at(chain, groups, facts):
     signatures = set(chain['recorded_signatures'])
     for group in groups:
@@ -198,6 +211,10 @@ def dry_tick(profile, output):
         e=json.loads(f.read_text())
         if e.get('deployed_at',0) < config['frozen_at'] or e['position'] not in wallets:continue
         pos=e['position'];row=state['positions'].setdefault(pos,dict(entry=e,last_observed=0,decisions={}))
+        if not entry_eligible(e,config.get('entry_filter')):
+            for name in config['strategies']:
+                if name != 'current':
+                    row['decisions'].setdefault(name,dict(observed_at=now,reason='entry_filter_skip',modeled_net_lamports=0))
         if pos in closed:row['closed_observed_at']=row.get('closed_observed_at',now)
         else:active.append(row)
     attempted=0
@@ -234,16 +251,17 @@ def dry_summary(profile, output, config, state):
         accepted=position_profit_acceptance(ledger,entries,config['frozen_at'],result['checked_at'])
         actual={r['position']:r for r in accepted['positions']}
         for name in config['strategies']:
-            held=set();modeled=[];pending=0
+            held=set();modeled=[];pending=0;skipped=0
             for pos,row in state['positions'].items():
                 proof=actual.get(pos,{})
                 if proof.get('cash_lower_lamports') is None:
                     pending+=1;continue
                 decision=row['decisions'].get(name)
-                if decision:modeled.append(decision['modeled_net_lamports'])
+                if decision and decision['reason']=='entry_filter_skip':skipped+=1
+                elif decision:modeled.append(decision['modeled_net_lamports'])
                 else:held.add(proof['root'])
             lo,hi=aggregate(ledger,held)
-            result['strategies'].append(dict(strategy=name,paired_completed=len(held)+len(modeled),
+            result['strategies'].append(dict(strategy=name,paired_completed=len(held)+len(modeled)+skipped,skipped_entries=skipped,
                 pending_or_unmeasured=pending,modeled_exits=len(modeled),
                 paired_net_lower_lamports=lo+sum(modeled),paired_net_upper_lamports=hi+sum(modeled)))
     write(output/'dry-summary.json',result)
