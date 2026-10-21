@@ -1,0 +1,11 @@
+[Unit]
+Description=Sample paired dry-run exit policies every minute
+
+[Timer]
+OnBootSec=30
+OnUnitInactiveSec=60
+AccuracySec=5
+Unit=azimuth-sol-net-experiment.service
+
+[Install]
+WantedBy=timers.target

@@ -1253,3 +1253,37 @@ Missing or invalid references do not remove positions from cash acceptance. The
 report keeps modeled fee and settled cash separate: their ratio is not forecast
 accuracy, and a verified reference is not evidence of profit. Existing entries
 without a saved reference remain unmeasured; this command never backfills them.
+
+
+### Paired net exit experiment
+
+`dlmm_net_experiment.py backtest --profile <profile> --output <new-directory>`
+compares recorded live entries/exits against fixed quote-based exit rules:
+0.1% net take-profit, 1% net stop, and both. Entry timing, capital, and LP
+allocation are held fixed. This is an exit-policy experiment, not a historical
+re-execution of every version of the scanner or a new entry strategy.
+
+Training precedes the chronological validation split. Only finalized lifecycle
+costs whose trade and rent facts were already observed before that split train
+the frozen p90 cost budget. Quotes include pool fees, price impact, and the
+minimum output under quoted slippage; the budget covers observed network costs,
+failed submissions, nonrefundable costs and cleanup. Full refundable rent return
+is an explicit assumption. Extra-cost and unrecovered-ATA-rent stress cases are
+reported. Hypothetical transactions can cost differently or fail, so modeled
+net returns are not proved realized profit after all costs.
+
+Missing quote opportunities cannot be recreated: the partial replay retains the
+actual baseline exit when no observed quote triggers. Quote coverage, unknown
+outcomes, and modeled-exit counts remain visible. Shared refund fees for actual
+fallback exits are grouped once. Historical policies changed over the sample;
+the recorded baseline must not be labeled a full backtest of today's code.
+
+`dry-tick` records new actual entry identities after config freeze, reads one
+position's native inventory and a sell quote, and freezes the first decision
+per alternative. It only invokes `pnl-onchain`, never deploy/close/swap. It does
+not alter the live trader. The timer samples one least-recently-observed open
+position per minute, with a 20-second quote budget. Missing native reads or quotes
+stay unmeasured. Closed pairs are reconciled in `dry-summary.json`; the current
+strategy uses actual cash, and alternate earlier exits stay explicitly modeled.
+A config hash prevents silent parameter changes mid-experiment. Use a new output
+directory for a new protocol. The daily report is not a performance guarantee.
