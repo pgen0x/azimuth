@@ -25,4 +25,14 @@ class SearchTests(unittest.TestCase):
         self.assertFalse(entry_eligible({},rule))
         self.assertTrue(entry_eligible({},None))
 
+    def test_pool_fee_filter_requires_recorded_finite_pre_entry_features(self):
+        rule={'min_pool_fee_pct':2}
+        e=dict(deployed_at=1000,signal=dict(fee_pct=2,entry_live_gates={'observed_at':990}))
+        self.assertTrue(entry_eligible(e,rule))
+        for fee in (None,1,float('nan'),float('inf')):
+            bad=copy.deepcopy(e);bad['signal']['fee_pct']=fee
+            self.assertFalse(entry_eligible(bad,rule))
+        e['signal']['entry_live_gates']['observed_at']=1001
+        self.assertFalse(entry_eligible(e,rule))
+
 if __name__=='__main__':unittest.main()

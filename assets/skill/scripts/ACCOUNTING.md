@@ -1305,6 +1305,15 @@ recorded as a skipped trade with zero trading cash flow, not a profitable exit;
 the baseline still retains its realized result. Missing pre-entry features do
 not qualify. Skips do not simulate reinvestment of freed capital. Live strategy
 parameters are unchanged; prospective outcomes may disprove either candidate.
+
+The optional dry-run entry filter `min_pool_fee_pct` uses the recorded signal's
+pool fee percentage with a pre-entry gate timestamp no more than 120 seconds old.
+Missing/nonfinite fee evidence fails eligibility. This fee tier is not earned
+yield. The fee-2% / net-TP-0.05% hypothesis has its own frozen prospective config
+(`net-fee-tier-20261021-v1`); historical training and later challenge were positive
+but an earlier cohort was negative. The later challenge was already inspected,
+so it cannot validate this new filter independently. No live promotion is enabled.
+
 # Frozen exit execution sensitivity
 
 `dlmm_net_execution_stress.py --source <search/result.json> --quotes
