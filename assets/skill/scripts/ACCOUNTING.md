@@ -1402,6 +1402,18 @@ so it cannot validate this new filter independently. No live promotion is enable
 
 # Frozen exit execution sensitivity
 
+Native price-path research uses `dlmm_price_path.py` and the optional
+`azimuth-sol-price-path.timer` (60 seconds after each completed run). It rotates
+through up to 30 recent candidate identities per tick using one confirmed
+`getMultipleAccountsInfoAndContext` batch per RPC attempt, without reading bin
+arrays, loading a private wallet, or signing transactions. RPC failover may make
+additional attempts; the outer process has a 25-second timeout. Wallet activity
+defers a read. Pool ownership, decoded token identity, bin step, and active bin
+must validate; missing accounts remain unmeasured. Facts retain RPC slot and local
+request/observation timestamps in `dlmm_candidate_price_paths.jsonl`. This is
+prospective sampled price movement, not fee evidence, exact intraminute OHLC,
+finalized accounting, or an entry gate. Existing sparse history is not backfilled.
+
 `dlmm_net_execution_stress.py --source <search/result.json> --quotes
 <memories/dlmm_liquidation_quotes.jsonl> --output <new-report.json>` evaluates
 the already selected training and validation exits under 0%, 1%, 3%, and 5%

@@ -1,0 +1,9 @@
+[Unit]
+Description=Azimuth native candidate price paths (research only)
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 %h/.hermes/profiles/solanza/skills/solana-dlmm/scripts/dlmm_price_path.py --profile %h/.hermes/profiles/solanza
+TimeoutStartSec=40
+UMask=0077
+NoNewPrivileges=true
