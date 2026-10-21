@@ -1391,3 +1391,15 @@ recorded as a skipped trade with zero trading cash flow, not a profitable exit;
 the baseline still retains its realized result. Missing pre-entry features do
 not qualify. Skips do not simulate reinvestment of freed capital. Live strategy
 parameters are unchanged; prospective outcomes may disprove either candidate.
+# Frozen exit execution sensitivity
+
+`dlmm_net_execution_stress.py --source <search/result.json> --quotes
+<memories/dlmm_liquidation_quotes.jsonl> --output <new-report.json>` evaluates
+the already selected training and validation exits under 0%, 1%, 3%, and 5%
+reductions in minimum token sale proceeds. It matches the exact position and
+decision timestamp and requires native inventory evidence. Missing or conflicting
+sale evidence leaves the aggregate unknown. Native SOL inventory and refundable
+rent are not shocked. Actual-exit fallback remains unchanged, and no strategy is
+reselected. These are sensitivity scenarios, not measured latency losses or
+executable fills; they do not authorize live promotion. The command refuses to
+overwrite an existing report.
