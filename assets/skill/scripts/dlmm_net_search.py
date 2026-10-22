@@ -53,7 +53,12 @@ def evaluate(data,start,end,policy,cost,entry_filter=None):
 
 
 def choose(scored):
-    eligible=[r for r in scored if r['training']['modeled_exits']>=3 and r['training']['evaluated']>=10]
+    # A late-settling loser can reverse a positive partial sum. Require the
+    # entire selected cohort to be measured before ranking its net return.
+    eligible=[r for r in scored if r['training']['modeled_exits']>=3
+              and r['training']['evaluated']>=10
+              and r['training'].get('unknown')==0
+              and r['training']['extra_cost_stress_lamports']>0]
     if not eligible:return None
     return max(eligible,key=lambda r:(r['training']['extra_cost_stress_lamports'],r['training']['net_lower_lamports'],r['name']))
 
@@ -67,7 +72,7 @@ def run(profile,output,source):
     grid=list(policies())
     protocol=dict(created_at=time.time(),start=start,split=split,end=end,policies=dict(grid),
                   cost_budget_lamports=config['cost_budget_lamports'],cost_source=str(source/'config.json'),
-                  selection='Max training lower net under +100000 lamports per modeled exit; >=3 modeled exits and >=10 evaluated entries.',
+                  selection='Max strictly positive training lower net under +100000 lamports per modeled exit; no unknown selected outcomes, >=3 modeled exits and >=10 evaluated entries.',
                   holdout='Score only the frozen training winner on subsequent period; no retuning after inspecting validation.',
                   limitation='Historical periods were previously inspected. This is a retrospective chronological challenge, not pristine holdout. Prospective dry run is independent.')
     write(output/'protocol.json',protocol)
@@ -108,6 +113,7 @@ def run_entry(profile,output,parent):
     rules=[dict(fee_tvl_pct_per_hour=f,min_traders=t)
            for f,t in itertools.product((0,.2,.5,1),(0,20,50))]
     write(output/'protocol.json',dict(created_at=time.time(),rules=rules,exit_policy=selection['policy'],parent=str(parent),
+        selection='Max strictly positive training lower net under +100000 lamports per modeled exit; no unknown selected outcomes, >=3 modeled exits and >=10 evaluated entries.',
         limitation='Second-stage research reuses inspected validation. Not independent validation; prospective dry run required.'))
     train=load(profile,protocol['split']-.001)
     scored=[dict(name=str(i),policy=selection['policy'],entry_filter=rule,
