@@ -146,6 +146,17 @@ remain unknown; no counterfactual profit is invented for paths not executed.
 
 ## Shadow study
 
+`dlmm_candidate_replay.py --profile <profile> --output <new-directory>` replays
+recorded candidate forecasts independently of live entries. It binds each anchor
+to its original native snapshots, reserves nonoverlapping pool intervals before
+examining outcomes, and compares the original geometry with a range one bin below
+the active price. Missing terminal observations remain unmeasured. The model caps
+inferred shares at 1% of each observed bin's supply and applies explicit network,
+entry-token and exit-token cost assumptions. Results are hypothetical ticket
+sensitivities, not funded portfolio returns: concurrent pools, uncertain fills,
+rent timing and market response still require separate validation. The command
+only reads profile evidence and refuses to overwrite an existing output directory.
+
 Scanner cooldown, momentum, audit and bundler/insider rejects preserve full candidate,
 pool and gate evidence under stable five-minute cohort IDs. Repeated IDs count once.
 Forward horizons are pulse 30 minutes, turnover 1 hour, casual 4 hours, multiday 24
