@@ -157,6 +157,17 @@ sensitivities, not funded portfolio returns: concurrent pools, uncertain fills,
 rent timing and market response still require separate validation. The command
 only reads profile evidence and refuses to overwrite an existing output directory.
 
+`dlmm_candidate_paper.py` collects prospective paired observations without opening
+live positions. The `azimuth-sol-candidate-paper.timer` runs once a minute, with
+at most two open paper cohorts and one native snapshot per run. Entry uses a fresh
+snapshot and already collected prior counters; terminal collection takes priority
+after the frozen one-hour horizon. Fresh ExactIn sell quotes replace the offline
+token haircut. Config and evaluator hashes are frozen, and stale/missing evidence
+remains unmeasured. The runner respects wallet trading activity and never signs or
+submits transactions. Quoted paper net still assumes inferred shares, estimated
+network/composition costs and returned rent; it does not prove executable profit
+or model a wallet's available capital.
+
 Scanner cooldown, momentum, audit and bundler/insider rejects preserve full candidate,
 pool and gate evidence under stable five-minute cohort IDs. Repeated IDs count once.
 Forward horizons are pulse 30 minutes, turnover 1 hour, casual 4 hours, multiday 24
