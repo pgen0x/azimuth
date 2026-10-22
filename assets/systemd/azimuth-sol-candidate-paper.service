@@ -1,0 +1,9 @@
+[Unit]
+Description=Azimuth unfunded candidate paper observations (read-only)
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 %h/.hermes/profiles/solanza/skills/solana-dlmm/scripts/dlmm_candidate_paper.py --profile %h/.hermes/profiles/solanza --output %h/.local/state/azimuth/optimization/candidate-paper-20261023-v1
+TimeoutStartSec=50
+UMask=0077
+NoNewPrivileges=true

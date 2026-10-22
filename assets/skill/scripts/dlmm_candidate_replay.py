@@ -88,6 +88,7 @@ def replay(base, terminal, below, offset, capital, network_cost, entry_bps, exit
                 fee_lamports=floor(fx * terminal_price + fy),
                 entry_friction_lamports=-floor(-entry_cost), exit_friction_lamports=-floor(-exit_cost),
                 network_cost_lamports=network_cost, terminal_token_value_lamports=floor(token_value),
+                terminal_token_raw=str(floor(x+fx)), terminal_sol_lamports=floor(y+fy),
                 initial_token_value_lamports=floor(initial_x * start_price),
                 max_share_fraction=float(largest_share), unspent_lamports=capital-spent,
                 extra_execution_stress_lamports=floor(net)-100000,
