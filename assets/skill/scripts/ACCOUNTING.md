@@ -157,6 +157,15 @@ submits transactions. Quoted paper net still assumes inferred shares, estimated
 network/composition costs and returned rent; it does not prove executable profit
 or model a wallet's available capital.
 
+`dlmm_candidate_portfolio.simulate` adds a finite cash budget to modeled tickets.
+Entry reserves the ticket, rent allowance and estimated costs before admitting
+another ticket. Capital returns only at the modeled observation/exit time;
+retained ATA rent returns after an explicit cleanup delay. Unmeasured exits keep
+their escrow unavailable and make final equity/net unknown. Cash conservation
+checks prevent counting reserved costs twice or treating missing outcomes as
+zero-return exits. This improves capacity modeling without converting hypothetical
+quotes or pool marks into proved wallet profit.
+
 Scanner cooldown, momentum, audit and bundler/insider rejects preserve full candidate,
 pool and gate evidence under stable five-minute cohort IDs. Repeated IDs count once.
 Forward horizons are pulse 30 minutes, turnover 1 hour, casual 4 hours, multiday 24
