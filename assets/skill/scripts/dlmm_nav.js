@@ -253,27 +253,41 @@ function tokenRentEvidence(tx, wallet) {
       && meta.postBalances[n]===0 && !(meta.postTokenBalances || []).some(t=>t.accountIndex===n)) {
     evidence.inline_closed=[{account:keys[n],mint:token.mint,pre_lamports:meta.preBalances[n]}];
   }
-  // Accept refunds only for pure empty-token-account closes with every native
+  // Accept refunds only for pure token-account closes with every native
   // balance change explained. Combined swaps/LP closes stay unmeasured here.
+  // Dust maintenance (`reclaim-empty-accounts --dust`) may burn an account's
+  // WHOLE balance with burnChecked before closing it in the same transaction;
+  // the burn moves no lamports, so the refund is still exact. The burned raw
+  // amount is recorded per refund so forfeited tokens stay visible.
   if (keys[0]!==wallet || message.accountKeys[0].signer!==true
       || !Number.isSafeInteger(meta.fee) || meta.fee<0
       || meta.preBalances.length!==keys.length || meta.postBalances.length!==keys.length
       || [...meta.preBalances,...meta.postBalances].some(n=>!Number.isSafeInteger(n)||n<0)
       || (meta.postTokenBalances || []).length) return evidence;
-  const changes=keys.map(()=>0), refunds=[], closed=new Set(); changes[0]=-meta.fee;
+  const changes=keys.map(()=>0), refunds=[], closed=new Set(), burned=new Map(); changes[0]=-meta.fee;
   for (const i of instructions) {
     if (i.programId?.toString()==='ComputeBudget111111111111111111111111111111') continue;
     const info=i.parsed?.info, n=keys.indexOf(info?.account);
     const token=(meta.preTokenBalances || []).find(t=>t.accountIndex===n);
+    if (TOKEN_PROGRAMS.includes(i.programId?.toString()) && i.parsed?.type==='burnChecked') {
+      const raw=info?.tokenAmount?.amount;
+      if (info.authority!==wallet || n<=0 || burned.has(n) || closed.has(n)
+          || !token || token.owner!==wallet || token.mint===SOL || info.mint!==token.mint
+          || typeof raw!=='string' || !/^[1-9]\d*$/.test(raw) || raw!==token.uiTokenAmount?.amount) return evidence;
+      burned.set(n,raw);
+      continue;
+    }
     if (!TOKEN_PROGRAMS.includes(i.programId?.toString()) || i.parsed?.type!=='closeAccount'
         || info?.destination!==wallet || info.owner!==wallet || n<=0 || closed.has(n)
-        || !token || token.owner!==wallet || token.mint===SOL || token.uiTokenAmount?.amount!=='0'
+        || !token || token.owner!==wallet || token.mint===SOL
+        || token.uiTokenAmount?.amount!==(burned.get(n) ?? '0')
         || meta.preBalances[n]<=0 || meta.postBalances[n]!==0) return evidence;
     closed.add(n);
     const lamports=meta.preBalances[n]; changes[n]-=lamports; changes[0]+=lamports;
-    refunds.push({account:keys[n],mint:token.mint,lamports});
+    refunds.push({account:keys[n],mint:token.mint,lamports,...(burned.has(n) ? {burned_raw:burned.get(n)} : {})});
   }
   if (refunds.length && closed.size===(meta.preTokenBalances || []).length
+      && [...burned.keys()].every(n=>closed.has(n))
       && changes.every((n,i)=>Number.isSafeInteger(n)&&meta.postBalances[i]-meta.preBalances[i]===n)) {
     evidence.refunded=refunds;
     delete evidence.refunds_unmeasured;

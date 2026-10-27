@@ -442,19 +442,19 @@ function tokenAccountCanClose(account, owner, raw = "0") {
 }
 
 // Full-balance token -> SOL quote for dust maintenance. Returns lamports out,
-// 0n for a definitive no-route answer, or null when the quote is unknown.
-// Unknown never authorizes a burn.
+// or null when the value is unknown. Unknown never authorizes a burn.
+// A "no route" answer is unknown too, not zero: it bounds nothing about the
+// balance's size, routes come back (a live settlement has sat deferred on
+// swap_no_route), and a marker-less bag would otherwise burn in full.
 async function dustQuoteLamports(mint, raw) {
+  const sol = "So11111111111111111111111111111111111111112";
   try {
-    const url = `https://api.jup.ag/swap/v1/quote?inputMint=${mint}&outputMint=So11111111111111111111111111111111111111112&amount=${raw}&slippageBps=100`;
+    const url = `https://api.jup.ag/swap/v1/quote?inputMint=${mint}&outputMint=${sol}&amount=${raw}&slippageBps=100`;
     const res = await fetch(url, { signal: AbortSignal.timeout(8000) });
-    if (!res.ok) {
-      let code;
-      try { code = JSON.parse(await res.text()).errorCode; } catch { /* unknown */ }
-      return res.status === 400 && ["COULD_NOT_FIND_ANY_ROUTE", "NO_ROUTES_FOUND", "TOKEN_NOT_TRADABLE"].includes(code) ? 0n : null;
-    }
+    if (!res.ok) return null;
     const q = await res.json();
-    if (q?.inputMint !== mint || q?.inAmount !== raw || !/^\d+$/.test(String(q?.outAmount))) return null;
+    if (q?.inputMint !== mint || q?.outputMint !== sol || q?.inAmount !== raw
+        || !/^\d+$/.test(String(q?.outAmount))) return null;
     return BigInt(q.outAmount);
   } catch {
     return null;
@@ -462,9 +462,9 @@ async function dustQuoteLamports(mint, raw) {
 }
 
 // Dust mode: settlement leaves small token balances whose accounts lock more
-// rent than the tokens are worth. A balance is dust when its full-balance quote
-// is at most half the rent it locks (or no route exists); it is burned and the
-// account closed in the same transaction, returning the rent as native SOL.
+// rent than the tokens are worth. A balance is dust when a fresh full-balance
+// quote prices it at most half the rent it locks; it is burned and the account
+// closed in the same transaction, returning the rent as native SOL.
 const DUST_MAX_QUOTES = 16;
 
 async function reclaimEmptyAccounts(execute = false, batch = false, dust = false) {
@@ -593,7 +593,10 @@ async function reclaimEmptyAccounts(execute = false, batch = false, dust = false
     }
     tx.sign(wallet);
     if (accounts.some(a => a.dust)) {
-      // A burn is irreversible: the exact signed transaction must simulate cleanly first.
+      // A burn is irreversible, so preflight the batch before broadcast. web3.js
+      // simulates a copy of these instructions under a fresh blockhash without
+      // signature verification; that is a check on the instructions, not on the
+      // signed bytes. The burn+close pair is atomic on-chain either way.
       const simulated = await connection.simulateTransaction(tx);
       if (simulated?.value?.err !== null) throw new Error("Rent reclaim refused: dust burn simulation failed");
     }
