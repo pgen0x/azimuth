@@ -324,6 +324,22 @@ signed transaction identity for reconciliation before another batch can run.
 Rent batches use a finalized blockhash and require a measured network fee below
 the reclaimed rent before signing; a missing fee still prevents submission.
 
+`--dust` (opt-in, off in the shipped unit) also admits NONZERO accounts whose
+whole balance is worth at most half the rent it locks. Settlement closes an ATA
+only when its swap empties it, so dust-sized remainders otherwise lock
+~0.002 SOL each forever, and about half of all closes leave one behind.
+Each candidate gets a fresh
+full-balance Jupiter quote to SOL: a definitive no-route answer counts as zero,
+an unknown quote never burns, and at most 16 quotes run per invocation. Mints
+with an open position or a `dlmm_settlements` marker are skipped, nonzero
+Token-2022 accounts are admitted only with `immutableOwner` alone, and an
+unreadable marker refuses the run. The batch burns the exact raw balance
+(`burnChecked`) before each close; the fee plus the forfeited quotes must stay
+below the reclaimed rent, and the exact signed transaction must simulate
+without error before broadcast. A refund is a native-cash conversion of rent
+the NAV already counts, never trading income: NAV falls by the forfeited quotes
+and fee, liquid native SOL rises by the rent.
+
 The scheduled unit passes `--batch`, which waits for at least two eligible
 accounts to share one network fee. A singleton is reclaimed immediately when
 its rent exceeds free native cash above the executor's existing 0.2 SOL reserve;

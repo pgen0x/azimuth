@@ -1171,6 +1171,45 @@ vm.runInNewContext("const productionExitTransport=confirmExitTransaction;confirm
   await assert.rejects(reclaimEmptyAccounts(true,true),/unknown or uneconomic/);
   assert.equal(signCalls,signCount);assert.equal(sends,beforeEntryRent+2);fee=5000;
   Connection.prototype.getBalanceAndContext=balanceReader;
+  // Dust mode (opt-in): burn + close only when the full-balance quote is at
+  // most half the locked rent; unknown quotes, settlements in flight, active
+  // mints and a failing simulation never burn. Default mode never burns.
+  {
+    deps["@solana/spl-token"].createBurnCheckedInstruction=(acct,mint,authority,amount,decimals,signers,program)=>{
+      assert.equal(authority,wallet.publicKey);assert.equal(typeof amount,"bigint");assert.equal(decimals,6);
+      assert.equal(program.toString(),"classic-token");return `burn:${acct}:${amount}`;};
+    const dustAccount=(name,raw,mint)=>account(name,{mint,tokenAmount:{amount:raw,decimals:6}});
+    const quotes={"dust-mint":"700000","norout-mint":null,"rich-mint":"800000","down-mint":"err","TOKEN":"1","pending-mint":"1"};
+    const quoted=[];const originalFetch=sandbox.fetch;
+    sandbox.fetch=async url=>{const mint=new URL(url).searchParams.get("inputMint"),amount=new URL(url).searchParams.get("amount");quoted.push(mint);
+      const q=quotes[mint];if(q==="err")throw new Error("quote timeout");
+      if(q===null)return{ok:false,status:400,text:async()=>JSON.stringify({errorCode:"COULD_NOT_FIND_ANY_ROUTE"})};
+      return{ok:true,json:async()=>({inputMint:mint,inAmount:amount,outAmount:q})};};
+    let simErr=null,sims=0;const originalSim=Connection.prototype.simulateTransaction;
+    Connection.prototype.simulateTransaction=async()=>{sims++;return{context:{slot:10},value:{err:simErr}};};
+    const settleDir=path.join(root,"memories/dlmm_settlements");fs.mkdirSync(settleDir,{recursive:true});
+    fs.writeFileSync(path.join(settleDir,"pos.json"),JSON.stringify({position:"pos",mint:"pending-mint"}));
+    tokenAccounts=[dustAccount("dust","5","dust-mint"),dustAccount("norout","9","norout-mint"),dustAccount("rich","7","rich-mint"),
+      dustAccount("down","3","down-mint"),dustAccount("active-dust","4","TOKEN"),dustAccount("pending","2","pending-mint"),account("eligible")];
+    const plain=await reclaimEmptyAccounts();
+    assert.deepEqual(Array.from(plain.accounts,a=>a.account),["eligible"]);assert.equal(quoted.length,0);
+    const dry=await reclaimEmptyAccounts(false,false,true);
+    assert.deepEqual(Array.from(dry.accounts,a=>a.account),["eligible","dust","norout"]);
+    assert.deepEqual(quoted,["dust-mint","norout-mint","rich-mint","down-mint"]); // active + pending mints are never quoted
+    assert.equal(dry.forfeited_quote_lamports,700000);assert.equal(dry.accounts[1].burn_raw,"5");assert.equal(sends,beforeEntryRent+2);
+    rentInstructions.length=0;simErr={InstructionError:[0,"Custom"]};
+    await assert.rejects(reclaimEmptyAccounts(true,false,true),/simulation failed/);assert.equal(sends,beforeEntryRent+2);
+    simErr=null;rentInstructions.length=0;
+    const burned=await reclaimEmptyAccounts(true,false,true);
+    assert.equal(burned.fee_lamports,5000);assert.equal(sends,beforeEntryRent+3);assert.equal(sims,2);
+    assert.deepEqual(rentInstructions,["eligible","burn:dust:5","dust","burn:norout:9","norout"]);
+    quotes["dust-mint"]="2000000";tokenAccounts=[dustAccount("dust","5","dust-mint")]; // quote*2 > rent: keep the tokens
+    assert.equal((await reclaimEmptyAccounts(false,false,true)).accounts.length,0);
+    fs.writeFileSync(path.join(settleDir,"bad.json"),"{");
+    await assert.rejects(reclaimEmptyAccounts(false,false,true),/unreadable settlement marker/);
+    fs.rmSync(settleDir,{recursive:true,force:true});
+    sandbox.fetch=originalFetch;Connection.prototype.simulateTransaction=originalSim;
+  }
   // Exercise the real CLI parser, not a copy of its option handling.
   let cliSwapArgs;
   sandbox.captureCLISwap = async (...args) => {cliSwapArgs=args;return {success:true};};
@@ -1187,10 +1226,10 @@ vm.runInNewContext("const productionExitTransport=confirmExitTransaction;confirm
   let cliRentArgs;
   sandbox.captureCLIRent=async(...args)=>{cliRentArgs=args;return {success:true};};
   vm.runInNewContext("reclaimEmptyAccounts = captureCLIRent;",sandbox);
-  for (const options of [[],["--batch"],["--execute"],["--execute","--batch"]]) {
+  for (const options of [[],["--batch"],["--execute"],["--execute","--batch"],["--dust"],["--execute","--batch","--dust"]]) {
     sandbox.process.argv=originalArgv.concat(["reclaim-empty-accounts",...options]);
     await sandbox.module.exports.runCLI();
-    assert.deepEqual(Array.from(cliRentArgs),[options.includes("--execute"),options.includes("--batch")]);
+    assert.deepEqual(Array.from(cliRentArgs),[options.includes("--execute"),options.includes("--batch"),options.includes("--dust")]);
   }
   cliRentArgs=null;sandbox.process.argv=originalArgv.concat(["reclaim-empty-accounts","--unknown"]);
   await assert.rejects(sandbox.module.exports.runCLI(),/exit 1/);assert.equal(cliRentArgs,null);
