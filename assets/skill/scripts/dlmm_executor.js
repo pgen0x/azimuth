@@ -446,7 +446,33 @@ function tokenAccountCanClose(account, owner, raw = "0") {
     && Number.isSafeInteger(account.lamports) && account.lamports > 0;
 }
 
-async function reclaimEmptyAccounts(execute = false, batch = false) {
+// Full-balance token -> SOL quote for dust maintenance. Returns lamports out,
+// or null when the value is unknown. Unknown never authorizes a burn.
+// A "no route" answer is unknown too, not zero: it bounds nothing about the
+// balance's size, routes come back (a live settlement has sat deferred on
+// swap_no_route), and a marker-less bag would otherwise burn in full.
+async function dustQuoteLamports(mint, raw) {
+  const sol = "So11111111111111111111111111111111111111112";
+  try {
+    const url = `https://api.jup.ag/swap/v1/quote?inputMint=${mint}&outputMint=${sol}&amount=${raw}&slippageBps=100`;
+    const res = await fetch(url, { signal: AbortSignal.timeout(8000) });
+    if (!res.ok) return null;
+    const q = await res.json();
+    if (q?.inputMint !== mint || q?.outputMint !== sol || q?.inAmount !== raw
+        || !/^\d+$/.test(String(q?.outAmount))) return null;
+    return BigInt(q.outAmount);
+  } catch {
+    return null;
+  }
+}
+
+// Dust mode: settlement leaves small token balances whose accounts lock more
+// rent than the tokens are worth. A balance is dust when a fresh full-balance
+// quote prices it at most half the rent it locks; it is burned and the account
+// closed in the same transaction, returning the rent as native SOL.
+const DUST_MAX_QUOTES = 16;
+
+async function reclaimEmptyAccounts(execute = false, batch = false, dust = false) {
   const { TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID, createCloseAccountInstruction } = require("@solana/spl-token");
   const wallet = getWallet(), owner = wallet.publicKey.toString();
   const releaseEntry = await acquireDeployLock(owner);
@@ -485,6 +511,28 @@ async function reclaimEmptyAccounts(execute = false, batch = false) {
         const info = account.data?.parsed?.info;
         return tokenAccountCanClose(account, owner) && !excluded.has(info.mint);
       });
+      if (dust) {
+        // A settlement still in flight owns its mint's balance.
+        const dir = path.join(PROFILE_DIR, "memories", "dlmm_settlements");
+        for (const file of fs.existsSync(dir) ? fs.readdirSync(dir).filter(f => f.endsWith(".json")) : []) {
+          let mint;
+          try { mint = JSON.parse(fs.readFileSync(path.join(dir, file), "utf8")).mint; }
+          catch { throw new Error("Rent reclaim refused: unreadable settlement marker"); }
+          if (mint) excluded.add(mint);
+        }
+        let quotes = 0;
+        for (const candidate of candidates) {
+          const info = candidate.account.data?.parsed?.info, raw = info?.tokenAmount?.amount;
+          const decimals = info?.tokenAmount?.decimals;
+          if (!/^[1-9]\d*$/.test(String(raw)) || !Number.isInteger(decimals) || excluded.has(info.mint)
+              || !tokenAccountCanClose(candidate.account, owner, raw)) continue;
+          if (accounts.length >= 8 || quotes >= DUST_MAX_QUOTES) break;
+          quotes++;
+          const quote = await dustQuoteLamports(info.mint, raw);
+          if (quote === null || quote * 2n > BigInt(candidate.account.lamports)) continue;
+          accounts.push({ ...candidate, dust: { raw, decimals, quote_lamports: Number(quote) } });
+        }
+      }
       let nativeBalance = null;
       if (batch && accounts.length === 1) {
         try { nativeBalance = (await connection.getBalanceAndContext(wallet.publicKey, "finalized")).value; }
@@ -498,8 +546,11 @@ async function reclaimEmptyAccounts(execute = false, batch = false) {
     const accounts = state.accounts.slice(0, 8);
     const result = { success: true, dry_run: !execute || process.env.DRY_RUN === "true",
       eligible: state.accounts.length, accounts: accounts.map(a => ({ account: a.pubkey.toString(),
-        mint: a.account.data.parsed.info.mint, program: a.account.owner.toString(), rent_lamports: a.account.lamports })),
+        mint: a.account.data.parsed.info.mint, program: a.account.owner.toString(), rent_lamports: a.account.lamports,
+        ...(a.dust ? { burn_raw: a.dust.raw, quote_lamports: a.dust.quote_lamports } : {}) })),
       recovered_lamports_before_fee: accounts.reduce((sum, a) => sum + a.account.lamports, 0) };
+    const forfeited = accounts.reduce((sum, a) => sum + (a.dust?.quote_lamports || 0), 0);
+    if (dust) result.forfeited_quote_lamports = forfeited;
     let entryLiquidityShortfall = null;
     if (batch) {
       result.batch_minimum_accounts = 2;
@@ -526,19 +577,34 @@ async function reclaimEmptyAccounts(execute = false, batch = false) {
     if (result.dry_run || !accounts.length) return result;
     const connection = state.connection;
     const tx = new Transaction();
-    for (const a of accounts) tx.add(createCloseAccountInstruction(a.pubkey, wallet.publicKey, wallet.publicKey, [], a.account.owner));
+    for (const a of accounts) {
+      if (a.dust) {
+        const { createBurnCheckedInstruction } = require("@solana/spl-token");
+        tx.add(createBurnCheckedInstruction(a.pubkey, new PublicKey(a.account.data.parsed.info.mint), wallet.publicKey,
+          BigInt(a.dust.raw), a.dust.decimals, [], a.account.owner));
+      }
+      tx.add(createCloseAccountInstruction(a.pubkey, wallet.publicKey, wallet.publicKey, [], a.account.owner));
+    }
     // A finalized hash is already available to the bank measuring the fee.
     const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash("finalized");
     tx.recentBlockhash = blockhash;
     tx.feePayer = wallet.publicKey;
     const fee = (await connection.getFeeForMessage(tx.compileMessage(), "confirmed")).value;
-    if (!Number.isSafeInteger(fee) || fee < 0 || fee >= result.recovered_lamports_before_fee) {
+    if (!Number.isSafeInteger(fee) || fee < 0 || fee + forfeited >= result.recovered_lamports_before_fee) {
       throw new Error("Rent reclaim refused: unknown or uneconomic network fee");
     }
     if (entryLiquidityShortfall !== null && result.recovered_lamports_before_fee-fee < entryLiquidityShortfall) {
       return {...result, deferred: true, reason: "singleton_net_below_entry_floor", fee_lamports: fee};
     }
     tx.sign(wallet);
+    if (accounts.some(a => a.dust)) {
+      // A burn is irreversible, so preflight the batch before broadcast. web3.js
+      // simulates a copy of these instructions under a fresh blockhash without
+      // signature verification; that is a check on the instructions, not on the
+      // signed bytes. The burn+close pair is atomic on-chain either way.
+      const simulated = await connection.simulateTransaction(tx);
+      if (simulated?.value?.err !== null) throw new Error("Rent reclaim refused: dust burn simulation failed");
+    }
     const raw = tx.serialize(), signature = bs58.encode(tx.signature);
     fs.mkdirSync(path.dirname(pendingPath), { recursive: true, mode: 0o700 });
     fs.writeFileSync(pendingPath, JSON.stringify({ signature, blockhash, lastValidBlockHeight }), { mode: 0o600, flag: "wx", flush: true });
@@ -1967,8 +2033,8 @@ async function main() {
   
   try {
     if (command === "reclaim-empty-accounts") {
-      if (args.slice(1).some(arg => !["--execute", "--batch"].includes(arg))) throw new Error("Usage: reclaim-empty-accounts [--execute] [--batch]");
-      console.log(JSON.stringify(await reclaimEmptyAccounts(args.includes("--execute"), args.includes("--batch"))));
+      if (args.slice(1).some(arg => !["--execute", "--batch", "--dust"].includes(arg))) throw new Error("Usage: reclaim-empty-accounts [--execute] [--batch] [--dust]");
+      console.log(JSON.stringify(await reclaimEmptyAccounts(args.includes("--execute"), args.includes("--batch"), args.includes("--dust"))));
     } else if (command === "accounting") {
       const recorded = await reconcileAccounting();
       const { collect } = require("./dlmm_nav.js");

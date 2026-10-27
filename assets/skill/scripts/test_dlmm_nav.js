@@ -42,6 +42,25 @@ for(const alter of [t=>{t.meta.err='failed'},t=>{t.meta.postBalances[0]--},
  const t=JSON.parse(JSON.stringify(reclaimedToken));alter(t);assert.deepEqual(transactionFact(t,wallet,'unproved').token_rent_evidence.refunded,[]);
 }
 
+// Dust maintenance: burnChecked of the WHOLE balance, then close, in one tx.
+// The refund stays exact (a burn moves no lamports) and records the burned raw.
+const burnedToken=JSON.parse(JSON.stringify(reclaimedToken));
+burnedToken.meta.preTokenBalances[0].uiTokenAmount.amount='7';
+burnedToken.transaction.message.instructions.unshift({programId:rentToken,parsed:{type:'burnChecked',
+ info:{account:'ata',mint:'mint',authority:wallet,tokenAmount:{amount:'7',decimals:6}}}});
+assert.deepEqual(transactionFact(burnedToken,wallet,'dust').token_rent_evidence,
+ {version:1,funded:[],refunded:[{account:'ata',mint:'mint',lamports:200,burned_raw:'7'}]});
+for(const alter of [t=>{t.transaction.message.instructions[0].parsed.info.tokenAmount.amount='6'},
+ t=>{t.transaction.message.instructions[0].parsed.info.authority='other'},
+ t=>{t.transaction.message.instructions[0].parsed.info.mint='other-mint'},
+ t=>{t.transaction.message.instructions.reverse()},
+ t=>{t.transaction.message.instructions.pop()},
+ t=>{t.transaction.message.instructions.splice(1,0,t.transaction.message.instructions[0])},
+ t=>{t.transaction.message.instructions[0].programId='unknown'},
+ t=>{t.meta.postBalances[0]--}]){
+ const t=JSON.parse(JSON.stringify(burnedToken));alter(t);assert.deepEqual(transactionFact(t,wallet,'unproved').token_rent_evidence.refunded,[]);
+}
+
 // An atomic sale+close releases rent; its wallet credit is not all swap proceeds.
 const mixedClose=JSON.parse(JSON.stringify(reclaimedToken));
 mixedClose.meta.preTokenBalances[0].uiTokenAmount.amount='10';
