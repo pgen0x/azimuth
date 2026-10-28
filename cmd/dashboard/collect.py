@@ -171,18 +171,43 @@ def nav_at(path, t, need=(), tries=50, meta=None):
                 meta['ordering_verified']=not meta.get('out_of_order',False)
                 if incomplete(meta) or meta.get('out_of_order'): meta['status']='partial'
                 return latest
-            meta.update(status='partial',ordering_assumption='chronological_append_not_fully_verified')
+            # Whole-file ordering cannot be proved within the bounds; check it where we looked.
+            # Every visited (offset, ts) plus one neighbour line on each side of the pick must
+            # be non-decreasing; any observed inversion marks the lookup partial.
+            meta.update(ordering_assumption='visited_window_monotonic')
+            visited={}
+            def seen(item):
+                if item is not None: visited[item[0]]=item[2]
+                return item
+            def previous(start):
+                back=65536
+                while back<=4*NAV_LINE_BYTES:
+                    cursor=max(0,start-back); last=None
+                    while True:
+                        item=_nav_line(f,cursor,size,meta,deadline)
+                        if item is None or item[0]>=start: break
+                        last=item; cursor=item[1]
+                    if last is not None or cursor==0: return seen(last)
+                    back*=4
+                return None
+            def ordered():
+                stamps=[visited[k] for k in sorted(visited)]
+                return all(a<=b for a,b in zip(stamps,stamps[1:]))
             limit=size
             for _ in range(tries):
-                first=_nav_line(f,0,size,meta,deadline)
+                first=seen(_nav_line(f,0,size,meta,deadline))
                 if not first or first[0]>=limit or first[2]>t: return None
                 best,lo,hi=first,first[1],limit
                 while lo<hi:
-                    mid=(lo+hi)//2; item=_nav_line(f,mid,size,meta,deadline)
+                    mid=(lo+hi)//2; item=seen(_nav_line(f,mid,size,meta,deadline))
                     if item is None or item[0]>=limit or item[2]>t: hi=mid
                     else: best,lo=item,item[1]
                 row=best[3]
-                if number(row.get('ts')) and row['ts']<=t and all(number(row.get(k)) for k in need): return row
+                if number(row.get('ts')) and row['ts']<=t and all(number(row.get(k)) for k in need):
+                    previous(best[0]); seen(_nav_line(f,best[1],size,meta,deadline))
+                    meta['visited_rows']=len(visited)
+                    if not ordered(): meta.update(status='partial',out_of_order=True)
+                    return row
                 limit=best[0]
             meta['status']='work_cap'
     except NavBudget as e: meta['status']=str(e)
@@ -217,7 +242,7 @@ def north_star(memory, now, days=14):
             a,b=prev.get('external_flow_lamports'),item['external_flow_lamports']
             item['d_external_sol']=(b-a)/1e9 if lamports(a,True) and lamports(b,True) else None
         out.append(item); prev=item
-    return {'days':out,'status':'partial' if any(incomplete(r['source']) for r in out) else 'ok','basis':'Last snapshot per WIB day, including unknown values. known = native + SPL mark + LP mark + refundable rent. cash = native + LP mark + refundable rent (no SPL marks). Deltas require consecutive days and complete source selection. Bounded seeks on large files cannot prove whole-file ordering and are marked partial.',
+    return {'days':out,'status':'partial' if any(incomplete(r['source']) for r in out) else 'ok','basis':'Last snapshot per WIB day, including unknown values. known = native + SPL mark + LP mark + refundable rent. cash = native + LP mark + refundable rent (no SPL marks). Deltas require consecutive days and complete source selection. Large files are searched within fixed read bounds; ordering is checked on every visited row plus one neighbour line on each side of the pick, and only an observed inversion marks a day partial.',
             'caveats':['SPL marks drop out when a quote is deferred or a token is unpriced: known then falls without a trade (phantom loss). cash excludes SPL marks and is immune to that, but also misses real token value.',
                        'External deposits/withdrawals are not netted out of either delta; check d_external_sol before reading a jump as profit.',
                        'Refundable rent is a recoverable reserve, not income; native growth can be recovered principal or rent.']}
@@ -374,7 +399,15 @@ def nav_bridge(memory, now, days=14):
            ('partial_lifecycles','Partial lifecycles straddling the window',partial['cash']),
            ('spl_coverage','SPL valuation coverage (priced at one end only)',d_spl-spl_both)]
     comps.append(('unexplained','Unexplained residual',d_known-sum(v for _,_,v in comps)))
-    incomplete_sources=[k for k,m in sources.items() if incomplete(m)]
+    # dlmm_closes.jsonl only labels modes here. Legacy corrupt lines are reported; they make the
+    # bridge incomplete only when a complete lifecycle in this window has no mode label.
+    closes_meta=sources['closes']
+    mode_unknown=sum(v['n'] for k,v in by_mode.items() if k=='unknown')
+    out['closes_invalid_lines']=closes_meta.get('invalid_lines',0); out['mode_unknown']=mode_unknown
+    closes_ok=(closes_meta.get('status') in ('ok','partial') and not closes_meta.get('truncated')
+               and not closes_meta.get('partial_line') and (closes_meta.get('status')=='ok' or closes_meta.get('invalid_lines'))
+               and mode_unknown==0)
+    incomplete_sources=[k for k,m in sources.items() if incomplete(m) and not (k=='closes' and closes_ok)]
     tx_delta=optional_sum(r.get('wallet_delta_lamports') if lamports(r.get('wallet_delta_lamports'),True) else None for r in win)
     if incomplete(sources['wallet_transactions']) or 'transaction_slot' in values_unknown or 'wallet_history_incomplete' in values_unknown: tx_delta=None
     unknown=set(values_unknown)

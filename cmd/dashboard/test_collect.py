@@ -150,8 +150,47 @@ class CollectorTests(unittest.TestCase):
                     else:
                         with f.open('a') as h:h.write({'corrupt':'broken\n','partial':'{"x":','non_object':'[]\n','bad_key':'{"position":[],"signature":[]}\n'}[corruption])
                     b=c.nav_bridge(self.m,T,1)
+                    if name=='dlmm_closes.jsonl' and corruption in ('corrupt','non_object','bad_key'):
+                        # closes only label modes: a bad legacy line with every window lifecycle labelled
+                        # is reported, not an incomplete bridge (fix2)
+                        self.assertEqual(b['status'],'ok');self.assertGreater(b['closes_invalid_lines'],0);self.assertEqual(b['mode_unknown'],0)
+                        continue
                     self.assertNotEqual(b['status'],'ok');self.assertTrue(b['incomplete_sources'])
                     self.assertIsNone(next(x['sol'] for x in b['components'] if x['key']=='rent_ledger'))
+    def test_bridge_closes_corruption_that_drops_a_mode_is_incomplete(self):
+        bridge_fixture(self.m);f=self.m/'dlmm_closes.jsonl'
+        f.write_text('broken\n')  # every label gone: the window lifecycle is now mode-unknown
+        b=c.nav_bridge(self.m,T,1)
+        self.assertEqual(b['mode_unknown'],1);self.assertIn('closes',b['incomplete_sources'])
+    def _big_nav(self,rows,pad=40_000):
+        with (self.m/'dlmm_nav.jsonl').open('w') as h:
+            for r in rows: h.write(json.dumps(dict(r,pad='x'*pad))+'\n')
+        self.assertGreater((self.m/'dlmm_nav.jsonl').stat().st_size,c.NAV_FULL_SCAN_BYTES)
+    def test_large_monotonic_nav_gives_deltas(self):
+        day=86400;base=20000*day-c.WIB
+        rows=[dict(ts=base+i*day+j*2400,native_sol=1.0+i*.01,lp_mark_sol=0.0,refundable_rent_sol=.01,known_asset_subtotal_sol=1.01+i*.01,
+                   external_flow_lamports=0,wallet_history_complete=True) for i in range(4) for j in range(30)]
+        self._big_nav(rows)
+        ns=c.north_star(self.m,base+3*day+20*3600,days=3)
+        full=[d for d in ns['days'] if d['status']=='ok']
+        self.assertEqual(len(full),3);self.assertEqual(ns['days'][-1]['status'],'partial_day')
+        for d in ns['days'][1:]:
+            self.assertAlmostEqual(d['d_cash_sol'],.01);self.assertEqual(d['source']['ordering_assumption'],'visited_window_monotonic')
+    def test_inversion_next_to_the_pick_is_partial(self):
+        rows=[dict(ts=100*i,native_sol=1.0) for i in range(120)]
+        rows.insert(21,dict(ts=1,native_sol=9.0))  # out-of-order neighbour right after the pick for t=2000
+        self._big_nav(rows)
+        meta={};row=c.nav_at(self.m/'dlmm_nav.jsonl',2000,meta=meta)
+        self.assertIn(row['ts'],(1,2000));self.assertEqual(meta['status'],'partial');self.assertTrue(meta['out_of_order'])
+        meta={};c.nav_at(self.m/'dlmm_nav.jsonl',500,meta=meta)  # inversion far from this pick
+        self.assertEqual(meta['status'],'ok')
+    def test_neighbour_lines_catch_an_unvisited_inversion(self):
+        # Found by search: the binary search never visits the inverted row; only the +1 neighbour read sees it.
+        rows=[dict(ts=100*i,native_sol=1.0) for i in range(120)]
+        rows.insert(20,dict(ts=1850,native_sol=2.0))
+        self._big_nav(rows)
+        meta={};c.nav_at(self.m/'dlmm_nav.jsonl',1900,meta=meta)
+        self.assertEqual(meta['status'],'partial');self.assertTrue(meta['out_of_order'])
     def test_bridge_unknown_values_and_history(self):
         for field in ('fee_lamports','wallet_delta_lamports','nonrefundable_account_cost_lamports'):
             bridge_fixture(self.m);f=self.m/'dlmm_wallet_transactions.jsonl';data=[json.loads(l) for l in f.read_text().splitlines()];data[0][field]=None;rows(f,data)
