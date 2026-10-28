@@ -10,7 +10,7 @@ import (
 )
 
 func TestReadOnlyCachedAPI(t *testing.T) {
-	s := &server{data: object{"nav": object{"nav_sol": nil, "native_sol": 0.0}, "journal": []any{object{"stage": "swap", "evidence": object{"signature": "proof-1"}}, object{"stage": "gate", "evidence": object{"pool": "pool-2"}}}}}
+	s := &server{data: object{"north_star": object{"days": []any{}}, "nav": object{"nav_sol": nil, "native_sol": 0.0}, "journal": []any{object{"stage": "swap", "evidence": object{"signature": "proof-1"}}, object{"stage": "gate", "evidence": object{"pool": "pool-2"}}}}}
 	for _, tc := range []struct {
 		method, path, host string
 		status             int
@@ -22,6 +22,7 @@ func TestReadOnlyCachedAPI(t *testing.T) {
 		{"GET", "/api/journal?offset=-1", "localhost", 400, "invalid offset"},
 		{"POST", "/api/redis", "localhost", 405, "read only"},
 		{"GET", "/api/overview", "attacker.example", 403, "localhost only"},
+		{"GET", "/api/capital", "localhost", 200, `"north_star":{"days":[]}`},
 		{"GET", "/api/command", "localhost", 404, "404"},
 	} {
 		r := httptest.NewRequest(tc.method, tc.path, nil)
@@ -92,5 +93,45 @@ with tempfile.TemporaryDirectory() as tmp:
 	out, err := exec.Command("python3", "-c", code).CombinedOutput()
 	if err != nil {
 		t.Fatalf("collector check: %v %s", err, out)
+	}
+}
+
+func TestNorthStarFromNavHistory(t *testing.T) {
+	// Synthetic NAV history: binary search must equal a linear scan, null parts stay null.
+	code := strings.Split(collector, "if __name__=='__main__':")[0] + `
+import random, tempfile
+rnd=random.Random(7)
+for trial in range(150):
+    with tempfile.TemporaryDirectory() as tmp:
+        p=Path(tmp)/'nav.jsonl'; rows=[]; ts=1000
+        for i in range(rnd.randint(1,40)):
+            ts+=rnd.randint(0,3); rows.append({'ts':ts,'native_sol':None if rnd.random()<.15 else 1.0,'pad':'x'*rnd.randint(0,200)})
+        body=[json.dumps(r)+'\n' for r in rows]
+        if rnd.random()<.3: body.insert(rnd.randint(0,len(body)),'no timestamp\n')
+        p.write_text(''.join(body)+('{"ts": 9' if rnd.random()<.3 else ''))
+        for t in range(995,ts+2):
+            want=[r for r in rows if r['ts']<=t and r['native_sol'] is not None]
+            assert nav_at(p,t)==(want[-1] if want else None),(trial,t)
+with tempfile.TemporaryDirectory() as tmp:
+    memory=Path(tmp); day=86400; base=20000*day-WIB
+    snaps=[{'ts':base+3600,'native_sol':1.0,'lp_mark_sol':0.5,'refundable_rent_sol':0.25,'known_asset_subtotal_sol':2.0,'external_flow_lamports':0,'wallet_history_complete':True,
+            'issues':['unpriced_token:m1'],'tokens':[{'mint':'m2','mark_error':'quote_budget_deferred'}]},
+           {'ts':base+day+3600,'native_sol':1.2,'lp_mark_sol':None,'refundable_rent_sol':0.25,'known_asset_subtotal_sol':None,'external_flow_lamports':0,'wallet_history_complete':False},
+           {'ts':base+2*day+60,'native_sol':1.1,'lp_mark_sol':0.5,'refundable_rent_sol':0.25,'known_asset_subtotal_sol':2.1,'external_flow_lamports':100000000,'wallet_history_complete':True},
+           {'ts':base+4*day+60,'native_sol':1.2,'lp_mark_sol':0.5,'refundable_rent_sol':0.25,'known_asset_subtotal_sol':2.3,'external_flow_lamports':100000000,'wallet_history_complete':True},
+           {'ts':base+5*day+60,'native_sol':1.3,'lp_mark_sol':0.5,'refundable_rent_sol':0.25,'known_asset_subtotal_sol':2.4,'external_flow_lamports':100000000,'wallet_history_complete':True}]
+    (memory/'dlmm_nav.jsonl').write_text(''.join(json.dumps(r)+'\n' for r in snaps))
+    out={d['day']:d for d in north_star(memory,base+5*day+120,days=6)['days']}
+    d=[out[time.strftime('%Y-%m-%d',time.gmtime((20000+i)*day))] for i in range(-1,6)]
+    assert d[0]['status']=='no_snapshot'
+    assert d[1]['cash_sol']==1.75 and d[1]['unpriced_tokens']==1 and d[1]['quote_deferred_tokens']==1 and 'd_cash_sol' not in d[1]
+    assert d[2]['cash_sol'] is None and d[2]['known_sol'] is None and d[2]['d_cash_sol'] is None and d[2]['d_known_sol'] is None
+    assert d[3]['d_cash_sol'] is None and abs(d[3]['d_external_sol']-0.1)<1e-12  # previous day unmeasured
+    assert d[4]['status']=='no_snapshot' and 'd_cash_sol' not in d[5]  # a missing day breaks the chain
+    assert d[6]['status']=='partial_day' and abs(d[6]['d_cash_sol']-0.1)<1e-12 and abs(d[6]['d_known_sol']-0.1)<1e-12 and d[6]['d_external_sol']==0
+`
+	out, err := exec.Command("python3", "-c", code).CombinedOutput()
+	if err != nil {
+		t.Fatalf("north star check: %v %s", err, out)
 	}
 }

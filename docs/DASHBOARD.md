@@ -36,6 +36,7 @@ The unit reads only the three Redis settings through the command, rather than im
 | `/api/overview` | Latest persisted NAV, source freshness, unit states, collector timestamp/error |
 | `/api/journal?q=IDENTIFIER&stage=swap&offset=0` | 50 rows/page, case-insensitive filter, exact stage filter, retained-tail match count |
 | `/api/evaluation` | Existing evaluation JSON, source file, generation and window timestamps |
+| `/api/capital` | North star per WIB day (cash, known, deltas, unpriced/deferred SPL counts, external-flow delta) |
 | `/api/hermes` | Profile/model/fallback configuration, skills, gateway state, recent session metadata |
 | `/api/redis` | Timestamped fixed capacity keys, position tracking sample, cooldown and dedup TTLs |
 
@@ -45,6 +46,7 @@ Refreshes serve an immutable in-memory snapshot. A background collector updates 
 
 - NAV: `memories/dlmm_nav.jsonl`; native SOL, SPL marks, LP marks and recoverable account reserves remain separate. Unknown NAV stays JSON null and displays Unknown.
 - Journal: delivery/rejection files under state, and transaction/fact/wallet-fact, close, decision, rent and realized journals under profile memories. Each row carries a source path, observed time and explicit evidence identifiers. Each journal reads at most 2 MiB / 500 complete recent rows; NAV retains one row. Partial final lines are omitted; invalid lines and truncated coverage are reported. These are source tails, not exhaustive historical counts.
+- North star (Capital tab): the last `dlmm_nav.jsonl` snapshot of each of the last 14 WIB days plus today so far, found by binary search over byte offsets (rows are appended in time order), so the full history is never parsed. `known` = native + SPL mark + LP mark + refundable rent; `cash` = native + LP mark + refundable rent. A null component makes the sum null (never 0), and a day without a snapshot or with an unmeasured figure breaks the delta chain instead of spanning the gap. SPL marks vanish when a quote is deferred or a token is unpriced, so `known` can fall with no trade; `cash` is immune to that but also blind to real token value. External flows are shown, not netted.
 - Close marks: `pnl_sol` in `dlmm_closes.jsonl` is the mark read one tick before the close, not realized cash. The journal passes the row's `pnl_basis` through and labels older rows without one `mark_unlabeled`; realized figures come only from `dlmm_realized.jsonl` (`realized_sol`, null = unmeasured).
 - Entry metadata: latest 100 `memories/dlmm_entries/*.json`; metadata is not proof of a landed deployment.
 - Routing: last 100 `entry_route=` markers from the actual `azimuth.service` journal within 48 hours. Only mode, route, reason and timestamp are extracted. No free-form service logs or Hermes tool messages are exposed.

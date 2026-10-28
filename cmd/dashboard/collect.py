@@ -46,6 +46,76 @@ def read_json(path):
     if path.stat().st_size>32*1024*1024: raise ValueError('report exceeds 32 MiB')
     return json.loads(path.read_text())
 
+WIB=7*3600
+NAV_TS=re.compile(rb'"ts":\s*(\d+)')
+
+def _nav_line(f, offset, size):
+    """First complete snapshot line starting at or after offset: (start, end, ts, raw)."""
+    if offset:
+        f.seek(offset-1)
+        if f.read(1)!=b'\n': f.readline()  # mid-line offset: skip to the next line start
+    else: f.seek(0)
+    while f.tell()<size:
+        start=f.tell(); raw=f.readline(4*1024*1024)
+        if not raw.endswith(b'\n'): return None  # partial append or oversized line
+        m=NAV_TS.search(raw[:256])
+        if m: return start,f.tell(),int(m[1]),raw
+    return None
+
+def nav_at(path, t, need=('native_sol',), tries=50):
+    """Last dlmm_nav.jsonl row with ts <= t whose `need` fields are non-null.
+    Binary search over byte offsets (rows are appended in time order), so a
+    multi-hundred-MB history costs a few dozen small reads, not a full parse."""
+    try:
+        with path.open('rb') as f:
+            size=os.fstat(f.fileno()).st_size; limit=size
+            for _ in range(tries):
+                # Last line starting before `limit` with ts <= t.
+                first=_nav_line(f,0,size)
+                if not first or first[0]>=limit or first[2]>t: return None
+                best,lo,hi=first,first[1],limit
+                while lo<hi:
+                    mid=(lo+hi)//2; line=_nav_line(f,mid,size)
+                    if line is None or line[0]>=limit or line[2]>t: hi=mid
+                    else: best,lo=line,line[1]
+                try: row=json.loads(best[3])
+                except ValueError: row=None
+                if isinstance(row,dict) and all(row.get(k) is not None for k in need): return row
+                limit=best[0]  # unusable row: search strictly earlier lines
+    except OSError: pass
+    return None
+
+def north_star(memory, now, days=14):
+    """Per WIB day: the day's last snapshot. cash = native + LP mark + refundable rent;
+    known = native + SPL mark + LP mark + rent. Unmeasured parts stay null, never 0."""
+    path=memory/'dlmm_nav.jsonl'; out=[]; prev=None
+    today=int((now+WIB)//86400)
+    for day in range(today-days, today+1):
+        end=day*86400-WIB+86400
+        row=nav_at(path,min(end-1,now))
+        if row is None or int((row['ts']+WIB)//86400)!=day:
+            out.append({'day':time.strftime('%Y-%m-%d',time.gmtime(day*86400)),'status':'no_snapshot'}); prev=None; continue
+        parts=[row.get(k) for k in ('native_sol','lp_mark_sol','refundable_rent_sol')]
+        cash=sum(parts) if all(isinstance(v,(int,float)) for v in parts) else None
+        known=row.get('known_asset_subtotal_sol')
+        tokens=row.get('tokens') if isinstance(row.get('tokens'),list) else []
+        item={'day':time.strftime('%Y-%m-%d',time.gmtime(day*86400)),'status':'partial_day' if day==today else 'ok',
+              'ts':row['ts'],'native_sol':row.get('native_sol'),'cash_sol':cash,'known_sol':known,
+              'refundable_rent_sol':row.get('refundable_rent_sol'),'wallet_history_complete':row.get('wallet_history_complete'),
+              'unpriced_tokens':sum(1 for i in row.get('issues') or [] if isinstance(i,str) and i.startswith('unpriced_token:')),
+              'quote_deferred_tokens':sum(1 for x in tokens if isinstance(x,dict) and x.get('mark_error')=='quote_budget_deferred'),
+              'external_flow_lamports':row.get('external_flow_lamports')}
+        if prev:
+            item['d_cash_sol']=None if cash is None or prev['cash_sol'] is None else cash-prev['cash_sol']
+            item['d_known_sol']=None if known is None or prev['known_sol'] is None else known-prev['known_sol']
+            a,b=prev.get('external_flow_lamports'),item['external_flow_lamports']
+            item['d_external_sol']=(b-a)/1e9 if isinstance(a,int) and isinstance(b,int) else None
+        out.append(item); prev=item
+    return {'days':out,'basis':'Last snapshot per WIB day. known = native + SPL mark + LP mark + refundable rent. cash = native + LP mark + refundable rent (no SPL marks). Deltas are between consecutive observed days; a missing day breaks the chain.',
+            'caveats':['SPL marks drop out when a quote is deferred or a token is unpriced: known then falls without a trade (phantom loss). cash excludes SPL marks and is immune to that, but also misses real token value.',
+                       'External deposits/withdrawals are not netted out of either delta; check d_external_sol before reading a jump as profit.',
+                       'Refundable rent is a recoverable reserve, not income; native growth can be recovered principal or rent.']}
+
 def collect(profile, state):
     now=time.time();memory=profile/'memories';sources=[];events=[]
     nav,meta=tail(memory/'dlmm_nav.jsonl',1);sources.append(meta)
@@ -137,7 +207,7 @@ def collect(profile, state):
     for delivery in evaluation.get('delivery_tracking',{}).get('deliveries',[]):
         events.append({'stage':'AI / fallback','time':delivery.get('prepared_at',0),'source':report_source,'evidence':delivery})
     events.sort(key=lambda e:e.get('time') or 0,reverse=True)
-    return clean({'collected_at':now,'nav':nav[-1] if nav else {},'evaluation':evaluation,'evaluation_source':report_source,'report_errors':report_errors,'journal':events,'sources':sources,'hermes':hermes,'services':services})
+    return clean({'collected_at':now,'north_star':north_star(memory,now),'nav':nav[-1] if nav else {},'evaluation':evaluation,'evaluation_source':report_source,'report_errors':report_errors,'journal':events,'sources':sources,'hermes':hermes,'services':services})
 
 if __name__=='__main__':
     print(json.dumps(collect(Path(sys.argv[1]),Path(sys.argv[2])),allow_nan=False))
