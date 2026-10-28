@@ -325,6 +325,26 @@ MIN_AGE_BEFORE_YIELD_CHECK = 60.0
 # No hard max-hold accompanies this: both closes past 300m in the journal are
 # winners (+1.13% mean), so length is not the defect — earning nothing is.
 PULSE_MIN_AGE_BEFORE_YIELD_CHECK = 30.0
+# Opt-in A/B canary (PULSE_HOLD_CANARY=1, default off): half of pulse positions,
+# chosen by a deterministic hash of the position id, get this yield-check grace
+# instead of the SOUL.md value. Nothing else changes. Spec and kill rules:
+# .orchestra/results/pulse-hold-canary-spec.md (not in the repo).
+PULSE_HOLD_CANARY_MINUTES = 60.0
+
+
+def pulse_hold_canary_arm(position):
+    """'A'/'B' while PULSE_HOLD_CANARY=1, else None. Stable for a position id."""
+    if os.environ.get("PULSE_HOLD_CANARY") != "1" or not isinstance(position, str) or not position:
+        return None
+    import hashlib
+    return "B" if int(hashlib.sha256(position.encode()).hexdigest()[:8], 16) % 2 == 1 else "A"
+
+
+def yield_grace_minutes_for(meta, position, pulse_minutes, default_minutes):
+    """Yield-check grace for one position; arm B of the canary is the only change."""
+    if meta.get("mode") != "pulse":
+        return default_minutes
+    return PULSE_HOLD_CANARY_MINUTES if pulse_hold_canary_arm(position) == "B" else pulse_minutes
 # Exit-side liquidity floor. Below the $10k entry TVL gate on purpose — only fires
 # when a pool's liquidity DRAINS after entry (the "can't exit cleanly" scenario).
 MIN_EXIT_LIQUIDITY_USD = 7000.0
@@ -811,6 +831,8 @@ def log_close(pool, pair, meta, pos_addr, pnl_pct, realized_sol, fee_per_tvl_24h
         "pnl_sol": round(float(realized_sol), 6) if realized_sol is not None else None,
         "fee_per_tvl_24h": round(float(fee_per_tvl_24h), 4),
         "age_min": round(float(age_min), 1),
+        # Canary arm (PULSE_HOLD_CANARY); null when the flag is off or the mode is not pulse.
+        "hold_canary_arm": pulse_hold_canary_arm(pos_addr) if meta.get("mode") == "pulse" else None,
         "reason": reason,
         "txs": txs,
         "dry_run": bool(dry_run),
@@ -2466,9 +2488,8 @@ def main():
         age_minutes = (now - deployed_at) / 60.0
         # Grace is mode-scoped: a pulse entry acted on a 5m window, so it does not
         # get an hour to prove it (see PULSE_MIN_AGE_BEFORE_YIELD_CHECK).
-        yield_grace_minutes = (pulse_min_age_before_yield_check
-                               if meta.get("mode") == "pulse"
-                               else min_age_before_yield_check)
+        yield_grace_minutes = yield_grace_minutes_for(meta, pos_addr, pulse_min_age_before_yield_check,
+                                                      min_age_before_yield_check)
         # The bar itself is mode-scoped for the same reason the grace is: a
         # fee-capture ticket earns by turning over, so a pool that has fallen to
         # a solvency pace is not a slow window to sit through — it is a slot
