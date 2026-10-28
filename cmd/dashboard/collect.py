@@ -116,6 +116,124 @@ def north_star(memory, now, days=14):
                        'External deposits/withdrawals are not netted out of either delta; check d_external_sol before reading a jump as profit.',
                        'Refundable rent is a recoverable reserve, not income; native growth can be recovered principal or rent.']}
 
+def read_jsonl(path, cap=64*1024*1024):
+    """Whole-file JSONL read for exact window sums; over `cap` the bridge is marked incomplete."""
+    rows,meta=[],{'path':str(path),'status':'missing','invalid_lines':0}
+    try:
+        with path.open('rb') as f:
+            size=os.fstat(f.fileno()).st_size
+            if size>cap: meta.update(status='over_cap',bytes=size); return rows,meta
+            data=f.read(cap)
+        meta.update(status='ok',bytes=size)
+        lines=data.splitlines()
+        if data and not data.endswith(b'\n'): lines=lines[:-1];meta['partial_line']=True
+        for line in lines:
+            try:
+                row=json.loads(line)
+                if isinstance(row,dict): rows.append(row)
+            except (ValueError,UnicodeDecodeError): meta['invalid_lines']+=1
+    except OSError: pass
+    return rows,meta
+
+def _token_marks(snap):
+    return {t['mint']:t['mark_sol'] for t in snap.get('tokens') or [] if isinstance(t,dict) and t.get('mint') and isinstance(t.get('mark_sol'),(int,float))}
+
+def _inline_refund(r):
+    ev=r.get('token_rent_evidence') or {}
+    items=ev.get('refunded') or []
+    if items: return sum(i.get('lamports') or 0 for i in items)
+    return sum(i.get('pre_lamports') or 0 for i in ev.get('inline_closed') or [])
+
+def _funded(r):
+    return sum(i.get('lamports') or 0 for i in (r.get('token_rent_evidence') or {}).get('funded') or [])
+
+BRIDGE_NEED=('native_sol','spl_mark_sol','lp_mark_sol','refundable_rent_sol','known_asset_subtotal_sol','slot')
+
+def nav_bridge(memory, now, days=14):
+    """Decompose the change in known SOL over the last `days` into additive parts.
+    Identity: Δknown = Σ wallet tx deltas + ΔSPL mark + ΔLP mark + Δrefundable rent.
+    Port of the nav-bridge study; same per-lifecycle split, no new data source."""
+    L=1e9; path=memory/'dlmm_nav.jsonl'
+    b=nav_at(path,now,need=BRIDGE_NEED)
+    a=nav_at(path,b['ts']-days*86400,need=BRIDGE_NEED) if b else None
+    out={'basis':'Change in known SOL (native + SPL mark + LP mark + refundable rent) between two NAV snapshots. '
+         'This is not NAV/ROI and is never withdrawal + fees - deposit; each component keeps its own basis.','days':days}
+    if not a or not b or a['ts']>=b['ts']:
+        out['status']='insufficient_snapshots'; return out
+    sources={}
+    kinds={r.get('signature'):r for r in read_jsonl(memory/'dlmm_transactions.jsonl')[0]}
+    txrows,sources['wallet_transactions']=read_jsonl(memory/'dlmm_wallet_transactions.jsonl')
+    realrows,sources['realized']=read_jsonl(memory/'dlmm_realized.jsonl')
+    closerows,sources['closes']=read_jsonl(memory/'dlmm_closes.jsonl')
+    txs={r.get('signature'):r for r in txrows}  # repeated observations: keep the last
+    realized={r.get('position'):r for r in realrows}
+    mode={r['position']:r['mode'] for r in closerows if r.get('position') and r.get('mode')}
+    win=[r for r in txs.values() if isinstance(r.get('slot'),int) and a['slot']<r['slot']<=b['slot']]
+    d_known=b['known_asset_subtotal_sol']-a['known_asset_subtotal_sol']
+    d_native=b['native_sol']-a['native_sol']; d_rent=b['refundable_rent_sol']-a['refundable_rent_sol']
+    d_lp=b['lp_mark_sol']-a['lp_mark_sol']; d_spl=b['spl_mark_sol']-a['spl_mark_sol']
+    ma,mb=_token_marks(a),_token_marks(b)
+    spl_both=sum(mb[m]-ma[m] for m in set(ma)&set(mb))
+    fee={}; per_pos={}; unattr={}; perm=0
+    add=lambda d,k,v:d.__setitem__(k,d.get(k,0)+v)
+    for r in win:
+        k=kinds.get(r.get('signature'),{})
+        kind=k.get('kind') or ('external' if r.get('classification')=='external_transfer' else 'unrecorded')
+        f=fee.setdefault(kind,{'n':0,'failed':0,'lamports':0})
+        f['n']+=1; f['lamports']+=r.get('fee_lamports') or 0; f['failed']+=bool(r.get('failed'))
+        perm+=r.get('nonrefundable_account_cost_lamports') or 0
+        pos=r.get('event_position') or k.get('position')
+        delta,fl=r.get('wallet_delta_lamports') or 0,r.get('fee_lamports') or 0
+        nonref=r.get('nonrefundable_account_cost_lamports') or 0
+        if pos and kind in ('deploy','close','claim','swap'):
+            p=per_pos.setdefault(pos,{}); add(p,'n_'+kind,1); add(p,'fee',fl)
+            if kind=='swap':
+                locked=r.get('refundable_rent_locked_lamports') or 0
+                add(p,'swap_net',delta+fl+nonref+locked-_inline_refund(r)); add(p,'ata_refund',_inline_refund(r)); add(p,'swap_rent_locked',locked)
+            else:
+                add(p,'lp_cash',delta+fl+nonref); add(p,'ata_funded',_funded(r)); add(p,'closed',bool(r.get('position_account_closed')))
+        else:
+            add(unattr,kind,delta+fl+nonref); add(unattr,'ext',r.get('external_flow_lamports') or 0)
+    R=TV=SW=0.0; complete=0; partial={'n':0,'cash':0.0,'unmeasured_realized':0}; by_mode={}
+    for pos,p in per_pos.items():
+        rz=(realized.get(pos) or {}).get('realized_sol')
+        if not (p.get('n_deploy',0)>=1 and p.get('closed',0)>=1 and isinstance(rz,(int,float))):
+            partial['n']+=1; partial['unmeasured_realized']+=bool(pos in realized and not isinstance(rz,(int,float)))
+            partial['cash']+=(p.get('lp_cash',0)+p.get('swap_net',0)+p.get('ata_refund',0)-p.get('swap_rent_locked',0))/L
+            continue
+        complete+=1
+        lp_native=(p.get('lp_cash',0)+p.get('ata_funded',0))/L
+        tv,sw=rz-lp_native,p.get('swap_net',0)/L
+        R+=rz; TV+=tv; SW+=sw
+        m=by_mode.setdefault(mode.get(pos,'unknown'),{'n':0,'realized_sol':0.0,'fees_sol':0.0,'swap_residual_sol':0.0,'ata_rent_left_sol':0.0})
+        m['n']+=1; m['realized_sol']+=rz; m['fees_sol']-=p.get('fee',0)/L; m['swap_residual_sol']+=sw-tv
+        m['ata_rent_left_sol']+=(p.get('ata_funded',0)+p.get('swap_rent_locked',0)-p.get('ata_refund',0))/L
+    fees_total=sum(v['lamports'] for v in fee.values())/L
+    ata_left=sum(v['ata_rent_left_sol'] for v in by_mode.values())
+    rent_ledger=d_rent-ata_left+(unattr.get('rent_reclaim',0)+unattr.get('swap',0)+unattr.get('unrecorded',0))/L
+    comps=[('lp_realized','LP realized (Meteora flows, complete lifecycles)',R),
+           ('network_fees','Network fees, all transactions incl. failed',-fees_total),
+           ('rent_permanent','Rent: permanent account cost',-perm/L),
+           ('rent_ledger','Rent: ledger mismatch (Δrent vs locks, refunds, reclaims)',rent_ledger),
+           ('swap_residual','Swap residual (settlement proceeds - Meteora token value)',SW-TV),
+           ('spl_mark','SPL mark change, tokens priced at both ends',spl_both),
+           ('lp_unrealized','Unrealized: Δ LP mark',d_lp),
+           ('external','External transfers',unattr.get('external',0)/L),
+           ('partial_lifecycles','Partial lifecycles straddling the window',partial['cash']),
+           ('spl_coverage','SPL valuation coverage (priced at one end only)',d_spl-spl_both)]
+    comps.append(('unexplained','Unexplained residual',d_known-sum(v for _,_,v in comps)))
+    incomplete=[k for k,m in sources.items() if m['status']!='ok']
+    out.update(status='incomplete_sources' if incomplete else 'ok', incomplete_sources=incomplete,
+               start_ts=a['ts'],end_ts=b['ts'],slots=[a['slot'],b['slot']],d_known_sol=d_known,d_native_sol=d_native,
+               sum_tx_delta_sol=sum(r.get('wallet_delta_lamports') or 0 for r in win)/L,transactions=len(win),
+               native_identity_exact=abs(sum(r.get('wallet_delta_lamports') or 0 for r in win)/L-d_native)<1e-9,
+               components=[{'key':k,'label':l,'sol':v} for k,l,v in comps],
+               fees_by_kind={k:{'n':v['n'],'failed':v['failed'],'sol':v['lamports']/L} for k,v in sorted(fee.items())},
+               positions={'complete':complete,'partial':partial['n'],'realized_unmeasured':partial['unmeasured_realized']},
+               by_mode=by_mode,
+               unpriced_tokens=[sum(1 for t in s.get('tokens') or [] if isinstance(t,dict) and t.get('mark_sol') is None) for s in (a,b)])
+    return out
+
 def collect(profile, state):
     now=time.time();memory=profile/'memories';sources=[];events=[]
     nav,meta=tail(memory/'dlmm_nav.jsonl',1);sources.append(meta)
@@ -207,7 +325,7 @@ def collect(profile, state):
     for delivery in evaluation.get('delivery_tracking',{}).get('deliveries',[]):
         events.append({'stage':'AI / fallback','time':delivery.get('prepared_at',0),'source':report_source,'evidence':delivery})
     events.sort(key=lambda e:e.get('time') or 0,reverse=True)
-    return clean({'collected_at':now,'north_star':north_star(memory,now),'nav':nav[-1] if nav else {},'evaluation':evaluation,'evaluation_source':report_source,'report_errors':report_errors,'journal':events,'sources':sources,'hermes':hermes,'services':services})
+    return clean({'collected_at':now,'north_star':north_star(memory,now),'nav_bridge':nav_bridge(memory,now),'nav':nav[-1] if nav else {},'evaluation':evaluation,'evaluation_source':report_source,'report_errors':report_errors,'journal':events,'sources':sources,'hermes':hermes,'services':services})
 
 if __name__=='__main__':
     print(json.dumps(collect(Path(sys.argv[1]),Path(sys.argv[2])),allow_nan=False))

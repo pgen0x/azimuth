@@ -201,7 +201,7 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case "/api/evaluation":
 		value = object{"report": data["evaluation"], "source": data["evaluation_source"], "errors": data["report_errors"], "collected_at": data["collected_at"]}
 	case "/api/capital":
-		value = object{"north_star": data["north_star"], "collected_at": data["collected_at"], "collection_error": failure}
+		value = object{"north_star": data["north_star"], "nav_bridge": data["nav_bridge"], "collected_at": data["collected_at"], "collection_error": failure}
 	case "/api/hermes":
 		value = data["hermes"]
 	case "/api/redis":

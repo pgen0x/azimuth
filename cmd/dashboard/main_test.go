@@ -135,3 +135,38 @@ with tempfile.TemporaryDirectory() as tmp:
 		t.Fatalf("north star check: %v %s", err, out)
 	}
 }
+
+func TestNavBridgeSyntheticLedger(t *testing.T) {
+	// One complete lifecycle, one with unmeasured realized PnL, an external transfer and an SPL move.
+	code := strings.Split(collector, "if __name__=='__main__':")[0] + `
+import tempfile
+with tempfile.TemporaryDirectory() as tmp:
+    m=Path(tmp); T=2000000000
+    a={'ts':T-86400,'slot':100,'native_sol':1.0,'spl_mark_sol':0.1,'lp_mark_sol':0.0,'refundable_rent_sol':0.002,'known_asset_subtotal_sol':1.102,'tokens':[{'mint':'m1','mark_sol':0.1}]}
+    b={'ts':T,'slot':200,'native_sol':1.029,'spl_mark_sol':0.12,'lp_mark_sol':0.1,'refundable_rent_sol':0.002,'known_asset_subtotal_sol':1.251,'tokens':[{'mint':'m1','mark_sol':0.12},{'mint':'m3','mark_sol':None}]}
+    (m/'dlmm_nav.jsonl').write_text(json.dumps(a)+'\n'+json.dumps(b)+'\n')
+    tx=lambda sig,slot,delta,fee=5000,**k: dict(signature=sig,slot=slot,wallet_delta_lamports=delta,fee_lamports=fee,**k)
+    wallet=[tx('d1',101,-500000000),tx('c1',102,520000000,position_account_closed=True),tx('s1',103,9000000),
+            tx('x1',104,100000000,0,classification='external_transfer'),tx('d2',105,-100000000),tx('old',50,7)]
+    (m/'dlmm_wallet_transactions.jsonl').write_text(''.join(json.dumps(r)+'\n' for r in wallet))
+    kinds=[dict(signature='d1',kind='deploy',position='P'),dict(signature='c1',kind='close',position='P'),dict(signature='s1',kind='swap',position='P'),dict(signature='d2',kind='deploy',position='Q')]
+    (m/'dlmm_transactions.jsonl').write_text(''.join(json.dumps(r)+'\n' for r in kinds))
+    (m/'dlmm_realized.jsonl').write_text(json.dumps({'position':'P','realized_sol':0.03})+'\n'+json.dumps({'position':'Q','realized_sol':None})+'\n')
+    (m/'dlmm_closes.jsonl').write_text(json.dumps({'position':'P','mode':'pulse'})+'\n')
+    r=nav_bridge(m,T,days=1); c={x['key']:x['sol'] for x in r['components']}
+    assert r['status']=='ok' and r['native_identity_exact'] and r['transactions']==5
+    assert abs(c['lp_realized']-0.03)<1e-12 and abs(c['network_fees']+0.00002)<1e-12
+    assert abs(c['swap_residual']-(0.009005-(0.03-0.02001)))<1e-12 and abs(c['spl_mark']-0.02)<1e-12
+    assert abs(c['external']-0.1)<1e-12 and abs(c['lp_unrealized']-0.1)<1e-12 and abs(c['partial_lifecycles']+0.099995)<1e-12
+    assert abs(c['unexplained'])<1e-9 and abs(sum(c.values())-r['d_known_sol'])<1e-12
+    assert r['positions']=={'complete':1,'partial':1,'realized_unmeasured':1} and r['by_mode']['pulse']['n']==1
+    assert r['fees_by_kind']['external']['n']==1 and r['unpriced_tokens']==[0,1]
+    assert nav_bridge(m,T-86400,days=1)['status']=='insufficient_snapshots'
+    (m/'dlmm_realized.jsonl').unlink()
+    assert nav_bridge(m,T,days=1)['incomplete_sources']==['realized']
+`
+	out, err := exec.Command("python3", "-c", code).CombinedOutput()
+	if err != nil {
+		t.Fatalf("nav bridge check: %v %s", err, out)
+	}
+}
