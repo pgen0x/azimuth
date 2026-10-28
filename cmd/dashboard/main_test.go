@@ -10,7 +10,7 @@ import (
 )
 
 func TestReadOnlyCachedAPI(t *testing.T) {
-	s := &server{data: object{"north_star": object{"days": []any{}}, "nav": object{"nav_sol": nil, "native_sol": 0.0}, "journal": []any{object{"stage": "swap", "evidence": object{"signature": "proof-1"}}, object{"stage": "gate", "evidence": object{"pool": "pool-2"}}}}}
+	s := &server{data: object{"live": object{"dust": object{"runs": 3}}, "north_star": object{"days": []any{}}, "nav": object{"nav_sol": nil, "native_sol": 0.0}, "journal": []any{object{"stage": "swap", "evidence": object{"signature": "proof-1"}}, object{"stage": "gate", "evidence": object{"pool": "pool-2"}}}}}
 	for _, tc := range []struct {
 		method, path, host string
 		status             int
@@ -23,6 +23,7 @@ func TestReadOnlyCachedAPI(t *testing.T) {
 		{"POST", "/api/redis", "localhost", 405, "read only"},
 		{"GET", "/api/overview", "attacker.example", 403, "localhost only"},
 		{"GET", "/api/capital", "localhost", 200, `"north_star":{"days":[]}`},
+		{"GET", "/api/live", "localhost", 200, `"live":{"dust":{"runs":3}}`},
 		{"GET", "/api/command", "localhost", 404, "404"},
 	} {
 		r := httptest.NewRequest(tc.method, tc.path, nil)
@@ -168,5 +169,50 @@ with tempfile.TemporaryDirectory() as tmp:
 	out, err := exec.Command("python3", "-c", code).CombinedOutput()
 	if err != nil {
 		t.Fatalf("nav bridge check: %v %s", err, out)
+	}
+}
+
+func TestLiveChangeLedger(t *testing.T) {
+	// Synthetic rent-unit journal and realized rows; no systemd or wallet access.
+	code := strings.Split(collector, "if __name__=='__main__':")[0] + `
+import tempfile
+journal='\n'.join([
+ '1000.0 host node[1]: {"success":true,"dry_run":false,"txHash":"t1","fee_lamports":5000,"accounts":[{"rent_lamports":2000000},{"rent_lamports":2000000,"burn_raw":"5","quote_lamports":900}]}',
+ '1100.0 host node[1]: {"success":true,"dry_run":false,"txHash":"t2","fee_lamports":5000,"accounts":[{"rent_lamports":2000000,"burn_raw":"7","quote_lamports":1500000}]}',
+ '1200.0 host node[1]: {"success":false,"error":"SWAP BUSY: another matching swap is active"}',
+ '1300.0 host node[1]: {"success":true,"deferred":true,"reason":"waiting_for_second_empty_account"}',
+ '1400.0 host node[1]: {"success":true,"dry_run":true,"txHash":null}',
+ '1500.0 host node[1]: [TX] {"stage":"reconcile","signature":"t1"}',
+ '1600.0 host systemd[1]: Finished rent unit.'])
+calls=[]
+def fake(cmd,**k):
+    calls.append(cmd); return type('R',(),{'stdout':journal})()
+with tempfile.TemporaryDirectory() as tmp:
+    m=Path(tmp)
+    (m/'dlmm_wallet_transactions.jsonl').write_text(json.dumps({'signature':'t2','failed':True})+'\n')
+    d=dust_ledger(m,1000,run=fake)
+    assert calls[0][:4]==['journalctl','--user','-u','azimuth-sol-rent.service'] and '@1000' in calls[0]
+    assert d['runs']==5 and d['executed_tx']==2 and d['deferred']==1 and d['failed_without_tx']==1
+    assert d['closed_accounts']==3 and d['burned_accounts']==2 and d['rent_recovered_lamports']==6000000
+    assert d['fee_lamports']==10000 and d['forfeited_quote_lamports']==1500900 and d['tx_not_ingested']==1
+    assert sorted(v['rule'] for v in d['violations'])==['burn transaction failed on-chain','quote above half rent']
+    assert list(d['errors'])==['SWAP BUSY: another matching swap is active']
+    assert abs(d['liquid_native_gain_sol']-0.00599)<1e-12 and abs(d['nav_effect_sol']+0.0015109)<1e-12
+    def broken(cmd,**k): raise OSError('no journal')
+    assert dust_ledger(m,1000,run=broken)['status']=='unavailable'
+    day=86400; base=20000*day-WIB
+    (m/'dlmm_realized.jsonl').write_text(''.join(json.dumps(r)+'\n' for r in [
+        {'position':'a','closed_at':base+10,'realized_sol':0.5},{'position':'b','closed_at':base+20,'realized_sol':None},
+        {'position':'c','closed_at':base+30,'realized_sol':-0.2},{'position':'old','closed_at':base-10,'realized_sol':9.0},
+        {'position':'a','closed_at':base+10,'realized_sol':0.25}]))
+    (m/'dlmm_closes.jsonl').write_text(''.join(json.dumps({'position':p,'mode':md})+'\n' for p,md in [('a','pulse'),('b','pulse'),('old','pulse')]))
+    r=realized_by_mode(m,base)
+    cell=r['days'][time.strftime('%Y-%m-%d',time.gmtime(20000*day))]
+    assert cell['pulse']=={'closes':2,'measured':1,'unmeasured':1,'realized_sol':0.25}  # last row per position wins
+    assert cell['unknown']=={'closes':1,'measured':1,'unmeasured':0,'realized_sol':-0.2} and len(r['days'])==1
+`
+	out, err := exec.Command("python3", "-c", code).CombinedOutput()
+	if err != nil {
+		t.Fatalf("live ledger check: %v %s", err, out)
 	}
 }

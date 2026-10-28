@@ -234,8 +234,70 @@ def nav_bridge(memory, now, days=14):
                unpriced_tokens=[sum(1 for t in s.get('tokens') or [] if isinstance(t,dict) and t.get('mark_sol') is None) for s in (a,b)])
     return out
 
-def collect(profile, state):
+def dust_ledger(memory, since, run=None):
+    """Rent-reclaim results printed by the rent unit since `since`, checked against the
+    dust rules: a burn never forfeits more than half the rent it frees, and fee +
+    forfeited must stay below the rent recovered. Wallet facts confirm landing."""
+    run=run or subprocess.run
+    out={'since':since,'runs':0,'executed_tx':0,'failed_without_tx':0,'deferred':0,'closed_accounts':0,'burned_accounts':0,
+         'rent_recovered_lamports':0,'fee_lamports':0,'forfeited_quote_lamports':0,'violations':[],'tx_not_ingested':0,'errors':{},
+         'source':'journalctl --user -u azimuth-sol-rent.service; last 5000 lines since the cutover'}
+    try:
+        text=run(['journalctl','--user','-u','azimuth-sol-rent.service','--since','@%d'%int(since),'-n','5000','-o','short-unix','--no-pager'],
+                 capture_output=True,text=True,timeout=5).stdout
+    except (OSError,subprocess.TimeoutExpired):
+        out['status']='unavailable'; return out
+    facts={r.get('signature'):r for r in read_jsonl(memory/'dlmm_wallet_transactions.jsonl')[0]}
+    for line in text.splitlines():
+        head,_,body=line.partition(' ')
+        if '{' not in body: continue
+        try: r=json.loads(body[body.index('{'):]); ts=float(head)
+        except ValueError: continue
+        if not isinstance(r,dict) or not ('success' in r or 'txHash' in r): continue
+        out['runs']+=1
+        if r.get('deferred'): out['deferred']+=1
+        if r.get('success') is False and not r.get('txHash'):
+            out['failed_without_tx']+=1
+            reason=str(r.get('error') or r.get('reason') or 'unknown')[:120]
+            out['errors'][reason]=out['errors'].get(reason,0)+1
+        if not r.get('txHash') or r.get('dry_run') is not False: continue
+        accts=[a for a in r.get('accounts') or [] if isinstance(a,dict)]
+        burns=[a for a in accts if a.get('burn_raw')]
+        rent=sum(a.get('rent_lamports') or 0 for a in accts); forfeited=sum(a.get('quote_lamports') or 0 for a in burns); fee=r.get('fee_lamports') or 0
+        out['executed_tx']+=1; out['closed_accounts']+=len(accts); out['burned_accounts']+=len(burns)
+        out['rent_recovered_lamports']+=rent; out['fee_lamports']+=fee; out['forfeited_quote_lamports']+=forfeited
+        sig=r['txHash']
+        for a in burns:
+            if (a.get('quote_lamports') or 0)*2>(a.get('rent_lamports') or 0): out['violations'].append({'rule':'quote above half rent','signature':sig,'time':ts})
+        if burns and fee+forfeited>=rent: out['violations'].append({'rule':'fee + forfeited >= rent','signature':sig,'time':ts})
+        fact=facts.get(sig)
+        if fact is None: out['tx_not_ingested']+=1
+        elif fact.get('failed') and burns: out['violations'].append({'rule':'burn transaction failed on-chain','signature':sig,'time':ts})
+    out['status']='ok'
+    out['liquid_native_gain_sol']=(out['rent_recovered_lamports']-out['fee_lamports'])/1e9
+    out['nav_effect_sol']=-(out['forfeited_quote_lamports']+out['fee_lamports'])/1e9
+    return out
+
+def realized_by_mode(memory, since):
+    """Per WIB day and mode, closes since the cutover from dlmm_realized.jsonl (the arbiter).
+    A null realized figure is counted as unmeasured, never added as 0."""
+    realrows,meta=read_jsonl(memory/'dlmm_realized.jsonl')
+    closerows,_=read_jsonl(memory/'dlmm_closes.jsonl')
+    mode={r['position']:r['mode'] for r in closerows if r.get('position') and r.get('mode')}
+    days={}
+    for r in {r.get('position'):r for r in realrows}.values():
+        t=r.get('closed_at')
+        if not isinstance(t,(int,float)) or t<since: continue
+        day=time.strftime('%Y-%m-%d',time.gmtime(t+WIB)); m=mode.get(r.get('position'),'unknown')
+        cell=days.setdefault(day,{}).setdefault(m,{'closes':0,'measured':0,'unmeasured':0,'realized_sol':0.0})
+        cell['closes']+=1
+        if isinstance(r.get('realized_sol'),(int,float)): cell['measured']+=1; cell['realized_sol']+=r['realized_sol']
+        else: cell['unmeasured']+=1
+    return {'since':since,'status':meta['status'],'days':days,'basis':'realized_sol from dlmm_realized.jsonl, keyed by close time (WIB day) and the mode on the close journal. Null realized = unmeasured, never 0.'}
+
+def collect(profile, state, since=None):
     now=time.time();memory=profile/'memories';sources=[];events=[]
+    since=float(since) if since and float(since)>0 else now-7*86400  # cutover; 0/absent = the last 7 days
     nav,meta=tail(memory/'dlmm_nav.jsonl',1);sources.append(meta)
     for filename,stage,root in [
         ('solana_deliveries.jsonl','AI / fallback',state),('solana_rejects.jsonl','gate',state),
@@ -325,7 +387,7 @@ def collect(profile, state):
     for delivery in evaluation.get('delivery_tracking',{}).get('deliveries',[]):
         events.append({'stage':'AI / fallback','time':delivery.get('prepared_at',0),'source':report_source,'evidence':delivery})
     events.sort(key=lambda e:e.get('time') or 0,reverse=True)
-    return clean({'collected_at':now,'north_star':north_star(memory,now),'nav_bridge':nav_bridge(memory,now),'nav':nav[-1] if nav else {},'evaluation':evaluation,'evaluation_source':report_source,'report_errors':report_errors,'journal':events,'sources':sources,'hermes':hermes,'services':services})
+    return clean({'collected_at':now,'north_star':north_star(memory,now),'nav_bridge':nav_bridge(memory,now),'live':{'dust':dust_ledger(memory,since),'realized':realized_by_mode(memory,since)},'nav':nav[-1] if nav else {},'evaluation':evaluation,'evaluation_source':report_source,'report_errors':report_errors,'journal':events,'sources':sources,'hermes':hermes,'services':services})
 
 if __name__=='__main__':
-    print(json.dumps(collect(Path(sys.argv[1]),Path(sys.argv[2])),allow_nan=False))
+    print(json.dumps(collect(Path(sys.argv[1]),Path(sys.argv[2]),sys.argv[3] if len(sys.argv)>3 else None),allow_nan=False))
