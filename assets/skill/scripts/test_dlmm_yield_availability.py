@@ -18,7 +18,8 @@ class YieldAvailabilityTests(unittest.TestCase):
         source=Path(monitor.__file__).read_text()
         code=textwrap.dedent(source[source.index('        # 5. Low Yield Exit Check'):source.index('        # 5b. Exit-side liquidity floor')])
         for available, prior in ((False,None),(False,'Stop-Loss'),(True,None)):
-            scope=dict(meta={'deployed_at':1,'mode':'turnover'}, now=10000,
+            scope=dict(meta={'deployed_at':1,'mode':'turnover'}, now=10000, pos_addr='position',
+                yield_grace_minutes_for=monitor.yield_grace_minutes_for,
                 pulse_min_age_before_yield_check=30,min_age_before_yield_check=60,
                 min_fee_tvl_24h_tight_limit=5,min_fee_tvl_24h_limit=1,
                 is_tight_tp_pos=True,fee_per_tvl_24h=0,fee_yield_available=available,close_reason=prior)
