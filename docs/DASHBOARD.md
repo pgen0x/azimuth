@@ -27,7 +27,7 @@ rtk proxy systemctl --user daemon-reload
 rtk proxy systemctl --user enable --now azimuth-dashboard.service
 ```
 
-The unit reads only the three Redis settings through the command, rather than importing the full trading environment. After dashboard code updates, rebuild the binary and restart `azimuth-dashboard.service`.
+The unit reads only the three Redis settings through the command, rather than importing the full trading environment. The installation example is for a first install. For updates, use the [SHA-pinned deployment and rollback runbook](DASHBOARD_DEPLOY.md); do not build over the running binary or reuse a fixed backup name.
 
 ## JSON API
 
@@ -47,9 +47,9 @@ Refreshes serve an immutable in-memory snapshot. A background collector updates 
 
 - NAV: `memories/dlmm_nav.jsonl`; native SOL, SPL marks, LP marks and recoverable account reserves remain separate. Unknown NAV stays JSON null and displays Unknown.
 - Journal: delivery/rejection files under state, and transaction/fact/wallet-fact, close, decision, rent and realized journals under profile memories. Each row carries a source path, observed time and explicit evidence identifiers. Each journal reads at most 2 MiB / 500 complete recent rows; NAV retains one row. Partial final lines are omitted; invalid lines and truncated coverage are reported. These are source tails, not exhaustive historical counts.
-- North star (Capital tab): the last `dlmm_nav.jsonl` snapshot of each of the last 14 WIB days plus today so far, found by binary search over byte offsets (rows are appended in time order), so the full history is never parsed. `known` = native + SPL mark + LP mark + refundable rent; `cash` = native + LP mark + refundable rent. A null component makes the sum null (never 0), and a day without a snapshot or with an unmeasured figure breaks the delta chain instead of spanning the gap. SPL marks vanish when a quote is deferred or a token is unpriced, so `known` can fall with no trade; `cash` is immune to that but also blind to real token value. External flows are shown, not netted.
-- NAV bridge (Capital tab, issue #93): splits the change in known SOL over the last 14 days between two complete snapshots into LP realized (complete lifecycles only, from `dlmm_realized.jsonl`), network fees by transaction kind, permanent rent, rent-ledger mismatch, swap residual, SPL mark change on tokens priced at both ends, unrealized LP mark change, external transfers, partial lifecycles, SPL valuation coverage and an unexplained residual. Components add up to the change by construction, so a large residual flags missing evidence, not profit. It is not NAV/ROI and never `withdrawal + fees - deposit`. A lifecycle whose realized figure is null stays partial. The wallet-transaction, realized and close journals are read whole (capped at 64 MiB each; over the cap the bridge reports `incomplete_sources`).
-- Live changes: the JSON results the rent unit prints (`journalctl --user -u azimuth-sol-rent.service`, at most 5000 lines since the cutover) become a dust ledger: runs, executed transactions, deferrals, failures without a transaction (grouped by message, 120 characters), rent returned, fees, quoted token value forfeited, and the rule checks (a burn never forfeits more than half the rent it frees; fee + forfeited stays below rent recovered; a burn transaction that failed on-chain per wallet facts). Rent returned is a released reserve, not income; the known-SOL effect is fees plus forfeited value. Realized PnL by mode comes from `dlmm_realized.jsonl` keyed by close time and the mode on the close journal; a null realized figure is counted as unmeasured, never 0.
+- North star (Capital tab): latest snapshot per WIB day, including null values, with selection coverage. Cash is native + LP mark + refundable rent; known also includes SPL marks. Missing/unknown days break deltas. See the bounds and large-file ordering limitation below.
+- NAV bridge (Capital tab, issue #93): known-SOL deltas and a source-qualified decomposition using transaction-kind, wallet, realized and close journals. Complete measured components reconcile; incomplete components stay null. Unattributed cash stays separate from rent. Snapshot history coverage and every journal status are exposed. It is not NAV/ROI or withdrawal + fees - deposit.
+- Live changes: deduplicated rent-unit receipt claims, separately verified transaction/account results, measured costs and explicit unknown totals. Realized PnL by mode uses close time and the close journal; wholly unmeasured cohorts remain null. The rules and coverage limits below apply to both views.
 - Close marks: `pnl_sol` in `dlmm_closes.jsonl` is the mark read one tick before the close, not realized cash. The journal passes the row's `pnl_basis` through and labels older rows without one `mark_unlabeled`; realized figures come only from `dlmm_realized.jsonl` (`realized_sol`, null = unmeasured).
 - Entry metadata: latest 100 `memories/dlmm_entries/*.json`; metadata is not proof of a landed deployment.
 - Routing: last 100 `entry_route=` markers from the actual `azimuth.service` journal within 48 hours. Only mode, route, reason and timestamp are extracted. No free-form service logs or Hermes tool messages are exposed.
@@ -62,6 +62,40 @@ Refreshes serve an immutable in-memory snapshot. A background collector updates 
 Native SOL increases include recovered principal/rent and transfers; they do not establish profit. The existing 0.20 SOL reserve + 0.05 allowance + 0.10 minimum position rule is displayed as a 0.35 SOL floor; this dashboard never authorizes or changes entry behavior.
 
 Configuration editing, restarts, historical indexing and active provider/bot probes are outside this read-only MVP.
+
+### Evidence coverage in Capital and Live changes
+
+Receipt signatures are deduplicated. `receipt_claimed` is separate from
+`verified_subtotal`: failed, unlanded, missing or conflicting outcomes never
+credit verified closes, rent or forfeiture. Successful landing alone is not
+account-close proof: account rent evidence and wallet delta must match, and
+mint deltas must match a claimed burn. Quotes remain receipt valuations. Fees
+and native deltas include measured landed failures. Window totals are null
+when evidence is missing; a verified subtotal is not a complete window total.
+
+Every bridge journal retains source metadata, including transaction kinds.
+Missing/oversized/corrupt/partial sources, incomplete wallet history and null
+money fields prevent an `ok` decomposition. Native identity is unknown when
+wallet deltas or coverage are unknown. Unattributed flows are never classified
+as rent. Realized cells with no measured closes stay null; mixed cohorts show
+only their labeled measured subtotal and unmeasured count.
+
+NAV searches parse top-level timestamps before using them, and preserve the
+latest day's null fields. A lookup reads at most 8 MiB / 256 operations, with a
+1 MiB line limit and a two-second work deadline. Files up to 4 MiB are scanned
+and ordering checked within that budget. Larger files use bounded seeks and
+explicitly report partial selection because ordering outside the visited rows
+is unverified; their daily deltas and bridge attribution remain unknown. A
+verified historical index would be needed for complete large-file coverage.
+No new index is written by the read-only dashboard.
+
+Whole accounting journals are capped at 64 MiB, 100,000 lines and 1 MiB per
+line. Rent-unit capture has a five-second deadline and a combined 2 MiB
+stdout/stderr cap; nonzero exit, timeout or capture cap is unavailable, while
+the 5,000-line tail limit is partial coverage. Errors are grouped only after
+sanitizing their messages. Every API/tab carries collector freshness/errors;
+Capital and Live refresh automatically. A malformed new panel is isolated from
+unrelated panels. These are resource and evidence limits, not profit claims.
 
 ## Verified deployment reports
 

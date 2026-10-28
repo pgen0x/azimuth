@@ -247,6 +247,16 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	// Copy the envelope: never mutate the cached snapshot while serving a reader.
+	if payload, ok := value.(map[string]any); ok {
+		withStatus := make(object, len(payload)+2)
+		for key, item := range payload {
+			withStatus[key] = item
+		}
+		withStatus["collected_at"] = data["collected_at"]
+		withStatus["collection_error"] = failure
+		value = withStatus
+	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(value)
 }

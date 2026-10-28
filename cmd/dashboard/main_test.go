@@ -76,7 +76,8 @@ with tempfile.TemporaryDirectory() as tmp:
     with sqlite3.connect(profile/'state.db') as db:
         db.execute('CREATE TABLE sessions (id, source, model, started_at, ended_at, end_reason, message_count, tool_call_count, chat_id)')
         db.execute('INSERT INTO sessions VALUES (?,?,?,?,?,?,?,?,?)',('session','webhook','markt',81,None,None,1,1,'webhook:v2:'+base64.urlsafe_b64encode(identity).decode().rstrip('=')))
-    subprocess.run=lambda *a,**k: type('Result',(),{'stdout':''})()
+    subprocess.run=lambda *a,**k: type('Result',(),{'stdout':'','stderr':'','returncode':0})()
+    bounded_run=subprocess.run  # No real journalctl when collect() exercises the new reader.
     data=collect(profile,state)
     fact=next(e for e in data['journal'] if e['evidence'].get('slot')==123)
     assert fact['time']==100 and fact['evidence']['failed'] is False and fact['evidence']['fee_lamports']==5000
@@ -112,7 +113,7 @@ for trial in range(150):
         p.write_text(''.join(body)+('{"ts": 9' if rnd.random()<.3 else ''))
         for t in range(995,ts+2):
             want=[r for r in rows if r['ts']<=t and r['native_sol'] is not None]
-            assert nav_at(p,t)==(want[-1] if want else None),(trial,t)
+            assert nav_at(p,t,need=('native_sol',))==(want[-1] if want else None),(trial,t)
 with tempfile.TemporaryDirectory() as tmp:
     # Equal-length rows put a binary-search midpoint exactly on a line start.
     p=Path(tmp)/'aligned.jsonl'; rows=[{'ts':t,'native_sol':1.0,'p':'x'} for t in (10,20,30)]
@@ -153,8 +154,12 @@ with tempfile.TemporaryDirectory() as tmp:
     b={'ts':T,'slot':200,'native_sol':1.029,'spl_mark_sol':0.12,'lp_mark_sol':0.1,'refundable_rent_sol':0.002,'known_asset_subtotal_sol':1.251,'tokens':[{'mint':'m1','mark_sol':0.12},{'mint':'m3','mark_sol':None}]}
     (m/'dlmm_nav.jsonl').write_text(json.dumps(a)+'\n'+json.dumps(b)+'\n')
     tx=lambda sig,slot,delta,fee=5000,**k: dict(signature=sig,slot=slot,wallet_delta_lamports=delta,fee_lamports=fee,**k)
+    a['wallet_history_complete']=b['wallet_history_complete']=True
+    (m/'dlmm_nav.jsonl').write_text(json.dumps(a)+'\n'+json.dumps(b)+'\n')
     wallet=[tx('d1',101,-500000000),tx('c1',102,520000000,position_account_closed=True),tx('s1',103,9000000),
             tx('x1',104,100000000,0,classification='external_transfer'),tx('d2',105,-100000000),tx('old',50,7)]
+    for row in wallet:
+        row.update(nonrefundable_account_cost_lamports=0,refundable_rent_locked_lamports=0,token_rent_evidence={'funded':[],'refunded':[]})
     (m/'dlmm_wallet_transactions.jsonl').write_text(''.join(json.dumps(r)+'\n' for r in wallet))
     kinds=[dict(signature='d1',kind='deploy',position='P'),dict(signature='c1',kind='close',position='P'),dict(signature='s1',kind='swap',position='P'),dict(signature='d2',kind='deploy',position='Q')]
     (m/'dlmm_transactions.jsonl').write_text(''.join(json.dumps(r)+'\n' for r in kinds))
@@ -193,18 +198,19 @@ journal='\n'.join([
  '1600.0 host systemd[1]: Finished rent unit.'])
 calls=[]
 def fake(cmd,**k):
-    calls.append(cmd); return type('R',(),{'stdout':journal})()
+    calls.append(cmd); return type('R',(),{'stdout':journal,'returncode':0,'stderr':''})()
 with tempfile.TemporaryDirectory() as tmp:
     m=Path(tmp)
-    (m/'dlmm_wallet_transactions.jsonl').write_text(json.dumps({'signature':'t2','failed':True})+'\n')
+    (m/'dlmm_wallet_transactions.jsonl').write_text(json.dumps({'signature':'t2','failed':True,'fee_lamports':5000,'wallet_delta_lamports':-5000})+'\n')
     d=dust_ledger(m,1000,run=fake)
     assert calls[0][:4]==['journalctl','--user','-u','azimuth-sol-rent.service'] and '@1000' in calls[0]
     assert d['runs']==6 and d['executed_tx']==2 and d['deferred']==1 and d['failed_without_tx']==1
-    assert d['closed_accounts']==3 and d['burned_accounts']==2 and d['rent_recovered_lamports']==6000000
-    assert d['fee_lamports']==10000 and d['forfeited_quote_lamports']==1500900 and d['tx_not_ingested']==1
-    assert sorted(v['rule'] for v in d['violations'])==['burn transaction failed on-chain','quote above half rent']
-    assert list(d['errors'])==['SWAP BUSY: another matching swap is active']
-    assert abs(d['liquid_native_gain_sol']-0.00599)<1e-12 and abs(d['nav_effect_sol']+0.0015109)<1e-12
+    assert d['closed_accounts']==0 and d['burned_accounts']==0 and d['rent_recovered_lamports'] is None
+    assert d['fee_lamports'] is None and d['forfeited_quote_lamports'] is None and d['tx_not_ingested']==1
+    assert d['receipt_claimed']['closed_accounts']==3 and d['receipt_claimed']['rent_recovered_lamports']==6000000
+    assert [v['rule'] for v in d['violations']]==['burn transaction failed on-chain']
+    assert d['errors']==[{'reason':'SWAP BUSY: another matching swap is active','count':1}]
+    assert d['liquid_native_gain_sol'] is None and d['nav_effect_sol'] is None
     def broken(cmd,**k): raise OSError('no journal')
     assert dust_ledger(m,1000,run=broken)['status']=='unavailable'
     day=86400; base=20000*day-WIB
@@ -221,5 +227,55 @@ with tempfile.TemporaryDirectory() as tmp:
 	out, err := exec.Command("python3", "-c", code).CombinedOutput()
 	if err != nil {
 		t.Fatalf("live ledger check: %v %s", err, out)
+	}
+}
+
+func TestDashboardReviewRegressions(t *testing.T) {
+	for _, command := range [][]string{{"python3", "-I", "test_collect.py"}, {"node", "test_render.js"}, {"python3", "-I", "test_deploy.py"}} {
+		out, err := exec.Command(command[0], command[1:]...).CombinedOutput()
+		if err != nil {
+			t.Fatalf("%s: %v %s", command[0], err, out)
+		}
+	}
+}
+
+func TestEveryPanelRetainsCollectionFailure(t *testing.T) {
+	s := &server{failure: "Synthetic collection failure", data: object{
+		"collected_at": 123, "hermes": object{"profile": "fixture"}, "redis": object{"status": "disabled"},
+	}}
+	for _, panel := range []string{"overview", "capital", "live", "evaluation", "journal", "hermes", "redis"} {
+		r := httptest.NewRequest("GET", "/api/"+panel, nil)
+		r.Host = "localhost"
+		w := httptest.NewRecorder()
+		s.ServeHTTP(w, r)
+		if w.Code != 200 || !strings.Contains(w.Body.String(), `"collection_error":"Synthetic collection failure"`) || !strings.Contains(w.Body.String(), `"collected_at":123`) {
+			t.Fatalf("missing failure/age on %s: %s", panel, w.Body.String())
+		}
+	}
+	if _, mutated := s.data["hermes"].(object)["collection_error"]; mutated {
+		t.Fatal("request mutated the cached snapshot")
+	}
+}
+
+func TestCapitalLiveLocalReadOnlyMatrix(t *testing.T) {
+	s := &server{data: object{"collected_at": 123}}
+	for _, path := range []string{"/api/capital", "/api/live"} {
+		for _, host := range []string{"localhost", "127.0.0.1:8787", "[::1]:8787", "attacker.invalid", "192.0.2.1:8787"} {
+			for _, method := range []string{"GET", "HEAD", "POST", "PUT", "DELETE", "PATCH"} {
+				r := httptest.NewRequest(method, path, nil)
+				r.Host = host
+				w := httptest.NewRecorder()
+				s.ServeHTTP(w, r)
+				want := 200
+				if host == "attacker.invalid" || host == "192.0.2.1:8787" {
+					want = 403
+				} else if method != "GET" && method != "HEAD" {
+					want = 405
+				}
+				if w.Code != want {
+					t.Fatalf("%s %s %s: %d", method, host, path, w.Code)
+				}
+			}
+		}
 	}
 }
