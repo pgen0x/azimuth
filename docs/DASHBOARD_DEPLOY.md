@@ -16,9 +16,17 @@ test "$(git -C "$repo" rev-parse "$DASHBOARD_REVIEWED_SHA^{commit}")" = "$DASHBO
 mkdir -p "$HOME/.local/state/azimuth" "$HOME/.local/bin"
 run_dir=$(mktemp -d "$HOME/.local/state/azimuth/dashboard-deploy.XXXXXXXX")
 chmod 700 "$run_dir"
-git -C "$repo" worktree add --detach "$run_dir/checkout" "$DASHBOARD_REVIEWED_SHA"
+# A full clone, not `git worktree add`: a linked worktree's `.git` is a FILE, and the
+# local Go 1.22 toolchain only stamps vcs.revision when `.git` is a directory, so the
+# exact-SHA gates below would always fail. --no-hardlinks copies the objects, so the
+# clone shares nothing writable with the live checkout.
+git clone --quiet --no-hardlinks --no-checkout "$repo" "$run_dir/checkout"
+git -C "$run_dir/checkout" -c advice.detachedHead=false checkout --quiet --detach "$DASHBOARD_REVIEWED_SHA"
+test -d "$run_dir/checkout/.git"
+test "$(git -C "$run_dir/checkout" rev-parse HEAD)" = "$DASHBOARD_REVIEWED_SHA"
 test -z "$(git -C "$run_dir/checkout" status --porcelain)"
 export GOPROXY=off GOSUMDB=off GOTOOLCHAIN=local GOTELEMETRY=off
+go version > "$run_dir/go.version"
 (cd "$run_dir/checkout" && go test -count=1 ./... && go vet ./...)
 binary="$HOME/.local/bin/azimuth-dashboard"
 candidate=$(mktemp "${binary}.candidate.XXXXXXXX")
@@ -147,8 +155,12 @@ except urllib.error.HTTPError as error:
 else: raise AssertionError('POST was accepted')
 print('Fresh overview/capital/live; no collection error; POST refused')
 PY
-git -C "$repo" worktree remove "$run_dir/checkout"
 ```
+
+The build clone stays in `run_dir/checkout` as evidence of exactly what was
+built. It is a standalone clone, not a registered worktree, so there is nothing
+to `git worktree remove`. Delete `run_dir` only after the user accepts the
+deployed version.
 
 If activation or verification fails, keep the evidence in `run_dir` and use the
 following rollback in the same shell (or restore `run_dir`, `binary`, `dropin`
