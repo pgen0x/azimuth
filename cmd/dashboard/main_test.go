@@ -68,6 +68,7 @@ with tempfile.TemporaryDirectory() as tmp:
     (memory/'dlmm_wallet_transactions.jsonl').write_text(json.dumps({'signature':'proof','failed':False,'slot':123,'fee_lamports':5000,'block_time':100,'observed_at':200})+'\n')
     (memory/'dlmm_transactions.jsonl').write_text(json.dumps({'signature':'proof','kind':'deploy','ts':90})+'\n')
     (memory/'dlmm_realized.jsonl').write_text(json.dumps({'position':'p','closed_at':150,'fetched_at':250})+'\n')
+    (memory/'dlmm_closes.jsonl').write_text(json.dumps({'position':'old','pnl_sol':0.5,'closed_at':160})+'\n'+json.dumps({'position':'new','pnl_sol':-0.1,'pnl_basis':'pre_swap_mark','closed_at':170})+'\n')
     (state/'solana_deliveries.jsonl').write_text(json.dumps({'delivery_id':'delivery','stage':'prepared','ts':80})+'\n')
     identity=json.dumps(['solanza','dlmm-signal','delivery'],separators=(',',':')).encode()
     with sqlite3.connect(profile/'state.db') as db:
@@ -82,6 +83,8 @@ with tempfile.TemporaryDirectory() as tmp:
     session=next(e for e in data['journal'] if e['evidence'].get('session_id')=='session')
     assert session['evidence']['execution_verified'] is False
     assert session['evidence']['session_state']=='no_end_recorded_liveness_unknown'
+    closes={e['evidence']['position']:e['evidence'] for e in data['journal'] if e['stage']=='exit'}
+    assert closes['old']['pnl_basis']=='mark_unlabeled' and closes['new']['pnl_basis']=='pre_swap_mark'
     deploy=next(e for e in data['journal'] if e['stage']=='deploy')
     assert 'before broadcast' in deploy['note']
 
