@@ -50,7 +50,7 @@ Refreshes serve an immutable in-memory snapshot. A background collector updates 
 - North star (Capital tab): latest snapshot per WIB day, including null values, with selection coverage. Cash is native + LP mark + refundable rent; known also includes SPL marks. Missing/unknown days break deltas. See the bounds and large-file ordering limitation below.
 - NAV bridge (Capital tab, issue #93): known-SOL deltas and a source-qualified decomposition using transaction-kind, wallet, realized and close journals. Complete measured components reconcile; incomplete components stay null. Unattributed cash stays separate from rent. Snapshot history coverage and every journal status are exposed. It is not NAV/ROI or withdrawal + fees - deposit.
 - Live changes: deduplicated rent-unit receipt claims, separately verified transaction/account results, measured costs and explicit unknown totals. Realized PnL by mode uses close time and the close journal; wholly unmeasured cohorts remain null. The rules and coverage limits below apply to both views.
-- NAV ordering (fix2): over 4 MiB the NAV journal is binary-searched within 8 MiB / 256 reads / 2 s per lookup. Whole-file ordering is not provable there, so each lookup checks the timestamps of every row it visited plus one neighbour line on each side of the selected row (`ordering_assumption: visited_window_monotonic`); only an observed inversion marks that day partial. `dlmm_closes.jsonl` only labels bridge modes: legacy corrupt lines are reported as `closes_invalid_lines`, and make the bridge incomplete only when a lifecycle in the window has no mode (`mode_unknown`).
+- NAV ordering (fix2): over 4 MiB the NAV journal is binary-searched within 8 MiB / 256 reads / 2 s per lookup. Whole-file ordering is not provable there, so each lookup checks the timestamps of every row it visited including every row of the backward scan, plus one neighbour line on each side of the selected row (`ordering_assumption: visited_window_monotonic`); only an observed inversion marks that day partial. `dlmm_closes.jsonl` only labels bridge modes: legacy corrupt lines are reported as `closes_invalid_lines`, and make the bridge incomplete only when a lifecycle in the window has no mode (`mode_unknown`).
 - Close marks: `pnl_sol` in `dlmm_closes.jsonl` is the mark read one tick before the close, not realized cash. The journal passes the row's `pnl_basis` through and labels older rows without one `mark_unlabeled`; realized figures come only from `dlmm_realized.jsonl` (`realized_sol`, null = unmeasured).
 - Entry metadata: latest 100 `memories/dlmm_entries/*.json`; metadata is not proof of a landed deployment.
 - Routing: last 100 `entry_route=` markers from the actual `azimuth.service` journal within 48 hours. Only mode, route, reason and timestamp are extracted. No free-form service logs or Hermes tool messages are exposed.
@@ -84,10 +84,11 @@ only their labeled measured subtotal and unmeasured count.
 NAV searches parse top-level timestamps before using them, and preserve the
 latest day's null fields. A lookup reads at most 8 MiB / 256 operations, with a
 1 MiB line limit and a two-second work deadline. Files up to 4 MiB are scanned
-and ordering checked within that budget. Larger files use bounded seeks and
-explicitly report partial selection because ordering outside the visited rows
-is unverified; their daily deltas and bridge attribution remain unknown. A
-verified historical index would be needed for complete large-file coverage.
+and ordering checked within that budget. Larger files use bounded seeks; every
+row a lookup reads is ordering-checked, and an observed inversion marks that
+day partial (its deltas and bridge attribution stay unknown). Ordering of rows
+the lookup did not read is assumed, not proved (`visited_window_monotonic`); a
+verified historical index would be needed to prove large-file coverage.
 No new index is written by the read-only dashboard.
 
 Whole accounting journals are capped at 64 MiB, 100,000 lines and 1 MiB per

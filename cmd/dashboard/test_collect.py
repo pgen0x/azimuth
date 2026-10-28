@@ -191,6 +191,46 @@ class CollectorTests(unittest.TestCase):
         self._big_nav(rows)
         meta={};c.nav_at(self.m/'dlmm_nav.jsonl',1900,meta=meta)
         self.assertEqual(meta['status'],'partial');self.assertTrue(meta['out_of_order'])
+    def _backscan_counterexample(self,base=0):
+        """Codex fix3 P1 probe: 300 rows / ~4.8 MB; one row that only previous()'s backward scan
+        reads is moved past the cutoff. Returns (rows, changed index, cutoff, reads, spy)."""
+        import inspect
+        rows=[dict(ts=base+i*100,native_sol=1.0,lp_mark_sol=0.0,refundable_rent_sol=0.0,
+                   known_asset_subtotal_sol=1.0,external_flow_lamports=0) for i in range(300)]
+        cutoff=base+15090
+        def write():
+            with (self.m/'dlmm_nav.jsonl').open('w') as h:
+                for r in rows: h.write(json.dumps(dict(r,pad='x'*16000))+'\n')
+        original=c._nav_line;reads=[]
+        def spy(*a,**k):
+            item=original(*a,**k)
+            if item: reads.append((item[0],item[2],any(fr.function=='previous' for fr in inspect.stack())))
+            return item
+        write()
+        with patch.object(c,'_nav_line',side_effect=spy):c.nav_at(self.m/'dlmm_nav.jsonl',cutoff,meta={})
+        other={ts for _,ts,prev in reads if not prev}
+        only_prev=sorted({(ts-base)//100 for _,ts,prev in reads if prev and ts not in other and ts<base+14900})
+        self.assertTrue(only_prev,'fixture no longer exercises the backward scan')
+        changed=only_prev[0];rows[changed].update(ts=base+15050,native_sol=9.0,known_asset_subtotal_sol=9.0)
+        write();reads.clear()
+        self.assertGreater((self.m/'dlmm_nav.jsonl').stat().st_size,c.NAV_FULL_SCAN_BYTES)
+        return rows,changed,cutoff,reads,spy
+    def test_inversion_read_by_backward_scan_is_partial(self):
+        rows,changed,cutoff,reads,spy=self._backscan_counterexample()
+        self.assertEqual(changed,146)  # the exact row of codex's counterexample
+        meta={}
+        with patch.object(c,'_nav_line',side_effect=spy):c.nav_at(self.m/'dlmm_nav.jsonl',cutoff,meta=meta)
+        self.assertIn(15050,[ts for _,ts,prev in reads if prev])  # the inversion was read, by previous()
+        self.assertEqual(meta['status'],'partial');self.assertTrue(meta['out_of_order']);self.assertTrue(c.incomplete(meta))
+        self.assertEqual(meta['visited_rows'],len({off for off,_,_ in reads}))  # every row read is checked
+        self.assertLess(meta['read_calls'],c.NAV_LOOKUP_READS);self.assertLess(meta['read_bytes'],c.NAV_LOOKUP_BYTES)
+    def test_backward_scan_inversion_blocks_the_next_days_delta(self):
+        day=20000;end=day*86400-c.WIB+86400
+        rows,changed,cutoff,reads,spy=self._backscan_counterexample(base=end-1-15090)
+        ns=c.north_star(self.m,cutoff+14000,days=1)
+        first,last=ns['days']
+        self.assertEqual(first['status'],'partial_source');self.assertTrue(first['source']['out_of_order'])
+        self.assertNotIn('d_cash_sol',last);self.assertNotIn('d_known_sol',last);self.assertEqual(ns['status'],'partial')
     def test_bridge_unknown_values_and_history(self):
         for field in ('fee_lamports','wallet_delta_lamports','nonrefundable_account_cost_lamports'):
             bridge_fixture(self.m);f=self.m/'dlmm_wallet_transactions.jsonl';data=[json.loads(l) for l in f.read_text().splitlines()];data[0][field]=None;rows(f,data)

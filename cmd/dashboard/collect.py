@@ -145,8 +145,10 @@ def _nav_line(f, offset, size, meta, deadline):
 def nav_at(path, t, need=(), tries=50, meta=None):
     """Latest row, including unknown monetary fields. Optional need is explicit.
 
-    Small files are fully validated. Large-file seeks are bounded and explicitly
-    partial: append ordering outside the visited rows cannot be proved by a seek.
+    Small files are fully validated. Large-file seeks are bounded; every row the
+    lookup reads (binary search, backward scan, neighbour) is ordering-checked and
+    any observed inversion marks the lookup partial. Ordering of unread rows is
+    assumed (`visited_window_monotonic`), never proved.
     Never use an unparsed or nested timestamp to steer the search.
     """
     meta={} if meta is None else meta
@@ -172,8 +174,9 @@ def nav_at(path, t, need=(), tries=50, meta=None):
                 if incomplete(meta) or meta.get('out_of_order'): meta['status']='partial'
                 return latest
             # Whole-file ordering cannot be proved within the bounds; check it where we looked.
-            # Every visited (offset, ts) plus one neighbour line on each side of the pick must
-            # be non-decreasing; any observed inversion marks the lookup partial.
+            # Every row read (offset, ts), including each row of the backward scan and one
+            # neighbour line on each side of the pick, must be non-decreasing; any observed
+            # inversion marks the lookup partial.
             meta.update(ordering_assumption='visited_window_monotonic')
             visited={}
             def seen(item):
@@ -184,10 +187,12 @@ def nav_at(path, t, need=(), tries=50, meta=None):
                 while back<=4*NAV_LINE_BYTES:
                     cursor=max(0,start-back); last=None
                     while True:
-                        item=_nav_line(f,cursor,size,meta,deadline)
+                        # Every row read here is part of the ordering check, including the one
+                        # that stops the scan: an inversion we read must not pass as ok.
+                        item=seen(_nav_line(f,cursor,size,meta,deadline))
                         if item is None or item[0]>=start: break
                         last=item; cursor=item[1]
-                    if last is not None or cursor==0: return seen(last)
+                    if last is not None or cursor==0: return last
                     back*=4
                 return None
             def ordered():
@@ -242,7 +247,7 @@ def north_star(memory, now, days=14):
             a,b=prev.get('external_flow_lamports'),item['external_flow_lamports']
             item['d_external_sol']=(b-a)/1e9 if lamports(a,True) and lamports(b,True) else None
         out.append(item); prev=item
-    return {'days':out,'status':'partial' if any(incomplete(r['source']) for r in out) else 'ok','basis':'Last snapshot per WIB day, including unknown values. known = native + SPL mark + LP mark + refundable rent. cash = native + LP mark + refundable rent (no SPL marks). Deltas require consecutive days and complete source selection. Large files are searched within fixed read bounds; ordering is checked on every visited row plus one neighbour line on each side of the pick, and only an observed inversion marks a day partial.',
+    return {'days':out,'status':'partial' if any(incomplete(r['source']) for r in out) else 'ok','basis':'Last snapshot per WIB day, including unknown values. known = native + SPL mark + LP mark + refundable rent. cash = native + LP mark + refundable rent (no SPL marks). Deltas require consecutive days and complete source selection. Large files are searched within fixed read bounds; ordering is checked on every row a lookup reads (binary search, backward scan and one neighbour line on each side of the pick), and only an observed inversion marks a day partial.',
             'caveats':['SPL marks drop out when a quote is deferred or a token is unpriced: known then falls without a trade (phantom loss). cash excludes SPL marks and is immune to that, but also misses real token value.',
                        'External deposits/withdrawals are not netted out of either delta; check d_external_sol before reading a jump as profit.',
                        'Refundable rent is a recoverable reserve, not income; native growth can be recovered principal or rent.']}
