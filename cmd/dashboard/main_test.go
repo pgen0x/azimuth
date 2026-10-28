@@ -114,6 +114,12 @@ for trial in range(150):
             want=[r for r in rows if r['ts']<=t and r['native_sol'] is not None]
             assert nav_at(p,t)==(want[-1] if want else None),(trial,t)
 with tempfile.TemporaryDirectory() as tmp:
+    # Equal-length rows put a binary-search midpoint exactly on a line start.
+    p=Path(tmp)/'aligned.jsonl'; rows=[{'ts':t,'native_sol':1.0,'p':'x'} for t in (10,20,30)]
+    lines=[json.dumps(r) for r in rows]; assert len({len(x) for x in lines})==1
+    p.write_text(''.join(x+'\n' for x in lines))
+    assert nav_at(p,30)==rows[2] and nav_at(p,29)==rows[1] and nav_at(p,9) is None
+with tempfile.TemporaryDirectory() as tmp:
     memory=Path(tmp); day=86400; base=20000*day-WIB
     snaps=[{'ts':base+3600,'native_sol':1.0,'lp_mark_sol':0.5,'refundable_rent_sol':0.25,'known_asset_subtotal_sol':2.0,'external_flow_lamports':0,'wallet_history_complete':True,
             'issues':['unpriced_token:m1'],'tokens':[{'mint':'m2','mark_error':'quote_budget_deferred'}]},
@@ -182,6 +188,7 @@ journal='\n'.join([
  '1200.0 host node[1]: {"success":false,"error":"SWAP BUSY: another matching swap is active"}',
  '1300.0 host node[1]: {"success":true,"deferred":true,"reason":"waiting_for_second_empty_account"}',
  '1400.0 host node[1]: {"success":true,"dry_run":true,"txHash":null}',
+ '1450.0 host node[1]: {"success":true,"dry_run":true,"txHash":"t3","fee_lamports":5000,"accounts":[{"rent_lamports":2000000,"burn_raw":"1","quote_lamports":1999999}]}',
  '1500.0 host node[1]: [TX] {"stage":"reconcile","signature":"t1"}',
  '1600.0 host systemd[1]: Finished rent unit.'])
 calls=[]
@@ -192,7 +199,7 @@ with tempfile.TemporaryDirectory() as tmp:
     (m/'dlmm_wallet_transactions.jsonl').write_text(json.dumps({'signature':'t2','failed':True})+'\n')
     d=dust_ledger(m,1000,run=fake)
     assert calls[0][:4]==['journalctl','--user','-u','azimuth-sol-rent.service'] and '@1000' in calls[0]
-    assert d['runs']==5 and d['executed_tx']==2 and d['deferred']==1 and d['failed_without_tx']==1
+    assert d['runs']==6 and d['executed_tx']==2 and d['deferred']==1 and d['failed_without_tx']==1
     assert d['closed_accounts']==3 and d['burned_accounts']==2 and d['rent_recovered_lamports']==6000000
     assert d['fee_lamports']==10000 and d['forfeited_quote_lamports']==1500900 and d['tx_not_ingested']==1
     assert sorted(v['rule'] for v in d['violations'])==['burn transaction failed on-chain','quote above half rent']
