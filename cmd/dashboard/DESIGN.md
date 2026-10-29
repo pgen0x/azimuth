@@ -33,7 +33,7 @@ Source: the product owner's answers (2026-10-29), transcribed. This file is dire
 ## Navigation (revised by the owner, 2026-10-29)
 
 - **No top header / tab bar.** A **left sidebar** like a typical admin panel: wordmark + compass mark at the top, one
-  item per section (overview, capital, live, journal, evaluation, hermes, redis), each with an **icon + label**, active
+  item per section (overview, capital, live, journal, hermes, redis), each with an **icon + label**, active
   item marked with the copper accent, sign-out and the viewer's time zone at the bottom.
 - Collapses to icons only on narrow desktop widths; on phones it becomes an off-canvas drawer behind a menu button.
 - **Icons from a common icon library** (owner choice), vendored in-repo as inline SVG (no CDN, no network), one stroke
