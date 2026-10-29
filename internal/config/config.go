@@ -187,7 +187,7 @@ type Config struct {
 	RobinhoodDeployModes map[string]bool
 	// RobinhoodExecutorCmd is the whitespace-split command line for
 	// uni_executor.js, e.g.
-	// "node /home/ubuntu/.hermes/profiles/<profile>/skills/solana-dlmm/scripts/uni_executor.js".
+	// "node <profile>/skills/solana-dlmm/scripts/uni_executor.js".
 	// Wallet keys stay in the profile .env — the executor loads them itself.
 	RobinhoodExecutorCmd string
 	// RobinhoodV4ExecutorCmd is the same for uni_v4_executor.js, the v4
