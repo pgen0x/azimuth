@@ -360,7 +360,7 @@ What landed (discovery/screening only — **no v4 execution**):
 ### Phase 7 — v4 execution ✅ (LIVE 2026-07-15)
 
 Validation round-trip completed on-chain 2026-07-15 (one position,
-CASHCAT/WETH 0.2888%: mint 0.002 WETH → state → collect → close, net cost
+CASHCAT/WETH 0.2888%: mint a dust-sized WETH position → state → collect → close, net cost
 dust plus gas), then `ROBINHOOD_V4_EXECUTOR_CMD` enabled in the live
 daemon env and the service restarted. Two chain-specific findings from the
 rollout, both fixed in `uni_v4_executor.js`:

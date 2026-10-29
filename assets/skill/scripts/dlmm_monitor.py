@@ -1187,8 +1187,8 @@ def position_gone_onchain(wallet_address, pos_addr, attempts=2, gap_s=6):
     return all(verdicts)
 
 # A position still holding this much quote after a close that reported success
-# did not actually close. Well under any real ticket (the smallest observed is
-# ~0.16 SOL). This is a position-close verification threshold, separate
+# did not actually close. Well under any real ticket (above the 0.10 SOL
+# minimum deploy). This is a position-close verification threshold, separate
 # from the wallet residual swap floor configured by --min-swap-sol.
 CLOSE_RESIDUAL_DUST_SOL = 0.005
 
