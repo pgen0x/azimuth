@@ -1,34 +1,34 @@
 # Hasil setelah optimasi Solana — 15 September 2026
 
-Snapshot pembandingan berakhir **15 September 09:08 WIB**. Patch exit/entry 0b77a72 mulai live **14 September 15:23:49 WIB**, sehingga baru 17 jam 44 menit berlalu, belum 24 jam penuh.
+Snapshot berakhir **15 September 09:08 WIB**. Patch exit/entry 0b77a72 mulai live **14 September 15:23:49 WIB**, sehingga baru 17 jam 44 menit berlalu, belum 24 jam penuh.
 
-**Belum terbukti meningkat. Penyebab utama jumlah posisi tertinggal adalah gangguan autentikasi Redis, yang sekarang sudah diperbaiki.**
+**Belum terbukti meningkat. Penyebab utama jumlah posisi yang rendah adalah gangguan autentikasi Redis, yang sekarang sudah diperbaiki.**
 
 ## Angka pengguna terkonfirmasi
 
 Periode 24 jam: 14 September 09:08 sampai 15 September 09:08 WIB.
 
-| Metrik | Azimuth | Meridian |
-|---|---:|---:|
-| Posisi tertutup | 12 | 37 |
-| WR berdasarkan PnL USD | 58,33% (7/12) | 62,16% (23/37) |
-| WR berdasarkan PnL SOL | 66,67% | 70,27% |
-| PnL LP SOL | +0,000176466 | +0,016044821 |
-| PnL LP USD | +$0,30436 | +$3,08910 |
-| Posisi masih terbuka pada snapshot | 0 | 2 |
+| Metrik | Azimuth |
+|---|---:|
+| Posisi tertutup | 12 |
+| WR berdasarkan PnL USD | 58,33% (7/12) |
+| WR berdasarkan PnL SOL | 66,67% |
+| PnL LP SOL | +0,000176466 |
+| PnL LP USD | +$0,30436 |
+| Posisi masih terbuka pada snapshot | 0 |
 
-Jadi “12 vs 37” adalah jumlah **close** dalam periode, bukan jumlah posisi yang masih open bersamaan. WR USD berbeda dari WR SOL karena denominasi. Semua PnL tabel adalah PnL LP dan belum merupakan profit bersih wallet setelah swap.
+Jadi “12” adalah jumlah **close** dalam periode, bukan jumlah posisi yang masih open bersamaan. WR USD berbeda dari WR SOL karena denominasi. Semua PnL tabel adalah PnL LP dan belum merupakan profit bersih wallet setelah swap.
 
 ## Periode yang benar-benar sesudah patch
 
-| Metrik, 14 Sep 15:23:49 — 15 Sep 09:08 | Azimuth | Meridian |
-|---|---:|---:|
-| Posisi ditutup | 5 | 29 |
-| WR USD | 40,00% | 58,62% |
-| PnL LP SOL | −0,002840139 | +0,004829418 |
-| Posisi baru dalam periode, sudah ditutup | 3 | 28 |
-| Posisi baru dalam periode, masih terbuka | 0 | 2 |
-| PnL LP dari posisi baru yang sudah tutup | −0,000531224 | +0,022592393 |
+| Metrik, 14 Sep 15:23:49 — 15 Sep 09:08 | Azimuth |
+|---|---:|
+| Posisi ditutup | 5 |
+| WR USD | 40,00% |
+| PnL LP SOL | −0,002840139 |
+| Posisi baru dalam periode, sudah ditutup | 3 |
+| Posisi baru dalam periode, masih terbuka | 0 |
+| PnL LP dari posisi baru yang sudah tutup | −0,000531224 |
 
 Dua close Azimuth adalah posisi yang sudah terbuka sebelum patch, sehingga seluruh hasilnya tidak boleh diatribusikan kepada patch baru. Sampel baru Azimuth hanya tiga close.
 
@@ -41,10 +41,10 @@ Redis server mulai berjalan dengan autentikasi pada **14 September 19:45:01 WIB*
 - Scanner: **9.450** pesan `NOAUTH Authentication required`; **1.606** siklus gabungan turnover/pulse selama gangguan, **nol kandidat terkirim**.
 - Monitor: **2.296** baris NOAUTH. Pesan error Redis bahkan dibaca sebagai nama posisi `NOAUTH Authentication required.`; scoreboard juga gagal mengubah pesan tersebut menjadi float.
 - Durasi gangguan dalam window audit: **13 jam 23 menit**, sekitar 75% periode sesudah patch.
-- Sebelum error Redis, kedua bot sama-sama menutup **5 posisi** sejak patch. Setelah error, Azimuth menutup **0**, sementara Meridian menutup **24** lagi.
+- Sebelum error Redis, Azimuth menutup **5 posisi** sejak patch. Setelah error, Azimuth menutup **0**.
 - Posisi Azimuth terakhir tutup 14 September 19:28:57 WIB; swap terakhir 19:31:56, sebelum Redis bermasalah. Tidak ada posisi nyata terbuka pada snapshot audit.
 
-Ini menunjukkan bottleneck operasional yang kuat. Tidak ada dasar melonggarkan filter risiko hanya untuk mengejar jumlah transaksi Meridian.
+Ini menunjukkan bottleneck operasional yang kuat. Tidak ada dasar melonggarkan filter risiko hanya untuk menambah jumlah transaksi.
 
 ## Apakah perbaikan strategi bekerja?
 
@@ -81,6 +81,6 @@ Baseline pengamatan operasional baru mulai **15 September 09:13:57 WIB**. Tidak 
 
 ## Sumber dan batas data
 
-Data terbuka diambil langsung dari Meridian API, status HTTP 200 untuk kedua wallet. Riwayat close diambil dari seluruh halaman Meteora portfolio/pnl untuk pool yang relevan, 0 error, lalu dijoin dengan journal kedua bot. `positions.csv`, `summary.json`, raw API, journal, dan log disimpan di direktori ini.
+Riwayat close diambil dari seluruh halaman Meteora portfolio/pnl untuk pool yang relevan, 0 error, lalu dijoin dengan journal Azimuth. `positions.csv`, `summary.json`, raw API, journal, dan log disimpan di direktori ini.
 
 On-chain swap Noiz diperiksa melalui enhanced transaction API. Upaya tambahan RPC untuk memeriksa seluruh signature window terkena HTTP 429; audit ini tidak menyatakan total gas atau ledger seluruh wallet window lengkap. Nilai Noiz dilaporkan sebelum gas. PnL LP berbeda dari PnL wallet sesuai audit kapital 14 September.
