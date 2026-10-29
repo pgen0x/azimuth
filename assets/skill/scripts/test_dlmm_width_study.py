@@ -7,7 +7,6 @@ import unittest
 from unittest.mock import patch
 
 import dlmm_shadow as shadow
-from dlmm_evaluate import evaluate
 
 
 class WidthStudyTests(unittest.TestCase):
@@ -58,7 +57,7 @@ class WidthStudyTests(unittest.TestCase):
         result = shadow.bin_width_replay(self.entry, [dict(self.sample, ts=200)])
         self.assertFalse(result['horizon_complete'])
 
-    def test_existing_collector_and_evaluator_use_the_wider_observation(self):
+    def test_existing_collector_reads_the_wider_observation(self):
         with tempfile.TemporaryDirectory() as directory:
             profile = Path(directory)
             memory = profile/'memories'
@@ -70,10 +69,6 @@ class WidthStudyTests(unittest.TestCase):
                 shadow.collect(profile, profile/'rejects.jsonl')
             self.assertEqual(read.call_args.args[0][-2:], ['-69', '0'])
             self.assertEqual(read.call_count, 1)
-            result = evaluate(profile, 50, 3800, profile/'rejects.jsonl')
-            self.assertEqual(result['bin_width_replay'][0]['status'], 'modeled')
-            self.assertTrue(result['bin_width_replay'][0]['horizon_complete'])
-            self.assertEqual(result['bin_replay'][0]['status'], 'modeled')
 
     def test_sol_x_mirrors_the_range_without_changing_the_SOL_benchmark(self):
         bins = [dict(b, id=-b['id'], x=b['y'], y=b['x'], price=1/b['price'])
@@ -124,47 +119,6 @@ class WidthStudyTests(unittest.TestCase):
         stale = shadow.bin_width_holding_replay(self.entry, [dict(self.sample, ts=200)], 801)
         self.assertEqual(stale['reason'], 'last_preclose_observation_too_old')
         self.assertEqual(shadow.bin_width_holding_replay(self.entry, [dict(self.sample, ts=200)], 800)['status'], 'modeled')
-
-    def test_evaluator_requires_close_proof_observed_by_its_cutoff(self):
-        with tempfile.TemporaryDirectory() as directory:
-            profile = Path(directory); memory = profile/'memories'
-            (memory/'dlmm_entries').mkdir(parents=True)
-            (memory/'dlmm_entries/position.json').write_text(json.dumps(self.entry))
-            (memory/'dlmm_closes.jsonl').write_text(json.dumps(dict(position='position', ts=250))+'\n')
-            (memory/'dlmm_bin_samples.jsonl').write_text(json.dumps(dict(self.sample, position='position', ts=200))+'\n'+json.dumps(dict(self.sample, position='position'))+'\n')
-            (memory/'dlmm_transactions.jsonl').write_text(json.dumps(dict(position='position',kind='close',signature='close',wallet='wallet',ts=250))+'\n')
-            fact=dict(signature='close',wallet='wallet',observed_at=270,block_time=250,position_account_closed=True,
-                      failed=False,wallet_delta_lamports=0,fee_lamports=0,token_deltas_raw={})
-            (memory/'dlmm_wallet_transactions.jsonl').write_text(json.dumps(fact)+'\n')
-            self.assertEqual(evaluate(profile,50,260,profile/'rejects.jsonl')['bin_width_holding_replay'][0]['status'], 'unmeasured')
-            result=evaluate(profile,50,3800,profile/'rejects.jsonl')['bin_width_holding_replay'][0]
-            self.assertEqual(result['status'], 'modeled'); self.assertEqual(result['observed_until_ts'], 200)
-            self.assertEqual(result['actual_close_ts'], 250)
-            for change in [dict(failed=True),dict(landed=False),dict(wallet='other'),dict(block_time=251),
-                           dict(block_time=0),dict(block_time=-1),dict(block_time=None),
-                           dict(position_account_closed=False)]:
-                (memory/'dlmm_wallet_transactions.jsonl').write_text(json.dumps(dict(fact,**change))+'\n')
-                self.assertEqual(evaluate(profile,50,3800,profile/'rejects.jsonl')['bin_width_holding_replay'][0]['status'], 'unmeasured')
-
-    def test_delayed_close_journal_cannot_admit_post_chain_close_samples(self):
-        with tempfile.TemporaryDirectory() as directory:
-            profile=Path(directory);memory=profile/'memories'
-            (memory/'dlmm_entries').mkdir(parents=True)
-            (memory/'dlmm_entries/position.json').write_text(json.dumps(self.entry))
-            (memory/'dlmm_closes.jsonl').write_text(json.dumps(dict(position='position',ts=350))+'\n')
-            (memory/'dlmm_transactions.jsonl').write_text(json.dumps(dict(position='position',kind='close',signature='close',wallet='wallet',ts=350))+'\n')
-            fact=dict(signature='close',wallet='wallet',observed_at=360,block_time=250,position_account_closed=True,
-                      failed=False,wallet_delta_lamports=0,fee_lamports=0,token_deltas_raw={})
-            (memory/'dlmm_wallet_transactions.jsonl').write_text(json.dumps(fact)+'\n')
-            before=dict(self.sample,position='position',ts=200,price=1,active_bin=0,bins=self.bins)
-            after=dict(self.sample,position='position',ts=300)
-            (memory/'dlmm_bin_samples.jsonl').write_text('\n'.join(map(json.dumps,[before,after]))+'\n')
-            result=evaluate(profile,50,3800,profile/'rejects.jsonl')['bin_width_holding_replay'][0]
-            self.assertEqual(result['status'],'modeled')
-            self.assertEqual(result['actual_close_ts'],250)
-            self.assertEqual(result['observed_until_ts'],200)
-            self.assertEqual(result['seconds_before_close'],50)
-            self.assertEqual(result['deltas']['gross_pnl_sol'],0)
 
 
 if __name__ == '__main__':

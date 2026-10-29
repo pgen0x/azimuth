@@ -1,5 +1,9 @@
 from dlmm_shadow import bin_replay, rejected_outcome
 from dlmm_accounting import root_decision
+import json
+import tempfile
+from pathlib import Path
+from unittest.mock import patch
 
 r=dict(id='a',ts=100,mode='pulse',gate='momentum',snapshot={'pool_price':1},candidate={'sol_is_x':False})
 assert rejected_outcome(r,2,1800) is None
@@ -59,89 +63,6 @@ gap=dict(wide,bin_snapshot=dict(wide['bin_snapshot'],bins=[three_bins[0],three_b
 assert bin_replay(gap,[wide_end])['expected_bidask_reference_scheme'] is None
 print('Root loss/cost gates and forward shadow outcomes/bin replay passed')
 
-from dlmm_evaluate import replay_root_decision
-r=dict(ts=200,root_chain_id='a',chain=root,opportunity_sol=0.02,allow=True,reason='root_cost_budget_pass')
-assert replay_root_decision(r)['proposed']=='recenter'
-assert replay_root_decision(dict(r,opportunity_sol=None))['reason']=='fee_opportunity_unavailable'
-assert replay_root_decision(dict(r,chain=None))['reason']=='incomplete_chain'
-
-# Evaluate the actual report path, not just the shared inflow predicate.
-import json
-import tempfile
-from pathlib import Path
-from dlmm_evaluate import evaluate
-with tempfile.TemporaryDirectory() as directory:
- profile=Path(directory); memory=profile/'memories'; memory.mkdir()
- snapshots=[dict(ts=100,end_slot=10,nav_sol=1,wallet_history_complete=True),
-            dict(ts=200,end_slot=20,nav_sol=1.5,wallet_history_complete=True)]
- (memory/'dlmm_nav.jsonl').write_text(''.join(json.dumps(s)+'\n' for s in snapshots))
- fact=dict(signature='gift',observed_at=150,slot=15,classification='external_token_inflow',token_deltas_raw={'mint':'10'})
- def assessment(record):
-  (memory/'dlmm_wallet_transactions.jsonl').write_text(json.dumps(record)+'\n')
-  return evaluate(profile,100,200,profile/'rejects.jsonl')
- result=assessment(fact)
- assert result['native_cash_change'] is None
- assert result['wealth_change'] is None
- assert result['unvalued_external_token_inflows']==['gift']
- assert result['accounting']['flow_adjusted_wealth_change_sol'] is None
- cash=assessment(dict(fact,classification='external_transfer',external_flow_lamports=500000000))
- assert cash['wealth_change']['flow_adjusted_change_sol']==0
- assert cash['accounting']['flow_adjusted_wealth_change_sol']==0
- assert assessment(dict(fact,slot=9))['wealth_change']['flow_adjusted_change_sol']==0.5
- assert assessment(dict(fact,slot=None))['wealth_change'] is None
- # Reclaim transfers existing reserve into cash; only service/network fees
- # change wealth. A positive cash receipt must not become a positive NAV return.
- snapshots[0]['nav_sol']=1.000000200; snapshots[1]['nav_sol']=1.000000193
- (memory/'dlmm_nav.jsonl').write_text(''.join(json.dumps(s)+'\n' for s in snapshots))
- maintenance=assessment(dict(fact,classification='rent_maintenance',external_flow_lamports=0,
-                            wallet_delta_lamports=193,rent_maintenance={'released_lamports':200,'service_fee_lamports':2},fee_lamports=5))
- assert abs(maintenance['wealth_change']['flow_adjusted_change_sol'] + 7e-9)<1e-15
- assert abs(maintenance['accounting']['flow_adjusted_wealth_change_sol'] + 7e-9)<1e-15
- # Cash remains measurable when token prices prevent complete NAV. A deployment
- # moves cash into LP/rent; displaying its outflow must not invent a net loss.
- snapshots=[dict(ts=100,end_slot=10,native_sol=0.5,nav_sol=None,lp_mark_sol=0,refundable_rent_sol=0.1),
-            dict(ts=200,end_slot=20,native_sol=0.35,nav_sol=None,lp_mark_sol=0.1,refundable_rent_sol=0.15)]
- (memory/'dlmm_nav.jsonl').write_text(''.join(json.dumps(s)+'\n' for s in reversed(snapshots)))
- result=assessment(fact)
- assert result['wealth_change'] is None
- assert result['native_cash_change']['change_sol']==-0.15
- assert result['native_cash_change']['start']['ts']==100
- assert result['native_cash_change']['end']['lp_mark_sol']==0.1
- assert result['native_cash_change']['end']['refundable_rent_sol']==0.15
- assert result['native_cash_change']['basis']=='observed_native_balance_change_not_trading_profit'
- assert evaluate(profile,101,200,profile/'rejects.jsonl')['native_cash_change'] is None
-print('Evaluation excludes unvalued gifts and subtracts known external cash flows')
-
-# A positive LP mark can coexist with negative spendable cash while rent is held.
-from dlmm_evaluate import root_cash_cohort
-cash_root = dict(root_chain_id='closed', positions=['p'], first_activity=100,
-                 last_activity=190, accounting_status='settled_cash',
-                 wallet_delta_lamports=-865793, settled_cash_pnl_sol=-0.000865793,
-                 lp_pnl_sol=0.000676761, reasons=[])
-incomplete = dict(cash_root, root_chain_id='open', accounting_status='incomplete',
-                  settled_cash_pnl_sol=None, reasons=['open_or_unjournaled_positions'])
-cash = root_cash_cohort({'chains': [cash_root, incomplete,
-    dict(cash_root, first_activity=99), dict(cash_root, last_activity=201),
-    dict(cash_root, positions=[], root_chain_id='unattributed')]}, 100, 200)
-assert (cash['window_roots'], cash['settled_roots'], cash['incomplete_roots']) == (2, 1, 1)
-assert cash['settled_cash_sol'] == -0.000865793 and cash['cash_positive_roots'] == 0
-assert cash['roots'][0]['lp_pnl_sol'] > 0
-assert root_cash_cohort({'chains': [incomplete]}, 100, 200)['settled_cash_sol'] is None
-print('Root cash cohort excludes carry-in, future and unattributed cash; incomplete is not zero')
-
-# Refund-adjusted groups must fit the entire evaluation window.
-from unittest.mock import patch
-import dlmm_evaluate as evaluation_module
-with tempfile.TemporaryDirectory() as root:
-    profile=Path(root)
-    inside=dict(first_activity=100,last_activity=200,root_chain_ids=["inside"])
-    carry=dict(first_activity=99,last_activity=200,root_chain_ids=["carry"])
-    late=dict(first_activity=100,last_activity=201,root_chain_ids=["late"])
-    with patch.object(evaluation_module,"report",return_value=dict(chains=[],rent_refund_groups=[inside,carry,late])):
-        result=evaluation_module.evaluate(profile,100,200,profile/"rejects.jsonl")
-    assert result["rent_refund_groups"]==[inside]
-print("Refund groups exclude carry-in roots and refunds after the evaluation window")
-
 # Fixed mode horizons use the first terminal observation, not later outcomes.
 import dlmm_shadow as shadow_module
 pulse_entry=dict(entry,mode="pulse")
@@ -169,62 +90,6 @@ with tempfile.TemporaryDirectory() as directory:
         result=shadow_module.collect(profile,profile/"rejects.jsonl")
         assert result["bin_snapshots_attempted"]==1 and fetch.call_args.args[0][3]=="long"
 print("Mode-bounded bin collection and explicit partial-horizon replay passed")
-
-# Execution comparisons undo locked/refunded rent and fees exactly once; they
-# must not silently classify missing, failed or late evidence as zero slippage.
-from dlmm_evaluate import swap_execution
-quote = dict(input_mint="TOKEN", output_mint="So11111111111111111111111111111111111111112",
-             in_amount="10", out_amount="1000", minimum_out_amount="990",
-             authorized_slippage_bps=100, observed_at=100)
-event = dict(kind="swap", signature="ok", position="position", ts=101, swap_quote=quote)
-fact = dict(observed_at=110, failed=False, basis="finalized_transaction_balances",
-            wallet_delta_lamports=795, fee_lamports=5, token_deltas_raw={"TOKEN":"-10"},
-            token_rent_evidence=dict(version=1, funded=[dict(lamports=300)], refunded=[dict(lamports=100)]))
-failed = dict(event, signature="failed", swap_quote=dict(quote, authorized_slippage_bps=300))
-missing = dict(event, signature="missing")
-late = dict(event, signature="late")
-result = swap_execution([event, event, failed, missing, late, dict(event, ts=201)],
-                        {"ok":fact, "failed":dict(fact, failed=True), "late":dict(fact, observed_at=201)}, 100, 200)
-assert len(result['attempts']) == 4
-assert result['attempts'][0]['actual_gross_lamports'] == 1000
-assert result['by_slippage_bps']['100']['pending'] == 2
-assert result['by_slippage_bps']['300']['failed'] == 1
-assert result['by_slippage_bps']['300']['known_network_fee_lamports'] == 5
-assert result['by_slippage_bps']['100']['measured_shortfall_lamports'] == 0
-for bad in [dict(fact, token_rent_evidence={}), dict(fact, token_deltas_raw={"TOKEN":"-9"}),
-            dict(fact, fee_lamports=float('nan')), dict(fact, wallet_delta_lamports=True)]:
-    assert swap_execution([event], {"ok":bad}, 100, 200)['attempts'][0]['status'] == 'unmeasured'
-for bad in [dict(quote, out_amount="NaN"), dict(quote, minimum_out_amount="1001"),
-            dict(quote, observed_at=102), dict(quote, output_mint="OTHER")]:
-    assert swap_execution([dict(event, swap_quote=bad)], {"ok":fact}, 100, 200)['attempts'][0]['status'] == 'unmeasured'
-# A mixed close's unknown rent must not look like a favorable fill. Exact proven
-# refunds can still be deducted; root cash keeps the actual full wallet delta.
-for rent in [dict(version=1, funded=[], refunded=[], refunds_unmeasured=True),
-             dict(version=1, funded=[], refunded=[])]:
-    combined = dict(event, swap_quote=dict(quote, token_rent_close_included=True))
-    r = swap_execution([combined], {'ok':dict(fact, wallet_delta_lamports=1486220,
-                        token_rent_evidence=rent)}, 100, 200)
-    assert r['attempts'][0]['reason'] == 'token_rent_refund_unmeasured'
-    assert r['by_slippage_bps']['100']['measured'] == 0
-    assert r['by_slippage_bps']['100']['known_network_fee_lamports'] == 5
-    assert 'actual_gross_lamports' not in r['attempts'][0]
-    if rent.get('refunds_unmeasured'):
-        assert swap_execution([event], {'ok':dict(fact, token_rent_evidence=rent)}, 100, 200)['attempts'][0]['status'] == 'unmeasured'
-proven = dict(event, swap_quote=dict(quote, token_rent_close_included=True))
-assert swap_execution([proven], {'ok':fact}, 100, 200)['attempts'][0]['actual_gross_lamports'] == 1000
-improved = swap_execution([event], {"ok":dict(fact, wallet_delta_lamports=805)}, 100, 200)
-assert improved['attempts'][0]['shortfall_lamports'] == -10
-expired = dict(observed_at=110, landed=False, classification='expired_unlanded',
-               basis='finalized_wallet_history_and_expiry')
-result = swap_execution([event], {'ok':expired}, 100, 200)
-assert result['by_slippage_bps']['100']['expired_unlanded'] == 1
-assert result['by_slippage_bps']['100']['pending'] == 0
-assert 'actual_gross_lamports' not in result['attempts'][0]
-assert 'network_fee_lamports' not in result['attempts'][0]
-for unproven in [dict(expired, observed_at=201), dict(expired, basis='unknown'),
-                 dict(expired, classification='unknown')]:
-    assert swap_execution([event], {'ok':unproven}, 100, 200)['attempts'][0]['status'] == 'pending'
-print("Swap quote/fill evaluation preserves rent, failed fees, cutoff and unknown evidence")
 
 # Sell-quote observations must not promote missing costs or malformed inventory
 # to net profit; HTTP work stays bounded even when data is unavailable.
@@ -336,35 +201,7 @@ with tempfile.TemporaryDirectory() as directory:
     samples = shadow_module.rows(memory/'dlmm_liquidation_quotes.jsonl')
     assert {x['position'] for x in samples} == {'p', 'q'}
     assert all(x['status']=='unmeasured' for x in samples)
-    assert len(evaluate(profile, 9999, 10000, profile/'rejects.jsonl')['liquidation_observations']) == 2
-    assert not evaluate(profile, 9999, 9999, profile/'rejects.jsonl')['liquidation_observations']
 print('Liquidation quotes preserve inventory, cost limits, unknown evidence and bounded collection')
-
-# API float noise is break-even, and an empty position is not a carry-in trade.
-from dlmm_evaluate import lp_cohort, compare_lp
-lp = dict(positionAddress='win', createdAt=100, closedAt=150, pnlSol='0.001',
-          allTimeDeposits=dict(total=dict(sol='0.1')))
-records = [lp, lp, dict(lp, positionAddress='noise', pnlSol='2.7755575615628914e-17'),
-           dict(lp, positionAddress='loss', pnlSol='-0.001'),
-           dict(lp, positionAddress='one-lamport', pnlSol='0.000000001'),
-           dict(lp, positionAddress='carry', createdAt=99),
-           dict(lp, positionAddress='empty', allTimeDeposits=dict(total=dict(sol='0'))),
-           dict(lp, positionAddress='future', closedAt=200)]
-cohort = lp_cohort(records, 100, 200)
-assert cohort['full_life_positions'] == 4 and cohort['carry_in_closes'] == 1
-assert cohort['zero_deposit_closes'] == 1
-assert (cohort['wins'], cohort['losses'], cohort['breakeven_positions']) == (2, 1, 1)
-assert abs(cohort['lp_pnl_sol'] - 1e-9) < 1e-15
-with patch.object(evaluation_module, 'fetch_pools', return_value=[dict(poolAddress='pool', lastClosedAt=150)]), \
-     patch.object(evaluation_module, 'fetch_closed_positions', return_value=records):
-    assert compare_lp({'azimuth':'wallet'}, 100, 200)['azimuth'] == cohort
-    for bad in [dict(lp, pnlSol='NaN'), dict(lp, pnlSol=True), dict(lp, createdAt=151),
-                dict(lp, allTimeDeposits=dict(total=dict(sol=True))),
-                dict(lp, allTimeDeposits=dict(total=dict(sol='NaN'))),
-                dict(lp, allTimeDeposits={})]:
-        with patch.object(evaluation_module, 'fetch_closed_positions', return_value=[bad]):
-            assert compare_lp({'azimuth':'wallet'}, 100, 200)['azimuth']['status'] == 'unmeasured'
-print('LP cohorts exclude empty positions and float-noise wins; missing valuations stay unmeasured')
 
 # Exercise the collector with slow providers: it must preserve time for bin/IL
 # observations and resume unattempted records rather than inventing outcomes.
@@ -554,74 +391,7 @@ shifted_observation['bin_observation']['bins'][1].update(liquidity_raw='0',y_raw
 shifted_result=replay_allocation(o=shifted_observation)
 assert shifted_result['status']=='modeled' and shifted_result['funded_bins']==1 and shifted_result['position_bins']==2
 assert shifted_result['schemes']['near_active']['paired_gross_delta_sol']==0
-
-# Verify the actual scheduled evaluator joins the funding/close facts and
-# obeys journal recording time, rather than testing only the pure helper.
-import dlmm_evaluate as native_evaluation
-with tempfile.TemporaryDirectory() as directory:
-    profile=Path(directory);memory=profile/'memories';(memory/'dlmm_entries').mkdir(parents=True)
-    (memory/'dlmm_entries/position.json').write_text(json.dumps(allocation_entry))
-    (memory/'dlmm_closes.jsonl').write_text(json.dumps(dict(position='position',ts=155,dry_run=False))+'\n')
-    events=[dict(kind='deploy',position='position',signature='funding',wallet='wallet',ts=50),
-            dict(kind='close',position='position',signature='close',wallet='wallet',ts=155)]
-    (memory/'dlmm_transactions.jsonl').write_text(''.join(json.dumps(e)+'\n' for e in events))
-    (memory/'dlmm_wallet_transactions.jsonl').write_text(''.join(json.dumps(f)+'\n' for f in [allocation_funding,allocation_close]))
-    journal=memory/'dlmm_close_bin_observations.jsonl';journal.write_text(json.dumps(allocation_observation)+'\n')
-    with patch.object(native_evaluation,'report',return_value={'chains':[],'rent_refund_groups':[]}):
-        measured=native_evaluation.evaluate(profile,1,200,profile/'rejects.jsonl')['native_bin_replay']
-        assert len(measured)==1 and measured[0]['status']=='modeled'
-        journal.write_text(json.dumps(dict(allocation_observation,recorded_at=201))+'\n')
-        assert native_evaluation.evaluate(profile,1,200,profile/'rejects.jsonl')['native_bin_replay'][0]['status']=='unmeasured'
-        journal.write_text(json.dumps(allocation_observation)+'\n')
-        (memory/'dlmm_wallet_transactions.jsonl').write_text(''.join(json.dumps(f)+'\n' for f in [allocation_funding,dict(allocation_close,failed=True)]))
-        assert native_evaluation.evaluate(profile,1,200,profile/'rejects.jsonl')['native_bin_replay'][0]['status']=='unmeasured'
-print('Native bin replay preserves composition cost, executed support and finalized observation cutoffs')
-
-# Evaluate a small window in large unrelated journals. Indexing preserves file
-# order/duplicates and the evaluator's original timestamp and first-reject rules.
-import tracemalloc
-from dlmm_evaluate import index_bin_samples, read_bin_samples
-with tempfile.TemporaryDirectory() as directory:
-    profile=Path(directory);memory=profile/'memories';(memory/'dlmm_entries').mkdir(parents=True)
-    initial_bin=dict(id=0,x='0',y='1000000000',supply=str(1000000000*2**64),fee_x='0',fee_y='0',price=1)
-    e=dict(position='position',mode='pulse',deployed_at=100,size_sol=.1,amount_x=0,amount_y=.1,
-        bin_snapshot=dict(ts=100,active_bin=0,price=1,decimals_x=9,decimals_y=9,sol_is_x=False,bins=[initial_bin]))
-    (memory/'dlmm_entries/position.json').write_text(json.dumps(e))
-    samples=[dict(position='position',ts=ts,price=1,active_bin=0,
-                  bins=[dict(initial_bin,fee_y=str((i+1)*2**64//100))])
-             for i,ts in enumerate([101,101,2000,2100,3000])]
-    file=memory/'dlmm_bin_samples.jsonl';rejects=profile/'rejects.jsonl'
-    with file.open('w') as output, rejects.open('w') as rejected:
-        for i in range(96):
-            output.write(json.dumps(dict(position='unrelated',ts=1,padding='x'*65536))+'\n')
-            rejected.write(json.dumps(dict(id=str(i),ts=1,padding='x'*65536))+'\n')
-            rejected.write(json.dumps(dict(id='selected'+str(i),ts=150,mode='pulse',gate='memory',padding='x'*65536))+'\n')
-        for sample in samples:output.write(json.dumps(sample)+'\n')
-        for gate in ['first','duplicate']:
-            rejected.write(json.dumps(dict(id='kept',ts=150,mode='pulse',gate=gate))+'\n')
-    with patch.object(native_evaluation,'report',return_value={'chains':[],'rent_refund_groups':[]}):
-        tracemalloc.start()
-        evaluated=native_evaluation.evaluate(profile,100,2100,rejects)
-        _,peak=tracemalloc.get_traced_memory();tracemalloc.stop()
-    assert peak<2*1024**2,peak
-    assert evaluated['bin_replay'][0]['schemes']==bin_replay(e,samples[:-1])['schemes']
-    assert set(evaluated['rejected_candidates'])=={'pulse/first','pulse/memory'}
-    assert evaluated['rejected_candidates']['pulse/memory']['total']==96
-    indexed=index_bin_samples(file,{'position'},2100)
-    assert read_bin_samples(file,indexed['position'])==samples[:-1]
-    with file.open('a') as output:output.write(json.dumps(dict(samples[0],ts=200))+'\n')
-    assert read_bin_samples(file,indexed['position'])==samples[:-1]
-    file.write_bytes(file.read_bytes().replace(b'"ts": 101',b'"ts": 102',1))
-    try: read_bin_samples(file,indexed['position'])
-    except ValueError: pass
-    else: raise AssertionError('Changed indexed evidence must fail')
-    with file.open('a') as output:output.write('{broken-json}\n')
-    for positions in [set(),{'position'}]:
-        try: index_bin_samples(file,positions,2100)
-        except json.JSONDecodeError: pass
-        else: raise AssertionError('Corrupt unrelated samples must remain visible')
-    assert index_bin_samples(profile/'missing',{'position'},2100)=={'position':[]}
-print('Evaluator bounds journal memory, preserves replay/reject semantics and detects changed indexed evidence')
+print('Native bin replay preserves composition cost and executed support')
 
 # Candidate reads share the shadow timer, stay bounded, and never become yield
 # labels. In particular, a sample fetched after entry cannot backfill history.
@@ -743,9 +513,6 @@ with tempfile.TemporaryDirectory() as directory:
     tracemalloc.start();coverage=pre_entry_bin_coverage([e],file,11000)
     _,peak=tracemalloc.get_traced_memory();tracemalloc.stop()
     assert peak<2*1024**2 and coverage[0]['status']=='observed',peak
-    (memory/'dlmm_entries/entry.json').write_text(json.dumps(e))
-    with patch.object(native_evaluation,'report',return_value={'chains':[],'rent_refund_groups':[]}):
-        assert native_evaluation.evaluate(profile,10000,11000,profile/'rejects')['pre_entry_bin_history']==coverage
     file.write_text('{broken-json}\n')
     try:pre_entry_bin_coverage([e],file,11000)
     except json.JSONDecodeError:pass

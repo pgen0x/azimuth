@@ -12,7 +12,7 @@ execution evidence leaves this field absent and does not disable native risk
 marking. No additional RPC or signer is used.
 
 The existing pre-close journal carries this evidence into `native_bin_replay`
-in scheduled evaluation. Funding and account-deletion facts must be finalized
+(`dlmm_shadow`). Funding and account-deletion facts must be finalized
 and observed by the report cutoff. The native observation must precede the
 earliest proved close block by no more than 30 seconds; its recording time must
 also be within the report. Historical rows without execution evidence remain
@@ -48,7 +48,6 @@ Run commands through the profile scripts path, or pass `--profile` explicitly.
 ```sh
 python3 ~/.hermes/profiles/solanza/skills/solana-dlmm/scripts/dlmm_accounting.py --refresh --hours 24
 python3 ~/.hermes/profiles/solanza/skills/solana-dlmm/scripts/dlmm_shadow.py
-python3 ~/.hermes/profiles/solanza/skills/solana-dlmm/scripts/dlmm_evaluate.py --start START_EPOCH --end END_EPOCH --output REVIEW_DIRECTORY
 ```
 
 ## Accounting basis
@@ -170,9 +169,8 @@ entries without a pre-entry wider snapshot are not backfilled with today's bins.
 The comparison is gross: additional rent, market impact, slippage and the live
 exit policy are unknown, so a modeled fee or IL advantage is not deployable profit.
 
-The evaluator also reports `bin_width_holding_replay`. It requires a recorded
-close plus account-deletion evidence observed by the evaluation cutoff, then
-compares both allocations at the last bin observation at or before the finalized
+`bin_width_holding_replay` requires a recorded close plus account-deletion
+evidence observed by the report cutoff, then compares both allocations at the last bin observation at or before the finalized
 transaction's block time. A delayed close journal cannot extend the holding
 period; repeated proof uses the earliest valid finalized close time.
 The observation must be no more than 600 seconds old; post-close samples and the
@@ -198,9 +196,7 @@ unmodeled; the existing bin replay does not automatically consume this journal.
 
 `azimuth-sol-accounting.timer` and `azimuth-sol-shadow.timer` collect outside the
 trading loop. Unit templates target the solanza profile; adapt the path elsewhere.
-Evaluation writes `report.md`, `evaluation.json`, and redacted runtime logs. Optional
-`--reference-wallet` adds the same full-life LP cohort for Meridian; LP comparison
-is explicitly separate from Azimuth wallet NAV. No reports are automatically sent.
+Collectors only append journals; no reports are automatically sent.
 
 Use an isolated checkout for development: the live profile scripts are symlinks.
 
@@ -412,7 +408,7 @@ inflow ambiguity, and the group's exact integer token deltas cancel for every mi
 It includes all owners connected by residual mints; incomplete owners block the group.
 Members remain incomplete individually and cannot pass the root re-entry gate.
 Combined cash already includes fees and rent; it is not per-position PnL, win rate,
-IL or wallet NAV. Evaluation shows only groups whose entire lifetime fits its window.
+IL or wallet NAV. A window report includes only groups whose entire lifetime fits it.
 
 Account funding also recognizes System transfer → allocate → assign sequences.
 The account must start unfunded, end with exactly the wallet's known funding,
@@ -477,7 +473,7 @@ root legs are included only after the entire root is settled.
 These are alternative, overlapping views of the root cash subtotal: never sum
 both. Individual root cash, re-entry decisions and per-root win rates are
 unchanged. Groups are not full NAV or proof all historical refunds are measured.
-Evaluation includes only groups whose whole activity lies within its window;
+A window report includes only groups whose whole activity lies within it;
 history evidence observed later cannot alter earlier reports or decisions.
 
 A root can also close its own funded token account in the final instruction of
@@ -496,7 +492,7 @@ Proved expired, unlanded submissions have no slot or fee and are excluded from
 the landed lifecycle records only when the settled chain and collector expiry
 proof agree. Their wallet, observation time and expired finalized height must
 match the proof contract. Unknown submissions and landed failures are not excluded.
-Evaluation, advisory pool history and the signal learner can consume this exact
+Advisory pool history and the signal learner can consume this exact
 cash outcome, including negative outcomes with positive LP PnL. New evidence keeps
 its observation time and does not retroactively change earlier decisions.
 Schema 11 mixed-close facts are optionally refreshed within the existing
@@ -573,7 +569,7 @@ rent/fee movements. A wallet native delta alone is not gross swap output. Old
 transactions lacking a saved quote remain unmeasured for quote-to-fill slippage;
 do not reconstruct their historical quotes from current market prices.
 
-Evaluation reports group signed attempts by authorized slippage. SOL output is
+Quote-to-fill comparisons group signed attempts by authorized slippage. SOL output is
 measured as finalized native delta plus network fees plus funded token rent minus
 refunded token rent. Failed transaction fees, pending facts and unmeasured rows
 remain explicit. Negative shortfall means the fill improved on the quote. These
@@ -626,7 +622,7 @@ terminal observation also stops further collection for that entry.
 Replay uses the first observation at/after the target within that grace window;
 it cannot select a more favorable later outcome. `horizon_complete` distinguishes
 full horizons from partial models, and `observed_until_ts` states the actual end.
-The evaluation summarizes these counts. Past snapshots remain available, but new
+Reports summarize these counts. Past snapshots remain available, but new
 extended holding-period bin studies beyond these horizons would require explicit
 collection changes. Trading monitors and actual position exits are independent.
 
@@ -680,9 +676,7 @@ acceptance/rejection/uncertainty in
 `~/.local/state/azimuth/solana_deliveries.jsonl` (override `SOLANA_DELIVERY_PATH`).
 No webhook URL, credential, or response body is stored. Receipt IDs must match.
 
-The evaluator joins delivery IDs to the profile's read-only Hermes session DB,
-respecting its evaluation cutoff. HTTP acceptance and session end are lifecycle
-evidence only; neither proves a completed AI pick or finalized trade. Missing
+HTTP acceptance and Hermes session end are lifecycle evidence only; neither proves a completed AI pick or finalized trade. Missing
 or ambiguous evidence remains explicit. This journal does not replay requests
 or relax the scanner's accepted/ambiguous-delivery deduplication protection.
 
@@ -733,10 +727,6 @@ network fees and rent and is **not net cash**. Inventory and quote are different
 observations; withdrawing liquidity can change the eventual route and price.
 These observations do not change exit rules, selection, learning or risk limits.
 
-## LP comparison precision
-
-Full-life LP cohorts include funded positions created and closed inside the report window. Funded positions created earlier are carry-in closes; positions with zero deposit are counted separately. A win requires at least one lamport of positive LP valuation PnL, a loss at least one lamport negative, and smaller marks count as break-even. This affects win labels only; raw LP PnL and deposit totals are retained. LP wins are before wallet fees and settlement costs. Missing or nonfinite required values leave the wallet comparison unmeasured.
-
 ## Automatic settlement inventory
 
 The durable settlement worker sells only the positive raw token delta proved by
@@ -751,21 +741,6 @@ an ATA containing legacy tokens. Zero owned inventory completes settlement
 without selling wallet dust; a nonzero wallet balance alone is not a blocker.
 This proof authorizes inventory disposal, not NAV or profit. Older legacy sales
 remain incomplete in accounting. Ambiguous inventory requires investigation.
-
-### Evaluation of root cash after refunds
-
-`matched_refund_cash_cohort` selects roots whose entire recorded activity lies
-inside the evaluation window, then projects complete proved refund groups onto
-those roots using the same cash bounds as the learner. Older carry-in roots can
-share the refund batch but their cash and funding returns are excluded. Shared
-fees are charged once per group in the cohort bounds. Individual root bounds
-must not be added; their fee assumptions overlap.
-
-The report gives positive, negative, exact-zero, ambiguous and unmeasured root
-counts. Its positive rate uses only roots with a proved sign; ambiguous and
-missing evidence are explicit, not zero losses or wins. This measured subset
-is root cash after fees and matched refunds, not position win rate or full NAV.
-No trading rule, risk limit or historical decision is changed.
 
 ### Every-position profit acceptance
 
@@ -829,17 +804,12 @@ capacity, not trading, RPC collection frequency or risk thresholds.
 
 Provider limits: https://developers.jup.ag/docs/portal/rate-limits
 
-### Evaluation journal memory
+### Journal memory
 
-The rolling evaluator streams reject and NAV history, keeping only records
-needed by the requested window. Accounting retains the first complete NAV and
-last eligible NAV in file order. The public `rows()` helper still returns a
-list, and malformed JSON remains an error even outside the selected window.
-Bin samples are indexed once by byte offset for eligible entries, then loaded
-one position at a time with a SHA-256 check against the indexed bytes. Appends
-after indexing cannot add samples to that run; changed indexed records fail
-visibly. Duplicate/order semantics, financial formulas and cutoff rules remain
-unchanged. No journal is truncated, deleted or backfilled by this read path.
+Accounting streams NAV history, retaining the first complete NAV and the last
+eligible NAV in file order. The public `rows()` helper still returns a list, and
+malformed JSON remains an error even outside the selected window. No journal is
+truncated, deleted or backfilled by this read path.
 
 ### Pre-entry candidate bin evidence
 
@@ -875,7 +845,7 @@ It requires only `SOLANA_PUBLIC_KEY`, never decodes a signing key, acquires a
 trading lock or submits a transaction. In-flight reads cannot be cancelled by a
 later lock acquisition. No new service or timer is installed.
 
-The evaluator embeds the earliest complete matching prior sample observed
+`pre_entry_bin_coverage` selects the earliest complete matching prior sample observed
 4–30 minutes before each entry snapshot, with its canonical JSON SHA-256. Both
 native observation time and collection time must precede entry; samples fetched
 after entry cannot backfill the estimate. Mints, decimals, all funded bin IDs
