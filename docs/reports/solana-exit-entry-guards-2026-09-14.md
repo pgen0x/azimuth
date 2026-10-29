@@ -1,10 +1,10 @@
 # Solana exit and entry guards — 14 September 2026
 
-Follow-up to the journal/API audit at `/home/ubuntu/azimuth-audits/review-2026-09-14/report.md`. The first 24h post-deployment LP flow was −0.009680 SOL. Latest rolling 24h was +0.004457 SOL; cumulative 37h25m was −0.008353 SOL. These exclude wallet swap/gas/rent settlement and open positions.
+Follow-up to a journal/API audit kept outside the repository.
 
 ## Failure and change
 
-PERPSPAD's monitor re-center and scanner minted positions one second apart on the same pool. A preflight exposure snapshot did not serialize the shared executor. The additional scanner position lost 0.010005 SOL. It also peaked +2.79%, armed trailing, and continued through repeated indicator vetoes until the hard stop: trailing had already occupied `close_reason`, hiding the downtrend guard.
+PERPSPAD's monitor re-center and scanner minted positions one second apart on the same pool. A preflight exposure snapshot did not serialize the shared executor. The additional scanner position closed at a loss. It also peaked +2.79%, armed trailing, and continued through repeated indicator vetoes until the hard stop: trailing had already occupied `close_reason`, hiding the downtrend guard.
 
 - Tight-mode risk floors now override discretionary profit reasons before the indicator/AI hold stages. Armed trailing, downtrend, fast-out and giveback stops cannot be vetoed in turnover/pulse. Existing emergency reasons and hard stops take priority. Thesis modes and pure report-only semantics are retained.
 - Every raw DLMM deployment shares a wallet-level Linux abstract-socket lock, including scanner, LLM and monitor re-center. Under that lock the executor reads on-chain position accounts and refuses existing exposure in the same pool or a sibling pool with the same non-SOL mint. Missing/failed chain reads block new deployment; cached Redis/portfolio emptiness cannot authorize one.
@@ -18,6 +18,6 @@ No changes to ticket sizing, range width, momentum/organic/bundler limits, coold
 - `python3 assets/skill/scripts/test_dlmm_guards.py`: executes the production hold section against PERPSPAD-like trailing/downtrend/SL states, preserves thesis-mode veto, verifies provenance.
 - `node assets/skill/scripts/test_dlmm_executor.js`: real cross-process socket exclusion, concurrent deploy, on-chain same-token exposure, exact signed blockhash, pending/expired reservation, read/build failure, post-send timeout, partial wide mint and chain confirmation error, malformed marker and invalid amount.
 - Existing `test_solana_policy.py`, Python syntax, Node syntax, Go vet/test/build and diff whitespace checks.
-- Read-only live SDK query with the Azimuth public wallet succeeded and refused the already-held reference pool. No test submitted a transaction.
+- A read-only live SDK query refused an already-held pool. No test submitted a transaction.
 
-Deployment timestamps and hashes are recorded outside the repository under `/home/ubuntu/azimuth-audits` when applied. Profitability after this patch remains to be observed.
+Deployment timestamps and hashes are recorded outside the repository. Profitability after this patch remains to be observed.
