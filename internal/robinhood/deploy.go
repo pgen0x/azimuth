@@ -231,7 +231,7 @@ type SizeParams struct {
 // whole point: each open position shrinks the base for the next one, so total
 // exposure tapers as positions stack instead of marching linearly to a zero
 // balance — and it scales up as the wallet grows, with no config edit. A fixed
-// 0.003 WETH size was deploying only ~17% of the wallet.
+// WETH size deployed only a small, shrinking fraction of the wallet.
 //
 // Returns 0 to mean SKIP THIS DEPLOY — callers must treat it as a skip, never
 // as "deploy nothing". A sub-floor position isn't worth its gas and swap costs,

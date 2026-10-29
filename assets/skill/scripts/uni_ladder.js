@@ -61,7 +61,7 @@ const LADDER_RUNGS = parseInt(process.env.UNI_LADDER_RUNGS || "5", 10);
 // PER TIER, not per mode: ~2.4% a rung at spacing 10 and 60, ~2.0% at 200.
 //
 // What 120 cost at that majority tier: two spacings, and the deposit floor
-// (UNI_LADDER_MIN_RUNG_USDG against a ~$7 commit) drops the wall to 3 rungs, so
+// (UNI_LADDER_MIN_RUNG_USDG against a small commit, e.g. $7) drops the wall to 3 rungs, so
 // 3 x 120 covered 3.6% of downside — a wall that a market moving 1-3% a day
 // steps over and never returns to. 240 covers 7.2% at 3 rungs, 12% at five.
 //

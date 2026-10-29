@@ -696,7 +696,7 @@ tokenized equity is the least collapse-prone base asset on the chain.
   | 1% | 200 | 3 | **200** — quantized down |
 
   At the 0.3% majority tier 120 was two spacings — near the narrowest rung the
-  pool can express — and the $2 rung floor caps a ~$7 commit at 3 rungs, i.e.
+  pool can express — and the $2 rung floor caps a small commit (e.g. $7) at 3 rungs, i.e.
   3.6% of covered downside. 240 gives 7.2% at 3 rungs, 12% at five. But
   `rungWidth` rounds to whole spacings, so at the 1% tier 240 collapses to a
   single 200-tick spacing and the widening changed nothing there — minted rungs
