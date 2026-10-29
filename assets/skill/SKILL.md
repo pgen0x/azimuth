@@ -195,9 +195,9 @@ refunds to exceed the transaction fee. Each invocation closes at most eight
 accounts. Rent returned is capital recovery, not trading income.
 
 The optional `assets/systemd/azimuth-sol-rent.{service,timer}` user units run this
-maintenance every 30 minutes, separately from the position monitor. They target
-the `solanza` profile; adjust the service path for another profile. Install the
-units in `~/.config/systemd/user/`, run `systemctl --user daemon-reload`, then
+maintenance every 30 minutes, separately from the position monitor. `install.sh`
+renders the service for your profile into `<profile>/systemd/`. Copy the rendered
+units into `~/.config/systemd/user/`, run `systemctl --user daemon-reload`, then
 `systemctl --user enable --now azimuth-sol-rent.timer`. A pending-trade safety
 refusal leaves that invocation unsuccessful; the timer waits until its next
 interval. It never immediately restarts or blindly resends an uncertain transaction.

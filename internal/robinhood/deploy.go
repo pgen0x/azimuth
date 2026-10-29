@@ -25,7 +25,7 @@ type Runner struct {
 }
 
 // New builds a Runner. execCmd is a whitespace-split command line, e.g.
-// "node /home/ubuntu/.hermes/profiles/solanza/skills/solana-dlmm/scripts/uni_executor.js"
+// "node <profile>/skills/solana-dlmm/scripts/uni_executor.js"
 // ("" disables direct deploy; paths with spaces are not supported).
 func New(execCmd string, timeout time.Duration) *Runner {
 	return &Runner{execCmd: strings.Fields(execCmd), timeout: timeout}

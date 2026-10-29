@@ -219,7 +219,7 @@ cron. Distinct from the systemd loop: the loop *acts* (closes), the cron only
   `{"positions":[]}`; a positions-read failure → `{"positions":[],"error":...}`
   so the agent surfaces the error instead of fabricating a card.
 - Cron `rh_dlmm_position_monitor` in `assets/hermes/cron_jobs_template.json`
-  (installed live in the `solanza` profile, `deliver=telegram`, every 30m,
+  (installed live in the operator's profile, `deliver=telegram`, every 30m,
   `terminal` toolset only). Prompt hard-forbids trading (no executor, no
   close/mint) and copies the script's card verbatim; empty positions → `[SILENT]`.
 - Validated 2026-07-13: `hermes cron run` → ok, 0 open positions → SILENT (no

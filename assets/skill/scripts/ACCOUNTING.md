@@ -46,8 +46,8 @@ authority changes, outflows, wallet signatures or SOL changes remain unclassifie
 Run commands through the profile scripts path, or pass `--profile` explicitly.
 
 ```sh
-python3 ~/.hermes/profiles/solanza/skills/solana-dlmm/scripts/dlmm_accounting.py --refresh --hours 24
-python3 ~/.hermes/profiles/solanza/skills/solana-dlmm/scripts/dlmm_shadow.py
+python3 <profile>/skills/solana-dlmm/scripts/dlmm_accounting.py --refresh --hours 24
+python3 <profile>/skills/solana-dlmm/scripts/dlmm_shadow.py
 ```
 
 ## Accounting basis
@@ -195,7 +195,8 @@ unmodeled; the existing bin replay does not automatically consume this journal.
 ## Operations
 
 `azimuth-sol-accounting.timer` and `azimuth-sol-shadow.timer` collect outside the
-trading loop. Unit templates target the solanza profile; adapt the path elsewhere.
+trading loop. `install.sh` renders the unit templates for its target profile into
+`<profile>/systemd/`; copy them into the user unit directory to enable them.
 Collectors only append journals; no reports are automatically sent.
 
 Use an isolated checkout for development: the live profile scripts are symlinks.
