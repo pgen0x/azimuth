@@ -224,8 +224,8 @@ one pass per enabled mode per `POLL_INTERVAL`.
     replaced the ladders on evidence, not taste — 104 live ladder rung closes
     produced **zero** fee-positive exits (63 `ladder idle`, 30 `ladder stale`,
     11 fills averaging −9.48%). The diagnosis is *not* "one-sided doesn't work":
-    the on-chain fee meter shows the rung NEAREST spot earning (GME rung 0:
-    0.002039 USDG/214m) while outer rungs read exactly 0. Two thirds of a wall's
+    the on-chain fee meter shows the rung NEAREST spot earning (GME rung 0)
+    while outer rungs read exactly 0. Two thirds of a wall's
     capital sat where the market never came. One rung concentrates it there, and
     the re-pin loop is what keeps it there. The mode pins its own strategy in
     `sizeFor` instead of inheriting `ROBINHOOD_DEPLOY_STRATEGY`; that pin is also

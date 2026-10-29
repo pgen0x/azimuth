@@ -202,7 +202,7 @@ type Config struct {
 	// (robinhood.ComputeDeployAmount) — the venue's port of the Solana
 	// pipeline's compute_deploy_amount. Replaces the old fixed
 	// ROBINHOOD_DEPLOY_AMOUNT_WETH, which minted a flat 0.003 WETH regardless of
-	// wallet size (~17% of a 0.0174 WETH stack) and never grew with the balance.
+	// wallet size (a small fraction of it) and never grew with the balance.
 	RobinhoodSize robinhood.SizeParams
 	// RobinhoodSizeUSDG sizes USDG-quoted v4 deploys from the live USDG
 	// balance — same shape, dollar units (USDG's 6 decimals are already

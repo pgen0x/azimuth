@@ -37,8 +37,8 @@ MEMORIES = os.path.join(PROFILE, "memories")
 CLOSES_PATH = os.path.join(MEMORIES, "dlmm_closes.jsonl")
 # On-chain flows per closed position, written by the skill's dlmm_realized.py.
 # The journal's own pnl_sol is the monitor's mark one tick before the close and
-# can be pure fiction (three -100% rows in 2026-08-17..18 booked -1.41 SOL the
-# chain never took). Read as an override, never as a requirement: a position the
+# can be pure fiction (three -100% rows in 2026-08-17..18 booked full-size losses
+# the chain never took). Read as an override, never as a requirement: a position the
 # reconciler has not fetched keeps its mark and is counted as such.
 REALIZED_PATH = os.path.join(MEMORIES, "dlmm_realized.jsonl")
 HOLDS_PATH = os.path.join(MEMORIES, "ai_holds.jsonl")

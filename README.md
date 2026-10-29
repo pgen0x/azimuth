@@ -498,7 +498,7 @@ Strategy: custom_ratio_spot — meme-pool volatility, symmetric range fits
 |---|---|
 | Token | world |
 | Decision | ✅ DEPLOYED (multiday) pos <POSITION> |
-| Size | 1.03 SOL |
+| Size | <SIZE> SOL |
 | Range | 62↓ 62↑ bins |
 | Fee/TVL | 10.8%/d |
 | Score | 290.7 |

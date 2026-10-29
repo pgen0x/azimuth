@@ -111,8 +111,8 @@ MODE_DEFAULTS = {
 #
 # Three measured consequences, all of which the narrower band attacks:
 #   1. Fee share is our liquidity in the ACTIVE bin over the pool's. Spread over
-#      100 bins only a handful ever earn: $6.25 fees in 24h — this book was
-#      never short of funds, only of concentration.
+#      100 bins only a handful ever earn — this book was never short of
+#      funds, only of concentration.
 #   2. The 5m OOR fuse is the churn engine, and a 63% range disarms it — the
 #      18-24%/h dumps observed on 2026-08-13/14 never left the range, so no rule
 #      could speak until the downtrend floor. This book held MARIO64 170m to
@@ -1893,7 +1893,7 @@ def main():
         # pre-swapped to base token so BOTH sides hold liquidity — a rising
         # price sells the token side bin-by-bin into SOL (realized profit on
         # the way up) and both directions pay fees. Tight width because fee
-        # share scales inversely with bin count (40-bin spreads earned ~$2/bin);
+        # share scales inversely with bin count (40-bin spreads earned little per bin);
         # the monitor's OOR re-center handles range breaks better than
         # wide-range insurance. The swap itself runs AFTER the pre-deploy
         # gates below so an aborted deploy never strands a fresh token bag.

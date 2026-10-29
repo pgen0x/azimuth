@@ -114,7 +114,7 @@ LADDER_MIN_RUNG.ETH = LADDER_MIN_RUNG.WETH;
 //
 // Why one rung and not five (2026-08-07): 104 live ladder closes produced zero
 // fee-positive exits, and the on-chain fee meter says why — the NEAR rung is
-// the only one that ever earned (GME rung 0: 0.002039 USDG/214m, while NVDA
+// the only one that ever earned (GME rung 0, while NVDA
 // rungs 1-2 and all three TSLA rungs read exactly 0). The ladder did not fail
 // for being one-sided; it failed because two thirds of the capital sat in rungs
 // the market never traded into. One rung puts all of it where the fees were.

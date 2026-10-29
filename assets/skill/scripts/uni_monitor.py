@@ -292,8 +292,8 @@ LADDER_FILL_HARD_PCT = float(os.environ.get("UNI_LADDER_FILL_HARD_PCT", "-8.0"))
 # rung 2 — so a per-rung verdict closes the far side of a wall while the near
 # side is still earning, ratcheting the wall thinner every window until only
 # rung 0 is left. The first working on-chain fee meter (feesQuote, landed the
-# same day) made that visible on eight live usdg_ladder rungs: GME rung 0 had
-# 0.002039 USDG in 214m and NVDA rung 0 0.000297 in 136m, while NVDA rungs 1-2
+# same day) made that visible on eight live usdg_ladder rungs: GME rung 0 and
+# NVDA rung 0 both earned within a few hours, while NVDA rungs 1-2
 # and all three TSLA rungs read exactly 0 — judged per rung, five of the eight
 # would have been torn out of three walls that were working as designed. That
 # is the shape this file's own header block describes: the reference LP's

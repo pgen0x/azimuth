@@ -361,7 +361,7 @@ What landed (discovery/screening only — **no v4 execution**):
 
 Validation round-trip completed on-chain 2026-07-15 (one position,
 CASHCAT/WETH 0.2888%: mint 0.002 WETH → state → collect → close, net cost
-~0.000015 WETH + gas), then `ROBINHOOD_V4_EXECUTOR_CMD` enabled in the live
+dust plus gas), then `ROBINHOOD_V4_EXECUTOR_CMD` enabled in the live
 daemon env and the service restarted. Two chain-specific findings from the
 rollout, both fixed in `uni_v4_executor.js`:
 
@@ -911,9 +911,8 @@ evidence kills which:
   "turnover keeps its tight two-sided range" and misled the first cut of this
   port on 2026-08-07; it has been corrected in place.)
 - **The five-rung wall** was not wrong for being one-sided. The on-chain fee
-  meter (§4b) shows rung 0 earning while rungs 1–2 read exactly 0 — GME rung 0
-  took 0.002039 USDG in 214m, NVDA rung 0 0.000297 in 136m, every outer rung
-  nothing. Two thirds of the capital sat below a market that never came for it.
+  meter (§4b) shows rung 0 earning while rungs 1–2 read exactly 0 — GME and
+  NVDA rung 0 both earned, every outer rung nothing. Two thirds of the capital sat below a market that never came for it.
 
 So the shape is **one rung**: all of the commit at the tick-spacing boundary
 adjacent to spot, where the fees demonstrably were, re-pinned by the loop
