@@ -256,7 +256,7 @@ func TestEveryPanelRetainsCollectionFailure(t *testing.T) {
 		"collected_at": 123, "hermes": object{"profile": "fixture"}, "redis": object{"status": "disabled"},
 	}}
 	cookie := signIn(t, s)
-	for _, panel := range []string{"overview", "capital", "live", "evaluation", "journal", "hermes", "redis"} {
+	for _, panel := range []string{"overview", "capital", "live", "journal", "hermes", "redis"} {
 		r := httptest.NewRequest("GET", "/api/"+panel, nil)
 		r.Host = "localhost"
 		r.AddCookie(cookie)

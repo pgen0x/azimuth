@@ -30,11 +30,29 @@ Source: the product owner's answers (2026-10-29), transcribed. This file is dire
   alone: sign and label always shown). Neutral grey for zero/unmeasured.
 - Unmeasured / unknown is its own visual state (never drawn as zero).
 
-## Typography
+## Navigation (revised by the owner, 2026-10-29)
 
-- **One technical sans-serif for all UI**, with **tabular figures** for every number so columns align.
-- No monospace headings, no wide-tracked uppercase labels.
-- Fonts must work offline (self-hosted or system stack); the dashboard is loopback-only.
+- **No top header / tab bar.** A **left sidebar** like a typical admin panel: wordmark + compass mark at the top, one
+  item per section (overview, capital, live, journal, evaluation, hermes, redis), each with an **icon + label**, active
+  item marked with the copper accent, sign-out and the viewer's time zone at the bottom.
+- Collapses to icons only on narrow desktop widths; on phones it becomes an off-canvas drawer behind a menu button.
+- **Icons from a common icon library** (owner choice), vendored in-repo as inline SVG (no CDN, no network), one stroke
+  weight, one size. Only for navigation and a few actions, not sprinkled on panels.
+
+## Panels: terminal look (revised by the owner, 2026-10-29)
+
+- The *concept* of a terminal, not an imitation of one: no fake window chrome (no three coloured dots, no title bar
+  with traffic lights), no fake `$` prompts or typed-out commands.
+- Flat near-black panels with hairline borders and square or near-square corners; each panel's header is a short
+  path-like label of what it shows (e.g. `capital / daily`) with its meta (zone, as-of time) on the right.
+- Dense, aligned rows like command output; dim secondary text; no shadows, no glow, no blur.
+
+## Typography (revised by the owner, 2026-10-29)
+
+- **One monospace font for all UI** (owner choice, supersedes the earlier "one sans, no monospace"): the dashboard's
+  identity is an operator's terminal instrument, and monospace also gives tabular figures for free.
+- Still no wide-tracked uppercase labels; hierarchy comes from size, weight and the dim/bright contrast.
+- Fonts must work offline (self-hosted or system monospace stack); the dashboard is loopback-only.
 
 ## Charts (requested, in the style of an LP tracker report)
 

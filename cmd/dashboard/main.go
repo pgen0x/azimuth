@@ -59,8 +59,14 @@ type server struct {
 
 var identifier = regexp.MustCompile(`^[A-Za-z0-9_.:-]{1,150}$`)
 
+// collectDeadline bounds one collector run. 20s left the dashboard without data on a cold page
+// cache and on a loaded host (runs were killed repeatedly at load average > 40); time.Tick drops
+// ticks while a run is slow, so a longer deadline never overlaps runs, it only stretches the period.
+const collectDeadline = 60 * time.Second
+
+// refresh runs the collector once.
 func (s *server) refresh() {
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), collectDeadline)
 	defer cancel()
 	output, err := exec.CommandContext(ctx, "python3", "-c", collector, s.profile, s.state, strconv.FormatInt(s.since, 10), strings.Join(s.zoneList(), ",")).Output()
 	var data object
@@ -254,8 +260,6 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch r.URL.Path {
 	case "/api/overview":
 		value = object{"collected_at": data["collected_at"], "collection_error": failure, "nav": data["nav"], "services": data["services"], "sources": data["sources"]}
-	case "/api/evaluation":
-		value = object{"report": data["evaluation"], "source": data["evaluation_source"], "errors": data["report_errors"], "collected_at": data["collected_at"]}
 	case "/api/capital", "/api/live":
 		tz, fallback := requestZone(r.URL.Query().Get("tz"))
 		panels, problem := s.daily(data, tz)

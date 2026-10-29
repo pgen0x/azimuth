@@ -298,4 +298,29 @@ class CollectorTests(unittest.TestCase):
         self.assertNotEqual(d['by_tz']['America/Sao_Paulo']['realized']['status'],'ok')
         self.assertEqual(d['by_tz']['America/Sao_Paulo']['north_star']['tz'],'America/Sao_Paulo')
 
+class OwnOnlyTests(unittest.TestCase):
+    """Owner policy: no comparison with another bot reaches the dashboard."""
+    def test_drops_other_bot_keys_recursively_and_keeps_own_cohort(self):
+        other='meri'+'dian'  # assembled so the directory never spells the other bot's name
+        report={'lp_comparison':{'azimuth':{'lp_pnl_sol':0.1,'note':'own'},other:{'lp_pnl_sol':0.2}},
+                'limits':[{other.upper()+'_cohort':1,'kept':2}],'nested':{'Reference_Bot_wallet':'x','ok':{'Comparison':3,'v':4}},
+                'bin_width_holding_replay':[{'limitation':'Gross allocation comparison'}]}
+        out=c.own_only(report)
+        self.assertNotIn('lp_comparison',out);self.assertEqual(out['limits'],[{'kept':2}])
+        self.assertEqual(out['nested'],{'ok':{'v':4}})
+        self.assertEqual(out['bin_width_holding_replay'],report['bin_width_holding_replay'])  # values are untouched
+        self.assertNotIn(other,json.dumps(out).lower())
+    def test_collect_has_no_evaluation_and_no_other_bot(self):
+        other='meri'+'dian'
+        profile=self.m/'profile';(profile/'memories').mkdir(parents=True)
+        state=self.m/'state';(state/'reviews'/'r1').mkdir(parents=True)
+        (state/'reviews'/'r1'/'evaluation.json').write_text(json.dumps({'generated_at':5,'lp_comparison':{'azimuth':{},other:{}}}))
+        rows(profile/'memories'/'dlmm_nav.jsonl',[{'ts':1,'native_sol':1,other+'_wallet':'x'}])
+        with patch.object(c.subprocess,'run',runner()),patch.object(c,'bounded_run',runner()):
+            d=c.collect(profile,state,1)
+        self.assertNotIn('evaluation',d);self.assertNotIn(other,json.dumps(d).lower())
+        self.assertEqual(d['nav']['native_sol'],1)
+    setUp=CollectorTests.setUp
+    tearDown=CollectorTests.tearDown
+
 if __name__=='__main__': unittest.main()

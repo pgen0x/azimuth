@@ -72,13 +72,12 @@ its zone.
 | --- | --- |
 | `/api/overview` | Latest persisted NAV, source freshness, unit states, collector timestamp/error |
 | `/api/journal?q=IDENTIFIER&stage=swap&offset=0` | 50 rows/page, case-insensitive filter, exact stage filter, retained-tail match count |
-| `/api/evaluation` | Existing evaluation JSON, source file, generation and window timestamps |
 | `/api/capital?tz=ZONE` | North star per local day over six weeks (cash, known, deltas, unpriced/deferred SPL counts, external-flow delta) and the 14-day NAV bridge |
 | `/api/live?tz=ZONE` | Dust rent ledger and realized PnL by mode and local day since the `-since` cutover |
 | `/api/hermes` | Profile/model/fallback configuration, skills, gateway state, recent session metadata |
 | `/api/redis` | Timestamped fixed capacity keys, position tracking sample, cooldown and dedup TTLs |
 
-Refreshes serve an immutable in-memory snapshot. A background collector updates every 30 seconds with a 20-second deadline. Collection failure retains the previous snapshot and exposes an error. Browser activity never invokes NAV collection, accounting evaluation, blockchain RPC, model/provider probes or Helius Wallet API.
+Refreshes serve an immutable in-memory snapshot. A background collector updates every 30 seconds with a 60-second deadline per run (a slow run delays the next one; runs never overlap). Collection failure retains the previous snapshot and exposes an error. Browser activity never invokes NAV collection, accounting runs, blockchain RPC, model/provider probes or Helius Wallet API.
 
 ## Source traceability and scope
 
@@ -91,8 +90,8 @@ Refreshes serve an immutable in-memory snapshot. A background collector updates 
 - Close marks: `pnl_sol` in `dlmm_closes.jsonl` is the mark read one tick before the close, not realized cash. The journal passes the row's `pnl_basis` through and labels older rows without one `mark_unlabeled`; realized figures come only from `dlmm_realized.jsonl` (`realized_sol`, null = unmeasured).
 - Entry metadata: latest 100 `memories/dlmm_entries/*.json`; metadata is not proof of a landed deployment.
 - Routing: last 100 `entry_route=` markers from the actual `azimuth.service` journal within 48 hours. Only mode, route, reason and timestamp are extracted. No free-form service logs or Hermes tool messages are exposed.
-- Session correlations: exact legacy or v2 webhook identity for deliveries, against the latest 40 session metadata rows in read-only SQLite. Existing evaluation delivery correlations are also retained with their report source. No time/pool heuristic invents a trade link; incomplete coverage remains uncorrelated. An HTTP 202, route/probe result or open session is not execution proof.
-- Evaluations: newest generated valid report among the latest 50 modified `reviews/*/evaluation.json` files, each capped at 32 MiB. Existing calculations are displayed without recomputing finance. LP wins use full-life LP positions; cash-positive roots use settled roots. Incomplete roots, carry-in closes, Meridian cohorts, pooled cash and matched refund evidence retain their source bases. Shared refunds are never independently summed or allocated. Root cash, pooled cash and refund groups overlap. Root cash excludes refunds that require grouping multiple roots; the matched-refund table shows the corresponding group cash including those refunds. Compare their root sets before drawing conclusions.
+- Session correlations: exact legacy or v2 webhook identity for deliveries, against the latest 40 session metadata rows in read-only SQLite. No time/pool heuristic invents a trade link; incomplete coverage remains uncorrelated. An HTTP 202, route/probe result or open session is not execution proof.
+- This bot only: the dashboard has no evaluation or comparison view. As a guard, the collector also drops, recursively, any key in the snapshot that names another bot or a comparison with one, so no other bot's data can reach a page or the JSON API.
 - Hermes: selected `config.yaml` fields, installed profile skill names and read-only `state.db` metadata. Provider and bot delivery availability remain Unknown without a probe. Gateway state comes from systemd.
 - Services: fixed scanner, gateway, SOL monitor, accounting, rent and daily-review services/timers using selected systemd properties. Inactive oneshots can be healthy; a failed run can be a busy-wallet deferral rather than an infrastructure failure.
 - Redis: `SCARD`, one bounded `SSCAN` of `sol:dlmm:active_positions`, and pipelined `TTL`/bounded `GETRANGE` for at most 400 derived keys. At most 100 recent candidate records and 100 active members inform the sample. Position fields are allowlisted; arbitrary stored error strings are not exposed. No KEYS, writes, arbitrary-key or command endpoint. TTL -2 means missing, -1 means no expiry, null means read failure. All TTLs are observations at the displayed timestamp.
@@ -157,8 +156,7 @@ flight. The plugin needs no dependencies and does not change model order or risk
 
 The dashboard journal reads only `dlmm_report_guard.jsonl` metadata (session ID,
 status, receipt count, timestamp), never raw messages, tool output or receipt nonce.
-Evaluation also correlates allowlisted public position/signature IDs and dry-run/
-verification flags from guarded outputs. Legacy receipt counts alone never prove
+Legacy receipt counts alone never prove
 execution. Output preparation is separate from session closure and Telegram delivery;
 no lifecycle state proves a worker is live or permits retrying a batch.
 The guard is scoped to this profile and route, bounds in-memory state to 256 turns,

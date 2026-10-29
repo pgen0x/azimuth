@@ -6,7 +6,7 @@ async function render(tab, payload, fail=false) {
   const content = {innerHTML: ''}, stamp = {textContent: ''}, intervals = [], calls = [];
   const document = {querySelector: s => s === '#content' ? content : s === '#stamp' ? stamp : {}, querySelectorAll: () => []};
   const fixtures = {overview: {nav: {}, services: [], sources: []}, capital: {north_star: {days: []}, nav_bridge: {}},
-    live: {live: {}}, journal: {rows: [], total_in_retained_tail: 0}, evaluation: {}, hermes: {}, redis: {rows: []}};
+    live: {live: {}}, journal: {rows: [], total_in_retained_tail: 0}, hermes: {}, redis: {rows: []}};
   const ctx = {document, Date, console, fetch: async url => {
     calls.push(url); const name = url.replace('/api/', '').split('?')[0];
     if (fail && name === tab) return {ok: false, status: 500, text: async () => 'synthetic failure'};
@@ -22,7 +22,7 @@ async function render(tab, payload, fail=false) {
 }
 (async () => {
   const warning = 'Local collection failed; last successful snapshot retained';
-  for (const tab of ['capital', 'live', 'journal', 'evaluation', 'hermes', 'redis', 'overview']) {
+  for (const tab of ['capital', 'live', 'journal', 'hermes', 'redis', 'overview']) {
     const r = await render(tab, {collected_at: 123, collection_error: warning, rows: [], total_in_retained_tail: 0, services: [], sources: []});
     assert(r.html.includes(warning) && r.html.includes('role="alert"'), tab);
     assert(r.stamp.includes('Observed') && !r.stamp.endsWith('Unknown'), tab);
@@ -74,5 +74,10 @@ async function render(tab, payload, fail=false) {
   const failing = await render('capital', null, true);
   assert(failing.html.includes('Could not load this section') && failing.html.includes('Retry loading'), 'error state');
   assert(!/\u2014/.test(charted.html + live.html + h), 'no em dash in UI text');
-  console.log('dashboard render: 22 synthetic cases passed');
+  // Owner policy: no other bot in any rendered evidence, even if a raw source still carries one.
+  const other = 'meri' + 'dian';
+  const ov = await render('overview', {nav: {native_sol: 1, tokens: [{[other + '_mark']: 1, own: 2}]}, services: [], sources: []});
+  assert(!ov.html.toLowerCase().includes(other) && ov.html.includes('&quot;own&quot;: 2'), 'no other-bot keys in raw evidence');
+  assert(!/evaluation/i.test(ov.html), 'no evaluation section');
+  console.log('dashboard render: 23 synthetic cases passed');
 })().catch(error => {console.error(error); process.exitCode = 1;});

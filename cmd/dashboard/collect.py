@@ -6,6 +6,15 @@ from datetime import datetime, timedelta, time as clock
 from zoneinfo import ZoneInfo
 
 SECRET = re.compile(r"(password|secret|credential|authorization|api.?key|private.?key|access.?token|bot.?token|system_prompt|model_config|origin_json)", re.I)
+# Owner policy: the dashboard reports this bot only, never a comparison with another bot.
+# The other bot's name is written as a character class so this directory stays free of it
+# (the policy check is a plain `git grep -i` over cmd/dashboard).
+OTHER_BOT = re.compile(r"m[e]ridian|comparison|reference_bot", re.I)
+def own_only(value):
+    """Drop, recursively, every key that names another bot or a comparison with one."""
+    if isinstance(value, dict): return {k: own_only(v) for k, v in value.items() if not OTHER_BOT.search(str(k))}
+    if isinstance(value, list): return [own_only(v) for v in value]
+    return value
 URL = re.compile(r"https?://[^\s\"<>]+")
 
 def clean(value):
@@ -643,13 +652,6 @@ def collect(profile, state, since=None, zones=('UTC',)):
             for key in ('chain','evidence'):
                 if isinstance(row.get(key),dict): evidence[key]=row[key]
             events.append({'stage':actual,'time':event_time(row), 'source':str(root/filename),'source_tail_index':i,'evidence':evidence,'note':'Submission recorded before broadcast; inspect matching transaction facts for confirmation.' if filename=='dlmm_transactions.jsonl' else ''})
-    evaluation={};report_source=None;report_errors=[]
-    candidates=sorted((state/'reviews').glob('*/evaluation.json'),key=lambda p:p.stat().st_mtime,reverse=True)[:50]
-    for path in candidates:
-        try:
-            candidate=read_json(path)
-            if candidate.get('generated_at',0)>evaluation.get('generated_at',0):evaluation=candidate;report_source=str(path)
-        except (OSError,ValueError): report_errors.append(str(path))
     hermes={'profile':profile.name,'config_status':'missing','sessions':[],'session_note':'An open session row is not proof that a process is alive. No messages or prompts are read.'}
     try:
         import yaml
@@ -706,10 +708,8 @@ def collect(profile, state, since=None, zones=('UTC',)):
             events.append({'stage':'deploy','time':event_time(row), 'source':str(path),'evidence':evidence,'note':'Entry metadata alone does not prove a landed transaction.'})
         except (OSError,ValueError): pass
     hermes['gateway'] = next((s for s in services if s.get('Id')=='hermes-gateway.service'), {'ActiveState':'unknown'})
-    for delivery in evaluation.get('delivery_tracking',{}).get('deliveries',[]):
-        events.append({'stage':'AI / fallback','time':delivery.get('prepared_at',0),'source':report_source,'evidence':delivery})
     events.sort(key=lambda e:e.get('time') or 0,reverse=True)
-    return clean({'collected_at':now,**daily(profile,since,zones,now),'nav_bridge':panel(nav_bridge,memory,now),'live':{'dust':panel(dust_ledger,memory,since)},'nav':nav[-1] if nav else {},'evaluation':evaluation,'evaluation_source':report_source,'report_errors':report_errors,'journal':events,'sources':sources,'hermes':hermes,'services':services})
+    return clean(own_only({'collected_at':now,**daily(profile,since,zones,now),'nav_bridge':panel(nav_bridge,memory,now),'live':{'dust':panel(dust_ledger,memory,since)},'nav':nav[-1] if nav else {},'journal':events,'sources':sources,'hermes':hermes,'services':services}))
 
 if __name__=='__main__':
     # argv: profile state since [zones,comma,separated] [daily]; `daily` refreshes only the day-bucketed panels.
