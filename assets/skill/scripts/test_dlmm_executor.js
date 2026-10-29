@@ -1171,6 +1171,79 @@ vm.runInNewContext("const productionExitTransport=confirmExitTransaction;confirm
   await assert.rejects(reclaimEmptyAccounts(true,true),/unknown or uneconomic/);
   assert.equal(signCalls,signCount);assert.equal(sends,beforeEntryRent+2);fee=5000;
   Connection.prototype.getBalanceAndContext=balanceReader;
+  // Dust mode (opt-in): burn + close only when the full-balance quote is at
+  // most half the locked rent; unknown quotes, settlements in flight, active
+  // mints and a failing simulation never burn. Default mode never burns.
+  {
+    deps["@solana/spl-token"].createBurnCheckedInstruction=(acct,mint,authority,amount,decimals,signers,program)=>{
+      assert.equal(authority,wallet.publicKey);assert.equal(typeof amount,"bigint");assert.equal(decimals,6);
+      assert.equal(program.toString(),"classic-token");return `burn:${acct}:${amount}`;};
+    const dustAccount=(name,raw,mint,info={},acct={})=>account(name,{mint,tokenAmount:{amount:raw,decimals:6},...info},acct);
+    const SOL_MINT="So11111111111111111111111111111111111111112";
+    // A string is the quoted outAmount; {status} is a non-OK response; {out,echo} overrides echoed fields.
+    const quotes={"dust-mint":"700000","norout-mint":{status:400,code:"COULD_NOT_FIND_ANY_ROUTE"},"rich-mint":"800000",
+      "down-mint":"err","TOKEN":"1","pending-mint":"1"};
+    const quoted=[];const originalFetch=sandbox.fetch;
+    sandbox.fetch=async url=>{const u=new URL(url),mint=u.searchParams.get("inputMint"),amount=u.searchParams.get("amount");quoted.push(mint);
+      assert.equal(u.searchParams.get("outputMint"),SOL_MINT);
+      const q=quotes[mint];if(q==="err")throw new Error("quote timeout");
+      if(q?.status)return{ok:false,status:q.status,text:async()=>JSON.stringify({errorCode:q.code})};
+      return{ok:true,json:async()=>({inputMint:mint,outputMint:SOL_MINT,inAmount:amount,outAmount:q?.out ?? q,...(q?.echo||{})})};};
+    let simErr=null,sims=0;const originalSim=Connection.prototype.simulateTransaction;
+    Connection.prototype.simulateTransaction=async()=>{sims++;return{context:{slot:10},value:{err:simErr}};};
+    const settleDir=path.join(root,"memories/dlmm_settlements");fs.mkdirSync(settleDir,{recursive:true});
+    fs.writeFileSync(path.join(settleDir,"pos.json"),JSON.stringify({position:"pos",mint:"pending-mint"}));
+    tokenAccounts=[dustAccount("dust","5","dust-mint"),dustAccount("norout","9","norout-mint"),dustAccount("rich","7","rich-mint"),
+      dustAccount("down","3","down-mint"),dustAccount("active-dust","4","TOKEN"),dustAccount("pending","2","pending-mint"),account("eligible")];
+    const plain=await reclaimEmptyAccounts();
+    assert.deepEqual(Array.from(plain.accounts,a=>a.account),["eligible"]);assert.equal(quoted.length,0);
+    const dry=await reclaimEmptyAccounts(false,false,true);
+    assert.deepEqual(Array.from(dry.accounts,a=>a.account),["eligible","dust"]); // no-route is unknown, never zero
+    assert.deepEqual(quoted,["dust-mint","norout-mint","rich-mint","down-mint"]); // active + pending mints are never quoted
+    assert.equal(dry.forfeited_quote_lamports,700000);assert.equal(dry.accounts[1].burn_raw,"5");assert.equal(sends,beforeEntryRent+2);
+    rentInstructions.length=0;simErr={InstructionError:[0,"Custom"]};
+    await assert.rejects(reclaimEmptyAccounts(true,false,true),/simulation failed/);assert.equal(sends,beforeEntryRent+2);
+    simErr=null;rentInstructions.length=0;
+    const burned=await reclaimEmptyAccounts(true,false,true);
+    assert.equal(burned.fee_lamports,5000);assert.equal(sends,beforeEntryRent+3);assert.equal(sims,2);
+    assert.deepEqual(rentInstructions,["eligible","burn:dust:5","dust"]);
+    quotes["dust-mint"]="2000000";tokenAccounts=[dustAccount("dust","5","dust-mint")]; // quote*2 > rent: keep the tokens
+    assert.equal((await reclaimEmptyAccounts(false,false,true)).accounts.length,0);
+    // Every answer that is not a matching quote is unknown and keeps even a large
+    // balance: no-route codes, rate limits, auth/server errors, mismatched echoes.
+    const unknowns={"nr-any":{status:400,code:"COULD_NOT_FIND_ANY_ROUTE"},"nr-none":{status:400,code:"NO_ROUTES_FOUND"},
+      "nr-tradable":{status:400,code:"TOKEN_NOT_TRADABLE"},"s400":{status:400,code:"BAD_REQUEST"},"s401":{status:401},
+      "s429":{status:429},"s500":{status:500},"echo-amount":{out:"1",echo:{inAmount:"999"}},
+      "echo-mint":{out:"1",echo:{inputMint:"other-mint"}},"echo-out":{out:"1",echo:{outputMint:"other-mint"}}};
+    Object.assign(quotes,unknowns);quoted.length=0;
+    tokenAccounts=Object.keys(unknowns).map(m=>dustAccount(`big-${m}`,"1000000000000",m));
+    assert.equal((await reclaimEmptyAccounts(false,false,true)).accounts.length,0);
+    assert.deepEqual(quoted,Object.keys(unknowns));
+    // Nonzero accounts must pass the closeability rule BEFORE any quote: a second
+    // Token-2022 extension or a delegate keeps them; immutableOwner alone is fine.
+    Object.assign(quotes,{"t22-fee-mint":"1","t22-ok-mint":"1","delegated-mint":"1"});quoted.length=0;
+    tokenAccounts=[dustAccount("t22-fee","5","t22-fee-mint",{extensions:[{extension:"immutableOwner"},{extension:"transferFeeAmount"}]},{owner:token2022}),
+      dustAccount("t22-ok","5","t22-ok-mint",{extensions:[{extension:"immutableOwner"}]},{owner:token2022}),
+      dustAccount("delegated","5","delegated-mint",{delegate:"someone"})];
+    assert.deepEqual(Array.from((await reclaimEmptyAccounts(false,false,true)).accounts,a=>a.account),["t22-ok"]);
+    assert.deepEqual(quoted,["t22-ok-mint"]);
+    // Quoting stops once eight accounts are admitted, and never exceeds 16 per run.
+    quotes["dust-mint"]="700000";quoted.length=0;
+    tokenAccounts=Array.from({length:10},(_,i)=>dustAccount(`cheap-${i}`,"5","dust-mint"));
+    assert.equal((await reclaimEmptyAccounts(false,false,true)).accounts.length,8);assert.equal(quoted.length,8);
+    quoted.length=0;tokenAccounts=Array.from({length:20},(_,i)=>dustAccount(`kept-${i}`,"7","rich-mint"));
+    assert.equal((await reclaimEmptyAccounts(false,false,true)).accounts.length,0);assert.equal(quoted.length,16);
+    // Fee plus forfeited quotes must stay below the rent: here the fee alone would
+    // pass (744220 < 1488440) but fee + forfeited equals the rent, so nothing sends.
+    quotes["dust-mint"]="744220";tokenAccounts=[dustAccount("dust","5","dust-mint")];
+    const sendsBeforeBoundary=sends;fee=744220;
+    await assert.rejects(reclaimEmptyAccounts(true,false,true),/uneconomic/);assert.equal(sends,sendsBeforeBoundary);
+    fee=5000;
+    fs.writeFileSync(path.join(settleDir,"bad.json"),"{");
+    await assert.rejects(reclaimEmptyAccounts(false,false,true),/unreadable settlement marker/);
+    fs.rmSync(settleDir,{recursive:true,force:true});
+    sandbox.fetch=originalFetch;Connection.prototype.simulateTransaction=originalSim;
+  }
   // Exercise the real CLI parser, not a copy of its option handling.
   let cliSwapArgs;
   sandbox.captureCLISwap = async (...args) => {cliSwapArgs=args;return {success:true};};
@@ -1187,10 +1260,10 @@ vm.runInNewContext("const productionExitTransport=confirmExitTransaction;confirm
   let cliRentArgs;
   sandbox.captureCLIRent=async(...args)=>{cliRentArgs=args;return {success:true};};
   vm.runInNewContext("reclaimEmptyAccounts = captureCLIRent;",sandbox);
-  for (const options of [[],["--batch"],["--execute"],["--execute","--batch"]]) {
+  for (const options of [[],["--batch"],["--execute"],["--execute","--batch"],["--dust"],["--execute","--batch","--dust"]]) {
     sandbox.process.argv=originalArgv.concat(["reclaim-empty-accounts",...options]);
     await sandbox.module.exports.runCLI();
-    assert.deepEqual(Array.from(cliRentArgs),[options.includes("--execute"),options.includes("--batch")]);
+    assert.deepEqual(Array.from(cliRentArgs),[options.includes("--execute"),options.includes("--batch"),options.includes("--dust")]);
   }
   cliRentArgs=null;sandbox.process.argv=originalArgv.concat(["reclaim-empty-accounts","--unknown"]);
   await assert.rejects(sandbox.module.exports.runCLI(),/exit 1/);assert.equal(cliRentArgs,null);

@@ -324,6 +324,28 @@ signed transaction identity for reconciliation before another batch can run.
 Rent batches use a finalized blockhash and require a measured network fee below
 the reclaimed rent before signing; a missing fee still prevents submission.
 
+`--dust` (opt-in, off in the shipped unit) also admits NONZERO accounts whose
+whole balance is worth at most half the rent it locks. Settlement closes an ATA
+only when its swap empties it, so dust-sized remainders otherwise lock
+~0.002 SOL each forever, and about half of all closes leave one behind.
+Each candidate gets a fresh
+full-balance Jupiter quote to SOL. Only a successful quote that echoes the same
+input mint, SOL output and exact raw amount can admit a burn; every other answer
+is unknown and keeps the tokens, including a no-route answer, which bounds
+nothing about the balance's size. At most 16 quotes run per invocation. Mints
+with an open position or a `dlmm_settlements` marker are skipped, nonzero
+Token-2022 accounts are admitted only with `immutableOwner` alone, and an
+unreadable marker refuses the run. The batch burns the exact raw balance
+(`burnChecked`) before each close; the fee plus the forfeited quotes must stay
+below the reclaimed rent, and the batch's instructions must simulate without
+error before broadcast (a preflight under a fresh blockhash, not a check of the
+signed bytes; burn and close are atomic on-chain regardless). A refund is a
+native-cash conversion of rent the NAV already counts, never trading income:
+NAV falls by the forfeited quotes and fee, liquid native SOL rises by the rent.
+The finalized receipt proves it: `token_rent_evidence.refunded` accepts a
+`burnChecked` of an account's whole balance followed by its close, and records
+the burned amount as `burned_raw` next to the refunded lamports.
+
 The scheduled unit passes `--batch`, which waits for at least two eligible
 accounts to share one network fee. A singleton is reclaimed immediately when
 its rent exceeds free native cash above the executor's existing 0.2 SOL reserve;
