@@ -49,7 +49,7 @@ All chart values come from the collector's real data; empty, loading and error s
 
 ## Access
 
-- **Password login screen** before any data is shown (similar in spirit to 9router's login gate).
+- **Password login screen** before any data is shown.
 - Password hash supplied via an environment variable set in a systemd drop-in env file; the server never stores or logs
   the plain password. Still loopback-only.
 

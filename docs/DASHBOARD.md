@@ -6,7 +6,7 @@ Run from the repository root (Go 1.22+, Python 3; existing PyYAML enables Hermes
 rtk go run ./cmd/dashboard
 ```
 
-A password hash is required (see [Sign-in](#sign-in)); without it the dashboard serves no data. Open http://127.0.0.1:8787. From your laptop, run `ssh -N -L 8787:127.0.0.1:8787 oc` (replace `oc` with your SSH host alias), then open that same address locally. The listener accepts loopback IPs only, rejects non-local Host headers, and exposes only GET/HEAD, apart from the `/login` and `/logout` form posts. For remote use, forward the localhost port over the existing SSH connection. No public listener, trading service restart, Telegram test, transaction, inference or RPC is needed.
+A password hash is required (see [Sign-in](#sign-in)); without it the dashboard serves no data. Open http://127.0.0.1:8787. From your laptop, run `ssh -N -L 8787:127.0.0.1:8787 <ssh-host>` (replace `<ssh-host>` with your SSH host or alias), then open that same address locally. The listener accepts loopback IPs only, rejects non-local Host headers, and exposes only GET/HEAD, apart from the `/login` and `/logout` form posts. For remote use, forward the localhost port over the existing SSH connection. No public listener, trading service restart, Telegram test, transaction, inference or RPC is needed.
 
 Build a standalone binary (HTML and collector are embedded):
 
