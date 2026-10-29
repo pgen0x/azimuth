@@ -180,20 +180,11 @@ def get_meteora_portfolio_positions(wallet_address):
 # it exists to catch, so it fired at PnL -15.64% and -8.34% on a rule written
 # for -5%. Between -5% and -25% nothing closed unconditionally. Six closes
 # produced the entire day's loss while 33 others returned ~0.
-# -8.0 is the value used by a reference LP running the same screen and the same
-# trailing pair (1.2/0.6) at materially better win rate over the same window.
-# Its SL carries no confirmation leg either — that is the point: an
-# unconditional floor is what the fast rails were standing in for and could not
-# deliver. Caveat for whoever revisits this: that reference also runs an LLM
-# review over every open position on a 5m cadence, which this bot has no
-# equivalent of, so an unknown share of its edge is judgment rather than
-# threshold. Treat -8.0 as calibrated, not proven.
-# Was -12.0 from 2026-08-26 to 2026-08-31, on the argument that "that
-# reference's own config defaults to -50%". That premise read the reference's
-# CODE DEFAULT (config.js: `u.stopLossPct ?? -50`), not the config it actually
-# runs: its user-config.json sets `stopLossPct: -8`, so the live reference has
-# been at -8 the whole time and the -50 was never a threshold anyone traded.
-# Restored to -8.0 to match. This constant is a FALLBACK only — SOUL.md
+# -8.0 is an unconditional floor with no confirmation leg — that is the point:
+# an unconditional floor is what the fast rails were standing in for and could
+# not deliver. Treat -8.0 as calibrated, not proven.
+# Was -12.0 from 2026-08-26 to 2026-08-31, on a misread code default (-50%)
+# rather than a live-traded threshold. Restored to -8.0. This constant is a FALLBACK only — SOUL.md
 # section 9 "Hard Stop-Loss" governs at runtime and already reads -8.0, which
 # is why live closes journal "Hard Stop-Loss hit (-10.07% <= -8.0%)" while this
 # line said -12. Aligning the two so a profile without a SOUL.md does not
@@ -229,8 +220,8 @@ TURNOVER_MAX_OOR_MINUTES = 3
 # against the chance price walks back INTO range (fees resume) or keeps
 # running (pump-out). Measured over the 24h to 2026-08-10: turnover's six
 # SOL-side OOR closes averaged +0.01% — it exits before a single fee accrues —
-# while the reference bot waiting 5m on the same event averaged +0.04% and the
-# pumps it held instead of cutting averaged +0.38% (n=10). Token-side keeps
+# while waiting 5m on the same event measured +0.04% and the pumps held
+# instead of cut averaged +0.38% (n=10). Token-side keeps
 # the 2m fuse: there the position IS a falling token bag.
 TURNOVER_SOL_SIDE_OOR_MINUTES = 5
 # Turnover rebalance circuit breaker: re-centers stop once the pool's cumulative
@@ -248,14 +239,13 @@ TURNOVER_CB_LOSS_SOL = -0.015
 # Niles -0.77 +2.90 -4.48; cc +0.14 -4.57; MARIO64 -0.03 -5.21). The re-pin is
 # a bid resting under a market: while the pool oscillates it earns ~0.1%, and
 # when the pool finally trends it hands back 4-5% at once. Bounding the run
-# bounds how many times we offer that trade. 3/24h matches the reference bot's
-# oorCooldownTriggerCount, which works the same book and never took a downtrend
-# close in the same window.
+# bounds how many times we offer that trade. 3/24h is the smallest budget that
+# still lets an oscillating pool re-pin through a normal day.
 TURNOVER_RECENTER_STRIKES = 3
 # Exhausting the strikes cools the POOL, not just the symbol — the symbol
 # cooldown is as short as 15m after a profitable exit, and the daemon would
-# re-signal the same pool straight back into a fresh run. Matches the reference
-# bot's oorCooldownHours and the pipeline's own repeat-deploy churn guard
+# re-signal the same pool straight back into a fresh run. Matches the
+# pipeline's own repeat-deploy churn guard
 # (dlmm_pipeline.py: 3 deploys/24h -> 12h pool cooldown), which never saw these
 # runs because a monitor re-center never passes through the deploy path.
 TURNOVER_STRIKE_COOLDOWN_HOURS = 12
@@ -292,25 +282,22 @@ TRAILING_DROP_PCT = 1.5
 # band, so a 5% trigger never arms and the mode's only profitable exit becomes an
 # upside-OOR pump-out. That starves is_turnover_churn (which requires
 # realized_sol > 0) and collapses the cadence back to the cooldown path. Values
-# match the reference bot's live closes ("peak 1.45% -> current 0.64%"), which
-# turn ~30 closes/day. Turnover also skips the fee/TVL trigger scaling below: its
+# sit inside the observed fee-capture win band (peaks ~1.45% giving back to
+# ~0.64%), a pair that supports ~30 closes/day. Turnover also skips the fee/TVL trigger scaling below: its
 # income is fee_pct x churn, not price, so a yield-scaled price trigger is the
 # wrong axis — and that scaler's 2.0 floor would swallow a 1.2 trigger anyway.
 TURNOVER_TRAILING_TRIGGER_PCT = 1.2
 TURNOVER_TRAILING_DROP_PCT = 0.6
 MIN_FEE_TVL_24H_LIMIT = 1.0
 # ...and 1.0% is a solvency bar, not an earning bar: at that pace a position pays
-# back 1% of TVL a day, of which our share is our liquidity over the pool's. The
-# reference bot holds the same book to 7% and turns its capital over twice as
-# fast for it (median hold 20.6m against this daemon's 33m, 47 closes/24h against
-# 27, on FEWER slots — 3 against turnover 2 + pulse 4). Slots were never the
-# constraint here: the 24h to 2026-08-14 logged ZERO "Max positions reached"
+# back 1% of TVL a day, of which our share is our liquidity over the pool's. A
+# fee-capture ticket earns by turning over (median hold was 33m, 27 closes/24h).
+# Slots were never the constraint here: the 24h to 2026-08-14 logged ZERO "Max positions reached"
 # aborts and 196 cycles of "already exposed to all winners", so throughput is
 # bounded by how long each ticket sits, and 11 of 27 closes sat past 54m. This
 # bar is what ends that sit. Tight-scoped, not global: a multiday ticket is
 # supposed to hold through a slow window, a fee-capture one is not. Set below
-# the reference's 7% because our exit also has the fee-pace-death rail underneath
-# it, which reads realized SOL rather than the pool's advertised ratio.
+# 7% because the exit also has the fee-pace-death rail underneath it, which reads realized SOL rather than the pool's advertised ratio.
 MIN_FEE_TVL_24H_TIGHT_LIMIT = 5.0
 MIN_AGE_BEFORE_YIELD_CHECK = 60.0
 # ...but 60m was calibrated on modes that enter a pool with hours of history.
@@ -399,11 +386,10 @@ FAST_EXIT_UNDERWATER_PNL_PCT = -1.5
 # Deliberately NOT a take-profit: the giveback lands near flat, well under
 # TRAILING_MIN_LOCK_PCT, so it must never route through the TP/cooldown path.
 # Widened 0.5/1.5 -> 2.5/2.5 on 2026-08-26: the 08-19 sample that motivated the
-# tight version was a 12:1 edge, but the 24h/7d comparison against a reference
-# bot running the same screen showed the opposite on Sue-SOL/Token-SOL/PANTS-SOL
-# — the same pool re-pinned, stopped on a dip that then reversed into a large
-# win the reference caught. That reference arms its own trailing rail at +3%
-# peak, not +0.5%; 2.5/2.5 moves partway there without fully matching it.
+# tight version was a 12:1 edge, but later 24h/7d closes showed the opposite on
+# Sue-SOL/Token-SOL/PANTS-SOL — the same pool re-pinned, stopped on a dip that
+# then reversed into a large win. A +3% arm would have held them; 2.5/2.5 moves
+# partway there.
 # Re-tune again once enough post-change closes accumulate to judge the swap.
 GIVEBACK_ARM_PCT = 2.5
 GIVEBACK_DROP_PCT = 2.5
@@ -457,8 +443,7 @@ DOWNTREND_PNL_ONLY_TIGHT_PCT = -2.5
 # OOR-upside profit lock: above range the position is fully converted to SOL
 # (PnL frozen, fees stopped); at or above this banked gain, close immediately
 # instead of riding the OOR fuse and risking a retrace back into range.
-# Ported from the reference bot's "OOR upside + profitable → close IMMEDIATELY";
-# threshold sits above the round-trip swap cost lock, so any real banked gain
+# Rule: "OOR upside + profitable → close IMMEDIATELY"; threshold sits above the round-trip swap cost lock, so any real banked gain
 # closes rather than riding a retrace. Lowered 3.0 -> 1.5 on 2026-07-19: with
 # the sol_bidask ladder an upside OOR means the whole deploy sold into the
 # pump — consensus is "above range = you already won, bank it"; waiting only
@@ -490,8 +475,8 @@ FEE_STALL_MIN_AGE_MINUTES = 45.0
 # Rug blacklist floor: a realized close at or below this is rug territory — no
 # re-entry thesis survives it in the near term. The mint and the deployer wallet
 # (when deploy metadata carries one) each go into a TTL'd Redis key, both
-# checked by the pipeline before any deploy. Ported from the reference bot's
-# token-blacklist / dev-blocklist, auto-added instead of agent-curated.
+# checked by the pipeline before any deploy. A token-blacklist / dev-blocklist,
+# auto-added instead of agent-curated.
 RUG_BLACKLIST_PNL_PCT = -30.0
 # Mint blacklist TTL. This was a permanent SADD until 2026-08-07. Discovery
 # recycles a small pool of tickers cycle after cycle, so a monotonic blocklist
@@ -1072,7 +1057,7 @@ def implausible_change(pct):
     all. Those five false reads each wrote a 7d mint ban and a 30d deployer ban
     (maybe_blacklist_rug takes the rug_event path, which ignores PnL by
     design), and that blacklist is what starved Solana entries for 12h on
-    2026-08-14 while a comparison bot entered the same pools green.
+    2026-08-14 while the same pools traded green.
 
     The source is pair confusion, not corruption: DexScreener aggregates every
     pool of a token, and a dead husk beside a live pool quotes a real -99.96%
@@ -2387,9 +2372,8 @@ def main():
         # stretch to 10m while a bid_ask position holds a full, decaying token
         # bag. That made the exit FAST on the harmless side (above range = 100%
         # SOL, PnL frozen, nothing decays) and SLOW on the side that actually
-        # loses money — the same asymmetry the reference bot found and fixed in
-        # its own rule 3 ("dumped far below range ... A gap this far past the
-        # lower edge is not drift — close it without waiting the clock").
+        # loses money. A gap this far past the lower edge is not drift — close
+        # it without waiting the clock.
         # At this distance price has crossed the WHOLE range plus
         # MAX_BINS_PUMPED_ABOVE bins, so there is no re-entry to wait for and
         # the token side decays every tick it is held. Same bin threshold as
@@ -2432,9 +2416,8 @@ def main():
                 minutes_oor = (now - oor_start) / 60.0
                 print(f"🔴 Position {pair} has been Out of Range for {minutes_oor:.1f} minutes.")
                 if minutes_oor >= oor_limit_minutes:
-                    # 4b. Downside recovery grace (deterministic port of the
-                    # reference bot's "OOR downside + volume recovering →
-                    # consider waiting"): if the 5m candle is green at fuse
+                    # 4b. Downside recovery grace ("OOR downside + volume
+                    # recovering → consider waiting"): if the 5m candle is green at fuse
                     # expiry, price is walking back toward the range — one
                     # 5-minute extension instead of closing into the bounce.
                     # One-shot per OOR episode (flag resets on range re-entry);
@@ -2457,8 +2440,8 @@ def main():
                                         f"{oor_limit_minutes}m) — position fully converted to token, selling before decay")
                     else:
                         close_reason = f"Out of Range for {minutes_oor:.1f}m (limit {oor_limit_minutes}m)"
-            # 4a. OOR-upside profit lock (ported from the reference bot's "OOR
-            # upside + profitable → close IMMEDIATELY"). Above range the
+            # 4a. OOR-upside profit lock ("OOR upside + profitable → close
+            # IMMEDIATELY"). Above range the
             # position has fully converted to SOL: PnL is frozen and fees have
             # stopped, so the fuse only buys a chance for price to fall back
             # INTO range — which, with a strong win banked, hands the profit
@@ -3104,8 +3087,8 @@ def main():
                     cd_label = f"{cooldown_secs // 60}m" if cooldown_secs < 3600 else f"{cooldown_secs // 3600}h"
                     print(f"🚫 Re-entry cooldown set for {base_symbol_cd}: {cd_label} (reason: {'profitable exit' if cooldown_secs == 900 else ('dump/momentum' if is_dump_close else 'normal exit')})")
 
-                # Low-yield exits also cool the POOL itself for 4h (ported from
-                # the reference bot's low-yield pool cooldown): the symbol cooldown above
+                # Low-yield exits also cool the POOL itself for 4h (a low-yield
+                # pool cooldown): the symbol cooldown above
                 # expires in 1h, but a pool whose fee flow already decayed won't
                 # recover that fast — without this we re-enter the same fee-dead
                 # pool on the next signal and churn.

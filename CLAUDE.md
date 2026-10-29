@@ -133,13 +133,12 @@ one pass per enabled mode per `POLL_INTERVAL`.
     When changing gates or thresholds, keep them in sync with that upstream, or
     note the divergence — the comments cite where each value came from.
     Two modes are this daemon's own: `Turnover` (30m, `category=all`,
-    `sort=fee:desc`) and `Pulse` (5m, `category=trending`) — a port of the
-    reference bot's screen. Same TVL/mcap/holder band, different discovery
-    window, so they surface largely disjoint pools; running both makes entries
-    the **union** of the two screens. Gates only some modes want (volatility
-    ceiling, yield-decline, warning severity, verified) are zero-disabled
-    `ModeParams` fields, so a new mode that omits one silently opts out — set
-    them explicitly.
+    `sort=fee:desc`) and `Pulse` (5m, `category=trending`). Same TVL/mcap/holder
+    band, different discovery window, so they surface largely disjoint pools;
+    running both makes entries the **union** of the two screens. Gates only
+    some modes want (volatility ceiling, yield-decline, warning severity,
+    verified) are zero-disabled `ModeParams` fields, so a new mode that omits
+    one silently opts out — set them explicitly.
   - `momentum.go` — best-effort DexScreener downtrend gate (fail-open).
   - `audit.go` — best-effort Jupiter token-audit gate (fail-open): hard-rejects
     >30% bot holders, enriches signals with bot % + global fees paid.
@@ -421,7 +420,7 @@ one pass per enabled mode per `POLL_INTERVAL`.
   healthy positions, and since that rule blacklists via `rug_event`
   (PnL-independent, by design) each false read cost a 7d mint ban plus a 30d
   deployer ban. Eleven such bans starved Solana of every entry for 12h on
-  2026-08-14 while the comparison bot entered the same pools green. Pinned by
+  2026-08-14 while those same pools traded green. Pinned by
   `internal/meteora/momentum_test.go`.
 - **Redis TTL is per-key on purpose.** `SetNX` per pool gives each an independent
   rolling `SEEN_TTL`. The old `SAdd`+`Expire` refreshed the whole set's TTL every

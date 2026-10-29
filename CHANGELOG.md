@@ -796,8 +796,8 @@ development history into this first tagged version.
   position budgets.
 - Layered risk gates: TVL, fee/TVL, market cap, holder count, organic score,
   top-10/dev supply concentration, mint/freeze authority, Jupiter shield
-  status, and a best-effort DexScreener downtrend filter (the reference bot
-  degen-score and bin-step gates ported from the upstream Python pipeline).
+  status, and a best-effort DexScreener downtrend filter (degen-score and
+  bin-step gates ported from the upstream Python pipeline).
 - Batch AI-Pick signalling: one HMAC-signed webhook per cycle carries every
   qualifying pool as an array, replacing first-come-per-pool sends so the
   agent compares the full batch before deploying.

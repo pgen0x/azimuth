@@ -53,7 +53,7 @@ type Config struct {
 	EnableCasual   bool
 	EnableMultiday bool
 	EnableTurnover bool
-	// EnablePulse runs the ported reference-bot screen (5m/trending)
+	// EnablePulse runs the pulse screen (5m/trending)
 	// alongside turnover (30m/all), so entries are the union of both screens
 	// instead of only the pools turnover's window happens to surface.
 	EnablePulse bool

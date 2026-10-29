@@ -76,7 +76,7 @@ MODE_DEFAULTS = {
     # the 30m-window fee_tvl_ratio floor 0.15 ~= 7.2%/day pace.
     "turnover": {
         # 2026-07-28: kept in sync with internal/meteora/screen.go Turnover —
-        # TVL floor 10k and mcap floor 150k, matching the reference bot's band.
+        # TVL floor 10k and mcap floor 150k, matching the pulse band.
         "MIN_TVL_USD": 10000.0,
         "MIN_FEE_TVL_24H": 0.15,
         "MIN_MCAP_USD": 150000.0,
@@ -84,7 +84,7 @@ MODE_DEFAULTS = {
         "TIMEFRAME": "30m",
         "MAX_POSITIONS": 2,
     },
-    # Port of the reference bot's own screen (internal/meteora/screen.go
+    # Mirrors the daemon's pulse screen (internal/meteora/screen.go
     # Pulse). Same TVL/mcap/holder band as turnover, but sampled through a
     # 5m trending window instead of a 30m fee-sorted one, so it surfaces pools
     # turnover never sees. Its fee bar is fee/ACTIVE-tvl >= 0.05 for that 5m
@@ -103,8 +103,7 @@ MODE_DEFAULTS = {
 }
 
 # Deployable bid-side depth, in bins below the active bin. Narrowed 40-100 ->
-# 35-53 on 2026-08-14 to match the reference bot's band (its live deploys read
-# bins_below 53-69, minBinsBelow 35). The old ceiling was not a ceiling: all 23
+# 35-53 on 2026-08-14. The old ceiling was not a ceiling: all 23
 # deploys in the preceding 48h printed "Bins Below | 100", i.e. every single one
 # clamped. At bin step 100 that is 63% of downside covered, and bid-ask weights
 # liquidity toward the FAR end of the ladder — so the majority of each ticket sat
@@ -112,16 +111,13 @@ MODE_DEFAULTS = {
 #
 # Three measured consequences, all of which the narrower band attacks:
 #   1. Fee share is our liquidity in the ACTIVE bin over the pool's. Spread over
-#      100 bins only a handful ever earn: $6.25 fees in 24h against the
-#      reference bot's $19.32 on comparable deployed capital — this book was
+#      100 bins only a handful ever earn: $6.25 fees in 24h — this book was
 #      never short of funds, only of concentration.
 #   2. The 5m OOR fuse is the churn engine, and a 63% range disarms it — the
 #      18-24%/h dumps observed on 2026-08-13/14 never left the range, so no rule
-#      could speak until the downtrend floor. Same tokens, same days: the
-#      reference bot closed MARIO64 at 13m/10m/60m for +0.05/+0.19/-0.24% while
-#      this book held it 170m to -5.21%; cc at 13m/16m for +0.02/+0.24% against
-#      56.7m and -4.57%; OnlyMarms at 6m for -0.11% against 93.3m and -2.80%.
-#      Its 72 closes over those 48h contain exactly 3 worse than -1%.
+#      could speak until the downtrend floor. This book held MARIO64 170m to
+#      -5.21%, cc 56.7m to -4.57% and OnlyMarms 93.3m to -2.80%, where an exit
+#      inside the first 6-16 minutes was near flat.
 #   3. Fewer bins span fewer 70-bin bin arrays, so fewer candidates are refused
 #      on bin-array rent (~0.071 SOL/array, non-refundable) — 12 such rejections
 #      in the 24h to 2026-08-14.
@@ -966,8 +962,8 @@ def apply_batch_conviction(candidates, mode="multiday"):
     survivors = []
     for c in candidates:
         # Token has produced almost no swap fees globally = bundled/inorganic.
-        # Only the truly-dead tail hard-rejects; the reference 30-SOL line is
-        # a penalty below. Absent field = unknown (fail-open), never zero.
+        # Only the truly-dead tail hard-rejects; the 30-SOL line is a penalty
+        # below. Absent field = unknown (fail-open), never zero.
         gf = c.get("global_fees_sol")
         if gf is not None and float(gf) < 5:
             print(f"Batch reject {c['name']} - global fees {float(gf):.1f} SOL < 5 (bundled/scam pattern)")
@@ -1011,8 +1007,7 @@ def apply_batch_conviction(candidates, mode="multiday"):
         elif dev_status == "creator_sell":
             adj -= 15; notes.append("dev_sell-15")
 
-        # Low-but-nonzero global fees: reference bot's 30-SOL bundled/scam
-        # line, demoted from hard reject (Jupiter's figure runs off GMGN's).
+        # Low-but-nonzero global fees: a 30-SOL bundled/scam line, demoted from hard reject (Jupiter's figure runs off GMGN's).
         gf = c.get("global_fees_sol")
         if gf is not None and float(gf) < 30:
             adj -= 15; notes.append("low_fees-15")
@@ -1136,8 +1131,8 @@ SOL_BIDASK_COVERAGE = 0.35
 # smaller range, so the band clamps in the dangerous direction — 53 bins is 34.4%
 # of downside at step 80 but only 10.0% at step 20, which a memecoin clears in
 # minutes and which would leave the position holding a full token bag instead of
-# re-centering. The reference bot avoids this by refusing the pools outright
-# (minBinStep 80); this book has no bin-step gate and should not grow one just to
+# re-centering. A minBinStep-80 gate would refuse these pools outright; this
+# book has no bin-step gate and should not grow one just to
 # make a geometry constant safe, so the guard lives here instead. 100 is the old
 # MAX_BINS_BELOW, kept as the rent/technical bound the floor may not exceed.
 SOL_BIDASK_MIN_COVERAGE = 0.20
@@ -1225,7 +1220,7 @@ def main():
     parser.add_argument("--pool", type=str, default=None, help="Deploy a specific pool address instead of auto-selecting winner")
     parser.add_argument("--from-signal", dest="from_signal", type=str, default=None, help="JSON of a pre-screened candidate record from the azimuth signal daemon. Skips discovery+screen and deploys this exact pool; live gates (holding/cooldown/momentum/rent) still run.")
     parser.add_argument("--from-batch", dest="from_batch", type=str, default=None, help="JSON ARRAY of pre-screened candidate records (the full azimuth signal payload). Deterministically re-ranks the batch (GMGN/PVP/prior-PnL heuristics + darwinian signal weights), then deploys the strongest candidate that clears every live gate — falling back to the runner-up when a gate rejects the pick. Replaces the LLM agent's pick step.")
-    parser.add_argument("--mode", type=str, default="multiday", choices=["casual", "multiday", "turnover", "pulse"], help="Pipeline mode: casual (30m, 2-6h plays), multiday (24h, 24h+ holds), turnover (30m, high-fee fee-capture plays) or pulse (5m trending, the reference bot's screen)")
+    parser.add_argument("--mode", type=str, default="multiday", choices=["casual", "multiday", "turnover", "pulse"], help="Pipeline mode: casual (30m, 2-6h plays), multiday (24h, 24h+ holds), turnover (30m, high-fee fee-capture plays) or pulse (5m trending)")
     cli = parser.parse_args()
 
     mode = cli.mode
@@ -1549,8 +1544,7 @@ def main():
                 ttl_h = int(bl_ttl) // 3600 if bl_ttl and bl_ttl.lstrip("-").isdigit() else "?"
                 print(f"Skipping {c['name']} - mint is rug-blacklisted ({ttl_h}h remaining, reason: {bl_mint[:60]})")
                 continue
-        # Dev blocklist (ported from the reference bot's dev-blocklist): the
-        # daemon ships the Jupiter deployer wallet as `dev`; a deployer that
+        # Dev blocklist: the daemon ships the Jupiter deployer wallet as `dev`; a deployer that
         # already rugged us does not get another deploy for the window the
         # monitor set. Missing dev = unknown, passes (fail-open).
         # One TTL'd key per wallet, not a SADD set — it was the latter until
@@ -1608,8 +1602,8 @@ def main():
         # that catch a token dying inside the hold, and they still apply. Live
         # 2026-08-13: 63 consecutive empty turnover batches, emptied by exactly
         # these two legs (BOIÚNA 6h -24.6%, MARIO64 24h -72.9%, CHAM 6h -79.7%),
-        # while a reference bot without them churned BOIÚNA three times in 26
-        # minutes for three positive closes.
+        # while BOIÚNA itself offered three positive 5-6 minute closes inside
+        # 26 minutes.
         skip_long_momentum = mode == "turnover"
         if h6 is not None and h6 < MAX_ENTRY_H6_DROP and not skip_long_momentum:
             print(f"Skipping {c['name']} - 6h trend {h6:.1f}% < {MAX_ENTRY_H6_DROP}% (downtrend gate)")

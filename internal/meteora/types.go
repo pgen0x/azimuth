@@ -67,7 +67,7 @@ type Pool struct {
 	DlmmParams           DlmmParams `json:"dlmm_params"`
 
 	// Authoritative risk flags from the discovery API (cheaper + more reliable
-	// than parsing the warnings array). Ported from the reference reject-reason mapping.
+	// than parsing the warnings array).
 	HasCriticalWarnings        bool `json:"base_token_has_critical_warnings"`
 	QuoteHasCriticalWarnings   bool `json:"quote_token_has_critical_warnings"`
 	HasHighSingleOwnership     bool `json:"base_token_has_high_single_ownership"`

@@ -15,11 +15,10 @@ import (
 var discoverClient = &http.Client{Timeout: 15 * time.Second}
 
 // minVolatilityTimeframe is the shortest window whose `volatility` field is
-// worth screening on. Ported from the reference bot (MIN_VOLATILITY_TIMEFRAME):
-// on a 5m window the API reports volatility 0 for any pool that simply did not
+// worth screening on (MIN_VOLATILITY_TIMEFRAME): on a 5m window the API reports volatility 0 for any pool that simply did not
 // move in the last five minutes, and Screen hard-rejects `volatility <= 0`.
 // Measured 2026-08-01: that one condition was 346 of pulse's 476 rejects in a
-// single day, including pools the reference bot entered and closed green. So
+// single day, including pools that went on to trade green. So
 // for any mode querying a shorter window we re-read volatility (and the window
 // volume, which the same detail call returns) at 30m and screen on THAT.
 const minVolatilityTimeframe = "30m"
@@ -45,7 +44,7 @@ func volatilityTimeframe(src string) string {
 const volatilityRefetchWorkers = 8
 
 // buildFilters pushes the mode thresholds into the discovery API's filter_by
-// query (ported from the reference discovery query) so the API returns pre-filtered
+// query so the API returns pre-filtered
 // pools instead of us discarding junk client-side. Screen still re-checks every
 // gate locally (belt-and-suspenders) since the API filter is best-effort.
 func buildFilters(mp ModeParams) string {
@@ -63,8 +62,7 @@ func buildFilters(mp ModeParams) string {
 	if mp.MinQuoteOrganic > 0 {
 		f = append(f, fmt.Sprintf("quote_token_organic_score>=%.0f", mp.MinQuoteOrganic))
 	}
-	// base_token_market_cap<= is verified live — the reference config's own
-	// discovery query pushes its maxMcap through this exact field.
+	// base_token_market_cap<= is verified live as a filter_by field.
 	if mp.MaxMcap > 0 {
 		f = append(f, fmt.Sprintf("base_token_market_cap<=%.0f", mp.MaxMcap))
 	}
@@ -91,8 +89,7 @@ func buildFilters(mp ModeParams) string {
 	if mp.MinUniqueTraders > 0 {
 		f = append(f, fmt.Sprintf("unique_traders>=%.0f", mp.MinUniqueTraders))
 	}
-	// Pulse-mode thresholds. Both fields are verified live — the reference
-	// bot's own discovery query pushes exactly these two through filter_by.
+	// Pulse-mode thresholds. Both fields are verified live as filter_by fields.
 	if mp.MinFeeActiveTVL > 0 {
 		f = append(f, fmt.Sprintf("fee_active_tvl_ratio>=%.3f", mp.MinFeeActiveTVL))
 	}
@@ -153,8 +150,7 @@ func FetchTopPools(baseURL string, mp ModeParams) ([]Pool, error) {
 // this step never ran.
 //
 // NOTE the API-side `volume>=` prefilter in buildFilters still applies at the
-// mode's own timeframe — this only relaxes the LOCAL re-check in Screen, which
-// is the same asymmetry the reference bot has.
+// mode's own timeframe — this only relaxes the LOCAL re-check in Screen.
 func applyVolatilityTimeframe(baseURL string, pools []Pool, mp ModeParams) {
 	tf := volatilityTimeframe(mp.Timeframe)
 	if len(pools) == 0 || tf == mp.Timeframe {
@@ -202,9 +198,8 @@ func applyVolatilityTimeframe(baseURL string, pools []Pool, mp ModeParams) {
 	}
 }
 
-// fetchPoolDetail re-reads one pool at a different timeframe. Mirrors the
-// reference bot's fetchPoolDiscoveryDetail: same endpoint, pool_address as the
-// only filter, page_size=1.
+// fetchPoolDetail re-reads one pool at a different timeframe: same endpoint,
+// pool_address as the only filter, page_size=1.
 func fetchPoolDetail(baseURL, poolAddress, timeframe string) (*Pool, error) {
 	reqURL := fmt.Sprintf("%s?page_size=1&timeframe=%s&filter_by=%s",
 		baseURL, timeframe, url.QueryEscape("pool_address="+poolAddress))
