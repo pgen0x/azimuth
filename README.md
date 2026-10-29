@@ -481,8 +481,9 @@ monitor loop auto-sends it daily at 09:00 WIB via `hermes send` when
 
 ## Example output
 
-The agent reports each deploy decision as a card like this (real values, not
-placeholders — the prompt never lets it fabricate a size/entry/TX):
+The agent reports each deploy decision as a card like this (illustrative values;
+the live card carries only measured ones — the prompt never lets it fabricate a
+size/entry/TX):
 
 ```
 🤖 AI Pick — multiday · 14:32 WIB
@@ -496,7 +497,7 @@ Strategy: custom_ratio_spot — meme-pool volatility, symmetric range fits
 | Metric | Value |
 |---|---|
 | Token | world |
-| Decision | ✅ DEPLOYED (multiday) pos DoSj3Ga... |
+| Decision | ✅ DEPLOYED (multiday) pos <POSITION> |
 | Size | 1.03 SOL |
 | Range | 62↓ 62↑ bins |
 | Fee/TVL | 10.8%/d |

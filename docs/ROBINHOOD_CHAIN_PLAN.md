@@ -140,9 +140,9 @@ Strategies: `balanced_tight` (swap half, ±range% band) and `weth_below`
 Wallet: `EVM_PRIVATE_KEY` in profile `.env` accepts a dedicated 0x-hex key OR
 the base58 Solana secret (ed25519 seed reused as secp256k1 scalar) — the
 Solana-derived account is the current setup. Read-only + DRY_RUN paths tested
-live. **Wallet funded 2026-07-13** (Phantom-exported EVM key, standard BIP44
-path — NOT the ed25519-seed-derived stopgap account) with ETH for gas and WETH
-for LP capital, both bridged from BNB/SOL via Across/Mayan.
+live. Live execution needs an EVM wallet funded with ETH for gas and WETH (or
+USDG) for LP capital; a standard BIP44 EVM key is preferred over the
+ed25519-seed-derived stopgap account.
 
 **Automatic dispatch landed** (commit f1504bf, `internal/robinhood/deploy.go`
 + `Scanner.robinhoodDeploy`): mirrors Solana's `DEPLOY_CMD` pattern exactly —
@@ -160,7 +160,7 @@ closed by hand via `uni_executor.js close --id N`.
 qualifying batch. Went live after the paper-mode (`DRY_RUN=true`) pick→deploy
 log path was observed end-to-end and Phase 3 (monitor exits) landed, so a
 deployed position auto-closes on the exit rules rather than sitting open until
-closed by hand. Capital is the funded wallet's ~0.0085 WETH; `uni_executor.js`
+closed by hand. Capital is the funded wallet's WETH balance; `uni_executor.js`
 sizes each deploy from that balance.
 
 **Remaining**: gate calibration from live journals (Phase 4) — no code gaps in
@@ -359,7 +359,7 @@ What landed (discovery/screening only — **no v4 execution**):
 
 ### Phase 7 — v4 execution ✅ (LIVE 2026-07-15)
 
-Validation round-trip completed on-chain 2026-07-15 (position 96988,
+Validation round-trip completed on-chain 2026-07-15 (one position,
 CASHCAT/WETH 0.2888%: mint 0.002 WETH → state → collect → close, net cost
 ~0.000015 WETH + gas), then `ROBINHOOD_V4_EXECUTOR_CMD` enabled in the live
 daemon env and the service restarted. Two chain-specific findings from the

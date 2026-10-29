@@ -100,9 +100,8 @@ found"). `loginctl enable-linger $USER` is what keeps them alive across logout.
 | `azimuth-rh-monitor` | Robinhood Chain exit loop (`uni_monitor_loop.sh`); installed disabled | `install.sh` ← `assets/systemd/azimuth-rh-monitor.service` |
 | `hermes-gateway-<profile>` | Hermes gateway that receives the webhook, and ticks the profile's cron jobs | Hermes, not this repo |
 
-Units named after other agents (e.g. a separate LLM LP agent) may also be
-running on the same box; they are **not** this repo's and `install.sh` must
-never write them.
+Units not listed here are **not** this repo's, and `install.sh` must never
+write them.
 
 ```bash
 journalctl --user -u azimuth -f          # live tail

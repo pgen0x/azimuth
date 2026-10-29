@@ -77,7 +77,7 @@ MIN_AGE_MIN_BEFORE_SL = 5.0        # grace so a fresh mint's settling isn't an S
 # Consecutive failed close attempts after which a position is declared
 # UNCLOSABLE and skipped for the rest of this process's life.
 #
-# Some closes can never succeed. On 2026-08-09 position #634693 (BLINK, a pool
+# Some closes can never succeed. On 2026-08-09 a BLINK position (a pool
 # the security gate convicted as a honeypot 20 minutes after the mint) failed
 # `collect` with `TF` — the token blocks transfers, so the withdraw can never
 # settle — and the loop retried it every 40s for 75 minutes: 78 attempts, 78
@@ -2199,7 +2199,7 @@ def main():
                 # Ask the breaker about the window BEFORE writing this close
                 # into it. Recording first made the very first re-center of a
                 # pool read its own number back and veto itself: on 2026-08-07
-                # position #616818 booked -0.01747 (the executor's weth_out bug,
+                # a position booked -0.01747 (the executor's weth_out bug,
                 # fixed in the same change) and recenter_ok declined on the
                 # -0.004 floor with `recenters` at 1 and no prior history. The
                 # breaker exists to stop a pool that has been bleeding ACROSS a
@@ -2235,7 +2235,7 @@ def main():
             # that hangs past the loop's patience, an unhandled error further
             # down the pass — never reached the save, and the next process loaded
             # a state with no `close_fails` at all. The cap could therefore never
-            # be reached: position #634693 was re-attempted 93 times in 85
+            # be reached: the BLINK position was re-attempted 93 times in 85
             # minutes on 2026-08-09 against MAX_CLOSE_FAILURES=5, each attempt
             # journaled with success=false. Writing here makes the counter
             # durable no matter what happens to the rest of the tick, which is

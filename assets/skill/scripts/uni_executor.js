@@ -1310,7 +1310,7 @@ async function cmdPositions(account) {
 // `collect` pays out BOTH sides in one call: UniswapV3Pool.collect runs a
 // TransferHelper.safeTransfer per non-zero amount, so a token that refuses to
 // be transferred reverts the whole call with `TF` and takes our quote asset
-// hostage with it. Live proof, 2026-08-09: #634693 (BLINK — a pool the security
+// hostage with it. Live proof, 2026-08-09: a BLINK position (a pool the security
 // gate convicted as a honeypot 20 minutes after the mint) had already run its
 // decreaseLiquidity, leaving 0.006857890871263797 WETH and 18.198 BLINK sitting
 // as tokensOwed, and every collect for the next 75 minutes reverted `TF`. The
@@ -1402,7 +1402,7 @@ async function cmdClose(wallet, account) {
   // This exists because a ONE-SIDED quote position (weth_below, every ladder
   // rung) closes with nothing to sell, and reporting only the swap proceeds
   // said its entire ticket had evaporated. Live proof, 2026-08-07: turnover
-  // position #616818 paid back its full 0.017466515519518273 WETH on-chain
+  // position paid back its full 0.017466515519518273 WETH on-chain
   // (DecreaseLiquidity/Collect amount0, amount1 = 0) and still printed
   // weth_out "0". uni_monitor.py books that number as realized PnL, so the
   // re-center circuit breaker recorded -0.0175 against the pool and declined

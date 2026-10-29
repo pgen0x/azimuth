@@ -373,7 +373,7 @@ def main():
     out, error, code = monitor.run_command("sleep 5", timeout=0.02)
     assert code == -1 and "process group terminated" in error
 
-    pos = "2G6rKc9ssZZxVagZpfKKfph8UARmAbh9GjpV9R3uxGGe"
+    pos = "7cQiBuoQXmc4zhH9uJXc4uurjCtHu7r6ZAZYzBb2gshy"
     commands = []
     with patch.object(monitor, "get_position_metadata", return_value={"pool": "pool"}), \
          patch.object(monitor, "run_command_json", return_value=({"success": True, "in_range": True, "unclaimed_fees_sol": 0.001}, None)), \
