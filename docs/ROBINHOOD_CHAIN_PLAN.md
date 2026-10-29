@@ -140,10 +140,9 @@ Strategies: `balanced_tight` (swap half, ±range% band) and `weth_below`
 Wallet: `EVM_PRIVATE_KEY` in profile `.env` accepts a dedicated 0x-hex key OR
 the base58 Solana secret (ed25519 seed reused as secp256k1 scalar) — the
 Solana-derived account is the current setup. Read-only + DRY_RUN paths tested
-live. **Wallet funded 2026-07-13**: `0x94098ccD4536729AAEcc113C313E11926A5bec2d`
-(Phantom-exported EVM key, standard BIP44 path — NOT the ed25519-seed-derived
-stopgap account) holds ~0.00104 ETH (gas) + 0.0085 WETH (LP capital), both
-bridged from BNB/SOL via Across/Mayan.
+live. **Wallet funded 2026-07-13** (Phantom-exported EVM key, standard BIP44
+path — NOT the ed25519-seed-derived stopgap account) with ETH for gas and WETH
+for LP capital, both bridged from BNB/SOL via Across/Mayan.
 
 **Automatic dispatch landed** (commit f1504bf, `internal/robinhood/deploy.go`
 + `Scanner.robinhoodDeploy`): mirrors Solana's `DEPLOY_CMD` pattern exactly —

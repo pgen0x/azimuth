@@ -327,11 +327,11 @@ func TestSwapFilter(t *testing.T) {
 }
 
 func TestAddressFromWord(t *testing.T) {
-	got, err := addressFromWord("0x0000000000000000000000006245e67affa44a23077f0ea7f981a8dc743a0c47")
+	got, err := addressFromWord("0x0000000000000000000000005ca1ab1e000000000000000000000000c0ffee01")
 	if err != nil {
 		t.Fatalf("addressFromWord: %v", err)
 	}
-	if got != "0x6245e67affa44a23077f0ea7f981a8dc743a0c47" {
+	if got != "0x5ca1ab1e000000000000000000000000c0ffee01" {
 		t.Errorf("got %s", got)
 	}
 	if _, err := addressFromWord("0xdeadbeef"); err == nil {
@@ -348,7 +348,7 @@ func TestInitCurrenciesNativeETH(t *testing.T) {
 			v4InitTopic0,
 			"0xacea8920877840033f0275c37f9b61550b5326917e948bcf8339714d96f9521a",
 			word("0"),
-			"0x0000000000000000000000006245e67affa44a23077f0ea7f981a8dc743a0c47",
+			"0x0000000000000000000000005ca1ab1e000000000000000000000000c0ffee01",
 		},
 	}})
 	if err != nil {
