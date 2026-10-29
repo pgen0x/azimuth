@@ -823,9 +823,9 @@ async function cmdDeploy(wallet, account) {
     // The swap goes FIRST and the band is centered on the tick it leaves behind,
     // because by mint time the tick read at the top of this function is stale on
     // two counts: our own buy moves a thin launch pool, and other traders move it
-    // while our swap is in flight. #111130 (2026-07-14) centered a +/-953-tick
+    // while our swap is in flight. One position (2026-07-14) centered a +/-953-tick
     // band on tick ~168150 and minted at 166042 — 2108 ticks away, of which our
-    // 0.0015 WETH buy was 783 (-7.5%) and 18 seconds of market dump was the rest.
+    // own buy was 783 (-7.5%) and 18 seconds of market dump was the rest.
     // A range that no longer straddles the tick makes the mint take one token and
     // refund the other, so the position was born out-of-range earning no fees.
     const half = amountQuote / 2n;
@@ -1021,7 +1021,7 @@ async function cmdDeploy(wallet, account) {
   // and reported a double-digit loss the instant the position opened. That is
   // enough to trip the monitor's emergency stop-loss, which deliberately
   // bypasses the age grace, so every position was closed within a tick or two of
-  // being born (#106405/#106446/#111130, all "emergency SL" under 2 minutes old,
+  // being born (three positions, all "emergency SL" under 2 minutes old,
   // none ever reaching a positive peak). The refunded leftovers are still ours —
   // they sit in the wallet and cmdClose sells them out — so they belong nowhere
   // in this position's PnL.
@@ -1312,8 +1312,8 @@ async function cmdPositions(account) {
 // be transferred reverts the whole call with `TF` and takes our quote asset
 // hostage with it. Live proof, 2026-08-09: a BLINK position (a pool the security
 // gate convicted as a honeypot 20 minutes after the mint) had already run its
-// decreaseLiquidity, leaving 0.006857890871263797 WETH and 18.198 BLINK sitting
-// as tokensOwed, and every collect for the next 75 minutes reverted `TF`. The
+// decreaseLiquidity, leaving its WETH and BLINK sitting as tokensOwed,
+// and every collect for the next 75 minutes reverted `TF`. The
 // WETH was transferable the whole time; it was blocked only by its co-passenger.
 //
 // The pool skips the transfer entirely for a zero request, so asking for the
@@ -1402,7 +1402,7 @@ async function cmdClose(wallet, account) {
   // This exists because a ONE-SIDED quote position (weth_below, every ladder
   // rung) closes with nothing to sell, and reporting only the swap proceeds
   // said its entire ticket had evaporated. Live proof, 2026-08-07: turnover
-  // position paid back its full 0.017466515519518273 WETH on-chain
+  // position paid back its full WETH deposit on-chain
   // (DecreaseLiquidity/Collect amount0, amount1 = 0) and still printed
   // weth_out "0". uni_monitor.py books that number as realized PnL, so the
   // re-center circuit breaker recorded -0.0175 against the pool and declined

@@ -1174,7 +1174,7 @@ def select_batch_strategy(c, mode):
     # 2026-07-25: turnover now uses sol_bidask too. Its old balanced_tight
     # entry pre-swapped HALF the deploy into base token, so a dumping fee-capture
     # pool (WORLDCUP/febu) booked a realized token loss the fee flow couldn't
-    # outrun (-0.102 SOL/14d, why ENABLE_TURNOVER was killed). The re-center path
+    # outrun (net negative over 14d, why ENABLE_TURNOVER was killed). The re-center path
     # in dlmm_monitor.py already redeploys SOL-only below price (armor); the
     # initial entry was the one place still carrying token exposure. SOL-only
     # bid-ask below = zero token at entry, dumps fill bins at discounts while
@@ -1279,7 +1279,7 @@ def main():
         sys.exit(0)
     deploy_sol = compute_deploy_amount(sol_balance)
     # The turnover half-size cap (2026-07-15) was removed 2026-07-28. It was sized
-    # against the -0.10 SOL/14d journal produced by the OLD balanced_tight entry,
+    # against the net-negative 14d journal produced by the OLD balanced_tight entry,
     # which pre-swapped half the deploy into the base token — the losses it capped
     # were realized token dumps, not the fee thesis. The sol_bidask entry removed
     # that exposure, and on a thin wallet the halving is actively harmful: it drives

@@ -92,9 +92,10 @@ type ModeParams struct {
 // 0.1 (~4.8%/day pace) still sits ~5x above multiday's 1%/day bar.
 var (
 	// MinHolders recalibrated 2026-07-15 against the 14d close journal (102
-	// live closes, net -0.09 SOL): big losers entered at median 7.8k holders,
-	// winners at 13.6k. Backtest: casual >=10k flips the mode +0.002 -> +0.126
-	// SOL (keeps 20/32 trades); multiday >=5k flips -0.014 -> +0.056 (17/23).
+	// live closes, net negative): big losers entered at median 7.8k holders,
+	// winners at 13.6k. Backtest: casual >=10k turns the mode from flat to
+	// clearly positive (keeps 20/32 trades); multiday >=5k turns it from
+	// negative to positive (17/23).
 	// Holder count is token-level, so it is the one gate not confounded by the
 	// per-mode discovery window.
 	// MaxMcap (10M, sized for a 5m degen window): a tail guard, not a fit gate. Every strategy assumption

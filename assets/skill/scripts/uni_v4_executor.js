@@ -1020,7 +1020,7 @@ async function cmdDeploy(wallet, account) {
 
   if (strategy === "balanced_tight") {
     // Swap first, band around the post-swap tick — same staleness rationale
-    // as the v3 executor (its #111130 post-mortem comment): our own buy plus
+    // as the v3 executor (its slipped-mint post-mortem comment): our own buy plus
     // in-flight market moves make the pre-swap tick stale by mint time.
     const half = amountQuote / 2n;
     const quoted = await quoteExactIn(key, quoteIs0, half);

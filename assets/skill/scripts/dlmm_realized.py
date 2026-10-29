@@ -4,7 +4,7 @@
 WHY THIS EXISTS. `dlmm_closes.jsonl` records what the monitor BELIEVED at the
 moment it closed — a Portfolio-API mark read one tick before the close tx. That
 mark is not money, and it is sometimes not even close: three closes on
-2026-08-17..18 were booked at -100.00% / -1.41 SOL while the on-chain flows show
+2026-08-17..18 were booked at -100.00% while the on-chain flows show
 every deposit returned in full (see SUSPECT_PNL_MIN_AGE_MINUTES in
 dlmm_monitor.py). Everything downstream — the scoreboard, the weight learner,
 the daily proposal brief — reads that number and inherits the lie.

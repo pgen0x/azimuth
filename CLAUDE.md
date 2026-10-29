@@ -435,7 +435,7 @@ one pass per enabled mode per `POLL_INTERVAL`.
   and the 20s loop retries with every rule still armed; unmeasurable keeps
   trusting the report. STACY-SOL is why: on 2026-08-31 a fast-out exit printed
   `✅ Successfully closed`, journaled -1.66% and dropped the Redis key while
-  0.2511 SOL sat in the position — unmanaged for 68 minutes, reclaimed at
+  most of the ticket still sat in the position — unmanaged for 68 minutes, reclaimed at
   -23.73%, realized -20.51%. Paired with that, the reclaim path
   (`recover_position_metadata`) rebuilds an adopted position's pair, mint, mode
   and mint TIME from the close journal instead of adopting it blank: a blank
@@ -472,7 +472,7 @@ one pass per enabled mode per `POLL_INTERVAL`.
 - **Neither is `pnl_sol`, on Solana.** In `dlmm_closes.jsonl` both figures are the
   MARK the monitor read one tick before it closed, and the Portfolio API returns
   `-100%` for a position it has not indexed yet — so three closes on 2026-08-17..18
-  booked -1.41 SOL that the chain never took (deposit == withdrawal on all three).
+  booked full-size losses that the chain never took (deposit == withdrawal on all three).
   `dlmm_realized.py` writes the arbiter to `memories/dlmm_realized.jsonl` (deposit /
   withdrawal / fee flows per closed position, joined on `position`), and the
   scoreboard, the weight learner and the proposal brief all read `realized_sol`

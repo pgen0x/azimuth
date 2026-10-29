@@ -94,8 +94,8 @@ MAX_CLOSE_FAILURES = int(os.environ.get("UNI_MAX_CLOSE_FAILURES", "5"))
 # --- ask side: the second leg of a round trip -------------------------------
 # A turnover bid that fills is holding the token. Until 2026-08-09 that bag was
 # market-sold on the spot, which cost -4.9% per fill and WAS this venue's entire
-# deficit: the 13 untouched rungs earned +0.00039 ETH between them while 5 fills
-# lost -0.00231. Breakeven needed a fill rate under 6.1%; the measured rate was
+# deficit: the 5 fills lost about six times what the 13 untouched rungs earned
+# between them. Breakeven needed a fill rate under 6.1%; the measured rate was
 # 27.8%. Tuning the bid cannot close a 4.6x gap, because moving the rung away
 # from spot to fill less also earns less — the two move together.
 #
