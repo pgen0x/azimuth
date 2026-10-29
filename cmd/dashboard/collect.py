@@ -2,6 +2,8 @@
 import base64, json, math, os, re, selectors, signal, sqlite3, stat, subprocess, sys, time
 from pathlib import Path
 from types import SimpleNamespace
+from datetime import datetime, timedelta, time as clock
+from zoneinfo import ZoneInfo
 
 SECRET = re.compile(r"(password|secret|credential|authorization|api.?key|private.?key|access.?token|bot.?token|system_prompt|model_config|origin_json)", re.I)
 URL = re.compile(r"https?://[^\s\"<>]+")
@@ -102,7 +104,10 @@ def read_json(path):
     if path.stat().st_size>32*1024*1024: raise ValueError('report exceeds 32 MiB')
     return json.loads(path.read_text())
 
-WIB=7*3600
+# Day buckets follow the viewer's IANA zone (validated by the Go server); timestamps stay UTC epochs.
+def zone(tz): return ZoneInfo(tz or 'UTC')
+def local_day(ts, z): return datetime.fromtimestamp(ts, z).date()
+def day_start(d, z): return datetime.combine(d, clock(0), z).timestamp()
 NAV_LINE_BYTES=1024*1024
 NAV_LOOKUP_BYTES=8*1024*1024
 NAV_LOOKUP_READS=256
@@ -220,21 +225,24 @@ def nav_at(path, t, need=(), tries=50, meta=None):
     except OSError: meta['status']='unavailable'
     return None
 
-def north_star(memory, now, days=14):
-    """Per WIB day: the day's last snapshot. cash = native + LP mark + refundable rent;
+# Six weeks of local days for the dashboard's calendar; the NAV bridge keeps its 14-day window.
+CALENDAR_DAYS=41
+
+def north_star(memory, now, days=14, tz='UTC'):
+    """Per local day in `tz`: the day's last snapshot. cash = native + LP mark + refundable rent;
     known = native + SPL mark + LP mark + rent. Unmeasured parts stay null, never 0."""
-    path=memory/'dlmm_nav.jsonl'; out=[]; prev=None
-    today=int((now+WIB)//86400)
-    for day in range(today-days, today+1):
-        end=day*86400-WIB+86400
+    path=memory/'dlmm_nav.jsonl'; out=[]; prev=None; z=zone(tz)
+    today=local_day(now,z)
+    for back in range(days,-1,-1):
+        day=today-timedelta(days=back); end=day_start(day+timedelta(days=1),z)
         source={}; row=nav_at(path,min(end-1,now),meta=source)
-        if row is None or int((row['ts']+WIB)//86400)!=day:
-            out.append({'day':time.strftime('%Y-%m-%d',time.gmtime(day*86400)),'status':'no_snapshot' if not incomplete(source) else 'unknown','source':source}); prev=None; continue
+        if row is None or local_day(row['ts'],z)!=day:
+            out.append({'day':day.isoformat(),'status':'no_snapshot' if not incomplete(source) else 'unknown','source':source}); prev=None; continue
         parts=[row.get(k) for k in ('native_sol','lp_mark_sol','refundable_rent_sol')]
         cash=optional_sum(parts)
         known=row.get('known_asset_subtotal_sol') if number(row.get('known_asset_subtotal_sol')) else None
         tokens=row.get('tokens') if isinstance(row.get('tokens'),list) else []
-        item={'day':time.strftime('%Y-%m-%d',time.gmtime(day*86400)),'status':'partial_day' if day==today else 'ok',
+        item={'day':day.isoformat(),'status':'partial_day' if day==today else 'ok',
               'ts':row['ts'],'source':source,'native_sol':row.get('native_sol'),'cash_sol':cash,'known_sol':known,
               'refundable_rent_sol':row.get('refundable_rent_sol'),'wallet_history_complete':row.get('wallet_history_complete'),
               'unpriced_tokens':sum(1 for i in row.get('issues') or [] if isinstance(i,str) and i.startswith('unpriced_token:')),
@@ -247,7 +255,7 @@ def north_star(memory, now, days=14):
             a,b=prev.get('external_flow_lamports'),item['external_flow_lamports']
             item['d_external_sol']=(b-a)/1e9 if lamports(a,True) and lamports(b,True) else None
         out.append(item); prev=item
-    return {'days':out,'status':'partial' if any(incomplete(r['source']) for r in out) else 'ok','basis':'Last snapshot per WIB day, including unknown values. known = native + SPL mark + LP mark + refundable rent. cash = native + LP mark + refundable rent (no SPL marks). Deltas require consecutive days and complete source selection. Large files are searched within fixed read bounds; ordering is checked on every row a lookup reads (binary search, backward scan and one neighbour line on each side of the pick), and only an observed inversion marks a day partial.',
+    return {'tz':tz,'days':out,'status':'partial' if any(incomplete(r['source']) for r in out) else 'ok','basis':'Last snapshot per local day in the viewer time zone, including unknown values. known = native + SPL mark + LP mark + refundable rent. cash = native + LP mark + refundable rent (no SPL marks). Deltas require consecutive days and complete source selection. Large files are searched within fixed read bounds; ordering is checked on every row a lookup reads (binary search, backward scan and one neighbour line on each side of the pick), and only an observed inversion marks a day partial.',
             'caveats':['SPL marks drop out when a quote is deferred or a token is unpriced: known then falls without a trade (phantom loss). cash excludes SPL marks and is immune to that, but also misses real token value.',
                        'External deposits/withdrawals are not netted out of either delta; check d_external_sol before reading a jump as profit.',
                        'Refundable rent is a recoverable reserve, not income; native growth can be recovered principal or rent.']}
@@ -579,32 +587,39 @@ def dust_ledger(memory, since, run=None):
     out['status']='ok' if complete and all_fees and all_cash and all_quotes and all_rent else 'partial'
     return out
 
-def realized_by_mode(memory, since):
-    """Per WIB day and mode, closes since the cutover from dlmm_realized.jsonl (the arbiter).
+def realized_by_mode(memory, since, tz='UTC'):
+    """Per local day in `tz` and mode, closes since the cutover from dlmm_realized.jsonl (the arbiter).
     A null realized figure is counted as unmeasured, never added as 0."""
     realrows,meta=read_jsonl(memory/'dlmm_realized.jsonl')
     closerows,closemeta=read_jsonl(memory/'dlmm_closes.jsonl')
     mode={p:r['mode'] for p,r in keyed(closerows,'position',closemeta).items() if identifier(r.get('mode'))}
-    days={}
+    days={}; z=zone(tz)
     for r in keyed(realrows,'position',meta).values():
         t=r.get('closed_at')
         if not number(t): meta['status']='partial'; meta['invalid_lines']+=1; continue
         if t<since: continue
-        day=time.strftime('%Y-%m-%d',time.gmtime(t+WIB)); m=mode.get(r.get('position'),'unknown')
+        day=local_day(t,z).isoformat(); m=mode.get(r.get('position'),'unknown')
         cell=days.setdefault(day,{}).setdefault(m,{'closes':0,'measured':0,'unmeasured':0,'realized_sol':None})
         cell['closes']+=1
         if number(r.get('realized_sol')): cell['measured']+=1; cell['realized_sol']=(cell['realized_sol'] or 0)+r['realized_sol']
         else: cell['unmeasured']+=1
-    return {'since':since,'status':'partial' if incomplete(meta) or incomplete(closemeta) else 'ok','sources':{'realized':meta,'closes':closemeta},'days':days,'basis':'Measured subtotal of realized_sol by close time (WIB day) and mode. Null realized = unmeasured; a wholly unmeasured cohort is Unknown, not 0.'}
+    return {'tz':tz,'since':since,'status':'partial' if incomplete(meta) or incomplete(closemeta) else 'ok','sources':{'realized':meta,'closes':closemeta},'days':days,'basis':'Measured subtotal of realized_sol by close time (local day in the viewer time zone) and mode. Null realized = unmeasured; a wholly unmeasured cohort is Unknown, not 0.'}
 
 def panel(call, *args):
     """Malformed evidence in one new panel cannot freeze unrelated collections."""
     try: return call(*args)
     except Exception as error: return {'status':'unavailable','collection_error':'Panel evidence could not be read: '+type(error).__name__}
 
-def collect(profile, state, since=None):
+def cutover(since, now): return float(since) if since and float(since)>0 else now-7*86400  # 0/absent = the last 7 days
+
+def daily(profile, since, zones, now=None):
+    """Day-bucketed panels, once per requested IANA zone."""
+    now=now or time.time(); memory=profile/'memories'; since=cutover(since,now)
+    return {'collected_at':now,'by_tz':{tz:{'north_star':panel(north_star,memory,now,CALENDAR_DAYS,tz),'realized':panel(realized_by_mode,memory,since,tz)} for tz in zones}}
+
+def collect(profile, state, since=None, zones=('UTC',)):
     now=time.time();memory=profile/'memories';sources=[];events=[]
-    since=float(since) if since and float(since)>0 else now-7*86400  # cutover; 0/absent = the last 7 days
+    since=cutover(since,now)
     nav,meta=tail(memory/'dlmm_nav.jsonl',1);sources.append(meta)
     for filename,stage,root in [
         ('solana_deliveries.jsonl','AI / fallback',state),('solana_rejects.jsonl','gate',state),
@@ -694,7 +709,11 @@ def collect(profile, state, since=None):
     for delivery in evaluation.get('delivery_tracking',{}).get('deliveries',[]):
         events.append({'stage':'AI / fallback','time':delivery.get('prepared_at',0),'source':report_source,'evidence':delivery})
     events.sort(key=lambda e:e.get('time') or 0,reverse=True)
-    return clean({'collected_at':now,'north_star':panel(north_star,memory,now),'nav_bridge':panel(nav_bridge,memory,now),'live':{'dust':panel(dust_ledger,memory,since),'realized':panel(realized_by_mode,memory,since)},'nav':nav[-1] if nav else {},'evaluation':evaluation,'evaluation_source':report_source,'report_errors':report_errors,'journal':events,'sources':sources,'hermes':hermes,'services':services})
+    return clean({'collected_at':now,**daily(profile,since,zones,now),'nav_bridge':panel(nav_bridge,memory,now),'live':{'dust':panel(dust_ledger,memory,since)},'nav':nav[-1] if nav else {},'evaluation':evaluation,'evaluation_source':report_source,'report_errors':report_errors,'journal':events,'sources':sources,'hermes':hermes,'services':services})
 
 if __name__=='__main__':
-    print(json.dumps(collect(Path(sys.argv[1]),Path(sys.argv[2]),sys.argv[3] if len(sys.argv)>3 else None),allow_nan=False))
+    # argv: profile state since [zones,comma,separated] [daily]; `daily` refreshes only the day-bucketed panels.
+    zones=tuple(sys.argv[4].split(',')) if len(sys.argv)>4 and sys.argv[4] else ('UTC',)
+    if len(sys.argv)>5 and sys.argv[5]=='daily': out=clean(daily(Path(sys.argv[1]),sys.argv[3],zones))
+    else: out=collect(Path(sys.argv[1]),Path(sys.argv[2]),sys.argv[3] if len(sys.argv)>3 else None,zones)
+    print(json.dumps(out,allow_nan=False))

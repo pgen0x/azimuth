@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"html/template"
 	"log"
 	"net"
 	"net/http"
@@ -30,6 +31,17 @@ var page []byte
 //go:embed collect.py
 var collector string
 
+//go:embed login.html
+var loginSource string
+
+//go:embed ui.css
+var stylesheet []byte
+
+//go:embed mark.svg
+var mark []byte
+
+var loginPage = template.Must(template.New("login").Parse(loginSource))
+
 type object = map[string]any
 
 type server struct {
@@ -40,6 +52,9 @@ type server struct {
 	since          int64
 	redis          *redis.Client
 	dedup          string
+	auth           *auth      // nil = locked: no data is served
+	zones          []string   // recently requested non-UTC zones, least recent first
+	zoneMu         sync.Mutex // serializes first-use day-bucket computations
 }
 
 var identifier = regexp.MustCompile(`^[A-Za-z0-9_.:-]{1,150}$`)
@@ -47,12 +62,21 @@ var identifier = regexp.MustCompile(`^[A-Za-z0-9_.:-]{1,150}$`)
 func (s *server) refresh() {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	output, err := exec.CommandContext(ctx, "python3", "-c", collector, s.profile, s.state, strconv.FormatInt(s.since, 10)).Output()
+	output, err := exec.CommandContext(ctx, "python3", "-c", collector, s.profile, s.state, strconv.FormatInt(s.since, 10), strings.Join(s.zoneList(), ",")).Output()
 	var data object
 	if err == nil {
 		err = json.Unmarshal(output, &data)
 	}
 	if err != nil {
+		// The last stderr line names the failing step; the collector masks credentials it reads.
+		detail := ""
+		if exit, ok := err.(*exec.ExitError); ok {
+			lines := strings.Split(strings.TrimSpace(string(exit.Stderr)), "\n")
+			if detail = lines[len(lines)-1]; len(detail) > 300 {
+				detail = detail[:300]
+			}
+		}
+		log.Printf("collector failed: %v %s", err, detail)
 		s.mu.Lock()
 		s.failure = "Local collection failed; last successful snapshot retained"
 		s.mu.Unlock()
@@ -176,10 +200,41 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
-	w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'")
+	w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'")
+	// same-origin, not no-referrer: no-referrer makes browsers send "Origin: null" on the login POST.
+	w.Header().Set("Referrer-Policy", "same-origin")
+	switch r.URL.Path {
+	case "/login":
+		s.serveLogin(w, r)
+		return
+	case "/logout":
+		s.serveLogout(w, r)
+		return
+	}
 	if r.Method != "GET" && r.Method != "HEAD" {
 		w.Header().Set("Allow", "GET, HEAD")
 		http.Error(w, "read only", 405)
+		return
+	}
+	// The login page's own assets are the only unauthenticated responses.
+	switch r.URL.Path {
+	case "/favicon.svg":
+		w.Header().Set("Content-Type", "image/svg+xml")
+		w.Write(mark)
+		return
+	case "/ui.css":
+		w.Header().Set("Content-Type", "text/css; charset=utf-8")
+		w.Write(stylesheet)
+		return
+	}
+	if !s.signedIn(r) {
+		if strings.HasPrefix(r.URL.Path, "/api/") {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnauthorized)
+			w.Write([]byte(`{"error":"login required"}` + "\n"))
+			return
+		}
+		http.Redirect(w, r, "/login", http.StatusSeeOther)
 		return
 	}
 	if r.URL.Path == "/" {
@@ -201,10 +256,28 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		value = object{"collected_at": data["collected_at"], "collection_error": failure, "nav": data["nav"], "services": data["services"], "sources": data["sources"]}
 	case "/api/evaluation":
 		value = object{"report": data["evaluation"], "source": data["evaluation_source"], "errors": data["report_errors"], "collected_at": data["collected_at"]}
-	case "/api/capital":
-		value = object{"north_star": data["north_star"], "nav_bridge": data["nav_bridge"], "collected_at": data["collected_at"], "collection_error": failure}
-	case "/api/live":
-		value = object{"live": data["live"], "collected_at": data["collected_at"], "collection_error": failure}
+	case "/api/capital", "/api/live":
+		tz, fallback := requestZone(r.URL.Query().Get("tz"))
+		panels, problem := s.daily(data, tz)
+		if panels == nil && tz != "UTC" {
+			tz, fallback = "UTC", true
+			panels, _ = s.daily(data, tz)
+		}
+		zoneInfo := object{"tz": tz, "tz_fallback": fallback, "tz_error": problem}
+		if r.URL.Path == "/api/capital" {
+			value = object{"north_star": panels["north_star"], "nav_bridge": data["nav_bridge"]}
+		} else {
+			live := object{"realized": panels["realized"]}
+			if old, ok := data["live"].(map[string]any); ok {
+				for k, v := range old {
+					live[k] = v
+				}
+			}
+			value = object{"live": live}
+		}
+		for k, v := range zoneInfo {
+			value.(object)[k] = v
+		}
 	case "/api/hermes":
 		value = data["hermes"]
 	case "/api/redis":
@@ -294,7 +367,19 @@ func main() {
 	envFile := flag.String("env-file", ".env", "read only REDIS_ADDR, REDISCLI_AUTH and REDIS_SEEN_KEY")
 	dedup := flag.String("dedup-prefix", "", "scanner REDIS_SEEN_KEY override")
 	since := flag.Int64("since", 0, "live-change cutover as unix seconds; 0 = the last 7 days")
+	hashMode := flag.Bool("hash-password", false, "read a password from the first stdin line, print its DASHBOARD_PASSWORD_HASH value and exit")
 	flag.Parse()
+	if *hashMode {
+		password, err := readPassword(os.Stdin)
+		if err == nil {
+			var hash string
+			if hash, err = hashPassword(password, hashIterations); err == nil {
+				fmt.Println(hash)
+				return
+			}
+		}
+		log.Fatal("hash-password: ", err)
+	}
 	host, _, err := net.SplitHostPort(*addr)
 	if err != nil || net.ParseIP(host) == nil || !net.ParseIP(host).IsLoopback() {
 		log.Fatal("listen must use a loopback IP")
@@ -312,7 +397,11 @@ func main() {
 	if *since < 0 {
 		log.Fatal("since must be unix seconds or 0")
 	}
-	s := &server{profile: *profile, state: *state, dedup: *dedup, since: *since}
+	hashValue, hashSet := os.LookupEnv("DASHBOARD_PASSWORD_HASH")
+	s := &server{profile: *profile, state: *state, dedup: *dedup, since: *since, auth: newAuth(hashValue, hashSet)}
+	if s.auth.problem != "" {
+		log.Print("dashboard locked: ", s.auth.problem)
+	}
 	if *redisAddr != "" && *redisAddr != "disabled" {
 		s.redis = redis.NewClient(&redis.Options{Addr: *redisAddr, Password: settings["REDISCLI_AUTH"], MaxRetries: -1, DialTimeout: time.Second, ReadTimeout: time.Second})
 		defer s.redis.Close()

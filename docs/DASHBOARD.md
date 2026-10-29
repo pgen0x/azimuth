@@ -6,7 +6,7 @@ Run from the repository root (Go 1.22+, Python 3; existing PyYAML enables Hermes
 rtk go run ./cmd/dashboard
 ```
 
-Open http://127.0.0.1:8787. From your laptop, run `ssh -N -L 8787:127.0.0.1:8787 oc` (replace `oc` with your SSH host alias), then open that same address locally. The listener accepts loopback IPs only, rejects non-local Host headers, and exposes only GET/HEAD. For remote use, forward the localhost port over the existing SSH connection. No public listener, trading service restart, Telegram test, transaction, inference or RPC is needed.
+A password hash is required (see [Sign-in](#sign-in)); without it the dashboard serves no data. Open http://127.0.0.1:8787. From your laptop, run `ssh -N -L 8787:127.0.0.1:8787 oc` (replace `oc` with your SSH host alias), then open that same address locally. The listener accepts loopback IPs only, rejects non-local Host headers, and exposes only GET/HEAD, apart from the `/login` and `/logout` form posts. For remote use, forward the localhost port over the existing SSH connection. No public listener, trading service restart, Telegram test, transaction, inference or RPC is needed.
 
 Build a standalone binary (HTML and collector are embedded):
 
@@ -29,6 +29,43 @@ rtk proxy systemctl --user enable --now azimuth-dashboard.service
 
 The unit reads only the three Redis settings through the command, rather than importing the full trading environment. The installation example is for a first install. For updates, use the [SHA-pinned deployment and rollback runbook](DASHBOARD_DEPLOY.md); do not build over the running binary or reuse a fixed backup name.
 
+## Sign-in
+
+Every page and every `/api/*` route needs a session. Only `/login`, `/favicon.svg` and `/ui.css` answer
+without one: HTML routes redirect to `/login`, API routes return `401`.
+
+- The password is checked against `DASHBOARD_PASSWORD_HASH`, a PBKDF2-HMAC-SHA256 hash (600,000 iterations,
+  16-byte random salt, 32-byte key, constant-time compare) in the form
+  `pbkdf2-sha256:<iterations>:<salt>:<key>`. PBKDF2 is built from the standard library because the module
+  targets Go 1.22 and pulling in `x/crypto` for scrypt/argon2id would raise its Go version and dependencies.
+- Generate a hash: the command reads one line from stdin without a prompt or echo control, so pipe the
+  password from a password manager (or type it and press Enter in a private terminal). Nothing is stored or
+  logged:
+
+  ```sh
+  rtk proxy "$HOME/.local/bin/azimuth-dashboard" -hash-password
+  ```
+
+- If the variable is missing or malformed the server refuses to serve data (fail closed) and the login page
+  says why.
+- Sessions are random 256-bit tokens in an `HttpOnly`, `SameSite=Strict` cookie, held in memory only (a
+  restart signs everyone out), valid 12 hours, at most 32 at once. The cookie is not `Secure` because the
+  listener is plain HTTP on loopback; reach it over an SSH tunnel.
+- Five failed attempts within 10 minutes pause sign-in until the oldest failure ages out. One password check
+  runs at a time. Cross-site posts to `/login` and `/logout` are refused.
+
+The unit drop-in that supplies the hash is in [DASHBOARD_DEPLOY.md](DASHBOARD_DEPLOY.md#password-hash).
+
+## Time zones
+
+The API carries UTC epochs only. Daily series (`/api/capital` north star and calendar, `/api/live` realized per
+mode) are split into days in the viewer's IANA time zone: the page sends
+`Intl.DateTimeFormat().resolvedOptions().timeZone` as `?tz=`. The server validates the name with Go's embedded
+zone database; a missing value means UTC, an invalid one falls back to UTC with `tz_fallback: true`. Each
+response states the zone it used in `tz`. A zone is computed on first request (about a second) and kept in the
+30-second refresh for the six most recently used zones, UTC always included. Every time the page displays names
+its zone.
+
 ## JSON API
 
 | Endpoint | Evidence |
@@ -36,8 +73,8 @@ The unit reads only the three Redis settings through the command, rather than im
 | `/api/overview` | Latest persisted NAV, source freshness, unit states, collector timestamp/error |
 | `/api/journal?q=IDENTIFIER&stage=swap&offset=0` | 50 rows/page, case-insensitive filter, exact stage filter, retained-tail match count |
 | `/api/evaluation` | Existing evaluation JSON, source file, generation and window timestamps |
-| `/api/capital` | North star per WIB day (cash, known, deltas, unpriced/deferred SPL counts, external-flow delta) and the 14-day NAV bridge |
-| `/api/live` | Dust rent ledger and realized PnL by mode and WIB day since the `-since` cutover |
+| `/api/capital?tz=ZONE` | North star per local day over six weeks (cash, known, deltas, unpriced/deferred SPL counts, external-flow delta) and the 14-day NAV bridge |
+| `/api/live?tz=ZONE` | Dust rent ledger and realized PnL by mode and local day since the `-since` cutover |
 | `/api/hermes` | Profile/model/fallback configuration, skills, gateway state, recent session metadata |
 | `/api/redis` | Timestamped fixed capacity keys, position tracking sample, cooldown and dedup TTLs |
 
@@ -47,7 +84,7 @@ Refreshes serve an immutable in-memory snapshot. A background collector updates 
 
 - NAV: `memories/dlmm_nav.jsonl`; native SOL, SPL marks, LP marks and recoverable account reserves remain separate. Unknown NAV stays JSON null and displays Unknown.
 - Journal: delivery/rejection files under state, and transaction/fact/wallet-fact, close, decision, rent and realized journals under profile memories. Each row carries a source path, observed time and explicit evidence identifiers. Each journal reads at most 2 MiB / 500 complete recent rows; NAV retains one row. Partial final lines are omitted; invalid lines and truncated coverage are reported. These are source tails, not exhaustive historical counts.
-- North star (Capital tab): latest snapshot per WIB day, including null values, with selection coverage. Cash is native + LP mark + refundable rent; known also includes SPL marks. Missing/unknown days break deltas. See the bounds and large-file ordering limitation below.
+- North star (Capital tab): latest snapshot per local day in the requested zone, including null values, with selection coverage. Cash is native + LP mark + refundable rent; known also includes SPL marks. Missing/unknown days break deltas. See the bounds and large-file ordering limitation below.
 - NAV bridge (Capital tab, issue #93): known-SOL deltas and a source-qualified decomposition using transaction-kind, wallet, realized and close journals. Complete measured components reconcile; incomplete components stay null. Unattributed cash stays separate from rent. Snapshot history coverage and every journal status are exposed. It is not NAV/ROI or withdrawal + fees - deposit.
 - Live changes: deduplicated rent-unit receipt claims, separately verified transaction/account results, measured costs and explicit unknown totals. Realized PnL by mode uses close time and the close journal; wholly unmeasured cohorts remain null. The rules and coverage limits below apply to both views.
 - NAV ordering (fix2): over 4 MiB the NAV journal is binary-searched within 8 MiB / 256 reads / 2 s per lookup. Whole-file ordering is not provable there, so each lookup checks the timestamps of every row it visited including every row of the backward scan, plus one neighbour line on each side of the selected row (`ordering_assumption: visited_window_monotonic`); only an observed inversion marks that day partial. `dlmm_closes.jsonl` only labels bridge modes: legacy corrupt lines are reported as `closes_invalid_lines`, and make the bridge incomplete only when a lifecycle in the window has no mode (`mode_unknown`).
