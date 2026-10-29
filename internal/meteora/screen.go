@@ -214,7 +214,7 @@ var (
 )
 
 // Degen Score targets — each liquidity-relative sub-score saturates here.
-// Ported from the reference config; inputs are normalized to a 30m reference window.
+// Inputs are normalized to a 30m reference window.
 const (
 	degenRefMinutes      = 30.0
 	degenTargetVolRatio  = 20.0    // (30m) volume/active_tvl for a full trading sub-score

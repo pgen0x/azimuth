@@ -491,8 +491,8 @@ RUG_BLACKLIST_TTL_SEC = int(float(os.environ.get("RUG_BLACKLIST_TTL_DAYS", "7"))
 # once is a rug factory and — unlike a mint — can mint again. That half-fix
 # reproduced the same starvation one level up. Measured 2026-08-12: the set held
 # 26 wallets at `ttl -1`, and TWO of them accounted for 99 rejected candidates,
-# including 4 of the 6 batches pulse sent that morning — while the comparison
-# agent, whose dev blocklist is empty, entered two of those same pools green.
+# including 4 of the 6 batches pulse sent that morning — while two of those
+# same pools went on to trade green.
 # A launchpad-scale deployer signs a large fraction of the venue's memecoins, so
 # banning it forever bans a slice of the universe forever, and the rejects are
 # silent exactly like the mint case. Longer than the mint window because the
@@ -501,8 +501,8 @@ DEV_BLOCKLIST_TTL_SEC = int(float(os.environ.get("DEV_BLOCKLIST_TTL_DAYS", "30")
 # Liquidity collapse required to turn a rug_event into a BAN — never into an
 # exit, which stays instant and unconditional. The velocity gate reads a 5m
 # PRICE candle, and -20% in 5m on a memecoin is a Tuesday: of the 19
-# rug-velocity bans live on 2026-08-16, the comparison agent had entered
-# several of the same pools green. A rug is liquidity LEAVING, so that is what
+# rug-velocity bans live on 2026-08-16, several of the same pools went on to
+# trade green. A rug is liquidity LEAVING, so that is what
 # a ban has to see. Measured against the entry TVL the pipeline snapshots into
 # meta["signal"]["tvl"].
 RUG_LIQ_DROP_PCT = float(os.environ.get("RUG_LIQ_DROP_PCT", "-50.0"))
