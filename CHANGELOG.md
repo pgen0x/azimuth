@@ -5,6 +5,29 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.12.0](https://github.com/pgen0x/azimuth/compare/v2.11.0...v2.12.0) (2026-10-29)
+
+
+### Features
+
+* **dashboard:** add live-change panel for dust and per-mode realized ([b316466](https://github.com/pgen0x/azimuth/commit/b316466a89e20c2ce9a5104702fd16fb58ea4003))
+* **dashboard:** add NAV bridge panel for issue 93 ([9da1787](https://github.com/pgen0x/azimuth/commit/9da1787ea736fef06091ef7aaa2012de0759958a))
+* **dashboard:** add per-day north-star capital panel ([4a7851b](https://github.com/pgen0x/azimuth/commit/4a7851bd9544c2a39c53ff9796a75fc0b6e62b8f))
+* **dashboard:** capital, NAV bridge and live-change views ([bbeb6a4](https://github.com/pgen0x/azimuth/commit/bbeb6a4549d07d2a7bd9eea374c78663b64a16e8))
+* **executor:** reclaim rent locked behind settlement dust ([faaac29](https://github.com/pgen0x/azimuth/commit/faaac291c5f59ec24af83cd52fcca99ae7947532))
+* **executor:** reclaim rent locked behind settlement dust ([43ce2a0](https://github.com/pgen0x/azimuth/commit/43ce2a096a0e86568e2aa379cbf263014901be54))
+* **monitor:** opt-in pulse hold canary on the yield-check grace ([7846e07](https://github.com/pgen0x/azimuth/commit/7846e073de235233b21fef7d3753acdbe8cdfc47))
+* **monitor:** opt-in pulse hold canary on the yield-check grace ([a2b9874](https://github.com/pgen0x/azimuth/commit/a2b9874c3c49897180d3835bc22422c71a1b8a07))
+
+
+### Bug Fixes
+
+* **dashboard:** check NAV ordering where it is read, not by file size ([f8e0fc4](https://github.com/pgen0x/azimuth/commit/f8e0fc4f6dfc972dd75a0704d280562f90f2fab6))
+* **dashboard:** label close-journal PnL as a mark ([a76bfc5](https://github.com/pgen0x/azimuth/commit/a76bfc50c1bb701aa2bdbe843697fc986d84247d))
+* **dashboard:** ordering-check every row the backward scan reads ([a98dbf5](https://github.com/pgen0x/azimuth/commit/a98dbf5f610f960e6b66c6ba24a2e6a82713a073))
+* **dashboard:** preserve unknown accounting and source coverage ([57a9355](https://github.com/pgen0x/azimuth/commit/57a9355a1654271bae1e040c69dba269a7fbed68))
+* **executor:** never burn on a no-route quote; measure dust refunds ([723dbd1](https://github.com/pgen0x/azimuth/commit/723dbd1fd4017aa922a3a7f6ad2f8ab8f8494ce5))
+
 ## [2.11.0](https://github.com/pgen0x/azimuth/compare/v2.10.0...v2.11.0) (2026-10-14)
 
 
