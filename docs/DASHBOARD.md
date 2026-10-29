@@ -16,7 +16,7 @@ rtk proxy /tmp/azimuth-dashboard
 rtk go test ./cmd/dashboard
 ```
 
-Flags: `-listen`, `-profile`, `-state`, `-env-file`, `-redis`, `-dedup-prefix`. Defaults use `~/.hermes/profiles/solanza`, `~/.local/state/azimuth`, and repository `.env`. Only `REDIS_ADDR`, `REDISCLI_AUTH`, and `REDIS_SEEN_KEY` are read from that file; matching environment variables override file settings. `-redis disabled` skips Redis. Missing Redis configuration disables its panel. No credential is returned or logged. Config metadata is field-allowlisted; prompts, session messages, private keys and bot credentials are excluded.
+Flags: `-listen`, `-profile`, `-state`, `-env-file`, `-redis`, `-dedup-prefix`, `-since` (live-change cutover, unix seconds; 0 = the last 7 days). Defaults use `~/.hermes/profiles/solanza`, `~/.local/state/azimuth`, and repository `.env`. Only `REDIS_ADDR`, `REDISCLI_AUTH`, and `REDIS_SEEN_KEY` are read from that file; matching environment variables override file settings. `-redis disabled` skips Redis. Missing Redis configuration disables its panel. No credential is returned or logged. Config metadata is field-allowlisted; prompts, session messages, private keys and bot credentials are excluded.
 
 For a persistent user service, build the binary and install the included unit:
 
@@ -27,7 +27,7 @@ rtk proxy systemctl --user daemon-reload
 rtk proxy systemctl --user enable --now azimuth-dashboard.service
 ```
 
-The unit reads only the three Redis settings through the command, rather than importing the full trading environment. After dashboard code updates, rebuild the binary and restart `azimuth-dashboard.service`.
+The unit reads only the three Redis settings through the command, rather than importing the full trading environment. The installation example is for a first install. For updates, use the [SHA-pinned deployment and rollback runbook](DASHBOARD_DEPLOY.md); do not build over the running binary or reuse a fixed backup name.
 
 ## JSON API
 
@@ -36,6 +36,8 @@ The unit reads only the three Redis settings through the command, rather than im
 | `/api/overview` | Latest persisted NAV, source freshness, unit states, collector timestamp/error |
 | `/api/journal?q=IDENTIFIER&stage=swap&offset=0` | 50 rows/page, case-insensitive filter, exact stage filter, retained-tail match count |
 | `/api/evaluation` | Existing evaluation JSON, source file, generation and window timestamps |
+| `/api/capital` | North star per WIB day (cash, known, deltas, unpriced/deferred SPL counts, external-flow delta) and the 14-day NAV bridge |
+| `/api/live` | Dust rent ledger and realized PnL by mode and WIB day since the `-since` cutover |
 | `/api/hermes` | Profile/model/fallback configuration, skills, gateway state, recent session metadata |
 | `/api/redis` | Timestamped fixed capacity keys, position tracking sample, cooldown and dedup TTLs |
 
@@ -45,6 +47,11 @@ Refreshes serve an immutable in-memory snapshot. A background collector updates 
 
 - NAV: `memories/dlmm_nav.jsonl`; native SOL, SPL marks, LP marks and recoverable account reserves remain separate. Unknown NAV stays JSON null and displays Unknown.
 - Journal: delivery/rejection files under state, and transaction/fact/wallet-fact, close, decision, rent and realized journals under profile memories. Each row carries a source path, observed time and explicit evidence identifiers. Each journal reads at most 2 MiB / 500 complete recent rows; NAV retains one row. Partial final lines are omitted; invalid lines and truncated coverage are reported. These are source tails, not exhaustive historical counts.
+- North star (Capital tab): latest snapshot per WIB day, including null values, with selection coverage. Cash is native + LP mark + refundable rent; known also includes SPL marks. Missing/unknown days break deltas. See the bounds and large-file ordering limitation below.
+- NAV bridge (Capital tab, issue #93): known-SOL deltas and a source-qualified decomposition using transaction-kind, wallet, realized and close journals. Complete measured components reconcile; incomplete components stay null. Unattributed cash stays separate from rent. Snapshot history coverage and every journal status are exposed. It is not NAV/ROI or withdrawal + fees - deposit.
+- Live changes: deduplicated rent-unit receipt claims, separately verified transaction/account results, measured costs and explicit unknown totals. Realized PnL by mode uses close time and the close journal; wholly unmeasured cohorts remain null. The rules and coverage limits below apply to both views.
+- NAV ordering (fix2): over 4 MiB the NAV journal is binary-searched within 8 MiB / 256 reads / 2 s per lookup. Whole-file ordering is not provable there, so each lookup checks the timestamps of every row it visited including every row of the backward scan, plus one neighbour line on each side of the selected row (`ordering_assumption: visited_window_monotonic`); only an observed inversion marks that day partial. `dlmm_closes.jsonl` only labels bridge modes: legacy corrupt lines are reported as `closes_invalid_lines`, and make the bridge incomplete only when a lifecycle in the window has no mode (`mode_unknown`).
+- Close marks: `pnl_sol` in `dlmm_closes.jsonl` is the mark read one tick before the close, not realized cash. The journal passes the row's `pnl_basis` through and labels older rows without one `mark_unlabeled`; realized figures come only from `dlmm_realized.jsonl` (`realized_sol`, null = unmeasured).
 - Entry metadata: latest 100 `memories/dlmm_entries/*.json`; metadata is not proof of a landed deployment.
 - Routing: last 100 `entry_route=` markers from the actual `azimuth.service` journal within 48 hours. Only mode, route, reason and timestamp are extracted. No free-form service logs or Hermes tool messages are exposed.
 - Session correlations: exact legacy or v2 webhook identity for deliveries, against the latest 40 session metadata rows in read-only SQLite. Existing evaluation delivery correlations are also retained with their report source. No time/pool heuristic invents a trade link; incomplete coverage remains uncorrelated. An HTTP 202, route/probe result or open session is not execution proof.
@@ -56,6 +63,41 @@ Refreshes serve an immutable in-memory snapshot. A background collector updates 
 Native SOL increases include recovered principal/rent and transfers; they do not establish profit. The existing 0.20 SOL reserve + 0.05 allowance + 0.10 minimum position rule is displayed as a 0.35 SOL floor; this dashboard never authorizes or changes entry behavior.
 
 Configuration editing, restarts, historical indexing and active provider/bot probes are outside this read-only MVP.
+
+### Evidence coverage in Capital and Live changes
+
+Receipt signatures are deduplicated. `receipt_claimed` is separate from
+`verified_subtotal`: failed, unlanded, missing or conflicting outcomes never
+credit verified closes, rent or forfeiture. Successful landing alone is not
+account-close proof: account rent evidence and wallet delta must match, and
+mint deltas must match a claimed burn. Quotes remain receipt valuations. Fees
+and native deltas include measured landed failures. Window totals are null
+when evidence is missing; a verified subtotal is not a complete window total.
+
+Every bridge journal retains source metadata, including transaction kinds.
+Missing/oversized/corrupt/partial sources, incomplete wallet history and null
+money fields prevent an `ok` decomposition. Native identity is unknown when
+wallet deltas or coverage are unknown. Unattributed flows are never classified
+as rent. Realized cells with no measured closes stay null; mixed cohorts show
+only their labeled measured subtotal and unmeasured count.
+
+NAV searches parse top-level timestamps before using them, and preserve the
+latest day's null fields. A lookup reads at most 8 MiB / 256 operations, with a
+1 MiB line limit and a two-second work deadline. Files up to 4 MiB are scanned
+and ordering checked within that budget. Larger files use bounded seeks; every
+row a lookup reads is ordering-checked, and an observed inversion marks that
+day partial (its deltas and bridge attribution stay unknown). Ordering of rows
+the lookup did not read is assumed, not proved (`visited_window_monotonic`); a
+verified historical index would be needed to prove large-file coverage.
+No new index is written by the read-only dashboard.
+
+Whole accounting journals are capped at 64 MiB, 100,000 lines and 1 MiB per
+line. Rent-unit capture has a five-second deadline and a combined 2 MiB
+stdout/stderr cap; nonzero exit, timeout or capture cap is unavailable, while
+the 5,000-line tail limit is partial coverage. Errors are grouped only after
+sanitizing their messages. Every API/tab carries collector freshness/errors;
+Capital and Live refresh automatically. A malformed new panel is isolated from
+unrelated panels. These are resource and evidence limits, not profit claims.
 
 ## Verified deployment reports
 

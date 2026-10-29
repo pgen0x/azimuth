@@ -37,6 +37,7 @@ type server struct {
 	data           object
 	failure        string
 	profile, state string
+	since          int64
 	redis          *redis.Client
 	dedup          string
 }
@@ -46,7 +47,7 @@ var identifier = regexp.MustCompile(`^[A-Za-z0-9_.:-]{1,150}$`)
 func (s *server) refresh() {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	output, err := exec.CommandContext(ctx, "python3", "-c", collector, s.profile, s.state).Output()
+	output, err := exec.CommandContext(ctx, "python3", "-c", collector, s.profile, s.state, strconv.FormatInt(s.since, 10)).Output()
 	var data object
 	if err == nil {
 		err = json.Unmarshal(output, &data)
@@ -200,6 +201,10 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		value = object{"collected_at": data["collected_at"], "collection_error": failure, "nav": data["nav"], "services": data["services"], "sources": data["sources"]}
 	case "/api/evaluation":
 		value = object{"report": data["evaluation"], "source": data["evaluation_source"], "errors": data["report_errors"], "collected_at": data["collected_at"]}
+	case "/api/capital":
+		value = object{"north_star": data["north_star"], "nav_bridge": data["nav_bridge"], "collected_at": data["collected_at"], "collection_error": failure}
+	case "/api/live":
+		value = object{"live": data["live"], "collected_at": data["collected_at"], "collection_error": failure}
 	case "/api/hermes":
 		value = data["hermes"]
 	case "/api/redis":
@@ -242,6 +247,16 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	// Copy the envelope: never mutate the cached snapshot while serving a reader.
+	if payload, ok := value.(map[string]any); ok {
+		withStatus := make(object, len(payload)+2)
+		for key, item := range payload {
+			withStatus[key] = item
+		}
+		withStatus["collected_at"] = data["collected_at"]
+		withStatus["collection_error"] = failure
+		value = withStatus
+	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(value)
 }
@@ -278,6 +293,7 @@ func main() {
 	redisAddr := flag.String("redis", "", "Redis address override; use disabled to disable")
 	envFile := flag.String("env-file", ".env", "read only REDIS_ADDR, REDISCLI_AUTH and REDIS_SEEN_KEY")
 	dedup := flag.String("dedup-prefix", "", "scanner REDIS_SEEN_KEY override")
+	since := flag.Int64("since", 0, "live-change cutover as unix seconds; 0 = the last 7 days")
 	flag.Parse()
 	host, _, err := net.SplitHostPort(*addr)
 	if err != nil || net.ParseIP(host) == nil || !net.ParseIP(host).IsLoopback() {
@@ -293,7 +309,10 @@ func main() {
 	if *dedup == "" {
 		*dedup = "dlmm:signal:seen_pools"
 	}
-	s := &server{profile: *profile, state: *state, dedup: *dedup}
+	if *since < 0 {
+		log.Fatal("since must be unix seconds or 0")
+	}
+	s := &server{profile: *profile, state: *state, dedup: *dedup, since: *since}
 	if *redisAddr != "" && *redisAddr != "disabled" {
 		s.redis = redis.NewClient(&redis.Options{Addr: *redisAddr, Password: settings["REDISCLI_AUTH"], MaxRetries: -1, DialTimeout: time.Second, ReadTimeout: time.Second})
 		defer s.redis.Close()
