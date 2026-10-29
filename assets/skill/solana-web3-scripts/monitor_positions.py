@@ -25,17 +25,20 @@ import time
 import subprocess
 import urllib.request
 from datetime import datetime
-try:
-    from zoneinfo import ZoneInfo
-except ImportError:
-    from backports.zoneinfo import ZoneInfo
-
-_WIB = ZoneInfo("Asia/Jakarta")
 
 # Resolved from this file's own location (<profile>/skills/solana-web3/scripts/) so the
 # script works whether it's a copy or a symlink into a Hermes profile.
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 _PROFILE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(_SCRIPT_DIR)))
+
+# Operator zone for day keys and card times: tz_util in the solana-dlmm skill is the single
+# source (assets/skill/scripts in the repo, which this file is symlinked from;
+# <profile>/skills/solana-dlmm/scripts once installed).
+for _tz_dir in (os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "scripts"),
+                os.path.join(_PROFILE_DIR, "skills", "solana-dlmm", "scripts")):
+    if os.path.isfile(os.path.join(_tz_dir, "tz_util.py")) and _tz_dir not in sys.path:
+        sys.path.append(_tz_dir)
+from tz_util import local_date_str, local_time_str, zone_name  # noqa: E402
 
 _TG_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 _TG_CHAT  = os.environ.get("TELEGRAM_HOME_CHANNEL", "")
@@ -128,9 +131,9 @@ def run_command(cmd):
 
 
 def track_daily_pnl(pnl_pct, size_usd):
-    """Accumulate today's realized PnL (WIB) into sol:pnl:daily:YYYY-MM-DD."""
+    """Accumulate today's realized PnL into sol:pnl:daily:YYYY-MM-DD (day in DLMM_TZ, default UTC)."""
     try:
-        today = datetime.now(_WIB).strftime("%Y-%m-%d")
+        today = local_date_str()
         key = f"sol:pnl:daily:{today}"
         raw, _ = run_command(f"redis-cli get '{key}'", timeout=5)
         try:
@@ -381,7 +384,9 @@ def _log_exit(record):
     Auto-closes happen in the 15s fast loop where no LLM runs hindsight_retain,
     so without this file the strategy review has no exit data to learn from."""
     try:
-        record["date_wib"] = datetime.now(_WIB).strftime("%Y-%m-%d %H:%M")
+        # date_local is in the operator zone named by tz; the old date_wib field had no reader.
+        record["date_local"] = local_time_str("%Y-%m-%d %H:%M")
+        record["tz"] = zone_name()
         with open(_EXITS_LOG, "a") as f:
             f.write(json.dumps(record) + "\n")
     except Exception:
@@ -730,10 +735,10 @@ def main():
             })
             close_txid = _poll_close_txid(mint)
             tx_line = f"\nTX: https://solscan.io/tx/{close_txid}" if close_txid else "\nTX: pending"
-            wib_time = datetime.now(_WIB).strftime("%H:%M WIB")
+            now_str = local_time_str()
             _tg_notify(
                 f"🚨 <b>FAST MONITOR — HARD STOP-LOSS</b>\n"
-                f"⏰ {wib_time} | 🤖 sol-fast-monitor\n\n"
+                f"⏰ {now_str} | 🤖 sol-fast-monitor\n\n"
                 f"<b>{ticker}</b> | PnL: <b>{pnl_pct:.1f}%</b>\n"
                 f"Entry: ${entry_price:.8f} → Exit: ${current_price:.8f}\n"
                 f"Age: {age_hours:.1f}h | Size: ${size_usd}\n"
@@ -772,10 +777,10 @@ def main():
                 })
                 close_txid = _poll_close_txid(mint)
                 tx_line = f"\nTX: https://solscan.io/tx/{close_txid}" if close_txid else "\nTX: pending"
-                wib_time = datetime.now(_WIB).strftime("%H:%M WIB")
+                now_str = local_time_str()
                 _tg_notify(
                     f"🏆 <b>FAST MONITOR — TRAILING TAKE-PROFIT</b>\n"
-                    f"⏰ {wib_time} | 🤖 sol-fast-monitor\n\n"
+                    f"⏰ {now_str} | 🤖 sol-fast-monitor\n\n"
                     f"<b>{ticker}</b> | PnL: <b>+{pnl_pct:.1f}%</b> (peaked +{peak_gain_pct:.1f}%)\n"
                     f"Entry: ${entry_price:.8f} → Exit: ${current_price:.8f}\n"
                     f"Peak: ${peak_price:.8f} | Dropped: {trail_pct:.1f}% from peak\n"
@@ -812,10 +817,10 @@ def main():
             })
             close_txid = _poll_close_txid(mint)
             tx_line = f"\nTX: https://solscan.io/tx/{close_txid}" if close_txid else "\nTX: pending"
-            wib_time = datetime.now(_WIB).strftime("%H:%M WIB")
+            now_str = local_time_str()
             _tg_notify(
                 f"🔒 <b>FAST MONITOR — PROFIT RATCHET (breakeven lock)</b>\n"
-                f"⏰ {wib_time} | 🤖 sol-fast-monitor\n\n"
+                f"⏰ {now_str} | 🤖 sol-fast-monitor\n\n"
                 f"<b>{ticker}</b> | PnL: <b>+{pnl_pct:.1f}%</b> (peaked +{peak_gain_pct:.1f}%)\n"
                 f"Entry: ${entry_price:.8f} → Exit: ${current_price:.8f}\n"
                 f"Age: {age_hours:.1f}h | Size: ${size_usd}\n"
@@ -840,10 +845,10 @@ def main():
             })
             close_txid = _poll_close_txid(mint)
             tx_line = f"\nTX: https://solscan.io/tx/{close_txid}" if close_txid else "\nTX: pending"
-            wib_time = datetime.now(_WIB).strftime("%H:%M WIB")
+            now_str = local_time_str()
             _tg_notify(
                 f"⚠️ <b>FAST MONITOR — LIQUIDITY SHUTDOWN</b>\n"
-                f"⏰ {wib_time} | 🤖 sol-fast-monitor\n\n"
+                f"⏰ {now_str} | 🤖 sol-fast-monitor\n\n"
                 f"<b>{ticker}</b> | PnL: <b>{pnl_pct:.1f}%</b>\n"
                 f"Entry: ${entry_price:.8f} → Exit: ${current_price:.8f}\n"
                 f"Age: {age_hours:.1f}h | Size: ${size_usd}\n"
@@ -871,10 +876,10 @@ def main():
             })
             close_txid = _poll_close_txid(mint)
             tx_line = f"\nTX: https://solscan.io/tx/{close_txid}" if close_txid else "\nTX: pending"
-            wib_time = datetime.now(_WIB).strftime("%H:%M WIB")
+            now_str = local_time_str()
             _tg_notify(
                 f"🎯 <b>FAST MONITOR — PARTIAL TAKE-PROFIT (50%)</b>\n"
-                f"⏰ {wib_time} | 🤖 sol-fast-monitor\n\n"
+                f"⏰ {now_str} | 🤖 sol-fast-monitor\n\n"
                 f"<b>{ticker}</b> | PnL: <b>+{pnl_pct:.1f}%</b>\n"
                 f"Entry: ${entry_price:.8f} → Now: ${current_price:.8f}\n"
                 f"Age: {age_hours:.1f}h | Size: ${size_usd}\n"

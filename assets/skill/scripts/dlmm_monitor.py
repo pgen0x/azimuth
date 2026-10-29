@@ -11,7 +11,7 @@ import math
 import urllib.request
 from decimal import Decimal
 from local_indicators import check_local_indicators
-from tz_util import local_time_str
+from tz_util import local_date_str, local_time_str
 
 METEORA_PORTFOLIO_API = "https://dlmm.datapi.meteora.ag/portfolio/open"
 
@@ -1849,7 +1849,7 @@ def main():
             print(f"🚫 Re-entry cooldown set for {base_symbol_cd}: {cooldown_secs // 3600}h")
             # Book daily realized PnL — same as the auto-close path so override-closes are not invisible to WR/stats.
             if not is_dry and guard_pnl_pct is not None:
-                today = time.strftime("%Y-%m-%d")
+                today = local_date_str()  # day in DLMM_TZ (default UTC), not the host zone
                 pnl_key = f"sol:dlmm:pnl:daily:{today}"
                 current_pnl_str, _, _ = run_command(f"redis-cli hget {pnl_key} total_sol")
                 current_pnl = float(current_pnl_str) if current_pnl_str and current_pnl_str != "(nil)" else 0.0
@@ -2872,7 +2872,7 @@ def main():
                 clear_signal_seen(pool)
                 
                 # Write Daily PnL statistics
-                today = time.strftime("%Y-%m-%d")
+                today = local_date_str()  # day in DLMM_TZ (default UTC), not the host zone
                 pnl_key = f"sol:dlmm:pnl:daily:{today}"
                 current_pnl_str, _, _ = run_command(f"redis-cli hget {pnl_key} total_sol")
                 current_pnl = float(current_pnl_str) if current_pnl_str and current_pnl_str != "(nil)" else 0.0

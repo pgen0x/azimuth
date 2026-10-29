@@ -38,13 +38,10 @@ while true; do
     fi
     # Daily scoreboard — deterministic dlmm_stats.py card via `hermes send`
     # (zero LLM). Hour + timezone are operator-set (profile .env): DLMM_TZ
-    # (IANA name, empty = system zone) and DLMM_STATS_HOUR (00-23, default 09).
-    # Stamp file dedups to once per day.
-    if [ -n "${DLMM_TZ:-}" ]; then
-        hour_local=$(TZ="$DLMM_TZ" date +%H); today_local=$(TZ="$DLMM_TZ" date +%F)
-    else
-        hour_local=$(date +%H); today_local=$(date +%F)
-    fi
+    # (IANA name, empty = UTC, same default as tz_util.py) and DLMM_STATS_HOUR
+    # (00-23, default 09). Stamp file dedups to once per day.
+    stats_tz="${DLMM_TZ:-UTC}"
+    hour_local=$(TZ="$stats_tz" date +%H); today_local=$(TZ="$stats_tz" date +%F)
     if [ "$hour_local" = "${DLMM_STATS_HOUR:-09}" ] && [ "$(cat "$STATS_STAMP" 2>/dev/null)" != "$today_local" ] &&
        { [ -z "${report_pid:-}" ] || ! kill -0 "$report_pid" 2>/dev/null; }; then
         # Reconciliation and delivery can wait on remote APIs. Keep them out

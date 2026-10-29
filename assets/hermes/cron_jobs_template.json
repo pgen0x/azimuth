@@ -88,7 +88,7 @@
     "schedule": {
       "kind": "cron",
       "expr": "0 21 * * *",
-      "display": "every day at 21:00 WIB"
+      "display": "every day at 21:00 in the Hermes timezone (HERMES_TIMEZONE or config.yaml timezone, else the server zone)"
     },
     "enabled": true,
     "state": "scheduled",

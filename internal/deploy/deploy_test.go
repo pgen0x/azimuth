@@ -14,8 +14,10 @@ func TestDeployed(t *testing.T) {
 		out  string
 		want bool
 	}{
-		{"🚀 DEPLOYED — 12:00 WIB\nFOO-SOL PosAddr", true},
-		{"🧪 DRY RUN DEPLOY — 12:00 WIB\nFOO-SOL PosAddr", true},
+		{"🚀 DEPLOYED — 12:00 UTC\nFOO-SOL PosAddr", true},
+		{"🚀 DEPLOYED — 07:00 EST\nFOO-SOL PosAddr", true},
+		{"🧪 DRY RUN DEPLOY — 12:00 UTC\nFOO-SOL PosAddr", true},
+		{"🧪 DRY RUN DEPLOY — 21:30 GMT+5:30\nFOO-SOL PosAddr", true},
 		{"Aborting deploy: entry timing check rejected", false},
 		{"", false},
 	}
@@ -27,7 +29,7 @@ func TestDeployed(t *testing.T) {
 }
 
 func TestSummarizeDeploy(t *testing.T) {
-	out := "🔍 Starting\nBATCH_PICK: FOO (score 82.0) over [BAR]\n🚀 DEPLOYED — 12:00 WIB\nFOO-SOL PosAddr\nTX | https://solscan.io/tx/abc\n"
+	out := "🔍 Starting\nBATCH_PICK: FOO (score 82.0) over [BAR]\n🚀 DEPLOYED — 12:00 UTC\nFOO-SOL PosAddr\nTX | https://solscan.io/tx/abc\n"
 	got := Summarize(out, "casual")
 	if !strings.HasPrefix(got, "[casual] 🚀 DEPLOYED") {
 		t.Errorf("Summarize deploy = %q, want deploy block from marker", got)
@@ -63,7 +65,7 @@ func TestGateNarrative(t *testing.T) {
 	if strings.Contains(got, "Batch mode:") || strings.Contains(got, "No candidates survived") {
 		t.Errorf("GateNarrative = %q, must contain only gate lines", got)
 	}
-	if GateNarrative("🚀 DEPLOYED — 12:00 WIB\n") != "" {
+	if GateNarrative("🚀 DEPLOYED — 12:00 CEST\n") != "" {
 		t.Error("GateNarrative without gate lines must be empty")
 	}
 }

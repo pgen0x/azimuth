@@ -302,7 +302,7 @@ def ai_pick_context(mode):
             positions.append({k: record[k] for k in ("pool", "mode")})
         except (ValueError, TypeError):
             complete = False
-    return dict(observed_at=int(time.time()), time=local_time_str("%H:%M"), mode=mode,
+    return dict(observed_at=int(time.time()), time=local_time_str(), mode=mode,
                 open_mode_positions=sum(p["mode"] == mode for p in positions) if complete else None,
                 positions=positions, positions_complete=complete, signal_weights=weights,
                 basis="Redis ranking context only; pipeline rechecks live entry gates")
