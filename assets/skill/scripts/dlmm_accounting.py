@@ -639,6 +639,43 @@ def refund_cash_bounds(group, chains, selected):
     return lower, upper
 
 
+def recent_position_cash_losses(journal, ledger, as_of):
+    """Prove each of the latest two journaled positions lost, independently.
+
+    Older incomplete roots remain unknown. Never allocate a multi-position
+    root or sum per-position bounds from a shared rent refund.
+    """
+    recent = journal[:2]
+    if len(recent) != 2 or recent[0]["ts"] == recent[1]["ts"]:
+        return []
+    chains = {c["root_chain_id"]: c for c in ledger["chains"]}
+    groups = ledger["rent_refund_groups"]
+    proofs = []
+    for row in recent:
+        position = row["position"]
+        root = row.get("root_chain_id") or row.get("recenter_of") or position
+        chain = chains.get(root)
+        owners = [c["root_chain_id"] for c in ledger["chains"] if position in c["positions"]]
+        matching = [g for g in groups if root in g["root_chain_ids"]]
+        if (owners != [root] or not chain or chain["positions"] != [position]
+                or chain.get("accounting_status") != "settled_cash" or len(matching) != 1):
+            return []
+        group = matching[0]
+        if (type(group.get("last_activity")) not in (int, float)
+                or not math.isfinite(group["last_activity"]) or group["last_activity"] > as_of
+                or any(sum(member in g["root_chain_ids"] for g in groups) != 1
+                       for member in group["root_chain_ids"])):
+            return []
+        bounds = refund_cash_bounds(group, chains, {root})
+        if bounds is None or bounds[1] >= 0:
+            return []
+        proofs.append(dict(position=position, root=root, ts=row["ts"],
+                           cash_upper_lamports=bounds[1]))
+    if len({p["root"] for p in proofs}) != 2:
+        return []
+    return proofs
+
+
 def pool_cash_history(closes, ledger, as_of):
     """Last ten closes per pool; net cash only when whole roots/refunds match.
 
@@ -709,6 +746,9 @@ def pool_cash_history(closes, ledger, as_of):
         valid_marks = all(not isinstance(v, bool) and isinstance(v, (int, float)) and math.isfinite(v) for v in marks)
         journal = sorted(journal_by_pool.get(pool, {}).values(), key=lambda r: r["ts"], reverse=True)[:10]
         result[pool] = {
+            "recent_position_cash_losses": (recent_position_cash_losses(journal, ledger, as_of)
+                if [(r["position"], r["ts"]) for r in selected[:2]]
+                   == [(r["position"], r["ts"]) for r in journal[:2]] else []),
             "journal_closes": len(journal),
             "journal_last_close_ts": journal[0]["ts"] if journal else 0,
             "prior_closes": len(selected), "last_close_ts": selected[0]["ts"],

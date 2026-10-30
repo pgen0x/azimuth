@@ -63,6 +63,10 @@ jobs:
           python3 assets/skill/scripts/test_dlmm_alerts.py
           python3 assets/skill/scripts/test_dlmm_risk_integration.py
           python3 assets/hermes/scripts/test_sol_dlmm_exit_review_gate.py
+          python3 assets/skill/scripts/test_dlmm_entry_liquidity.py
+          python3 assets/skill/scripts/test_dlmm_ladder_coverage.py
+          python3 assets/skill/scripts/test_dlmm_pool_cash_gate.py
+          python3 assets/skill/scripts/test_dlmm_recent_pool_losses.py
           python3 assets/skill/scripts/test_solana_policy.py
           python3 assets/skill/scripts/test_dlmm_accounting.py
           python3 assets/skill/scripts/test_dlmm_recovered_close.py
