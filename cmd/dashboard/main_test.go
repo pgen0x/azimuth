@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"net/http/httptest"
 	"os"
 	"os/exec"
@@ -256,7 +257,7 @@ func TestEveryPanelRetainsCollectionFailure(t *testing.T) {
 		"collected_at": 123, "hermes": object{"profile": "fixture"}, "redis": object{"status": "disabled"},
 	}}
 	cookie := signIn(t, s)
-	for _, panel := range []string{"overview", "capital", "live", "journal", "hermes", "redis"} {
+	for _, panel := range []string{"overview", "capital", "live", "robinhood", "journal", "hermes", "redis"} {
 		r := httptest.NewRequest("GET", "/api/"+panel, nil)
 		r.Host = "localhost"
 		r.AddCookie(cookie)
@@ -274,7 +275,7 @@ func TestEveryPanelRetainsCollectionFailure(t *testing.T) {
 func TestCapitalLiveLocalReadOnlyMatrix(t *testing.T) {
 	s := &server{data: object{"collected_at": 123}}
 	cookie := signIn(t, s)
-	for _, path := range []string{"/api/capital", "/api/live"} {
+	for _, path := range []string{"/api/capital", "/api/live", "/api/robinhood"} {
 		for _, host := range []string{"localhost", "127.0.0.1:8787", "[::1]:8787", "attacker.invalid", "192.0.2.1:8787"} {
 			for _, method := range []string{"GET", "HEAD", "POST", "PUT", "DELETE", "PATCH"} {
 				r := httptest.NewRequest(method, path, nil)
@@ -293,5 +294,41 @@ func TestCapitalLiveLocalReadOnlyMatrix(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+func TestRobinhoodLogLimitAndZone(t *testing.T) {
+	logs := []any{}
+	for i := 0; i < 5; i++ {
+		logs = append(logs, object{"time": float64(100 - i), "line": "x"})
+	}
+	section := object{"logs": logs, "monitor_active": false}
+	s := &server{data: object{"collected_at": 123, "robinhood": section,
+		"by_tz": object{"UTC": object{"robinhood": object{"tz": "UTC", "totals": object{}}}}}}
+	cookie := signIn(t, s)
+	get := func(query string) (int, map[string]any) {
+		r := httptest.NewRequest("GET", "/api/robinhood"+query, nil)
+		r.Host = "localhost"
+		r.AddCookie(cookie)
+		w := httptest.NewRecorder()
+		s.ServeHTTP(w, r)
+		var body map[string]any
+		json.Unmarshal(w.Body.Bytes(), &body)
+		return w.Code, body
+	}
+	code, body := get("?tz=UTC&n=2")
+	if code != 200 || len(body["logs"].([]any)) != 2 || body["logs_retained"].(float64) != 5 || body["closes"].(map[string]any)["tz"] != "UTC" {
+		t.Fatalf("n=2: %d %v", code, body)
+	}
+	if code, body = get(""); code != 200 || len(body["logs"].([]any)) != 5 || body["log_limit"].(float64) != 200 {
+		t.Fatalf("default: %d %v", code, body)
+	}
+	for _, bad := range []string{"?n=0", "?n=1001", "?n=abc"} {
+		if code, _ := get(bad); code != 400 {
+			t.Fatalf("%s: %d", bad, code)
+		}
+	}
+	if len(section["logs"].([]any)) != 5 {
+		t.Fatal("request mutated the cached snapshot")
 	}
 }

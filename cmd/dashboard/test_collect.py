@@ -334,4 +334,87 @@ class OwnOnlyTests(unittest.TestCase):
     setUp=CollectorTests.setUp
     tearDown=CollectorTests.tearDown
 
+KEY='ab'*32  # synthetic 64-hex, shaped like a private key
+def rh_run(active='inactive', start='@1000', toggles='robinhood=false, rh-turnover=true', log=None):
+    """Fake bounded_run keyed on argv: systemd state, the scanner start line and unit journals."""
+    def run(argv, **kw):
+        joined=' '.join(argv); out=''
+        if argv[:2]==['systemctl','--user'] and 'azimuth-rh-monitor.service' in argv:
+            out='Id=azimuth-rh-monitor.service\nActiveState=%s\nUnitFileState=disabled\n' % active
+        elif argv[:2]==['systemctl','--user']: out=start+'\n'
+        elif 'scanner: started' in joined:
+            out=json.dumps({'MESSAGE':'scanner: started (interval=1m0s, pulse=true, %s)' % toggles,'__REALTIME_TIMESTAMP':'1000000000'})+'\n'
+        elif 'azimuth-rh-monitor.service' in argv:
+            out=''.join(json.dumps({'MESSAGE':m,'__REALTIME_TIMESTAMP':str(t*1000000)})+'\n' for t,m in (log or []))
+        return SimpleNamespace(stdout=out,stderr='',returncode=0,capture_status='ok')
+    return run
+
+class RobinhoodTests(unittest.TestCase):
+    setUp=CollectorTests.setUp
+    tearDown=CollectorTests.tearDown
+    def closes(self,where=None):
+        rows((where or self.m)/'uni_closes.jsonl',[
+            {'ts':86400*3,'tokenId':'1','pool':'0xp1','reason':'turnover re-center','success':True,'dry_run':False,'protocol':'v3','quote_symbol':'WETH','realized_quote':0.01,'pnl_basis':'realized','pnl_pct':95.0,'gas_eth':'0.001','gas_txs':3},
+            {'ts':86400*3+60,'tokenId':'7','pool':'0xp7','reason':'turnover rung filled','success':True,'dry_run':False,'protocol':'v4','quote_symbol':'ETH','realized_quote':-0.004,'pnl_basis':'realized','pnl_pct':-4,'gas_eth':'0.002','gas_txs':2},
+            {'ts':86400*4,'tokenId':'8','pool':'0xp8','reason':'ladder idle','success':True,'dry_run':False,'protocol':'v3','quote_symbol':'WETH','realized_quote':None,'pnl_pct':1},
+            {'ts':86400*4+5,'tokenId':'9','pool':'0xp9','reason':'ladder stale','success':True,'dry_run':False,'protocol':'v3','quote_symbol':'USDG','realized_quote':1.5,'pnl_basis':'realized','pnl_pct':2},
+            {'ts':86400*4+9,'tokenId':'10','pool':'0xpa','reason':'fill','success':True,'dry_run':False,'protocol':'v3','quote_symbol':'WETH','realized_quote':0.5,'pnl_basis':'mark','stranded':{'symbol':'X'},'pnl_pct':90},
+            {'ts':86400*5,'tokenId':'2','pool':'0xp2','reason':'rpc https://rpc.example/KEY failed','success':False,'dry_run':False,'protocol':'v3','realized_quote':9.0,'pnl_basis':'realized','quote_symbol':'WETH'},
+            {'ts':86400*5,'tokenId':'11','pool':'0xpb','reason':'dry','success':True,'dry_run':True,'quote_symbol':'WETH','realized_quote':5.0,'pnl_basis':'realized'}])
+    def test_closes_success_only_per_asset_null_counted_mark_flagged(self):
+        self.closes()
+        d=c.rh_closes(self.m,'UTC')
+        self.assertEqual(d['skipped'],{'failed':1,'dry_run':1})
+        eth,usdg=d['totals']['ETH'],d['totals']['USDG']
+        self.assertAlmostEqual(eth['realized_quote'],0.006)  # WETH v3 + native ETH v4, never the failed or dry-run rows
+        self.assertEqual((eth['closes'],eth['measured'],eth['unmeasured'],eth['mark_flagged']),(4,2,2,1))
+        self.assertEqual((usdg['realized_quote'],usdg['closes']),(1.5,1))  # never summed with ETH
+        self.assertAlmostEqual(d['gas']['gas_eth'],0.003);self.assertEqual((d['gas']['gas_txs'],d['gas']['unmetered']),(5,3))
+        mark=next(r for r in d['closes'] if r['token_id']=='10')
+        self.assertTrue(mark['mark_flagged']);self.assertIsNone(mark['realized_quote'])  # a mark is not money
+        self.assertIsNone(next(r for r in d['closes'] if r['token_id']=='8')['realized_quote'])
+        self.assertEqual(d['days']['1970-01-05']['ETH']['unmeasured'],2)
+    def test_day_buckets_follow_the_viewer_zone(self):
+        rows(self.m/'uni_closes.jsonl',[{'ts':86400*3+3600,'tokenId':'1','success':True,'quote_symbol':'WETH','realized_quote':0.1,'pnl_basis':'realized'}])
+        self.assertEqual(list(c.rh_closes(self.m,'UTC')['days']),['1970-01-04'])
+        self.assertEqual(list(c.rh_closes(self.m,'America/Sao_Paulo')['days']),['1970-01-03'])  # UTC-3
+    def test_positions_open_only_without_a_successful_close_and_keyed_by_protocol(self):
+        self.closes()
+        rows(self.m/'uni_positions.jsonl',[{'tokenId':'1','pool':'0xp1','token0':'0xT','token1':'0xQ','quote':'0xQ','quoteSymbol':'WETH','strategy':'weth_below','tickLower':-600,'tickUpper':0,'ts':86400},
+                                           {'tokenId':'2','pool':'0xp2','token0':'0xT','token1':'0xQ','quote':'0xQ','quoteSymbol':'WETH','strategy':'weth_below','ts':86400},
+                                           {'tokenId':'11','pool':'0xpb','quoteSymbol':'WETH','strategy':'weth_below','ts':86400}])
+        rows(self.m/'uni_v4_positions.jsonl',[{'tokenId':'1','protocol':'v4','pool':'0xv','key':{'currency0':'0x0','currency1':'0xT'},'quote':'0x0','quoteSymbol':'ETH','strategy':'weth_ladder','ts':86400*2}])
+        out=c.robinhood(self.m,86400*6,run=rh_run())
+        got={(p['protocol'],p['token_id']):p for p in out['positions']}
+        self.assertEqual(set(got),{('v3','2'),('v3','11'),('v4','1')})  # dry-run close leaves 11 open; v4 #1 is not v3 #1
+        self.assertEqual(got[('v3','2')]['token'],'0xT')
+        self.assertNotIn('rpc.example',got[('v3','2')]['last_failed_close']['reason'])
+        self.assertEqual(got[('v4','1')]['token'],'0xT');self.assertEqual(got[('v4','1')]['age_s'],86400*4)
+    def test_status_inactive_unit_toggles_and_redacted_logs(self):
+        log=[(50,'rpc https://rh.example/v2/'+KEY+' timeout'),(60,'PRIVATE_KEY='+KEY+' tokenId=817 gas 0.0001 ETH'),(70,'tx 0x'+KEY+' re-center ok')]
+        out=c.robinhood(self.m,100,run=rh_run(log=log))
+        self.assertFalse(out['monitor_active']);self.assertEqual(out['unit']['ActiveState'],'inactive')
+        self.assertEqual(out['modes']['flags'],{'robinhood':False,'rh-turnover':True});self.assertEqual(out['modes']['started_at'],1000)
+        text=json.dumps(out['logs'])
+        self.assertNotIn(KEY,text);self.assertNotIn('rh.example',text)
+        self.assertIn('PRIVATE_KEY=[masked]',text);self.assertIn('tokenId=817',text)  # a field name, not a secret
+        self.assertEqual([r['time'] for r in out['logs']],[70,60,50])
+        self.assertEqual(out['positions'],[]);self.assertEqual(out['stranded']['open'],[])  # no journals: empty, not an error
+    def test_modes_unknown_when_scanner_not_running(self):
+        out=c.robinhood(self.m,100,run=rh_run(start='@0'))
+        self.assertEqual(out['modes']['status'],'unknown');self.assertIn('not running',out['modes']['note'])
+    def test_stranded_latest_line_per_token_wins(self):
+        rows(self.m/'uni_stranded.jsonl',[{'ts':1,'tokenId':'1','token':'0xA','symbol':'A','amount':'5','reason':'no pool','resolved':False},
+                                          {'ts':2,'tokenId':'1','token':'0xa','symbol':'A','amount':'5','reason':'sold','resolved':True,'weth_out':'0.1'},
+                                          {'ts':3,'tokenId':'2','token':'0xB','symbol':'B','amount':'7','reason':'quote 0','resolved':False,'attempts':4}])
+        rows(self.m/'uni_positions.jsonl',[{'tokenId':'2','pool':'0xpool2','ts':1}])
+        st=c.robinhood(self.m,100,run=rh_run())['stranded']
+        self.assertEqual([(r['symbol'],r['pool'],r['amount_raw']) for r in st['open']],[('B','0xpool2','7')])
+        self.assertEqual([r['symbol'] for r in st['resolved']],['A'])
+    def test_collect_and_daily_carry_robinhood(self):
+        (self.m/'memories').mkdir();self.closes(self.m/'memories')
+        with patch.object(c.subprocess,'run',runner()),patch.object(c,'bounded_run',rh_run()):
+            d=c.collect(self.m,self.m,1,('UTC',))
+        self.assertIn('robinhood',d);self.assertEqual(d['by_tz']['UTC']['robinhood']['totals']['USDG']['closes'],1)
+
 if __name__=='__main__': unittest.main()
