@@ -76,11 +76,13 @@ class RentTransaction {
   compileMessage() { return {}; }
 }
 let swapSigns = 0; // swap transactions signed, so refused paths can prove 'not signed'
+let lastSignedMessageHash = null; // sha256 of the message actually signed
 class SwapTransaction {
   constructor(message) { this.message = message; this.signatures = [Buffer.from([1])]; }
   static deserialize() { return new SwapTransaction({ header: { numRequiredSignatures: 1 }, staticAccountKeys: [wallet.publicKey], addressTableLookups: [], instructions: [],
     serialize() { return Buffer.from(JSON.stringify({blockhash:this.recentBlockhash,instructions:this.instructions})); } }); }
-  sign() { swapSigns++; }
+  sign() { swapSigns++; lastSignedMessageHash = this.message?.serialize
+    ? require('crypto').createHash('sha256').update(this.message.serialize()).digest('hex') : null; }
   serialize() { return Buffer.from(this.message.recentBlockhash || "unsigned"); }
 }
 const deps = {
@@ -576,6 +578,8 @@ vm.runInNewContext("const productionExitTransport=confirmExitTransaction;confirm
   assert.equal(lastOrdinary().net_recovery.wallet_read_before_slot,10);
   assert.equal(lastOrdinary().net_recovery.wallet_read_after_slot,10);
   assert.match(lastOrdinary().net_recovery.message_sha256,/^[a-f0-9]{64}$/);
+  // The journaled measurement belongs to the exact message that was signed and sent.
+  assert.equal(lastOrdinary().net_recovery.message_sha256,lastSignedMessageHash);
   const selectedRecoveryHash=lastOrdinary().net_recovery.message_sha256;
   const ordinarySimulation=Connection.prototype.simulateTransaction;
   const sendsBeforeMutation=sends;
