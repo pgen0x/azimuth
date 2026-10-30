@@ -108,11 +108,47 @@ PY
 fi
 ```
 
+## Password hash
+
+Since the sign-in gate, the dashboard serves no data until `DASHBOARD_PASSWORD_HASH` is set. Supply it once
+through an environment file and a drop-in, both outside the repository. The hash is not the password, but keep
+the file private anyway (`0600`). The value below is a placeholder; generate your own with the reviewed binary:
+
+```bash
+umask 077
+mkdir -p "$HOME/.config/azimuth"
+read -rs -p 'Dashboard password: ' pw && echo
+hash=$(printf '%s\n' "$pw" | "$binary" -hash-password); unset pw
+printf 'DASHBOARD_PASSWORD_HASH=%s\n' "$hash" > "$HOME/.config/azimuth/dashboard-auth.env"
+auth_dropin="$HOME/.config/systemd/user/azimuth-dashboard.service.d/auth.conf"
+mkdir -p "$(dirname "$auth_dropin")"
+printf '[Service]\nEnvironmentFile=%%h/.config/azimuth/dashboard-auth.env\n' > "$auth_dropin"
+```
+
+The resulting files look like this (placeholder hash, not a usable credential):
+
+```ini
+# ~/.config/azimuth/dashboard-auth.env
+DASHBOARD_PASSWORD_HASH=pbkdf2-sha256:600000:REPLACE_WITH_SALT:REPLACE_WITH_KEY
+
+# ~/.config/systemd/user/azimuth-dashboard.service.d/auth.conf
+[Service]
+EnvironmentFile=%h/.config/azimuth/dashboard-auth.env
+```
+
+The hash uses `:` separators, so it needs no quoting in the environment file. To rotate the password, rewrite
+the env file and restart the unit; every session ends on restart. A rollback to a binary older than the gate
+ignores the variable. The drop-in is independent of `dashboard-since.conf` and the rollback block below does
+not touch it; remove it by hand only if you also want the variable gone.
+
+## Restart and verification
+
 Restart and verification are real gates. Preserve the activation time and verify
 the running executable, not just a filename. Keep the URL loopback-only; change
 the port only to match the reviewed unit. The probe waits at most 45 seconds for
 a fresh snapshot from all three endpoints, rejects hidden collector/panel
-errors, and confirms POST is refused. Partial economic evidence is allowed but
+errors, confirms that data needs a session and that POST is refused. It asks
+for the dashboard password once and keeps it only in memory. Partial economic evidence is allowed but
 must remain visible in the response; it is not proof of profit.
 
 ```bash
@@ -126,7 +162,7 @@ pid=$(systemctl --user show -p MainPID --value "$unit")
 test "$(sha256sum "/proc/$pid/exe" | cut -d ' ' -f 1)" = "$candidate_hash"
 go version -m "/proc/$pid/exe" | grep -F "vcs.revision=$DASHBOARD_REVIEWED_SHA"
 python3 - "$activation_ts" <<'PY'
-import json,sys,time,urllib.request,urllib.error
+import getpass,http.cookiejar,json,sys,time,urllib.parse,urllib.request,urllib.error
 start=float(sys.argv[1]); deadline=time.monotonic()+45
 def check_errors(value):
     if isinstance(value,dict):
@@ -135,10 +171,19 @@ def check_errors(value):
     elif isinstance(value,list):
         for item in value: check_errors(item)
 base='http://127.0.0.1:8787'
+try:
+    urllib.request.urlopen(base+'/api/overview',timeout=2)
+except urllib.error.HTTPError as error:
+    assert error.code==401, 'data must require a session'
+else: raise AssertionError('data served without a session')
+jar=http.cookiejar.CookieJar(); opener=urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
+form=urllib.parse.urlencode({'password':getpass.getpass('Dashboard password: ')}).encode()
+opener.open(urllib.request.Request(base+'/login',data=form,headers={'Origin':base}),timeout=5)
+assert any(c.name=='azimuth_session' for c in jar), 'sign-in failed'
 while True:
     try:
         for route in ('overview','capital','live'):
-            with urllib.request.urlopen(base+'/api/'+route,timeout=2) as response:
+            with opener.open(base+'/api/'+route,timeout=2) as response:
                 body=response.read(8*1024*1024+1)
                 assert len(body)<=8*1024*1024
                 data=json.loads(body)
@@ -149,11 +194,11 @@ while True:
         if time.monotonic()>=deadline: raise
         time.sleep(1)
 try:
-    urllib.request.urlopen(urllib.request.Request(base+'/api/live',data=b'{}',method='POST'),timeout=2)
+    opener.open(urllib.request.Request(base+'/api/live',data=b'{}',method='POST'),timeout=2)
 except urllib.error.HTTPError as error:
     assert error.code==405
 else: raise AssertionError('POST was accepted')
-print('Fresh overview/capital/live; no collection error; POST refused')
+print('Fresh overview/capital/live; session required; no collection error; POST refused')
 PY
 ```
 
