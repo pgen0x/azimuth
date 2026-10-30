@@ -15,7 +15,7 @@ from local_indicators import check_local_indicators
 from tz_util import local_time_str
 from dlmm_monitor import position_live_onchain
 from dlmm_weights import ranking_weight_context
-from dlmm_candidate_watch import record_pipeline_candidates
+from dlmm_candidate_watch import record_pipeline_candidates, record_pipeline_reject
 
 CASH_POLICY = json.loads(Path(__file__).with_name('dlmm_cash_policy.json').read_text())
 if (type(CASH_POLICY.get('version')) is not int or CASH_POLICY['version'] != 1
@@ -1407,11 +1407,13 @@ def main():
         # Absolute fee floor scales with timeframe: 30m pools are naturally small-TVL
         min_daily_fee = 20.0 if timeframe in ("5m", "30m", "1h") else 150.0
         if daily_fee_usd < min_daily_fee:
+            record_pipeline_reject(PROFILE_DIR, mode, "min_daily_fee", pool_address, base_token.get("address"), sol_is_x, pool_name)
             print(f"Skipping {pool_name} - absolute daily fees ${daily_fee_usd:.0f} too low (<${min_daily_fee:.0f}/day)")
             continue
         if volatility <= 0:
             continue
         if volatility > 15:
+            record_pipeline_reject(PROFILE_DIR, mode, "volatility", pool_address, base_token.get("address"), sol_is_x, pool_name)
             print(f"Skipping {pool_name} - volatility {volatility:.2f} too high (>15), IL risk exceeds fee capture")
             continue
         if base_organic < min_organic:
@@ -1421,6 +1423,7 @@ def main():
         if base_holders < min_holders:
             continue
         if fee_tvl_ratio_change_pct < -40.0:
+            record_pipeline_reject(PROFILE_DIR, mode, "yield_decline", pool_address, base_token.get("address"), sol_is_x, pool_name)
             print(f"Skipping {pool_name} - yield declining {fee_tvl_ratio_change_pct:.0f}% (fee/TVL falling fast)")
             continue
 
@@ -1428,9 +1431,11 @@ def main():
         top_holders_pct = float(base_token.get("top_holders_pct", 0) or 0)
         dev_balance_pct = float(base_token.get("dev_balance_pct", 0) or 0)
         if top_holders_pct > 60.0:
+            record_pipeline_reject(PROFILE_DIR, mode, "top10_holders", pool_address, base_token.get("address"), sol_is_x, pool_name)
             print(f"Skipping {pool_name} - Base token top 10 holders own {top_holders_pct:.1f}% (>60%)")
             continue
         if dev_balance_pct > 20.0:
+            record_pipeline_reject(PROFILE_DIR, mode, "dev_owns", pool_address, base_token.get("address"), sol_is_x, pool_name)
             print(f"Skipping {pool_name} - Base token dev owns {dev_balance_pct:.1f}% (>20%)")
             continue
 
@@ -1438,19 +1443,23 @@ def main():
         has_freeze = base_token.get("has_freeze_authority", False)
         has_mint = base_token.get("has_mint_authority", False)
         if has_freeze:
+            record_pipeline_reject(PROFILE_DIR, mode, "freeze_authority", pool_address, base_token.get("address"), sol_is_x, pool_name)
             print(f"Skipping {pool_name} - Base token has freeze authority enabled")
             continue
         if has_mint:
+            record_pipeline_reject(PROFILE_DIR, mode, "mint_authority", pool_address, base_token.get("address"), sol_is_x, pool_name)
             print(f"Skipping {pool_name} - Base token has mint authority enabled")
             continue
 
         # verified + jupshield gates (fail open if field absent — API may not always return them)
         is_verified = base_token.get("verified", True)
         if is_verified is False:
+            record_pipeline_reject(PROFILE_DIR, mode, "unverified", pool_address, base_token.get("address"), sol_is_x, pool_name)
             print(f"Skipping {pool_name} - Base token not verified")
             continue
         jup_shield = base_token.get("jupshield_verified", base_token.get("jup_shield", True))
         if jup_shield is False:
+            record_pipeline_reject(PROFILE_DIR, mode, "jupiter_shield", pool_address, base_token.get("address"), sol_is_x, pool_name)
             print(f"Skipping {pool_name} - Base token failed Jupiter shield")
             continue
 
@@ -1459,6 +1468,7 @@ def main():
         for w in warnings:
             if w.get("severity") in ["critical", "warning"]:
                 has_crit = True
+                record_pipeline_reject(PROFILE_DIR, mode, "critical_warning", pool_address, base_token.get("address"), sol_is_x, pool_name)
                 print(f"Skipping {pool_name} - Base token has critical warning: {w.get('message')}")
                 break
         if has_crit:
@@ -1513,21 +1523,26 @@ def main():
     valid_candidates = []
     for c in candidates:
         if c["pool"] in open_pools:
+            record_pipeline_reject(PROFILE_DIR, mode, "active_pool_position", c.get("pool"), c.get("base_mint"), c.get("sol_is_x"), c.get("name"))
             print(f"Skipping {c['name']} - already have an active position in this pool")
             continue
         if c["base_mint"] and c["base_mint"] in open_base_mints:
+            record_pipeline_reject(PROFILE_DIR, mode, "token_exposure_mint", c.get("pool"), c.get("base_mint"), c.get("sol_is_x"), c.get("name"))
             print(f"Skipping {c['name']} - already exposed to token {c['base_symbol']} (mint match)")
             continue
         if c["base_symbol"].upper() in open_base_symbols:
+            record_pipeline_reject(PROFILE_DIR, mode, "token_exposure_symbol", c.get("pool"), c.get("base_mint"), c.get("sol_is_x"), c.get("name"))
             print(f"Skipping {c['name']} - already exposed to token {c['base_symbol']} (symbol match)")
             continue
         if check_pvp_conflict(c["base_symbol"], c["base_mint"]):
+            record_pipeline_reject(PROFILE_DIR, mode, "pvp", c.get("pool"), c.get("base_mint"), c.get("sol_is_x"), c.get("name"))
             print(f"Skipping {c['name']} - PvP symbol conflict detected")
             continue
         cooldown_val, _, _ = run_command(f"redis-cli get \"sol:dlmm:cooldown:{c['base_symbol'].upper()}\"")
         if cooldown_val and cooldown_val != "(nil)":
             ttl_out, _, _ = run_command(f"redis-cli ttl \"sol:dlmm:cooldown:{c['base_symbol'].upper()}\"")
             ttl_mins = int(ttl_out) // 60 if ttl_out and ttl_out.lstrip("-").isdigit() else "?"
+            record_pipeline_reject(PROFILE_DIR, mode, "reentry_cooldown", c.get("pool"), c.get("base_mint"), c.get("sol_is_x"), c.get("name"))
             print(f"Skipping {c['name']} - re-entry cooldown active ({ttl_mins}m remaining, reason: {cooldown_val[:60]})")
             continue
         # Mint-keyed cooldown: the symbol key above is evadable (a rug that
@@ -1537,6 +1552,7 @@ def main():
         if c.get("base_mint"):
             mint_cd, _, _ = run_command(f"redis-cli get \"sol:dlmm:cooldown:mint:{c['base_mint']}\"")
             if mint_cd and mint_cd != "(nil)":
+                record_pipeline_reject(PROFILE_DIR, mode, "mint_cooldown", c.get("pool"), c.get("base_mint"), c.get("sol_is_x"), c.get("name"))
                 print(f"Skipping {c['name']} - mint cooldown active (reason: {mint_cd[:60]})")
                 continue
             # Rug blacklist (mint) — set by the monitor on catastrophic closes
@@ -1547,6 +1563,7 @@ def main():
             if bl_mint and bl_mint != "(nil)":
                 bl_ttl, _, _ = run_command(f"redis-cli ttl \"sol:dlmm:blocklist:mint:{c['base_mint']}\"")
                 ttl_h = int(bl_ttl) // 3600 if bl_ttl and bl_ttl.lstrip("-").isdigit() else "?"
+                record_pipeline_reject(PROFILE_DIR, mode, "rug_blacklist", c.get("pool"), c.get("base_mint"), c.get("sol_is_x"), c.get("name"))
                 print(f"Skipping {c['name']} - mint is rug-blacklisted ({ttl_h}h remaining, reason: {bl_mint[:60]})")
                 continue
         # Dev blocklist (ported from the reference bot's dev-blocklist): the
@@ -1561,12 +1578,14 @@ def main():
             if bl_dev and bl_dev != "(nil)":
                 dev_ttl, _, _ = run_command(f"redis-cli ttl \"sol:dlmm:blocklist:dev:{c['dev']}\"")
                 dev_ttl_h = int(dev_ttl) // 3600 if dev_ttl and dev_ttl.lstrip("-").isdigit() else "?"
+                record_pipeline_reject(PROFILE_DIR, mode, "dev_blocklist", c.get("pool"), c.get("base_mint"), c.get("sol_is_x"), c.get("name"))
                 print(f"Skipping {c['name']} - deployer {c['dev'][:8]}… is dev-blocklisted "
                       f"({dev_ttl_h}h remaining, reason: {bl_dev[:60]})")
                 continue
         # Pool-level cooldown (repeat-deploy churn guard, set post-deploy below).
         pool_cd, _, _ = run_command(f"redis-cli get \"sol:dlmm:cooldown:pool:{c['pool']}\"")
         if pool_cd and pool_cd != "(nil)":
+            record_pipeline_reject(PROFILE_DIR, mode, "pool_cooldown", c.get("pool"), c.get("base_mint"), c.get("sol_is_x"), c.get("name"))
             print(f"Skipping {c['name']} - pool cooldown active (reason: {pool_cd[:60]})")
             continue
         # Pool memory: closes on this exact pool are journaled to
@@ -1582,6 +1601,7 @@ def main():
                 except (ValueError, json.JSONDecodeError):
                     continue
             if len(past_pnls) >= 2 and sum(past_pnls) <= POOL_MEMORY_NET_FLOOR_PCT:
+                record_pipeline_reject(PROFILE_DIR, mode, "pool_memory", c.get("pool"), c.get("base_mint"), c.get("sol_is_x"), c.get("name"))
                 print(f"Skipping {c['name']} - pool memory: {len(past_pnls)} past closes marked {sum(past_pnls):+.1f}% PnL")
                 continue
         # Momentum screen across ALL candidates (not just deploy winner).
@@ -1592,9 +1612,11 @@ def main():
         c["h6"] = h6
         c["h24"] = h24
         if m5 is not None and m5 < -5.0:
+            record_pipeline_reject(PROFILE_DIR, mode, "momentum_m5_dump", c.get("pool"), c.get("base_mint"), c.get("sol_is_x"), c.get("name"))
             print(f"Skipping {c['name']} - dumping {m5:.1f}% in 5m (momentum screen)")
             continue
         if h1 is not None and h1 < -15.0:
+            record_pipeline_reject(PROFILE_DIR, mode, "momentum_h1", c.get("pool"), c.get("base_mint"), c.get("sol_is_x"), c.get("name"))
             print(f"Skipping {c['name']} - 1h trend {h1:.1f}% < -15% (momentum screen)")
             continue
         # Multi-timeframe trend gate: reject sustained downtrends even when h1 looks positive
@@ -1612,9 +1634,11 @@ def main():
         # minutes for three positive closes.
         skip_long_momentum = mode == "turnover"
         if h6 is not None and h6 < MAX_ENTRY_H6_DROP and not skip_long_momentum:
+            record_pipeline_reject(PROFILE_DIR, mode, "downtrend_h6", c.get("pool"), c.get("base_mint"), c.get("sol_is_x"), c.get("name"))
             print(f"Skipping {c['name']} - 6h trend {h6:.1f}% < {MAX_ENTRY_H6_DROP}% (downtrend gate)")
             continue
         if h24 is not None and h24 < MAX_ENTRY_H24_DROP and not skip_long_momentum:
+            record_pipeline_reject(PROFILE_DIR, mode, "downtrend_h24", c.get("pool"), c.get("base_mint"), c.get("sol_is_x"), c.get("name"))
             print(f"Skipping {c['name']} - 24h trend {h24:.1f}% < {MAX_ENTRY_H24_DROP}% (downtrend gate)")
             continue
         # Momentum term: reward up-trend, penalize weak. Clamped so it tunes ranking,
@@ -1670,6 +1694,7 @@ def main():
             else:
                 cov = check_bin_coverage(c["pool"], bb, bb)
             if cov is not None and not cov.get("deployable", True):
+                record_pipeline_reject(PROFILE_DIR, mode, "bin_array_rent", c.get("pool"), c.get("base_mint"), c.get("sol_is_x"), c.get("name"))
                 print(f"Skipping {c['name']} - deploy range needs {cov.get('missing', 0)} new bin-array init "
                       f"(~{cov.get('totalFee', 0):.4f} SOL non-refundable rent) — excluded from AI pick")
                 continue
@@ -1726,6 +1751,7 @@ def main():
             if batch_mode:
                 candidate_ticket, _ = risk_scaled_ticket(deploy_sol, c.get("score"), mode)
                 if candidate_ticket == 0:
+                    record_pipeline_reject(PROFILE_DIR, mode, "risk_ticket_min", c.get("pool"), c.get("base_mint"), c.get("sol_is_x"), c.get("name"))
                     print(f"Skipping {c['name']} - risk-scaled ticket below minimum; no size increase")
                     continue
             v = c["volatility"]
@@ -1748,6 +1774,7 @@ def main():
                 bb = max(MIN_BINS_BELOW, min(MAX_BINS_BELOW, max(bp, bl // 2)))
                 cov = check_bin_coverage(c["pool"], bb, bb)
             if cov is not None and not cov.get("deployable", True):
+                record_pipeline_reject(PROFILE_DIR, mode, "bin_array_rent", c.get("pool"), c.get("base_mint"), c.get("sol_is_x"), c.get("name"))
                 print(f"Skipping {c['name']} - deploy range needs {cov.get('missing', 0)} new bin-array init "
                       f"(~{cov.get('totalFee', 0):.4f} SOL non-refundable rent)")
                 continue
@@ -1755,6 +1782,7 @@ def main():
                 preset = params.get("INDICATORS_PRESET", "supertrend_or_rsi")
                 confirmed = check_local_indicators(c["pool"], c["base_mint"], "entry", preset, timeframe)
                 if confirmed is False:
+                    record_pipeline_reject(PROFILE_DIR, mode, "entry_timing", c.get("pool"), c.get("base_mint"), c.get("sol_is_x"), c.get("name"))
                     print(f"Skipping {c['name']} - entry timing check ({preset}) rejected for base token {c['base_symbol']}")
                     continue
                 elif confirmed is None:
@@ -1762,6 +1790,7 @@ def main():
             if batch_mode:
                 rejection = predeploy_live_gate_reject(c, deploy_sol, timeframe)
                 if rejection:
+                    record_pipeline_reject(PROFILE_DIR, mode, "live_gate", c.get("pool"), c.get("base_mint"), c.get("sol_is_x"), c.get("name"))
                     print(f"Skipping {c['name']} - live gate rejected: {rejection}")
                     continue
             winner = c

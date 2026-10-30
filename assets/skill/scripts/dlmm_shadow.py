@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Forward shadow outcomes and bin replay. Never submits a trade or changes weights."""
 import argparse
+import collections
 import hashlib
 import json
 import math
@@ -27,6 +28,16 @@ LIQUIDATION_BUDGET_SECONDS = 20
 CANDIDATE_BUDGET_SECONDS = 10
 CANDIDATE_MAX_POOLS = 64
 CANDIDATE_MAX_AGE_SECONDS = 1800
+# Opt-in (DLMM_BRACKET_REJECTS=1) bracket reads of rejected pulse candidates: one
+# baseline read within 10 min of the reject and one terminal read at +1h on the same
+# anchor, so a rejected candidate gets the same [t, t+1h] pair a forecast does. At
+# most one new baseline per run, stratified across gates; every bracket read is one
+# of the existing 3 reads per run, so request volume and budgets are unchanged.
+BRACKET_FILENAME = 'dlmm_reject_brackets.jsonl'
+PIPELINE_REJECT_FILENAME = 'dlmm_pipeline_rejects.jsonl'
+BRACKET_HORIZON_SECONDS = 3600
+BRACKET_BASELINE_MAX_AGE_SECONDS = 600
+BRACKET_MAX_BASELINES_PER_RUN = 1
 SOL_MINT = 'So11111111111111111111111111111111111111112'
 ADDRESS = re.compile(r'[1-9A-HJ-NP-Za-km-z]{32,44}\Z')
 
@@ -81,20 +92,198 @@ def validate_candidate_snapshot(sample, pool, mint):
                 raise ValueError('invalid_candidate_counter')
 
 
+BRACKET_MAX_LINE_BYTES = 64 * 1024        # research rows are small; a longer line is corruption
+BRACKET_MAX_JOURNAL_BYTES = 64 * 1024 * 1024
+BRACKET_MAX_INDEX = 5000                  # retained baselines/terminals in the 24h window
+
+
+def research_rows(file, phase_end, report, label):
+    """Tolerant, bounded reader for the opt-in research journals only.
+
+    Unlike iter_rows, a corrupt or wrong-shaped line is counted in
+    report['reject_brackets_invalid_rows'] and skipped, so one bad append cannot
+    stop the sampler; the count makes the corruption visible instead of silently
+    empty. A non-regular file or one over the byte cap is reported as an error and
+    read as nothing. Stops at the phase deadline and says so.
+    """
+    import stat
+    try:
+        fd = os.open(file, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        return
+    except OSError as error:
+        report.setdefault('reject_brackets_errors', []).append(f'{label}:{type(error).__name__}')
+        return
+    with os.fdopen(fd, 'rb') as stream:
+        info = os.fstat(stream.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_size > BRACKET_MAX_JOURNAL_BYTES:
+            report.setdefault('reject_brackets_errors', []).append(
+                f'{label}:{"not_regular_file" if not stat.S_ISREG(info.st_mode) else "over_byte_cap"}')
+            return
+        while True:
+            if time.monotonic() >= phase_end:
+                report['reject_brackets_deadline'] = True
+                return
+            line = stream.readline(BRACKET_MAX_LINE_BYTES + 1)
+            if not line:
+                return
+            if not line.strip():
+                continue
+            try:
+                if len(line) > BRACKET_MAX_LINE_BYTES or not line.endswith(b'\n'):
+                    raise ValueError('oversized_or_partial')
+                row = json.loads(line)
+                if not isinstance(row, dict):
+                    raise ValueError('not_object')
+            except (ValueError, UnicodeDecodeError):
+                report['reject_brackets_invalid_rows'] = report.get('reject_brackets_invalid_rows', 0) + 1
+                if len(line) > BRACKET_MAX_LINE_BYTES:  # drain the rest of an oversized line
+                    while line and not line.endswith(b'\n'):
+                        if time.monotonic() >= phase_end:
+                            report['reject_brackets_deadline'] = True
+                            return
+                        line = stream.readline(BRACKET_MAX_LINE_BYTES + 1)
+                continue
+            yield row
+
+
+def append_research(file, row):
+    """A refused/partial append returns False; callers must report lost evidence."""
+    from dlmm_research_io import research_writer, research_write
+    try:
+        payload = (json.dumps(row, allow_nan=False) + '\n').encode()
+        if len(payload) > BRACKET_MAX_LINE_BYTES:
+            return False
+        file.parent.mkdir(parents=True, exist_ok=True)
+        with research_writer(file, len(payload), BRACKET_MAX_JOURNAL_BYTES) as fd:
+            research_write(fd, payload)
+        return True
+    except (OSError, ValueError, TypeError):
+        return False
+
+
+def bracket_covers(sample, anchor):
+    """A sample satisfies a terminal read only on the same anchor with the full baseline range."""
+    return (sample.get('status') == 'observed' and sample.get('anchor_bin') == anchor
+            and type(sample.get('lower_bin')) is int and type(sample.get('upper_bin')) is int
+            and sample['lower_bin'] <= anchor - 69 and sample['upper_bin'] >= anchor + 16)
+
+
+def index_reject_brackets(profile, candidates, now, phase_end, report):
+    """Schedule bracket reads for rejected pulse candidates; no-op unless enabled.
+
+    Bounded by the candidate phase deadline and to a 24h window of at most
+    BRACKET_MAX_INDEX entries. Research-journal corruption is isolated and reported
+    in `report`; it never raises into collect().
+    """
+    if os.environ.get('DLMM_BRACKET_REJECTS') != '1':
+        return 0
+    memory = profile/'memories'
+    baselines, terminal_done, gate_counts = {}, set(), collections.Counter()
+    for row in research_rows(memory/BRACKET_FILENAME, phase_end, report, 'brackets'):
+        ident, phase, stamp = row.get('bracket_id'), row.get('bracket_phase'), row.get('ts')
+        if (row.get('status') != 'observed' or not isinstance(ident, str) or len(ident) > 128
+                or not finite_number(stamp) or not 0 <= now - stamp <= 86400 + BRACKET_HORIZON_SECONDS + 600):
+            continue
+        if len(baselines) + len(terminal_done) >= BRACKET_MAX_INDEX:
+            report['reject_brackets_index_capped'] = True
+            break
+        if phase == 'terminal':
+            terminal_done.add(ident)
+        elif phase == 'baseline' and type(row.get('anchor_bin')) is int:
+            baselines[ident] = row
+            if now - stamp <= 86400:
+                gate_counts[row.get('bracket_gate')] += 1
+    scheduled = 0
+    for ident, base in baselines.items():
+        if time.monotonic() >= phase_end:
+            report['reject_brackets_deadline'] = True
+            return scheduled
+        target = base['ts'] + BRACKET_HORIZON_SECONDS
+        pool, anchor = base.get('pool'), base['anchor_bin']
+        if (ident in terminal_done or not target <= now <= target + 600
+                or not isinstance(pool, str) or not ADDRESS.fullmatch(pool)):
+            continue
+        existing = candidates.get(pool)
+        if existing and 'terminal_target_ts' in existing:
+            continue  # never displace another terminal read on the same pool
+        mint = base.get('base_mint')
+        candidate = dict(existing) if existing else dict(
+            pool=pool, base_mint=mint if isinstance(mint, str) and ADDRESS.fullmatch(mint) else None,
+            mode='pulse', source_id=ident, source_ts=base['ts'], terminal_only=True)
+        candidate.update(terminal_target_ts=target, terminal_anchor_bin=anchor, bracket_id=ident,
+                         bracket_gate=base.get('bracket_gate'), bracket_phase='terminal', bracket_priority=True)
+        candidates[pool] = candidate
+        scheduled += 1
+    fresh = []
+    for row in research_rows(memory/PIPELINE_REJECT_FILENAME, phase_end, report, 'rejects'):
+        candidate = row.get('candidate')
+        if not isinstance(candidate, dict):
+            report['reject_brackets_invalid_rows'] = report.get('reject_brackets_invalid_rows', 0) + 1
+            continue
+        pool, mint, stamp, ident = row.get('pool'), candidate.get('base_mint'), row.get('ts'), row.get('id')
+        if (row.get('mode') != 'pulse' or not isinstance(ident, str) or len(ident) > 128 or ident in baselines
+                or not isinstance(pool, str) or not ADDRESS.fullmatch(pool)
+                or not isinstance(mint, str) or not ADDRESS.fullmatch(mint) or mint == SOL_MINT
+                or candidate.get('sol_is_x') is not False or not finite_number(stamp)
+                or not 0 <= now - stamp <= BRACKET_BASELINE_MAX_AGE_SECONDS):
+            continue
+        fresh.append(row)
+        if len(fresh) > CANDIDATE_MAX_POOLS:
+            fresh.sort(key=lambda r: (gate_counts[r.get('gate')], r['ts'], r['id']))
+            del fresh[CANDIDATE_MAX_POOLS:]
+    fresh.sort(key=lambda r: (gate_counts[r.get('gate')], r['ts'], r['id']))
+    picked = set()
+    for row in fresh:
+        if len(picked) >= BRACKET_MAX_BASELINES_PER_RUN:
+            break
+        pool = row['pool']
+        existing = candidates.get(pool)
+        if pool in picked or (existing and existing.get('bracket_phase')):
+            continue
+        candidate = dict(existing) if existing else dict(
+            pool=pool, base_mint=row['candidate']['base_mint'], mode='pulse', source_id=row['id'],
+            source_ts=row['ts'])
+        if candidate.get('terminal_only'):
+            continue  # a terminal-only watch cannot serve as a fresh baseline
+        candidate.update(bracket_id=row['id'], bracket_gate=row.get('gate'), bracket_phase='baseline',
+                         bracket_priority=True)
+        candidates[pool] = candidate
+        picked.add(pool)
+        scheduled += 1
+    return scheduled
+
+
 def collect_candidate_bins(profile, candidates, deadline):
-    """Use existing timer slack; leave liquidation time and never acquire a lock."""
+    """Use timer slack; preserve liquidation time and never acquire a trading lock."""
     result = dict(candidate_bin_snapshots_attempted=0, candidate_bin_snapshots_observed=0,
                   candidate_bin_trading_deferred=False, candidate_bin_budget_exhausted=False,
                   candidate_fee_forecasts_frozen=0, candidate_fee_forecasts_unmeasured=0)
     phase_end = min(deadline - LIQUIDATION_BUDGET_SECONDS,
                     time.monotonic() + CANDIDATE_BUDGET_SECONDS)
+    if os.environ.get('DLMM_BRACKET_REJECTS') == '1':
+        if time.monotonic() >= phase_end:
+            result['candidate_bin_budget_exhausted'] = True
+            return result
+        candidates = {pool: dict(value) for pool, value in candidates.items()}
+        # Isolated: research-journal trouble is reported, never raised into collect().
+        report = {}
+        try:
+            result['reject_brackets_scheduled'] = index_reject_brackets(profile, candidates, time.time(), phase_end, report)
+        except Exception as error:
+            result['reject_brackets_scheduled'] = 0
+            report.setdefault('reject_brackets_errors', []).append('index:' + type(error).__name__)
+        result.update(report)
+        if report.get('reject_brackets_deadline'):
+            result['candidate_bin_budget_exhausted'] = True
+            return result
     if not candidates:
         return result
     if time.monotonic() >= phase_end:
         result['candidate_bin_budget_exhausted'] = True
         return result
     file = profile/'memories/dlmm_candidate_bin_samples.jsonl'
-    latest, recent, history_limited = {}, {}, set()
+    latest, recent, history_limited, terminal_done, bracket_reused = {}, {}, set(), set(), {}
     history_now = time.time()
     for row in iter_rows(file):
         if time.monotonic() >= phase_end:
@@ -102,7 +291,25 @@ def collect_candidate_bins(profile, candidates, deadline):
             return result
         stamp = row.get('collected_at')
         if row.get('pool') in candidates and finite_number(stamp):
+            # Only a bracket terminal carries terminal_target_ts on this branch.
+            target = candidates[row['pool']].get('terminal_target_ts')
+            bracket = candidates[row['pool']].get('bracket_phase') == 'terminal'
+            if bracket:
+                try:
+                    validate_candidate_snapshot(row, row['pool'], candidates[row['pool']]['base_mint'])
+                except (ValueError, TypeError, KeyError):
+                    result['reject_brackets_invalid_rows'] = result.get('reject_brackets_invalid_rows', 0) + 1
+                    continue  # invalid history is neither completion nor a recent-read throttle
             latest[row['pool']] = max(latest.get(row['pool'], 0), stamp)
+            if (target is not None and row.get('status') == 'observed'
+                    and finite_number(row.get('ts')) and target <= row['ts'] <= target+600
+                    and row['ts'] <= stamp <= history_now
+                    and (not bracket or bracket_covers(row, candidates[row['pool']].get('terminal_anchor_bin')))):
+                # A bracket terminal reuses history only on its own anchor with full
+                # baseline coverage; the reuse is recorded below as its completion.
+                terminal_done.add(row['pool'])
+                if bracket:
+                    bracket_reused[row['pool']] = row
             if (row.get('status') == 'observed' and finite_number(row.get('ts'))
                     and 0 <= history_now-row['ts'] <= 1800):
                 history = recent.setdefault(row['pool'], [])
@@ -110,27 +317,52 @@ def collect_candidate_bins(profile, candidates, deadline):
                     history_limited.add(row['pool'])
                 else:
                     history.append(row)
+    for pool, row in bracket_reused.items():
+        candidate = candidates[pool]
+        try:
+            written = append_research(profile/'memories'/BRACKET_FILENAME, dict(
+                bracket_id=candidate['bracket_id'], bracket_gate=candidate.get('bracket_gate'), bracket_phase='terminal',
+                pool=pool, base_mint=candidate.get('base_mint'), status='observed', ts=row['ts'],
+                anchor_bin=row.get('anchor_bin'), reused_sample_collected_at=row.get('collected_at'),
+                collected_at=time.time()))
+            if not written:
+                result.setdefault('reject_brackets_errors', []).append('append:refused')
+        except OSError as error:
+            result.setdefault('reject_brackets_errors', []).append('append:' + type(error).__name__)
     executor = profile/'skills/solana-dlmm/scripts/dlmm_executor.js'
-    for pool in sorted(candidates, key=lambda p: (latest.get(p, 0), -candidates[p]['source_ts'], p)):
+    order = sorted(candidates, key=lambda p: (
+        0 if candidates[p].get('bracket_priority') else 1,
+        candidates[p].get('terminal_target_ts', float('inf')) if p not in terminal_done else float('inf'),
+        latest.get(p, 0), -candidates[p]['source_ts'], p))
+    for pool in order:
         if time.monotonic() >= phase_end:
             result['candidate_bin_budget_exhausted'] = True
             break
         if result['candidate_bin_snapshots_attempted'] >= 3:
             break
         candidate = candidates[pool]
-        if time.time() - latest.get(pool, 0) < 240 or time.time() - candidate['source_ts'] > CANDIDATE_MAX_AGE_SECONDS:
+        terminal_due = (pool not in terminal_done and 'terminal_target_ts' in candidate
+                        and candidate['terminal_target_ts'] <= time.time() <= candidate['terminal_target_ts']+600)
+        if (time.time() - latest.get(pool, 0) < 240
+                or (candidate.get('terminal_only') and not terminal_due)
+                or (not terminal_due and time.time() - candidate['source_ts'] > CANDIDATE_MAX_AGE_SECONDS)):
             continue
         result['candidate_bin_snapshots_attempted'] += 1
         started = time.time()
         record = dict(candidate, request_started_at=started)
         try:
-            output = subprocess.check_output(['node', str(executor), 'candidate-bin-snapshot', pool, '69', '16'],
+            command = ['node', str(executor), 'candidate-bin-snapshot', pool, '69', '16']
+            if terminal_due:
+                command.append(str(candidate['terminal_anchor_bin']))
+            output = subprocess.check_output(command,
                 stderr=subprocess.DEVNULL, timeout=request_timeout(phase_end, 3))
             sample = json.loads(output)
             if sample.get('status') == 'deferred' and sample.get('reason') == 'wallet_trade_active':
                 result['candidate_bin_trading_deferred'] = True
                 break
             validate_candidate_snapshot(sample, pool, candidate['base_mint'])
+            if terminal_due and sample['anchor_bin'] != candidate['terminal_anchor_bin']:
+                raise ValueError('terminal_anchor_mismatch')
             if not started - 1 <= sample['ts'] <= time.time():
                 raise ValueError('invalid_candidate_timestamp')
             fields = ('ts', 'active_bin', 'anchor_bin', 'lower_bin', 'upper_bin', 'price',
@@ -146,7 +378,20 @@ def collect_candidate_bins(profile, candidates, deadline):
             record.update(status='unmeasured', reason=type(error).__name__)
         record['collected_at'] = time.time()
         append(file, record)
-        if record['status'] == 'observed':
+        if candidate.get('bracket_id'):
+            try:
+                written = append_research(profile/'memories'/BRACKET_FILENAME, dict(
+                    bracket_id=candidate['bracket_id'], bracket_gate=candidate.get('bracket_gate'),
+                    bracket_phase=candidate.get('bracket_phase'), pool=pool, base_mint=candidate.get('base_mint'),
+                    status=record['status'], ts=record.get('ts'), anchor_bin=record.get('anchor_bin'),
+                    collected_at=record['collected_at']))
+                if not written:
+                    result.setdefault('reject_brackets_errors', []).append('append:refused')
+            except OSError as error:
+                result.setdefault('reject_brackets_errors', []).append('append:' + type(error).__name__)
+        # A terminal-only bracket watch is not a discovery candidate and never forecasts.
+        if (record['status'] == 'observed' and not candidate.get('terminal_only')
+                and 0 <= record['collected_at'] - candidate['source_ts'] <= CANDIDATE_MAX_AGE_SECONDS):
             try:
                 from dlmm_fee_forecast import candidate_fee_forecast, FORECAST_FILE, BASIS
                 if time.monotonic() >= phase_end:
@@ -243,8 +488,11 @@ def rejected_outcome(row, price, observed_at):
     target = row['ts'] + HORIZONS.get(row['mode'], 86400)
     if observed_at < target:
         return None
+    # pool/base_mint are additive identity fields: without them a reject outcome
+    # cannot be joined to any LP-like replay of the same pool.
     result = dict(id=row['id'], gate=row['gate'], mode=row['mode'], target_ts=target,
-                  observed_at=observed_at, basis='pool_price_proxy_not_simulated_LP_return')
+                  observed_at=observed_at, basis='pool_price_proxy_not_simulated_LP_return',
+                  pool=row.get('pool'), base_mint=(row.get('candidate') or {}).get('base_mint'))
     baseline = row['snapshot'].get('pool_price')
     if observed_at > target + 600:
         return dict(result, status='censored', reason='missed_horizon')
@@ -829,4 +1077,6 @@ def main():
     parser.add_argument('--rejects',type=Path,default=Path.home()/'.local/state/azimuth/solana_rejects.jsonl')
     args=parser.parse_args();print(json.dumps(collect(args.profile,args.rejects)))
 
-if __name__=='__main__':main()
+if __name__=='__main__':
+    from dlmm_research_io import run_observed_main
+    run_observed_main('shadow', main)

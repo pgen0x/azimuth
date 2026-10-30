@@ -212,6 +212,13 @@ vm.runInNewContext("const productionExitTransport=confirmExitTransaction;confirm
       await assert.rejects(snapshot("pool", below, above), /bounds/);
     }
     assert.equal(candidateCreates, 2);
+    // Bracket terminal reads pass a frozen anchor; invalid anchors fail before any read.
+    const fixed = await snapshot("pool", 69, 16, 5);
+    assert.equal(fixed.anchor_bin, 5); assert.equal(fixed.lower_bin, -64); assert.equal(fixed.upper_bin, 21);
+    for (const bad of [1.5, NaN, 100001]) {
+      await assert.rejects(snapshot("pool", 69, 16, bad), /anchor/);
+    }
+    assert.equal(candidateCreates, 3);
     delete env.SOLANA_PUBLIC_KEY;
     await assert.rejects(snapshot("pool"), /SOLANA_PUBLIC_KEY/);
     env.SOLANA_PUBLIC_KEY = wallet.publicKey.toString();
