@@ -76,6 +76,14 @@ jobs:
           node assets/skill/scripts/test_dlmm_retained_rent.js
           node assets/skill/scripts/test_dlmm_exit_bank.js
           python3 assets/skill/scripts/test_dlmm_shadow.py
+          python3 assets/skill/scripts/test_dlmm_candidate_paper.py
+          python3 assets/skill/scripts/test_dlmm_candidate_portfolio.py
+          python3 assets/skill/scripts/test_dlmm_candidate_replay.py
+          python3 assets/skill/scripts/test_dlmm_net_execution_stress.py
+          python3 assets/skill/scripts/test_dlmm_net_experiment.py
+          python3 assets/skill/scripts/test_dlmm_net_search.py
+          node assets/skill/scripts/test_dlmm_price_path.js
+          python3 assets/skill/scripts/test_dlmm_price_path_features.py
           python3 assets/skill/scripts/test_dlmm_fee_forecast.py
           python3 assets/skill/scripts/test_dlmm_candidate_watch.py
           python3 assets/skill/scripts/test_dlmm_observe_bounds.py
