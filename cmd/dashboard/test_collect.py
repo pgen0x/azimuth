@@ -430,7 +430,14 @@ SECRETS += [name + '=SYNTHETIC_VALUE public tail' for name in (
 SECRETS += ['tokenId=817 pool=0xabc TOKEN=SYNTHETIC_AFTER_PUBLIC',
             'Authorization: Basic SYNTHETIC_BASIC public tail',
             'Bearer SYNTHETIC_INLINE public tail', 'sk-SYNTHETIC_INLINE public tail',
-            'VERYLONGCUSTOMENDPOINTSCHEME+TLS://rpc.example/SYNTHETIC_LONG_SCHEME']
+            'VERYLONGCUSTOMENDPOINTSCHEME+TLS://rpc.example/SYNTHETIC_LONG_SCHEME',
+            # Prose forms with no single-word name before a separator.
+            'Seed phrase: SYNTHETIC_SEED alpha bravo', 'mnemonic SYNTHETIC_PROSE alpha bravo lima',
+            'wallet recovery words SYNTHETIC_RECOVERY', 'export backup-phrase=SYNTHETIC_BACKUP',
+            # The mask sentinel is untrusted text: it must not shield a later secret on the same line.
+            'prior [masked to end of line] mnemonic SYNTHETIC_BYPASS alpha bravo',
+            'prior [masked to end of line] TOKEN=SYNTHETIC_BYPASS_ASSIGNMENT',
+            '"mnemonic": "SYNTHETIC_QUOTED_PROSE alpha"']
 LEAKS=('SYNTHETIC','bravo','lima','rpc.example','127.0.0.1')
 
 class RedactionTests(unittest.TestCase):

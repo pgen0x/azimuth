@@ -5,7 +5,7 @@ from types import SimpleNamespace
 from datetime import datetime, timedelta, time as clock
 from zoneinfo import ZoneInfo
 
-SECRET = re.compile(r"(password|passwd|passphrase|secret|credential|authorization|mnemonic|seed[_-]?phrase|api.?key|private.?key|access.?token|auth.?token|bot.?token|refresh.?token|system_prompt|model_config|origin_json)", re.I)
+SECRET = re.compile(r"(password|passwd|passphrase|secret|credential|authorization|mnemonic|(?:seed|recovery|backup)[ _-]?(?:phrase|words)|api.?key|private.?key|access.?token|auth.?token|bot.?token|refresh.?token|system_prompt|model_config|origin_json)", re.I)
 # Public identity fields are not credentials, even when written in upper case.
 PUBLIC_FIELDS = frozenset(('tokenid', 'token_id', 'pool', 'poolid', 'pool_id', 'mint',
     'address', 'pubkey', 'public_key', 'solana_public_key', 'base_mint', 'quote_mint',
@@ -46,18 +46,34 @@ URL = re.compile(r"(?i)\b[a-z][a-z0-9+.-]*://[^\s\"'<>]+")
 # Inspect every assignment/header name, so a public field before a secret cannot hide it.
 ASSIGNMENT = re.compile(r"""(?<![\w.-])(["']?)([a-zA-Z_][a-zA-Z0-9_.-]*)\1[ \t]*[:=]""")
 INLINE_CREDENTIAL = re.compile(r'(?i)\b(?:bearer[ \t]+|sk-)[A-Za-z0-9_.-]+.*$')
+# Wallet phrases are often written as prose ("Seed phrase: ...", "mnemonic alpha bravo ..."), with no
+# single-word name before a separator, so the words themselves mask the rest of the line.
+# A bare word with nothing after it (a dictionary key such as "mnemonic") is left for the key check.
+SECRET_PHRASE = re.compile(r'(?i)\b(mnemonic|(?:seed|recovery|backup|secret)[ _-]?(?:phrase|words))\b(.*)$')
+MASKED = '[masked to end of line]'
+
+
+def _mask_phrase(match):
+    rest = match[2]
+    if not rest.strip():
+        return match[0]
+    separator = '=' if rest.lstrip(' \t"\'').startswith((':', '=')) else ' '
+    return match[1] + separator + MASKED
 
 
 def redact_text(value):
     lines = []
     for line in value.splitlines(keepends=True):
+        ending = line[len(line.rstrip('\r\n')):]
+        # Prose wallet phrases first and unconditionally: text already carrying the mask sentinel is
+        # untrusted input, so an earlier "[masked to end of line]" can never shield a later secret.
+        line = SECRET_PHRASE.sub(_mask_phrase, line[:len(line) - len(ending)]) + ending
         for match in ASSIGNMENT.finditer(line):
             if secret_name(match[2]):
-                ending = line[len(line.rstrip('\r\n')):]
-                line = line[:match.start()] + match[2] + '=[masked to end of line]' + ending
+                line = line[:match.start()] + match[2] + '=' + MASKED + ending
                 break
         line = URL.sub('[endpoint masked]', line)
-        lines.append(INLINE_CREDENTIAL.sub('[masked to end of line]', line))
+        lines.append(INLINE_CREDENTIAL.sub(MASKED, line))
     return ''.join(lines)
 
 
