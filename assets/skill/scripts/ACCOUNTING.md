@@ -1479,3 +1479,20 @@ It targets pools with repeated small net losses despite older attribution gaps.
 It is an entry risk constraint, not proof of improved trading returns: it can
 also skip a future winner. Forward evaluation must retain rejected candidates
 and all executed losses rather than claiming saved money from rejection alone.
+
+
+### Auditable token valuation coverage
+
+Spot conversion validates the token and native-reference identities, RPC decimals,
+positive finite USD prices, provider timestamps and bounded slot distance. Future
+or stale evidence remains unavailable. Both currency legs must survive the
+remaining bounded quote phase, as full-balance quote caches already must.
+Token rows retain timestamps and slots for both conversion legs.
+
+`valuation_coverage` reports measured/unmeasured token accounts, quote attempts,
+the unchanged 40-account budget and stable unknown-reason counts. A missing
+quote due to budget, trading priority or rate limiting remains distinct from a
+provider's explicit no-route or rounded-threshold refusal. Provider response
+bodies and arbitrary error codes are not retained. No-route is not proof of zero
+asset value; stale prices, failed quotes and unknown inventory never become zero
+or complete NAV. Native cash and recovered rent remain distinct from profit.
