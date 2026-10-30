@@ -872,6 +872,21 @@ vm.runInNewContext("const productionExitTransport=confirmExitTransaction;confirm
     fs.rmdirSync(preparationPath);
     fs.renameSync(preparationPath + ".saved", preparationPath);
   }
+  // The close lock is released exactly once after use, and never when it was not acquired.
+  {
+    let acquires=0,releases=0,lockFails=false;
+    sandbox.lockProbe={acquire:()=>acquires++,release:()=>releases++,fail:()=>lockFails};
+    vm.runInNewContext('const lockBeforeCloseTest = acquireSwapLock; acquireSwapLock = async (...a) => { lockProbe.acquire(); if (lockProbe.fail()) throw new Error("lock busy"); const r = await lockBeforeCloseTest(...a); return async () => { lockProbe.release(); return r(); }; };', sandbox);
+    assert.equal((await closePosition("lock-success-position")).success,true);
+    assert.equal(acquires,1);assert.equal(releases,1);
+    lockFails=true;const signsBeforeLock=signCalls,sendsBeforeLock=sends;
+    await assert.rejects(closePosition("lock-busy-position"),/lock busy/);
+    assert.equal(acquires,2);assert.equal(releases,1);assert.equal(signCalls,signsBeforeLock);assert.equal(sends,sendsBeforeLock);
+    const busyStages=fs.readFileSync(preparationPath,'utf8').trim().split('\n').map(JSON.parse)
+      .filter(row=>row.position==='lock-busy-position').map(row=>row.stage);
+    assert.deepEqual(busyStages,['started','failed']);
+    lockFails=false;vm.runInNewContext('acquireSwapLock = lockBeforeCloseTest;', sandbox);
+  }
   // Null/processed responses are pending, even when they have err:null. Poll
   // the original signature until confirmed, without another broadcast.
   const observedStatuses = [null,{confirmationStatus:"processed",err:null},{confirmationStatus:"confirmed",err:null}];
