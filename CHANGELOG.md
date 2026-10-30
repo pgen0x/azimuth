@@ -5,6 +5,56 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.14.0](https://github.com/pgen0x/azimuth/compare/v2.13.0...v2.14.0) (2026-10-30)
+
+
+### Features
+
+* **dlmm:** bind existing fee forecasts to entry provenance ([1d267c1](https://github.com/pgen0x/azimuth/commit/1d267c1bc39b279edd4aee2a27a64aadfb3fb5dd))
+* **dlmm:** observe discovery candidates before AI routing ([2c348e2](https://github.com/pgen0x/azimuth/commit/2c348e2bff2ec57b48d341c135d2cec5d0732cb6))
+* **dlmm:** record pre-sign range check for entry evaluation ([fb40a5d](https://github.com/pgen0x/azimuth/commit/fb40a5d7601d50e13769b9755f49cedef6f7e306))
+* **dlmm:** retain bounded PDA history outcomes in entry evidence ([2deeddf](https://github.com/pgen0x/azimuth/commit/2deeddffa909e1f96bbffc66750c1320e6135804))
+* **dlmm:** score principal sensitivity alongside forecast fees ([4c95fd7](https://github.com/pgen0x/azimuth/commit/4c95fd700709513ceab14fd3901be8241024db34))
+* **dlmm:** verify entry forecasts against source observations and cash ([1750913](https://github.com/pgen0x/azimuth/commit/1750913fcaf73808d6dee00e73af002387ced96a))
+* **evaluation:** add paired net exit backtest and quote-only dry run ([4df2c74](https://github.com/pgen0x/azimuth/commit/4df2c748d26cdceace67239f279b9f1c67354d24))
+* **research:** collect native candidate price paths in bounded batches ([537c032](https://github.com/pgen0x/azimuth/commit/537c0329d272d2e6db8ec22e04677eff6845a840))
+* **research:** enforce finite cash and rent in candidate portfolios ([0066311](https://github.com/pgen0x/azimuth/commit/006631157dff42eff7bf8b7ccdb92913294ab90e))
+* **research:** freeze paired price path entry eligibility ([0b29845](https://github.com/pgen0x/azimuth/commit/0b29845a10540ba6877edc3980eeff6ba7ec7190))
+* **research:** freeze prospective pool fee tier comparison ([3b399a1](https://github.com/pgen0x/azimuth/commit/3b399a12c018b02f87e62ba11c8f0f1333dddabf))
+* **research:** observe independent candidate paper exits with quotes ([64d6283](https://github.com/pgen0x/azimuth/commit/64d6283c07210e6806ac2a403b457a16d773e8ea))
+* **research:** replay unfunded candidates across historical periods ([a8ab1e3](https://github.com/pgen0x/azimuth/commit/a8ab1e3438af812d590e33a21f59f113d6e5f58e))
+* **research:** restore bounded forecast observations and entry provenance ([7486058](https://github.com/pgen0x/azimuth/commit/748605850417b22d8162dbf9cc67eb8fb377858d))
+* **research:** restore optional candidate and net policy research tools ([e323809](https://github.com/pgen0x/azimuth/commit/e323809f8ef6b44d8c7f95f78c535dc5bbbf6321))
+* **research:** search frozen net policies before forward dry runs ([b5cf590](https://github.com/pgen0x/azimuth/commit/b5cf590233ccf687d44046632e93b011f5100ef3))
+* **research:** stress frozen exits against worse token proceeds ([e1b9151](https://github.com/pgen0x/azimuth/commit/e1b9151f969500c428d483ff930da181ba77a831))
+* **research:** validate as-of native price path features ([c41665d](https://github.com/pgen0x/azimuth/commit/c41665d572f7e754b85ad5081d788ff00cafb154))
+
+
+### Bug Fixes
+
+* **dashboard:** drop the hard-coded 0.35 SOL entry floor from the overview ([67895c6](https://github.com/pgen0x/azimuth/commit/67895c61a6300d5c8a705605d4102acf18eb2ae6))
+* **dlmm:** apply conviction risk sizing to AI-selected signals ([910059a](https://github.com/pgen0x/azimuth/commit/910059a0ee8f850182afa3e3c8c5ce9e69c75295))
+* **dlmm:** bind prospective fee forecasts to bin attribution ([c20ed46](https://github.com/pgen0x/azimuth/commit/c20ed46493f8368de5cc2cee65f2c314d2e60b29))
+* **dlmm:** lower native reserve and retain small-wallet tickets ([9962c37](https://github.com/pgen0x/azimuth/commit/9962c376d5a36adfe5f5f71a828c963ec8ae33cd))
+* **dlmm:** port entry eligibility, cash loss gates and production sizing ([3faec69](https://github.com/pgen0x/azimuth/commit/3faec69ba63c85c9a24756a5e2936a5524a58bad))
+* **dlmm:** preserve bounded exit bank time series ([1b3a7bc](https://github.com/pgen0x/azimuth/commit/1b3a7bcb06847034744283c64fdceba2ef9688be))
+* **dlmm:** record identity for proved pool cash-loss refusals ([08781a1](https://github.com/pgen0x/azimuth/commit/08781a16fcde7a67b2fea06e14338edf3c2890fb))
+* **dlmm:** refuse repeat entries into proved cash-negative pools ([1b1e4e4](https://github.com/pgen0x/azimuth/commit/1b1e4e47979a2b11ac4715ec4fae7651caa8be78))
+* **dlmm:** refuse SOL ladder entries outside range before signing ([c432172](https://github.com/pgen0x/azimuth/commit/c432172419ad83b99157b0663ab1dbb517328844))
+* **dlmm:** reject entry below configured exit liquidity floor ([dd6cd59](https://github.com/pgen0x/azimuth/commit/dd6cd59277f1e7055cf79ecf7d2ce97f60b6e69d))
+* **dlmm:** reject inconsistent entry bin anchors ([9cf9e0d](https://github.com/pgen0x/azimuth/commit/9cf9e0dd51d8dbda6f680f8beae306bdf44f56e9))
+* **dlmm:** reject ladders below minimum price coverage ([1191ba5](https://github.com/pgen0x/azimuth/commit/1191ba56c603b178439f727fa2e44988ec29bef8))
+* **dlmm:** reject non-finite automatic entry scores ([3454875](https://github.com/pgen0x/azimuth/commit/3454875adedacbb60117f328dc12b9c8f2fd6ff9))
+* **dlmm:** retain automatic sizing decision provenance ([304077c](https://github.com/pgen0x/azimuth/commit/304077c2131382b2a37fe5b896999760af59ffa6))
+* **dlmm:** retain due forecast pools for terminal reads at their frozen range ([2391703](https://github.com/pgen0x/azimuth/commit/2391703604c739fb9889ffa269295d6852e4dcfc))
+* **dlmm:** retain fresh forecasts during terminal observations ([b58aa69](https://github.com/pgen0x/azimuth/commit/b58aa6988805c23593e5e9d1a95e2e6bb5e2c75b))
+* **dlmm:** retain terminal observations for version two forecasts ([21e74f7](https://github.com/pgen0x/azimuth/commit/21e74f7cf025793131b90b91bcc7df151490e528))
+* **entry:** reject two recent proved pool cash losses ([f1a8f0b](https://github.com/pgen0x/azimuth/commit/f1a8f0b9521c0207fe78de56a69a80d5167d2aa5))
+* **research:** reject incomplete and nonpositive training cohorts ([f58005a](https://github.com/pgen0x/azimuth/commit/f58005a446d638f639c8fefc26219525db94af9b))
+* **shadow:** refresh live baselines after terminal geometry diverges ([ef788f2](https://github.com/pgen0x/azimuth/commit/ef788f2731a308c6e9470f682d816f3d402caccd))
+* **shadow:** reuse terminal coverage for falling candidate bins ([4a59f1d](https://github.com/pgen0x/azimuth/commit/4a59f1d3d14f9a03ac20bb341d73b8824bf03950))
+* **shadow:** validate terminal history for forecast terminals, not only brackets ([fd396c1](https://github.com/pgen0x/azimuth/commit/fd396c109b173a56f6be6f7dc631eb7169fd2fc8))
+
 ## [2.13.0](https://github.com/pgen0x/azimuth/compare/v2.12.0...v2.13.0) (2026-10-30)
 
 
