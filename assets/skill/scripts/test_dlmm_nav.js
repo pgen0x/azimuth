@@ -444,7 +444,7 @@ global.fetch=async url=>{if(url.includes('/quote?'))throw new Error('no route');
  assert.equal(enrichedSnapshot.tokens[0].basis,'helius_wallet_estimate');
  assert.ok(enriched.issues.every(i=>i.startsWith('undated_helius_price:')));
  const heliusFetch=global.fetch;
- global.fetch=async(url,options)=>url.includes('/assets/search') ? {ok:true,json:async()=>[sol,'unknown0'].map(id=>({id,usdPrice:id===sol?100:3,updatedAt:new Date().toISOString(),priceBlockId:101}))} : heliusFetch(url,options);
+ global.fetch=async(url,options)=>url.includes('/assets/search') ? {ok:true,json:async()=>[sol,'unknown0'].map(id=>({id,decimals:9,usdPrice:id===sol?100:3,updatedAt:new Date().toISOString(),priceBlockId:101}))} : heliusFetch(url,options);
  await collect(args);
  const preferred=JSON.parse(fs.readFileSync(path.join(dir,'dlmm_nav.jsonl'),'utf8').trim().split('\n').at(-1));
  assert.equal(preferred.tokens[0].basis,'spot_mark');

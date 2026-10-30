@@ -77,6 +77,7 @@ jobs:
           python3 assets/skill/scripts/test_dlmm_cash_sign.py
           node assets/skill/scripts/test_dlmm_cash_sign.js
           node assets/skill/scripts/test_dlmm_nav.js
+          node assets/skill/scripts/test_dlmm_nav_valuation.js
           node assets/skill/scripts/test_dlmm_retained_rent.js
           node assets/skill/scripts/test_dlmm_exit_bank.js
           python3 assets/skill/scripts/test_dlmm_shadow.py

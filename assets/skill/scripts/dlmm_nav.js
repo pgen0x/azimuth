@@ -47,7 +47,19 @@ async function json(url, attempts=3, timeout=12000, deadline=Infinity, quoteAllo
           && stamp>Date.now() && stamp-Date.now()<=60000) quoteReadyAt=stamp+100;
     }
     if (response.status===429 && attempt<attempts-1) { await new Promise(resolve=>setTimeout(resolve,1000*(attempt+1))); continue; }
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    if (!response.ok) {
+      const error = new Error(`HTTP ${response.status}`);
+      if (quote) {
+        try {
+          const code = (await response.json()).errorCode;
+          if (response.status === 400 && ['COULD_NOT_FIND_ANY_ROUTE', 'NO_ROUTES_FOUND', 'TOKEN_NOT_TRADABLE'].includes(code))
+            error.code = 'quote_no_route';
+          else if (response.status === 400 && code === 'CANNOT_COMPUTE_OTHER_AMOUNT_THRESHOLD')
+            error.code = 'quote_threshold_unavailable';
+        } catch { /* Unknown failures retain the HTTP status; never persist response bodies. */ }
+      }
+      throw error;
+    }
     return response.json();
   }
 }
@@ -60,6 +72,18 @@ function navQuoteMark(q, mint, raw, slot) {
       || Math.abs(q.contextSlot-slot)>1500) throw new Error('Invalid or stale quote evidence');
   // Quote slots can lead finalized balance slots; retain the provider's slot.
   return {schema_version:2,in_amount:raw,out_lamports:q.outAmount,observed_at:now(),slot:q.contextSlot};
+}
+
+// A USD mark also needs a valid native conversion mark. Both identities,
+// decimals, timestamps and slots remain auditable; future quotes are not fresh.
+function navSpotMark(asset, mint, decimals, slot, observedAt = now()) {
+  const stamp = typeof asset?.updatedAt === 'string' ? Date.parse(asset.updatedAt) / 1000 : NaN;
+  if (typeof mint !== 'string' || !mint || !asset || asset.id !== mint || !Number.isSafeInteger(decimals) || decimals < 0 || decimals > 255
+      || asset.decimals !== decimals || !Number.isFinite(asset.usdPrice) || asset.usdPrice <= 0
+      || !Number.isFinite(observedAt) || !Number.isFinite(stamp) || stamp > observedAt + 5 || observedAt - stamp > 600
+      || !Number.isSafeInteger(slot) || slot <= 0 || !Number.isSafeInteger(asset.priceBlockId)
+      || asset.priceBlockId <= 0 || Math.abs(asset.priceBlockId - slot) > 1500) return null;
+  return {usdPrice: asset.usdPrice, decimals, observed_at: stamp, slot: asset.priceBlockId};
 }
 
 // Additional provider marks only; finalized RPC remains the balance source.
@@ -556,12 +580,18 @@ async function collect({dir, wallet, PublicKey, rpc, historyOnly=false, includeR
     try {
       const assets = await json('https://datapi.jup.ag/v1/assets/search?query='+encodeURIComponent(mints.slice(i,i+50).join(',')));
       for (const a of assets) {
-        if (a.usdPrice>0 && Number.isFinite(a.usdPrice) && now()-Date.parse(a.updatedAt)/1000<=600 && a.priceBlockId>=slot-1500) marks.set(a.id,a);
+        const mark = navSpotMark(a, a?.id, a?.decimals, slot);
+        if (mark) marks.set(a.id, mark);
       }
     } catch { /* Fall back to bounded executable quotes; never invent missing prices. */ }
   }
   const helius=process.env.DLMM_HELIUS_WALLET_PRICES === "true"
     ? await heliusPrices(wallet) : {marks:new Map(),status:"disabled"};
+  // Oracle marks, like quote caches, must survive the remaining quote phase.
+  const spotUsable=mark=>mark && mark.observed_at<=now()+5
+    && Math.max(now(),started+90)-mark.observed_at<=600;
+  const spotPriced=info=>marks.get(SOL)?.decimals===9 && marks.get(info.mint)?.decimals===info.tokenAmount.decimals
+    && spotUsable(marks.get(SOL)) && spotUsable(marks.get(info.mint));
   const heliusMark=info=>helius.marks.get(SOL)?.decimals===9 && helius.marks.has(info.mint) && helius.marks.get(info.mint).decimals===info.tokenAmount.decimals;
   // Rotate the bounded quote budget: illiquid early accounts must not starve later ones.
   const cursorPath=path.join(dir,'dlmm_quote_cursor.json');
@@ -587,7 +617,7 @@ async function collect({dir, wallet, PublicKey, rpc, historyOnly=false, includeR
   };
   const missingAccounts=allAccounts.filter(a=>{
     const i=a.account.data.parsed.info;
-    return BigInt(i.tokenAmount.amount)>0n && i.mint!==SOL && !(marks.has(i.mint)&&marks.has(SOL)) && !heliusMark(i) && !freshQuote(i);
+    return BigInt(i.tokenAmount.amount)>0n && i.mint!==SOL && !spotPriced(i) && !heliusMark(i) && !freshQuote(i);
   });
   const selected=new Set();
   // Up to 75 balances currently need quotes: two rotations must fit inside cache freshness.
@@ -600,11 +630,14 @@ async function collect({dir, wallet, PublicKey, rpc, historyOnly=false, includeR
       // Include recoverable ATA reserves, but never count wrapped principal twice.
       rent += account.account.lamports-(mint===SOL ? Number(raw) : 0);
       if (BigInt(raw)===0n) continue;
-      let value = null, basis="spot_mark", markError=null, priceObservedAt=null, priceContextSlot=null, freshness="timestamp_and_slot_checked";
+      let value = null, basis="spot_mark", markError=null, markErrorCode=null, priceObservedAt=null, priceContextSlot=null, referenceObservedAt=null, referenceContextSlot=null, freshness="timestamp_and_slot_checked";
       try {
         if (mint===SOL) { value=Number(raw)/1e9; freshness="finalized_balance"; }
-        else if (marks.has(mint) && marks.has(SOL)) {
-          value=Number(raw)/10**info.tokenAmount.decimals*marks.get(mint).usdPrice/marks.get(SOL).usdPrice;
+        else if (spotPriced(info)) {
+          const mark=marks.get(mint), reference=marks.get(SOL);
+          value=Number(raw)/10**info.tokenAmount.decimals*mark.usdPrice/reference.usdPrice;
+          priceObservedAt=mark.observed_at; priceContextSlot=mark.slot;
+          referenceObservedAt=reference.observed_at; referenceContextSlot=reference.slot;
         } else if (heliusMark(info)) {
           const mark=helius.marks.get(mint);
           value=Number(raw)/10**info.tokenAmount.decimals*mark.usdPrice/helius.marks.get(SOL).usdPrice;
@@ -629,12 +662,14 @@ async function collect({dir, wallet, PublicKey, rpc, historyOnly=false, includeR
         if (!Number.isFinite(value) || value<0) throw new Error('Invalid mark');
       } catch (err) {
         value=null; freshness="unavailable"; markError=err.message;
+        markErrorCode=['quote_no_route','quote_threshold_unavailable'].includes(err.code) ? err.code : (['quote_budget_deferred','quote_rate_limit_deferred','quote_trading_deferred'].includes(err.message)
+          ? err.message : err.message === 'HTTP 429' ? 'quote_rate_limit_deferred' : 'price_unavailable');
         if (err.message==='HTTP 429') quoteDeferredReason='quote_rate_limit_deferred';
         if (err.message==='quote_budget_deferred') quoteDeferredReason=err.message;
         if (err.message==='quote_trading_deferred') quoteDeferredReason=err.message;
         issues.push(`unpriced_token:${mint}`);
       }
-      tokens.push({mint,raw,mark_sol:value,basis,mark_error:markError,price_freshness:freshness,price_observed_at:priceObservedAt,price_context_slot:priceContextSlot,observed_at:now()});
+      tokens.push({mint,raw,mark_sol:value,basis,mark_error:markError,mark_error_code:markErrorCode,price_freshness:freshness,price_observed_at:priceObservedAt,price_context_slot:priceContextSlot,reference_price_observed_at:referenceObservedAt,reference_price_context_slot:referenceContextSlot,observed_at:now()});
       if (value!==null) tokenValue+=value;
   }
   fs.writeFileSync(cursorPath,JSON.stringify({offset:missingAccounts.length ? (cursor+quoteAttempts)%missingAccounts.length : 0}),{mode:0o600});
@@ -668,6 +703,11 @@ async function collect({dir, wallet, PublicKey, rpc, historyOnly=false, includeR
     native_sol:balance/1e9,spl_mark_sol:tokenValue,lp_mark_sol:lpValue,refundable_rent_sol:rent/1e9,
     known_asset_subtotal_sol:balance/1e9+tokenValue+lpValue+rent/1e9,
     nav_sol:issues.length ? null : balance/1e9+tokenValue+lpValue+rent/1e9,
+    valuation_coverage:{token_accounts:tokens.length,measured:tokens.filter(t=>t.mark_sol!==null).length,
+      unmeasured:tokens.filter(t=>t.mark_sol===null).length,
+      unknown_by_reason:tokens.filter(t=>t.mark_sol===null).reduce((out,t)=>{
+        const reason=t.mark_error_code || 'price_unavailable'; out[reason]=(out[reason] || 0)+1; return out;
+      },{}),quote_attempts:quoteAttempts,quote_budget_cap:40},
     tokens,positions,issues,price_sources:{helius_wallet:helius.status},
     basis:'native_plus_Jupiter_SPL_marks_or_quotes_and_Helius_estimates_plus_Meteora_LP_marks_plus_refundable_rent',
     external_flow_lamports: [...cache.values()].filter(r=>r.block_time>=since).reduce((sum,r)=>sum+(r.external_flow_lamports || 0),0),
@@ -675,4 +715,4 @@ async function collect({dir, wallet, PublicKey, rpc, historyOnly=false, includeR
   append(path.join(dir,'dlmm_nav.jsonl'),snapshot);
   return {nav_sol:snapshot.nav_sol,issues,missing_transactions:missing,wallet_history_complete:snapshot.wallet_history_complete};
 }
-module.exports={collect,transactionFact,heliusPrices,collectRentHistory,parsedAccountingTransaction,navQuoteMark,walletTradeActive};
+module.exports={collect,transactionFact,heliusPrices,collectRentHistory,parsedAccountingTransaction,navQuoteMark,navSpotMark,walletTradeActive};
