@@ -235,6 +235,20 @@ def observed_fee_yield(data):
     return value if math.isfinite(value) and value >= 0 else None
 
 
+# The young in-range stop-loss grace needs the 24h fee rate. Native-first valuation skips the
+# per-position indexed read that used to supply it, so the SL branch fetches it on its own, bounded,
+# and only for that non-emergency decision. A failed or unknown read grants no grace.
+SL_GRACE_FEE_TIMEOUT_SECS = 10
+
+
+def sl_grace_fee_context(data):
+    """(fee_per_tvl_24h, available) from an indexed per-position read; (0.0, False) when unknown."""
+    if not isinstance(data, dict) or data.get("success") is False:
+        return 0.0, False
+    fee = observed_fee_yield(data)
+    return (fee, True) if fee is not None else (0.0, False)
+
+
 def get_meteora_portfolio_positions(wallet_address, *, timeout=15):
     """Returns dict keyed by position address using Meteora Portfolio HTTP API.
     More reliable than DLMM SDK getAllLbPairPositionsByUser which requires fully initialized bin arrays."""
@@ -2455,7 +2469,15 @@ def main():
             emergency_close = True
             emergency_reason = close_reason
         elif pnl_pct <= stop_loss_pct:
-            if age_minutes_sl < 15 and in_range and fee_per_tvl_24h >= 10.0:
+            # Only where the base read the indexed position anyway (no portfolio row, real position)
+            # and only when grace is otherwise possible. The emergency branch above never waits.
+            if (age_minutes_sl < 15 and in_range and not fee_yield_available and native_mark_valid
+                    and not indexed_pnl_available and not is_dry_run_stored):
+                grace_data, _grace_err = run_command_json(f"node {EXECUTOR_PATH} pnl {pool} {pos_addr}",
+                                                          timeout=SL_GRACE_FEE_TIMEOUT_SECS)
+                fee_per_tvl_24h, fee_yield_available = sl_grace_fee_context(grace_data)
+                print(f"SL grace fee context: {f'{fee_per_tvl_24h:.2f}%' if fee_yield_available else 'unavailable'}")
+            if age_minutes_sl < 15 and in_range and fee_yield_available and fee_per_tvl_24h >= 10.0:
                 print(f"⏳ SL deferred: {age_minutes_sl:.0f}m old, in range, fee/TVL {fee_per_tvl_24h:.1f}% — grace until 15m or {emergency_floor_pct:.1f}% floor")
             else:
                 close_reason = f"Hard Stop-Loss hit ({pnl_pct:.2f}% <= {stop_loss_pct}%)"
