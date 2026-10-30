@@ -92,9 +92,9 @@ async function render(tab, payload, fail=false) {
     modes: {status: 'ok', started_at: 1000, flags: {robinhood: false, 'rh-turnover': true}},
     logs: [{time: 300, unit: 'azimuth-rh-monitor.service', line: 'turnover re-center ok'}, {time: 200, unit: 'azimuth.service', line: 'scanner[rh-turnover]: gas spike <b>'}],
     positions: [{protocol: 'v4', token_id: '1', pool: '0x' + 'c'.repeat(40), strategy: 'weth_below', quote: 'ETH', token: '0xT', tick_lower: -600, tick_upper: 0, minted_at: 100, age_s: 90000, last_failed_close: {time: 150, reason: 'revert'}}],
-    stranded: {open: [{symbol: 'XYZ', token: '0x' + 'd'.repeat(40), amount_raw: '107037025008', reason: 'no pool', time: 120, attempts: 4, next_try: 130}], resolved: []},
+    stranded: {open: [{symbol: 'XYZ', token: '0x' + 'd'.repeat(40), amount_raw: '107037025008', reason: 'no pool', time: 120, attempts: 4, next_try: 130}], resolved: [], sources: [{path: 'uni_stranded.jsonl', status: 'ok', rows: 1}, {path: 'uni_v4_stranded.jsonl', status: 'unavailable', rows: 0}]},
     closes: {tz: 'UTC', status: 'ok', closes_total: 3, skipped: {failed: 1, dry_run: 0}, gas: {gas_eth: 0.003, gas_txs: 5, metered: 2, unmetered: 1},
-      totals: {ETH: {closes: 2, measured: 1, unmeasured: 1, realized_quote: 0.01, mark_flagged: 1}, USDG: {closes: 1, measured: 0, unmeasured: 1, realized_quote: null, mark_flagged: 0}},
+      totals: {ETH: {closes: 2, measured: 1, unmeasured: 1, realized_quote: 0.01, mark_flagged: 1}, USDG: {closes: 1, measured: 0, unmeasured: 1, realized_quote: null, mark_flagged: 0}, unknown: {closes: 2, measured: 0, unmeasured: 2, realized_quote: null, mark_flagged: 0}},
       days: {'1970-01-02': {ETH: {closes: 2, measured: 1, unmeasured: 1, realized_quote: 0.01}}, '1970-01-03': {USDG: {closes: 1, measured: 0, unmeasured: 1, realized_quote: null}}},
       closes: [{time: 90000, reason: 'fill', asset: 'ETH', realized_quote: null, pnl_basis: 'mark', mark_flagged: true, pnl_pct: 90, age_min: 30, gas_eth: null},
                {time: 86500, reason: 'turnover re-center', asset: 'ETH', realized_quote: 0.01, pnl_basis: 'realized', mark_flagged: false, pnl_pct: 2, age_min: 5, gas_eth: 0.001, gas_txs: 3}]}});
@@ -108,10 +108,13 @@ async function render(tab, payload, fail=false) {
   assert(!rh.html.includes(KEY), 'no key-shaped data');
   assert(rh.log.includes('turnover re-center ok') && rh.log.includes('&lt;b&gt;') && !rh.log.includes('<b>'), 'log escaped');
   assert(rh.count.startsWith('2 of 2'), 'log count');
+  assert(rh.html.includes('Realized · unknown unit · never summed</span><strong>Unknown</strong>'), 'unknown unit never summed');
+  assert(rh.html.includes('Stranded evidence: partial'), 'stranded source coverage shown, a refused source is not an empty inventory');
+  assert(rh.timerFetches > 0, 'robinhood refreshes on the timer');
   const rhEmpty = await render('robinhood', {collected_at: 1, unit: {}, modes: {status: 'unknown', flags: {}, note: 'azimuth.service is not running'}, logs: [], positions: [], stranded: {}, closes: {totals: {}, days: {}, closes: []}});
   assert(rhEmpty.html.includes('Robinhood modes unknown') && rhEmpty.html.includes('No ETH closes in this window.'), 'empty robinhood');
   assert(rhEmpty.log.includes('No log lines retained'), 'empty log state');
   const rhFail = await render('robinhood', null, true);
   assert(rhFail.html.includes('Could not load this section'), 'robinhood error state');
-  console.log('dashboard render: 34 synthetic cases passed');
+  console.log('dashboard render: 37 synthetic cases passed');
 })().catch(error => {console.error(error); process.exitCode = 1;});

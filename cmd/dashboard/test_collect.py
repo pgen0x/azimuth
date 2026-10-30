@@ -391,14 +391,14 @@ class RobinhoodTests(unittest.TestCase):
         self.assertNotIn('rpc.example',got[('v3','2')]['last_failed_close']['reason'])
         self.assertEqual(got[('v4','1')]['token'],'0xT');self.assertEqual(got[('v4','1')]['age_s'],86400*4)
     def test_status_inactive_unit_toggles_and_redacted_logs(self):
-        log=[(50,'rpc https://rh.example/v2/'+KEY+' timeout'),(60,'PRIVATE_KEY='+KEY+' tokenId=817 gas 0.0001 ETH'),(70,'tx 0x'+KEY+' re-center ok')]
+        log=[(50,'rpc https://rh.example/v2/'+KEY+' timeout'),(60,'PRIVATE_KEY='+KEY+' tokenId=1 gas'),(65,'tokenId=817 gas 0.0001 ETH'),(70,'tx 0x'+KEY+' re-center ok')]
         out=c.robinhood(self.m,100,run=rh_run(log=log))
         self.assertFalse(out['monitor_active']);self.assertEqual(out['unit']['ActiveState'],'inactive')
         self.assertEqual(out['modes']['flags'],{'robinhood':False,'rh-turnover':True});self.assertEqual(out['modes']['started_at'],1000)
         text=json.dumps(out['logs'])
         self.assertNotIn(KEY,text);self.assertNotIn('rh.example',text)
-        self.assertIn('PRIVATE_KEY=[masked]',text);self.assertIn('tokenId=817',text)  # a field name, not a secret
-        self.assertEqual([r['time'] for r in out['logs']],[70,60,50])
+        self.assertIn('PRIVATE_KEY=[masked to end of line]',text);self.assertIn('tokenId=817 gas',text)  # a field name, not a secret
+        self.assertEqual([r['time'] for r in out['logs']],[70,65,60,50])
         self.assertEqual(out['positions'],[]);self.assertEqual(out['stranded']['open'],[])  # no journals: empty, not an error
     def test_modes_unknown_when_scanner_not_running(self):
         out=c.robinhood(self.m,100,run=rh_run(start='@0'))
@@ -416,5 +416,93 @@ class RobinhoodTests(unittest.TestCase):
         with patch.object(c.subprocess,'run',runner()),patch.object(c,'bounded_run',rh_run()):
             d=c.collect(self.m,self.m,1,('UTC',))
         self.assertIn('robinhood',d);self.assertEqual(d['by_tz']['UTC']['robinhood']['totals']['USDG']['closes'],1)
+
+# Synthetic secrets in every form the review reproduced; none may reach any API payload.
+SECRETS=['wss://rpc.example/v2/SYNTHETIC_CREDENTIAL_A','HTTPS://rpc.example/v2/SYNTHETIC_CREDENTIAL_B',
+         'MNEMONIC="alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima"',
+         'PRIVATE_KEY: SYNTHETIC_PRIVATE_VALUE','{"api_key": "SYNTHETIC_JSON_VALUE", "next": "SYNTHETIC_TAIL"}',
+         "seed_phrase = 'SYNTHETIC quoted words'",'HELIUS_API_KEY = SYNTHETIC spaced value','Authorization: Bearer SYNTHETIC_BEARER',
+         'ws://127.0.0.1:8899/SYNTHETIC_LOCAL_RPC']
+LEAKS=('SYNTHETIC','bravo','lima','rpc.example','127.0.0.1')
+
+class RedactionTests(unittest.TestCase):
+    setUp=CollectorTests.setUp
+    tearDown=CollectorTests.tearDown
+    def assertClean(self,payload):
+        text=json.dumps(payload)
+        for leak in LEAKS: self.assertNotIn(leak,text)
+    def test_shared_helper_masks_every_form_and_keeps_public_fields(self):
+        for secret in SECRETS:
+            with self.subTest(secret=secret):
+                self.assertClean(c.clean(secret));self.assertClean(c.clean(c.rh_redact(secret)))
+        kept='tokenId=817 gas 0.0001 ETH re-center; token_id: 5; pool=0xabc'
+        self.assertEqual(c.clean(kept),kept);self.assertEqual(c.rh_redact(kept),kept)
+        self.assertEqual(c.clean('first line ok\nPRIVATE_KEY=x y\nlast line ok'),'first line ok\nPRIVATE_KEY=[masked to end of line]\nlast line ok')
+    def test_final_api_composition_for_every_log_panel(self):
+        """collect() is exactly what the Go server caches and serves: journal evidence, Robinhood logs,
+        close reasons, failed-close reasons on open positions and stranded reasons all pass through it."""
+        profile=self.m/'p';memory=profile/'memories';memory.mkdir(parents=True);state=self.m/'s';state.mkdir()
+        line=' | '.join(SECRETS)
+        rows(state/'solana_rejects.jsonl',[{'ts':1,'reason':s,'gate':'g'} for s in SECRETS])
+        rows(memory/'dlmm_closes.jsonl',[{'position':'p','closed_at':2,'reason':s,'error':s} for s in SECRETS])
+        rows(memory/'uni_closes.jsonl',[{'ts':3,'tokenId':str(i),'success':i>0,'quote_symbol':'WETH','reason':s} for i,s in enumerate(SECRETS)]+
+                                       [{'ts':3,'tokenId':'99','success':False,'reason':line}])
+        rows(memory/'uni_positions.jsonl',[{'tokenId':'99','pool':'0xp','ts':1}])
+        rows(memory/'uni_stranded.jsonl',[{'ts':4,'tokenId':'99','token':'0x%d' % i,'symbol':'S','amount':'1','reason':s,'resolved':False} for i,s in enumerate(SECRETS)])
+        log=[(10+i,s) for i,s in enumerate(SECRETS)]
+        with patch.object(c.subprocess,'run',runner()),patch.object(c,'bounded_run',rh_run(log=log)):
+            d=c.collect(profile,state,1,('UTC','America/Sao_Paulo'))
+        rh=d['robinhood']
+        self.assertEqual(len(rh['logs']),len(SECRETS));self.assertEqual(len(rh['stranded']['open']),len(SECRETS))
+        self.assertTrue(rh['positions'][0]['last_failed_close']['reason'])
+        self.assertTrue(any(e['stage']=='gate' for e in d['journal']));self.assertTrue(any(e['stage']=='exit' for e in d['journal']))
+        self.assertEqual(len(d['by_tz']['UTC']['robinhood']['closes']),len(SECRETS)-1)
+        self.assertClean(d)
+        with patch.object(c.subprocess,'run',runner()),patch.object(c,'bounded_run',rh_run(log=log)):
+            self.assertClean(c.clean(c.daily(profile,1,('Asia/Tokyo',))))  # the per-zone refresh path
+
+class RobinhoodReviewTests(unittest.TestCase):
+    setUp=CollectorTests.setUp
+    tearDown=CollectorTests.tearDown
+    def test_missing_or_unsupported_quote_asset_is_never_summed(self):
+        rows(self.m/'uni_closes.jsonl',[
+            {'ts':86400,'tokenId':'1','success':True,'realized_quote':1,'pnl_basis':'realized'},
+            {'ts':86400,'tokenId':'2','success':True,'quote_symbol':'UNSUPPORTED','realized_quote':100,'pnl_basis':'realized'},
+            {'ts':86400,'tokenId':'3','success':True,'quote_symbol':None,'realized_quote':5,'pnl_basis':'realized'},
+            {'ts':86400,'tokenId':'4','success':True,'quote_symbol':'weth','realized_quote':0.5,'pnl_basis':'realized'}])
+        d=c.rh_closes(self.m)
+        unknown=d['totals']['unknown']
+        self.assertEqual((unknown['closes'],unknown['measured'],unknown['unmeasured'],unknown['realized_quote']),(3,0,3,None))
+        self.assertEqual(d['totals']['ETH']['realized_quote'],0.5)
+        self.assertIsNone(d['days']['1970-01-02']['unknown']['realized_quote'])
+        row=next(r for r in d['closes'] if r['token_id']=='2')
+        self.assertIsNone(row['realized_quote']);self.assertEqual(row['unit_unknown_value'],100)  # evidence, not money
+    def test_stranded_pool_join_keeps_the_protocol(self):
+        rows(self.m/'uni_positions.jsonl',[{'tokenId':'1','pool':'pool-v3','ts':1}])
+        rows(self.m/'uni_v4_positions.jsonl',[{'tokenId':'1','protocol':'v4','pool':'pool-v4','ts':1}])
+        rows(self.m/'uni_stranded.jsonl',[{'ts':2,'tokenId':'1','token':'0xA','symbol':'A','amount':'1','resolved':False}])
+        rows(self.m/'uni_v4_stranded.jsonl',[{'ts':3,'tokenId':'1','token':'0xB','symbol':'B','amount':'2','resolved':True,'quote_out':'0.2','quote_symbol':'ETH'}])
+        st=c.robinhood(self.m,10,run=rh_run())['stranded']
+        self.assertEqual([(r['protocol'],r['symbol'],r['pool']) for r in st['open']],[('v3','A','pool-v3')])
+        self.assertEqual([(r['protocol'],r['pool'],r['quote_out'],r['quote']) for r in st['resolved']],[('v4','pool-v4','0.2','ETH')])
+    def test_fifo_and_symlink_journals_are_refused_without_blocking(self):
+        import signal
+        def stop(*a): raise AssertionError('collector blocked on a non-regular file')
+        old=signal.signal(signal.SIGALRM,stop);signal.alarm(10)
+        try:
+            os.mkfifo(self.m/'uni_stranded.jsonl')
+            real=self.m/'real.jsonl';rows(real,[{'ts':1,'token':'0xA','resolved':False}])
+            (self.m/'uni_v4_stranded.jsonl').symlink_to(real)
+            os.mkfifo(self.m/'uni_closes.jsonl')
+            out=c.robinhood(self.m,10,run=rh_run())
+            self.assertEqual([s['status'] for s in out['stranded']['sources']],['unavailable','unavailable'])
+            self.assertEqual(out['stranded']['open'],[])
+            self.assertEqual(c.rh_closes(self.m)['status'],'unavailable')
+            rows_,meta=c.tail(self.m/'uni_stranded.jsonl');self.assertEqual((rows_,meta['status']),([],'unavailable'))
+            self.assertEqual(c.tail(self.m/'absent.jsonl')[1]['status'],'missing')
+            os.mkfifo(self.m/'report.json')
+            with self.assertRaises(OSError): c.read_json(self.m/'report.json')
+        finally:
+            signal.alarm(0);signal.signal(signal.SIGALRM,old)
 
 if __name__=='__main__': unittest.main()

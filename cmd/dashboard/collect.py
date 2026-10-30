@@ -27,15 +27,26 @@ def unit_list(extra=None):
     raw = os.environ.get('DASHBOARD_EXTRA_UNITS', '') if extra is None else extra
     more = [u.strip() for u in raw.split(',') if UNIT_NAME.match(u.strip()) and u.strip() not in UNITS]
     return [*UNITS, *dict.fromkeys(more)][:len(UNITS) + 16]
-URL = re.compile(r"https?://[^\s\"<>]+")
+# Any scheme, any case: wss:// and HTTPS:// RPC endpoints carry keys as often as https:// does.
+URL = re.compile(r"(?i)\b[a-z][a-z0-9+.-]{0,15}://[^\s\"'<>]+")
+# A secret-like name followed by = or : (bare, quoted or JSON) masks the REST OF THE LINE: values can be quoted,
+# contain spaces (a mnemonic) or be followed by more secrets, so nothing after the name is kept.
+SECRET_LINE = re.compile(r"""(?im)(["']?)\b([a-z0-9_.-]*(?:password|passwd|passphrase|secret|credential|mnemonic|seed[_-]?phrase|private[_-]?key|api[_-]?key|access[_-]?token|auth[_-]?token|bot[_-]?token|refresh[_-]?token|authorization|rpc[_-]?url|webhook[_-]?url)[a-z0-9_.-]*)\1[ \t]*[:=][ \t]*\S.*$""")
+# Upper-case environment names (HELIUS_API_KEY, REDISCLI_AUTH, ...). Case-sensitive, so tokenId= stays.
+ENV_LINE = re.compile(r"(?m)\b([A-Z][A-Z0-9_]*_(?:KEY|TOKEN|SECRET|AUTH|URL|PASS|PASSWORD|MNEMONIC|SEED))\b[ \t]*[:=][ \t]*\S.*$")
+
+def redact_text(value):
+    value = URL.sub('[endpoint masked]', value)
+    value = SECRET_LINE.sub(lambda m: m[2]+'=[masked to end of line]', value)
+    value = ENV_LINE.sub(lambda m: m[1]+'=[masked to end of line]', value)
+    return re.sub(r'(?i)\b(bearer\s+|sk-)[A-Za-z0-9_.-]+', '[masked]', value)
 
 def clean(value):
     if isinstance(value, dict):
         return {clean(str(k)): '[masked]' if SECRET.search(str(k)) else clean(v) for k,v in value.items()}
     if isinstance(value, list): return [clean(v) for v in value]
     if isinstance(value, str):
-        value = URL.sub('[endpoint masked]', value)
-        return re.sub(r'(?i)\b(bearer\s+|sk-)[A-Za-z0-9_.-]+', '[masked]', value)
+        return redact_text(value)
     if isinstance(value,float) and not math.isfinite(value): return None
     return value
 
@@ -96,7 +107,8 @@ def tail(path, limit=500, budget=2*1024*1024):
     meta = {'path': str(path), 'status': 'missing', 'truncated': False, 'invalid_lines': 0}
     rows = []
     try:
-        with path.open('rb') as f:
+        # Regular files only: a FIFO or symlink is refused instead of blocking the collector.
+        with open_regular(path) as f:
             stat=os.fstat(f.fileno()); offset=max(0,stat.st_size-budget); f.seek(offset)
             data=f.read(budget)
         meta.update(status='ok', modified_at=stat.st_mtime, bytes=stat.st_size, truncated=offset>0)
@@ -112,7 +124,8 @@ def tail(path, limit=500, budget=2*1024*1024):
             except (ValueError,UnicodeDecodeError): meta['invalid_lines']+=1
         meta['truncated'] |= len(rows)>limit
         rows=rows[-limit:]
-    except OSError: pass
+    except FileNotFoundError: pass
+    except OSError: meta['status']='unavailable'; meta['error']='not a readable regular file'
     meta['rows']=len(rows)
     return rows,meta
 
@@ -121,9 +134,13 @@ def event_time(row):
 
 def select(d, keys): return {k:d.get(k) for k in keys.split()}
 
+def read_regular(path, cap):
+    with open_regular(path) as f: data=f.read(cap+1)
+    if len(data)>cap: raise ValueError('file exceeds its read cap')
+    return data
+
 def read_json(path):
-    if path.stat().st_size>32*1024*1024: raise ValueError('report exceeds 32 MiB')
-    return json.loads(path.read_text())
+    return json.loads(read_regular(path, 32*1024*1024))
 
 # Day buckets follow the viewer's IANA zone (validated by the Go server); timestamps stay UTC epochs.
 def zone(tz): return ZoneInfo(tz or 'UTC')
@@ -631,20 +648,19 @@ def realized_by_mode(memory, since, tz='UTC'):
 RH_UNIT = 'azimuth-rh-monitor.service'
 RH_ASSET = {'WETH':'ETH','ETH':'ETH','USDG':'USDG'}
 RH_HEX64 = re.compile(r'\b(?:0x)?[0-9a-fA-F]{64}\b')
-RH_ENV = re.compile(r'\b([A-Z0-9_]*(?:KEY|SECRET|TOKEN|PASSWORD|AUTH|RPC|URL|MNEMONIC|SEED)[A-Z0-9_]*)=\S+')
 RH_LOG_CAP = 1000
 
 def rh_redact(text):
-    """URLs can carry RPC keys and a 64-hex string can be a private key, so both are masked
-    (transaction hashes look the same and are masked too); NAME=value pairs with secret-like names lose the value."""
-    text = URL.sub('[endpoint masked]', str(text))
-    text = RH_ENV.sub(lambda m: m[1]+'=[masked]', text)
-    return RH_HEX64.sub('[64-hex masked]', text)[:2000]
+    """The shared redaction (URLs, rest of any secret-bearing line) plus every 64-hex string, which can be a
+    private key (transaction hashes look the same and are masked too)."""
+    return RH_HEX64.sub('[64-hex masked]', redact_text(str(text)))[:2000]
 
 def rh_time(v):
     return None if not number(v) else v/1000 if v > 1e12 else v
 
-def rh_asset(symbol): return RH_ASSET.get(str(symbol).upper(), 'unknown') if symbol else 'unknown'
+def rh_asset(symbol):
+    """ETH (WETH or native) or USDG; anything else has no known unit and is never summed."""
+    return RH_ASSET.get(symbol.upper()) if isinstance(symbol, str) else None
 
 def rh_float(v):
     try: f = float(v)
@@ -735,7 +751,8 @@ def rh_add(cell, measured, value):
 
 def rh_closes(memory, tz='UTC', limit=200):
     """Money = realized_quote over pnl_basis == 'realized' rows of successful, non-dry-run closes, per quote asset.
-    A null figure is unmeasured and counted, never 0; pnl_pct is a mark and ranks only."""
+    A null figure is unmeasured and counted, never 0; pnl_pct is a mark and ranks only. A row whose quote asset is
+    missing or unsupported has no known unit: it lands in 'unknown', counted unmeasured, never summed."""
     rows, meta = read_jsonl(memory/'uni_closes.jsonl')
     minted, _ = rh_minted(memory)
     z = zone(tz); totals, days, table = {}, {}, []
@@ -744,8 +761,8 @@ def rh_closes(memory, tz='UTC', limit=200):
     for c in rows:
         if c.get('success') is not True: skipped['failed'] += 1; continue
         if c.get('dry_run'): skipped['dry_run'] += 1; continue
-        t = rh_time(c.get('ts')); asset = rh_asset(c.get('quote_symbol')); rq = c.get('realized_quote')
-        measured = c.get('pnl_basis') == 'realized' and number(rq)
+        t = rh_time(c.get('ts')); known = rh_asset(c.get('quote_symbol')); asset = known or 'unknown'; rq = c.get('realized_quote')
+        measured = known is not None and c.get('pnl_basis') == 'realized' and number(rq)
         mark = c.get('pnl_basis') == 'mark' or bool(c.get('stranded') or c.get('unclaimed'))
         cell = totals.setdefault(asset, {'closes':0, 'measured':0, 'unmeasured':0, 'realized_quote':None, 'mark_flagged':0})
         rh_add(cell, measured, rq); cell['mark_flagged'] += mark
@@ -762,25 +779,28 @@ def rh_closes(memory, tz='UTC', limit=200):
         table.append({'time':t, 'protocol':k[0] if k else None, 'token_id':k[1] if k else None, 'pool':c.get('pool'),
                       'strategy':(minted.get(k) or {}).get('strategy'), 'reason':rh_redact(c.get('reason', '')),
                       'quote':c.get('quote_symbol'), 'asset':asset, 'realized_quote':rq if measured else None,
+                      'unit_unknown_value':rq if known is None and number(rq) else None,
                       'pnl_basis':c.get('pnl_basis'), 'mark_flagged':mark, 'pnl_pct':c.get('pnl_pct'),
                       'age_min':c.get('age_min'), 'gas_eth':g, 'gas_txs':c.get('gas_txs')})
     table.sort(key=lambda r: r['time'] or 0, reverse=True)
-    return {'tz':tz, 'status':'partial' if incomplete(meta) else meta['status'], 'source':meta, 'totals':totals, 'gas':gas,
+    return {'tz':tz, 'status':meta['status'] if meta['status'] != 'ok' else 'partial' if incomplete(meta) else 'ok', 'source':meta, 'totals':totals, 'gas':gas,
             'days':days, 'closes':table[:limit], 'closes_total':len(table), 'skipped':skipped,
-            'basis':'Successful, non-dry-run closes from uni_closes.jsonl. Realized = realized_quote summed over pnl_basis "realized" rows, per quote asset (v3 WETH and v4 native ETH are both ETH; USDG is separate). Rows without a realized figure are unmeasured and counted, never 0. pnl_pct is a mark against the marked value and only ranks.'}
+            'basis':'Successful, non-dry-run closes from uni_closes.jsonl. Realized = realized_quote summed over pnl_basis "realized" rows, per quote asset (v3 WETH and v4 native ETH are both ETH; USDG is separate; a missing or unsupported quote asset has no known unit and is never summed). Rows without a realized figure are unmeasured and counted, never 0. pnl_pct is a mark against the marked value and only ranks.'}
 
 def rh_stranded(memory, minted):
     """Latest line per token wins, so a resolved line retires an earlier open one (the executors' own rule)."""
-    pools = {k[1]: r.get('pool') for k, r in minted.items()}
+    pools = {k: r.get('pool') for k, r in minted.items()}  # (protocol, tokenId): ids collide across v3/v4
     latest, sources = {}, []
     for name, proto in (('uni_stranded.jsonl','v3'), ('uni_v4_stranded.jsonl','v4')):
         rows, meta = tail(memory/name, limit=50000, budget=4*1024*1024); sources.append(meta)
         for r in rows:
             if isinstance(r.get('token'), str): latest[(proto, r['token'].lower())] = (proto, r)
     out = [{'protocol':proto, 'token':r.get('token'), 'symbol':r.get('symbol'), 'amount_raw':r.get('amount'),
-            'token_id':r.get('tokenId'), 'pool':pools.get(str(r.get('tokenId'))), 'reason':rh_redact(r.get('reason', '')),
+            'token_id':r.get('tokenId'), 'pool':pools.get((proto, str(r.get('tokenId')))), 'reason':rh_redact(r.get('reason', '')),
             'time':rh_time(r.get('ts')), 'attempts':r.get('attempts'), 'next_try':rh_time(r.get('next_try')),
-            'resolved':bool(r.get('resolved')), 'quote_out':r.get('weth_out'), 'quote':r.get('quote_symbol')}
+            'resolved':bool(r.get('resolved')), 'quote':r.get('quote_symbol'),
+            # v3 sweeps write weth_out, v4 writes quote_out; the raw scalar is kept with whatever unit label exists.
+            'quote_out':r.get('weth_out') if r.get('weth_out') is not None else r.get('quote_out')}
            for proto, r in latest.values()]
     out.sort(key=lambda r: r['time'] or 0, reverse=True)
     return {'open':[r for r in out if not r['resolved']], 'resolved':[r for r in out if r['resolved']][:10], 'sources':sources}
@@ -844,7 +864,7 @@ def collect(profile, state, since=None, zones=('UTC',)):
     hermes={'profile':profile.name,'config_status':'missing','sessions':[],'session_note':'An open session row is not proof that a process is alive. No messages or prompts are read.'}
     try:
         import yaml
-        try: cfg=yaml.safe_load((profile/'config.yaml').read_text()) or {}
+        try: cfg=yaml.safe_load(read_regular(profile/'config.yaml', 1024*1024)) or {}
         except yaml.YAMLError as err: raise ValueError('invalid config') from err
         if not isinstance(cfg,dict): raise ValueError('invalid config')
         model=cfg.get('model',{})
