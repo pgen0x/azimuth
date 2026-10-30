@@ -75,11 +75,12 @@ class RentTransaction {
   add(instruction) { rentInstructions.push(instruction); return this; }
   compileMessage() { return {}; }
 }
+let swapSigns = 0; // swap transactions signed, so refused paths can prove 'not signed'
 class SwapTransaction {
   constructor(message) { this.message = message; this.signatures = [Buffer.from([1])]; }
   static deserialize() { return new SwapTransaction({ header: { numRequiredSignatures: 1 }, staticAccountKeys: [wallet.publicKey], addressTableLookups: [], instructions: [],
     serialize() { return Buffer.from(JSON.stringify({blockhash:this.recentBlockhash,instructions:this.instructions})); } }); }
-  sign() {}
+  sign() { swapSigns++; }
   serialize() { return Buffer.from(this.message.recentBlockhash || "unsigned"); }
 }
 const deps = {
@@ -574,7 +575,7 @@ vm.runInNewContext("const productionExitTransport=confirmExitTransaction;confirm
     if (url.includes("/quote?")) {
       const bps = Number(new URL(url).searchParams.get("slippageBps"));
       const i = quoteCalls.length; quoteCalls.push(bps);
-      if (quoteFailure && i === quoteFailureIndex) return {ok:false,status:quoteFailure,text:async()=>JSON.stringify({errorCode:quoteErrorCode})};
+      if (quoteFailure && (quoteFailureIndex instanceof Set ? quoteFailureIndex.has(i) : i === quoteFailureIndex)) return {ok:false,status:quoteFailure,text:async()=>JSON.stringify({errorCode:quoteErrorCode})};
       const out = quotedOutputs[Math.min(i, quotedOutputs.length-1)];
       const q = {inputMint:"TOKEN",outputMint:"So11111111111111111111111111111111111111112",
         inAmount:"100000000",outAmount:out,swapMode:"ExactIn",slippageBps:bps,
@@ -660,10 +661,10 @@ vm.runInNewContext("const productionExitTransport=confirmExitTransaction;confirm
   await assert.rejects(smallRecovery(),/429/);assert.equal(swapRequests.length,0);
   for (const impact of [undefined,null,false,""," ","NaN","Infinity","0.01junk","-0.1","1.01",{},[]]) {
     resetSmall();quoteAlter=q=>q.priceImpactPct=impact;
-    const beforeImpactSends=sends;
+    const beforeImpactSends=sends, beforeImpactSigns=swapSigns;
     assert.equal((await smallRecovery()).reason,"price_impact_unmeasured");
     assert.equal(swapRequests.length,0);
-    assert.equal(sends,beforeImpactSends);
+    assert.equal(sends,beforeImpactSends);assert.equal(swapSigns,beforeImpactSigns);
   }
   resetSmall();quoteAlter=q=>q.priceImpactPct="0.16";
   assert.equal((await smallRecovery()).reason,"price_impact_exceeded");assert.equal(swapRequests.length,0);
@@ -682,6 +683,36 @@ vm.runInNewContext("const productionExitTransport=confirmExitTransaction;confirm
   signatureStatus={confirmationStatus:"processed",err:null};
   assert.equal((await smallRecovery()).pending,true);assert.deepEqual(quoteCalls,[]);assert.equal(sends,smallSends);
   fs.rmSync(pendingSmall);signatureStatus=null;
+  // Strict one-lamport fallback: eligibility predicates and exact zero-step binding.
+  // Every refusal here must build no /swap request, sign nothing and send nothing.
+  const thresholdAt=indexes=>{quoteFailure=400;quoteFailureIndex=indexes;quoteErrorCode="CANNOT_COMPUTE_OTHER_AMOUNT_THRESHOLD";};
+  const refusedUnsigned=async(call,reason,calls)=>{
+    const s=sends,g=swapSigns;const r=await call();
+    assert.equal(r.success,false);if(reason)assert.equal(r.reason,reason);if(calls)assert.deepEqual(quoteCalls,calls);
+    assert.equal(swapRequests.length,0);assert.equal(sends,s);assert.equal(swapSigns,g);
+  };
+  // (a) Without a net-recovery floor there is no zero-slippage requote.
+  resetSmall(["1"]);thresholdAt(0);
+  await refusedUnsigned(()=>swapToken("TOKEN",settlementSol,"raw:100000000",15,300,null),"swap_quote_threshold_unavailable",[300]);
+  // (b) Without owned settlement inventory there is no zero-slippage requote.
+  delete env.DLMM_SETTLEMENT_POSITION;
+  resetSmall(["1"]);thresholdAt(0);
+  await refusedUnsigned(()=>swapToken("TOKEN",settlementSol,0.1,15,300,1),"swap_quote_threshold_unavailable",[300]);
+  env.DLMM_SETTLEMENT_POSITION=settlementPosition;
+  // (c) A one-lamport quote at ordinary slippage keeps the ordinary impact ceiling.
+  resetSmall(["1"]);quoteAlter=q=>q.priceImpactPct="0.262";
+  await refusedUnsigned(()=>swapToken("TOKEN",settlementSol,"raw:100000000",15,100,1),"price_impact_exceeded",[100]);
+  // (d) The zero-slippage quote must stay exact: mode, echo, amounts and mints.
+  for (const alter of [q=>q.swapMode="ExactOut",q=>q.slippageBps=50,q=>q.inAmount="100000001",
+      q=>q.inputMint="OTHER",q=>q.outputMint="OTHER",q=>q.outAmount="2",q=>q.otherAmountThreshold="2"]) {
+    resetSmall(["250000","250000","1"]);thresholdAt(1);quoteAlter=(q,i)=>{if(i===2)alter(q);};
+    await refusedUnsigned(smallRecovery,null,[100,300,0]);
+  }
+  // (e) A second threshold failure at zero slippage ends the ladder: no fourth quote.
+  resetSmall(["250000","250000","1"]);thresholdAt(new Set([1,2]));
+  await refusedUnsigned(smallRecovery,"swap_quote_threshold_unavailable",[100,300,0]);
+  assert.deepEqual(quoteDelays,[2100,2100]);
+  resetSmall();
   await assert.rejects(swapToken("TOKEN","SOL","raw:100000000",15,300,1,true),/Small-settlement allowance/);
   await assert.rejects(swapToken("TOKEN","SOL","raw:100000000",15,100,null,true),/Small-settlement allowance/);
   delete env.DLMM_SETTLEMENT_POSITION;
