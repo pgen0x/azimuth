@@ -5,7 +5,21 @@ from types import SimpleNamespace
 from datetime import datetime, timedelta, time as clock
 from zoneinfo import ZoneInfo
 
-SECRET = re.compile(r"(password|secret|credential|authorization|api.?key|private.?key|access.?token|bot.?token|system_prompt|model_config|origin_json)", re.I)
+SECRET = re.compile(r"(password|passwd|passphrase|secret|credential|authorization|mnemonic|seed[_-]?phrase|api.?key|private.?key|access.?token|auth.?token|bot.?token|refresh.?token|system_prompt|model_config|origin_json)", re.I)
+# Public identity fields are not credentials, even when written in upper case.
+PUBLIC_FIELDS = frozenset(('tokenid', 'token_id', 'pool', 'poolid', 'pool_id', 'mint',
+    'address', 'pubkey', 'public_key', 'solana_public_key', 'base_mint', 'quote_mint',
+    'input_mint', 'output_mint', 'token_address', 'pool_address'))
+SECRET_NAMES = frozenset(('key', 'token', 'auth', 'seed', 'private', 'bearer', 'rpc', 'url'))
+ENV_SECRET = re.compile(r'KEY|TOKEN|AUTH|SECRET|PASS|MNEMONIC|SEED|PRIVATE|BEARER|RPC|URL')
+
+
+def secret_name(name):
+    name = str(name)
+    if name.lower() in PUBLIC_FIELDS:
+        return False
+    return (name.lower() in SECRET_NAMES or bool(SECRET.search(name))
+            or (name.isupper() and bool(ENV_SECRET.search(name))))
 # Owner policy: the dashboard reports this bot only, never a comparison with another bot.
 # Keys are dropped on generic markers; an operator adds names through DASHBOARD_HIDE_KEYS
 # (comma-separated, case-insensitive substrings), so no name has to live in this repository.
@@ -27,23 +41,29 @@ def unit_list(extra=None):
     raw = os.environ.get('DASHBOARD_EXTRA_UNITS', '') if extra is None else extra
     more = [u.strip() for u in raw.split(',') if UNIT_NAME.match(u.strip()) and u.strip() not in UNITS]
     return [*UNITS, *dict.fromkeys(more)][:len(UNITS) + 16]
-# Any scheme, any case: wss:// and HTTPS:// RPC endpoints carry keys as often as https:// does.
-URL = re.compile(r"(?i)\b[a-z][a-z0-9+.-]{0,15}://[^\s\"'<>]+")
-# A secret-like name followed by = or : (bare, quoted or JSON) masks the REST OF THE LINE: values can be quoted,
-# contain spaces (a mnemonic) or be followed by more secrets, so nothing after the name is kept.
-SECRET_LINE = re.compile(r"""(?im)(["']?)\b([a-z0-9_.-]*(?:password|passwd|passphrase|secret|credential|mnemonic|seed[_-]?phrase|private[_-]?key|api[_-]?key|access[_-]?token|auth[_-]?token|bot[_-]?token|refresh[_-]?token|authorization|rpc[_-]?url|webhook[_-]?url)[a-z0-9_.-]*)\1[ \t]*[:=][ \t]*\S.*$""")
-# Upper-case environment names (HELIUS_API_KEY, REDISCLI_AUTH, ...). Case-sensitive, so tokenId= stays.
-ENV_LINE = re.compile(r"(?m)\b([A-Z][A-Z0-9_]*_(?:KEY|TOKEN|SECRET|AUTH|URL|PASS|PASSWORD|MNEMONIC|SEED))\b[ \t]*[:=][ \t]*\S.*$")
+# RFC-style schemes have no fixed length limit; endpoint paths may contain credentials.
+URL = re.compile(r"(?i)\b[a-z][a-z0-9+.-]*://[^\s\"'<>]+")
+# Inspect every assignment/header name, so a public field before a secret cannot hide it.
+ASSIGNMENT = re.compile(r"""(?<![\w.-])(["']?)([a-zA-Z_][a-zA-Z0-9_.-]*)\1[ \t]*[:=]""")
+INLINE_CREDENTIAL = re.compile(r'(?i)\b(?:bearer[ \t]+|sk-)[A-Za-z0-9_.-]+.*$')
+
 
 def redact_text(value):
-    value = URL.sub('[endpoint masked]', value)
-    value = SECRET_LINE.sub(lambda m: m[2]+'=[masked to end of line]', value)
-    value = ENV_LINE.sub(lambda m: m[1]+'=[masked to end of line]', value)
-    return re.sub(r'(?i)\b(bearer\s+|sk-)[A-Za-z0-9_.-]+', '[masked]', value)
+    lines = []
+    for line in value.splitlines(keepends=True):
+        for match in ASSIGNMENT.finditer(line):
+            if secret_name(match[2]):
+                ending = line[len(line.rstrip('\r\n')):]
+                line = line[:match.start()] + match[2] + '=[masked to end of line]' + ending
+                break
+        line = URL.sub('[endpoint masked]', line)
+        lines.append(INLINE_CREDENTIAL.sub('[masked to end of line]', line))
+    return ''.join(lines)
+
 
 def clean(value):
     if isinstance(value, dict):
-        return {clean(str(k)): '[masked]' if SECRET.search(str(k)) else clean(v) for k,v in value.items()}
+        return {clean(str(k)): '[masked]' if secret_name(k) else clean(v) for k,v in value.items()}
     if isinstance(value, list): return [clean(v) for v in value]
     if isinstance(value, str):
         return redact_text(value)
@@ -734,9 +754,10 @@ def rh_positions(memory, closes, now):
         quote = r.get('quote') if isinstance(r.get('quote'), str) else ''
         pair = [x for x in (r.get('token0') or key.get('currency0'), r.get('token1') or key.get('currency1')) if isinstance(x, str)]
         f = failed.get(k)
+        token_address = next((x for x in pair if quote and x.lower() != quote.lower()), None)
         out.append({'protocol':k[0], 'token_id':k[1], 'pool':r.get('pool'), 'strategy':r.get('strategy'),
                     'quote':r.get('quoteSymbol') or ('WETH' if r.get('wethIn') else None),
-                    'token':next((x for x in pair if quote and x.lower() != quote.lower()), None),
+                    'token':token_address, 'token_address':token_address,
                     'tick_lower':r.get('tickLower'), 'tick_upper':r.get('tickUpper'), 'entry_tick':r.get('entryTick'),
                     'rung':r.get('rung'), 'rungs':r.get('rungs'), 'quote_in':r.get('quoteIn') or r.get('wethIn'),
                     'minted_at':t, 'age_s':now-t if t else None,
@@ -795,7 +816,7 @@ def rh_stranded(memory, minted):
         rows, meta = tail(memory/name, limit=50000, budget=4*1024*1024); sources.append(meta)
         for r in rows:
             if isinstance(r.get('token'), str): latest[(proto, r['token'].lower())] = (proto, r)
-    out = [{'protocol':proto, 'token':r.get('token'), 'symbol':r.get('symbol'), 'amount_raw':r.get('amount'),
+    out = [{'protocol':proto, 'token':r.get('token'), 'token_address':r.get('token'), 'symbol':r.get('symbol'), 'amount_raw':r.get('amount'),
             'token_id':r.get('tokenId'), 'pool':pools.get((proto, str(r.get('tokenId')))), 'reason':rh_redact(r.get('reason', '')),
             'time':rh_time(r.get('ts')), 'attempts':r.get('attempts'), 'next_try':rh_time(r.get('next_try')),
             'resolved':bool(r.get('resolved')), 'quote':r.get('quote_symbol'),

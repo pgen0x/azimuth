@@ -91,8 +91,8 @@ async function render(tab, payload, fail=false) {
     unit: {Id: 'azimuth-rh-monitor.service', ActiveState: 'inactive', SubState: 'dead', UnitFileState: 'disabled'},
     modes: {status: 'ok', started_at: 1000, flags: {robinhood: false, 'rh-turnover': true}},
     logs: [{time: 300, unit: 'azimuth-rh-monitor.service', line: 'turnover re-center ok'}, {time: 200, unit: 'azimuth.service', line: 'scanner[rh-turnover]: gas spike <b>'}],
-    positions: [{protocol: 'v4', token_id: '1', pool: '0x' + 'c'.repeat(40), strategy: 'weth_below', quote: 'ETH', token: '0xT', tick_lower: -600, tick_upper: 0, minted_at: 100, age_s: 90000, last_failed_close: {time: 150, reason: 'revert'}}],
-    stranded: {open: [{symbol: 'XYZ', token: '0x' + 'd'.repeat(40), amount_raw: '107037025008', reason: 'no pool', time: 120, attempts: 4, next_try: 130}], resolved: [], sources: [{path: 'uni_stranded.jsonl', status: 'ok', rows: 1}, {path: 'uni_v4_stranded.jsonl', status: 'unavailable', rows: 0}]},
+    positions: [{protocol: 'v4', token_id: '1', pool: '0x' + 'c'.repeat(40), strategy: 'weth_below', quote: 'ETH', token: '[masked]', token_address: 'position-public-token', tick_lower: -600, tick_upper: 0, minted_at: 100, age_s: 90000, last_failed_close: {time: 150, reason: 'revert'}}],
+    stranded: {open: [{symbol: 'XYZ', token: '0x' + 'd'.repeat(40), token_address: 'stranded-public-token', amount_raw: '107037025008', reason: 'no pool', time: 120, attempts: 4, next_try: 130}], resolved: [], sources: [{path: 'uni_stranded.jsonl', status: 'ok', rows: 1}, {path: 'uni_v4_stranded.jsonl', status: 'unavailable', rows: 0}]},
     closes: {tz: 'UTC', status: 'ok', closes_total: 3, skipped: {failed: 1, dry_run: 0}, gas: {gas_eth: 0.003, gas_txs: 5, metered: 2, unmetered: 1},
       totals: {ETH: {closes: 2, measured: 1, unmeasured: 1, realized_quote: 0.01, mark_flagged: 1}, USDG: {closes: 1, measured: 0, unmeasured: 1, realized_quote: null, mark_flagged: 0}, unknown: {closes: 2, measured: 0, unmeasured: 2, realized_quote: null, mark_flagged: 0}},
       days: {'1970-01-02': {ETH: {closes: 2, measured: 1, unmeasured: 1, realized_quote: 0.01}}, '1970-01-03': {USDG: {closes: 1, measured: 0, unmeasured: 1, realized_quote: null}}},
@@ -104,6 +104,7 @@ async function render(tab, payload, fail=false) {
   assert(rh.html.includes('+0.010000') && rh.html.includes('mark: value left behind') && rh.html.includes('Unmeasured'), 'mark row is flagged, not money');
   assert(rh.html.includes('>−0.003000<') && rh.html.includes('1 unmetered'), 'gas is a cost, unmetered counted');
   assert(rh.html.includes('No USDG') === false && /hatch|url\(#h/.test(rh.html), 'unmeasured day hatched');
+  assert(rh.html.includes('position-public-token') && rh.html.includes('stranded-public-token'), 'public token address aliases survive credential masking');
   assert(rh.html.includes('107037025008') && rh.html.includes('raw units'), 'stranded amount labelled raw');
   assert(!rh.html.includes(KEY), 'no key-shaped data');
   assert(rh.log.includes('turnover re-center ok') && rh.log.includes('&lt;b&gt;') && !rh.log.includes('<b>'), 'log escaped');

@@ -423,6 +423,14 @@ SECRETS=['wss://rpc.example/v2/SYNTHETIC_CREDENTIAL_A','HTTPS://rpc.example/v2/S
          'PRIVATE_KEY: SYNTHETIC_PRIVATE_VALUE','{"api_key": "SYNTHETIC_JSON_VALUE", "next": "SYNTHETIC_TAIL"}',
          "seed_phrase = 'SYNTHETIC quoted words'",'HELIUS_API_KEY = SYNTHETIC spaced value','Authorization: Bearer SYNTHETIC_BEARER',
          'ws://127.0.0.1:8899/SYNTHETIC_LOCAL_RPC']
+SECRETS += [name + '=SYNTHETIC_VALUE public tail' for name in (
+    'TOKEN', 'KEY', 'AUTH', 'CUSTOM_TOKEN_SUFFIX', 'SECRET', 'PASSWORD', 'MNEMONIC',
+    'SEED', 'PRIVATE', 'API_KEY', 'BEARER', 'PREFIX_KEY_SUFFIX', 'TOKEN_PREFIX',
+    'RPC', 'URL')]
+SECRETS += ['tokenId=817 pool=0xabc TOKEN=SYNTHETIC_AFTER_PUBLIC',
+            'Authorization: Basic SYNTHETIC_BASIC public tail',
+            'Bearer SYNTHETIC_INLINE public tail', 'sk-SYNTHETIC_INLINE public tail',
+            'VERYLONGCUSTOMENDPOINTSCHEME+TLS://rpc.example/SYNTHETIC_LONG_SCHEME']
 LEAKS=('SYNTHETIC','bravo','lima','rpc.example','127.0.0.1')
 
 class RedactionTests(unittest.TestCase):
@@ -438,23 +446,67 @@ class RedactionTests(unittest.TestCase):
         kept='tokenId=817 gas 0.0001 ETH re-center; token_id: 5; pool=0xabc'
         self.assertEqual(c.clean(kept),kept);self.assertEqual(c.rh_redact(kept),kept)
         self.assertEqual(c.clean('first line ok\nPRIVATE_KEY=x y\nlast line ok'),'first line ok\nPRIVATE_KEY=[masked to end of line]\nlast line ok')
+    def test_nested_secret_keys_and_public_identifiers_in_final_payload(self):
+        profile=self.m/'p';memory=profile/'memories';memory.mkdir(parents=True);state=self.m/'s';state.mkdir()
+        names=['mnemonic','seed','seed_phrase','private_key','secret','token','password','api_key','auth',
+               'TOKEN','KEY','AUTH','CUSTOM_TOKEN_SUFFIX','PRIVATE','BEARER','Authorization']
+        secrets={name: {'nested': ['SYNTHETIC_STRUCTURED_SECRET']} for name in names}
+        public={'tokenId':'817','token_id':'818','TOKEN_ID':'819','pool':'pool-public',
+                'pool_id':'pool-id-public','mint':'mint-public','address':'address-public',
+                'public_key':'key-public','SOLANA_PUBLIC_KEY':'wallet-public',
+                'token_address':'token-public','base_mint':'base-public'}
+        evidence={'outer':[{'fields':secrets,'public':public}]}
+        rows(memory/'dlmm_closes.jsonl',[{'position':'p','closed_at':2,'evidence':evidence}])
+        with patch.object(c.subprocess,'run',runner()),patch.object(c,'bounded_run',rh_run()):
+            d=c.collect(profile,state,1,('UTC',))
+        result=next(e['evidence']['evidence']['outer'][0] for e in d['journal'] if e['stage']=='exit')
+        self.assertEqual(result['fields'], {name:'[masked]' for name in names})
+        self.assertEqual(result['public'],public)
+        self.assertClean(d)
+        public_line=' '.join(name+'='+value for name,value in public.items())
+        self.assertEqual(c.clean(public_line),public_line)
+        self.assertEqual(c.rh_redact(public_line),public_line)
+        self.assertEqual(c.clean({'outer':[public]}),{'outer':[public]})
+
+    def test_line_masking_keeps_following_public_lines(self):
+        for name in ('TOKEN','KEY','AUTH','MNEMONIC','SEED','PRIVATE','BEARER','CUSTOM_TOKEN_SUFFIX'):
+            with self.subTest(name=name):
+                raw='public first\r\n'+name+'="SYNTHETIC value" public tail\r\ntokenId=817 mint=public\n'
+                self.assertEqual(c.clean(raw),'public first\r\n'+name+'=[masked to end of line]\r\ntokenId=817 mint=public\n')
+
     def test_final_api_composition_for_every_log_panel(self):
         """collect() is exactly what the Go server caches and serves: journal evidence, Robinhood logs,
         close reasons, failed-close reasons on open positions and stranded reasons all pass through it."""
         profile=self.m/'p';memory=profile/'memories';memory.mkdir(parents=True);state=self.m/'s';state.mkdir()
-        line=' | '.join(SECRETS)
         rows(state/'solana_rejects.jsonl',[{'ts':1,'reason':s,'gate':'g'} for s in SECRETS])
         rows(memory/'dlmm_closes.jsonl',[{'position':'p','closed_at':2,'reason':s,'error':s} for s in SECRETS])
         rows(memory/'uni_closes.jsonl',[{'ts':3,'tokenId':str(i),'success':i>0,'quote_symbol':'WETH','reason':s} for i,s in enumerate(SECRETS)]+
-                                       [{'ts':3,'tokenId':'99','success':False,'reason':line}])
-        rows(memory/'uni_positions.jsonl',[{'tokenId':'99','pool':'0xp','ts':1}])
+                                       [{'ts':3,'tokenId':'failed'+str(i),'success':False,'reason':secret} for i,secret in enumerate(SECRETS)])
+        rows(memory/'uni_positions.jsonl',[{'tokenId':'failed'+str(i),'pool':'0xp','ts':1,'token0':'public-token','token1':'public-quote','quote':'public-quote'} for i in range(len(SECRETS))])
         rows(memory/'uni_stranded.jsonl',[{'ts':4,'tokenId':'99','token':'0x%d' % i,'symbol':'S','amount':'1','reason':s,'resolved':False} for i,s in enumerate(SECRETS)])
+        # Hermes session metadata is another panel served from the same final payload.
+        import sqlite3
+        with sqlite3.connect(profile/'state.db') as db:
+            db.execute('CREATE TABLE sessions (id, source, model, started_at, ended_at, end_reason, message_count, tool_call_count, chat_id)')
+            db.executemany('INSERT INTO sessions VALUES (?,?,?,?,?,?,?,?,?)',
+                [(str(i),secret,secret,1,None,secret,0,0,'') for i,secret in enumerate(SECRETS)])
         log=[(10+i,s) for i,s in enumerate(SECRETS)]
-        with patch.object(c.subprocess,'run',runner()),patch.object(c,'bounded_run',rh_run(log=log)):
+        def log_run(argv, **kwargs):
+            if argv[0]=='journalctl' and 'azimuth.service' in argv and 'scanner: started' not in argv:
+                return SimpleNamespace(stdout=''.join(json.dumps({'MESSAGE':'scanner[rh-turnover]: '+secret,
+                    '__REALTIME_TIMESTAMP':str((100+i)*1000000)})+'\n' for i,secret in enumerate(SECRETS)),
+                    stderr='',returncode=0,capture_status='ok')
+            return rh_run(log=log)(argv, **kwargs)
+        with patch.object(c.subprocess,'run',runner()),patch.object(c,'bounded_run',log_run):
             d=c.collect(profile,state,1,('UTC','America/Sao_Paulo'))
         rh=d['robinhood']
-        self.assertEqual(len(rh['logs']),len(SECRETS));self.assertEqual(len(rh['stranded']['open']),len(SECRETS))
-        self.assertTrue(rh['positions'][0]['last_failed_close']['reason'])
+        self.assertEqual(len(rh['logs']),2*len(SECRETS));self.assertEqual(len(rh['stranded']['open']),len(SECRETS))
+        self.assertEqual({row['unit'] for row in rh['logs']},{'azimuth.service','azimuth-rh-monitor.service'})
+        self.assertEqual(len(rh['positions']),len(SECRETS))
+        self.assertTrue(all(p['last_failed_close']['reason'] for p in rh['positions']))
+        self.assertTrue(d['hermes']['sessions'])
+        self.assertTrue(all(p['token_address']=='public-token' and p['token']=='[masked]' for p in rh['positions']))
+        self.assertEqual({p['token_address'] for p in rh['stranded']['open']},{'0x%d' % i for i in range(len(SECRETS))})
         self.assertTrue(any(e['stage']=='gate' for e in d['journal']));self.assertTrue(any(e['stage']=='exit' for e in d['journal']))
         self.assertEqual(len(d['by_tz']['UTC']['robinhood']['closes']),len(SECRETS)-1)
         self.assertClean(d)
