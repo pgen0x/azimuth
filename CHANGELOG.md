@@ -5,6 +5,14 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.14.1](https://github.com/pgen0x/azimuth/compare/v2.14.0...v2.14.1) (2026-10-30)
+
+
+### Bug Fixes
+
+* **accounting:** validate NAV price evidence and distinguish missing marks ([32374df](https://github.com/pgen0x/azimuth/commit/32374df7c2623d34ce02e06a17488ccf5012a218))
+* **accounting:** validate spot mark provenance and explain unmeasured NAV ([60fd87d](https://github.com/pgen0x/azimuth/commit/60fd87dbcedcc124354cc35fb151ce474fa693a3))
+
 ## [2.14.0](https://github.com/pgen0x/azimuth/compare/v2.13.0...v2.14.0) (2026-10-30)
 
 
