@@ -60,8 +60,12 @@ def wants_review(p):
         return "oor"
     yield_age_min = (YIELD_CHECK_AGE_MIN_PULSE if p.get("mode") == "pulse"
                      else YIELD_CHECK_AGE_MIN)
+    # The monitor reports null when fee yield is unavailable; unknown yield cannot
+    # fire the low-yield rule, so it must not wake a review for it either.
+    fee = p.get("fee_per_tvl_24h")
     if (p.get("age_minutes", 0) >= yield_age_min
-            and p.get("fee_per_tvl_24h", 0) < YIELD_BAND_FEE_TVL):
+            and isinstance(fee, (int, float)) and not isinstance(fee, bool)
+            and fee < YIELD_BAND_FEE_TVL):
         return "low-yield"
     if p.get("trailing_active") or p.get("peak_pnl", 0) >= TRAILING_ARM_PCT:
         return "trailing"

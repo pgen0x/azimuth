@@ -31,10 +31,22 @@ while true; do
     set +a
 
     "$PYTHON" "$SCRIPT_DIR/dlmm_monitor.py"
+    # Learning can read a large accounting history. Keep it off the risk path,
+    # with the same 60s bound and at most one refresh worker in this loop.
+    # dlmm_weights.py retains its six-hour recalculation guard.
+    if [ -z "${weights_pid:-}" ] || ! kill -0 "$weights_pid" 2>/dev/null; then
+        timeout 60 "$PYTHON" "$SCRIPT_DIR/dlmm_weights.py" --quiet &
+        weights_pid=$!
+    fi
     # Settlement must not stall risk checks for other open positions.
     if [ -z "${settlement_pid:-}" ] || ! kill -0 "$settlement_pid" 2>/dev/null; then
         "$PYTHON" "$SCRIPT_DIR/dlmm_monitor.py" --settle-pending &
         settlement_pid=$!
+    fi
+    # Event delivery has its own bounded worker; never hold up settlement/risk.
+    if [ -z "${alert_pid:-}" ] || ! kill -0 "$alert_pid" 2>/dev/null; then
+        "$PYTHON" "$SCRIPT_DIR/dlmm_alerts.py" &
+        alert_pid=$!
     fi
     # Daily scoreboard — deterministic dlmm_stats.py card via `hermes send`
     # (zero LLM). Hour + timezone are operator-set (profile .env): DLMM_TZ

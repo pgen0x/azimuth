@@ -25,7 +25,7 @@ def main():
             assert "--empty-only" in cmd.call_args.args[0]
             queue.assert_not_called()
 
-    # Replay production eligibility and both profitable-exit cooldown shortcuts.
+    # Replay production eligibility and cooldown handling before cash settlement.
     tree = ast.parse(Path(monitor.__file__).read_text())
     # Exercise the real risk classifiers and the normal close call: an ordinary
     # close must not acquire an emergency fill allowance just because it loses.
@@ -81,7 +81,7 @@ def main():
     shortcuts = [n.test for n in ast.walk(tree) if isinstance(n, ast.If)
                  and any(isinstance(c, ast.Call) and isinstance(c.func, ast.Name)
                          and c.func.id == "adverse_exit" for c in ast.walk(n.test))]
-    assert len(shortcuts) == 2
+    assert len(shortcuts) == 0  # LP marks cannot authorize profit cooldowns
     ns = dict(mode_cd="turnover", strategy="sol_bidask", emergency_close=False,
               realized_sol=0.0015, rebalance_budget_ok=True, adverse_exit=monitor.adverse_exit)
     for reason, allowed in [("Fast-out dump exit (5m -8.6%, PnL +1.29%)", False),
@@ -97,6 +97,37 @@ def main():
     for reason in ("Low yield", "Fee pace death"):
         ns["reason_lower"] = reason.lower()
         assert not eval(compile(ast.Expression(churn), "exit-policy", "eval"), ns)
+
+    # Execute both real loss-streak branches with marked wins that later lost
+    # cash (Normie +0.000218 mark / -0.001209247 cash), zero, and repeat losses.
+    loss_branches = [n for n in ast.walk(tree) if isinstance(n, ast.If)
+                     and ast.unparse(n.test) == "realized_sol < 0"
+                     and "loss_streak" in ast.unparse(n)]
+    assert len(loss_branches) == 2
+    for branch in loss_branches:
+        for mark in (0.000218, 0.0, -0.001):
+            writes = []
+            def command(cmd):
+                writes.append(cmd)
+                return ("2" if "redis-cli get " in cmd else "", "", 0)
+            scope = dict(realized_sol=mark, run_command=command,
+                         loss_streak_key="sol:dlmm:loss_streak:TOKEN",
+                         base_symbol_cd="TOKEN", cooldown_key="cooldown",
+                         mint_cd_key="mint-cooldown", cooldown_secs=3600,
+                         pnl_key="pnl", reason_lower="take-profit")
+            with contextlib.redirect_stdout(io.StringIO()):
+                exec(compile(ast.Module(body=[branch], type_ignores=[]),
+                             "marked-profit-cooldown-replay", "exec"), scope)
+            assert not any("redis-cli del " in cmd for cmd in writes), writes
+            assert not any(cmd.endswith(" 900") for cmd in writes), writes
+            if mark >= 0:
+                assert not writes, writes
+            else:
+                assert any("redis-cli incr " in cmd for cmd in writes)
+                assert (scope["cooldown_secs"] == 86400
+                        or any(cmd.endswith(" 86400") for cmd in writes))
+    assert not any(isinstance(n, ast.Assign) and ast.unparse(n) == "cooldown_secs = 900"
+                   for n in ast.walk(tree))
 
     cli = SimpleNamespace(mode="turnover", from_batch=json.dumps([{"pool": "A"*32}]), from_signal=None)
     with patch.object(pipeline, "run_command", return_value=("1", "", 0)) as command:
@@ -291,6 +322,26 @@ def main():
         assert again.call_count == 2
         path.unlink()
 
+    # Previously deferred dust must not consume the only settlement slot while
+    # an executable exit is pending. Keep retry fairness within pending exits,
+    # then retry deferred inventory once those exits have cleared.
+    with tempfile.TemporaryDirectory() as tmp, patch.object(monitor, "SETTLEMENT_DIR", tmp), \
+         patch.object(monitor, "get_wallet_address", return_value="wallet"), \
+         patch.object(monitor, "position_live_onchain", return_value=False), \
+         patch.object(monitor, "get_meteora_portfolio_positions", return_value=({}, None)), \
+         patch.object(monitor, "run_command", return_value=("1", "", 0)):
+        markers = [dict(position="dust", mint="DUST", state="deferred", last_attempt=0),
+                   dict(position="exitB", mint="B", state="pending", last_attempt=20),
+                   dict(position="exitA", mint="A", state="pending", last_attempt=10)]
+        for marker in markers:
+            Path(tmp, marker["position"] + ".json").write_text(json.dumps(marker))
+        for expected in ("exitA", "exitB", "dust"):
+            with patch.object(monitor, "run_command_json", return_value=({"success": True, "amount_raw": "0"}, None)) as run:
+                monitor.settle_pending()
+            assert run.call_count == 1
+            assert f"settlement-balance {expected} " in run.call_args.args[0]
+            assert not Path(tmp, expected + ".json").exists()
+
     # Empty indexer results never authorize deletion of a live/unknown position,
     # including orphan metadata and its risk-state keys.
     class EmptyPortfolio:
@@ -317,13 +368,15 @@ def main():
 
     # Run the actual monitor missing-position branch with the same three RPC verdicts.
     tree = ast.parse(Path(monitor.__file__).read_text())
-    branch = next(n for n in ast.walk(tree) if isinstance(n, ast.If)
-                  and ast.unparse(n.test) == "not bp and (not is_dry_run_stored)")
+    branches = [n for n in ast.walk(tree) if isinstance(n, ast.If)
+                and ast.unparse(n.test) == "not bp and (not is_dry_run_stored)"]
+    assert len(branches) == 2  # native recovery, then conservative cleanup
     wrapper = ast.Module(body=[ast.For(target=ast.Name(id="tick",ctx=ast.Store()),
-        iter=ast.List(elts=[ast.Constant(1)],ctx=ast.Load()),body=[branch],orelse=[])],type_ignores=[])
+        iter=ast.List(elts=[ast.Constant(1)],ctx=ast.Load()),body=branches,orelse=[])],type_ignores=[])
     for live in (True, None, False):
         commands=[]
-        ns=dict(bp=None,is_dry_run_stored=False,api_available=True,meta={"deployed_at":1},
+        ns=dict(vars(monitor), bp=None,is_dry_run_stored=False,api_available=True,meta={"deployed_at":1},
+                pool="pool",run_command_json=lambda *a, **kw: (None, "unavailable"),
                 now=10000,pos_addr="position",pair="TOKEN-SOL",position_live_onchain=lambda _:live,
                 run_command=commands.append,print=lambda *args:None)
         exec(compile(ast.fix_missing_locations(wrapper),"monitor-prune","exec"),ns)
@@ -344,7 +397,7 @@ def main():
                 ns=dict(get_active_positions=lambda:initial,
                     get_position_metadata=lambda _:existing,
                     get_wallet_address=lambda:"wallet",
-                    get_meteora_portfolio_positions=lambda _:({"position": {
+                    get_meteora_portfolio_positions=lambda _, timeout=None:({"position": {
                         "pool":"pool", "balances_sol":0.11}}, None),
                     recover_position_metadata=lambda *_:{"pair":"TOKEN-SOL", "mode":"turnover",
                         "base_mint":"TOKEN", "dev":"developer", "signal":{"holders":0},

@@ -1280,7 +1280,7 @@ async function getPositionPnl(poolAddressStr, positionAddressStr) {
     active_bin: found.poolActiveBinId ?? null,
     lower_bin: found.lowerBinId ?? null,
     upper_bin: found.upperBinId ?? null,
-    fee_per_tvl_24h: found.feePerTvl24h ? parseFloat(found.feePerTvl24h) : 0
+    fee_per_tvl_24h: found.feePerTvl24h != null && typeof found.feePerTvl24h !== "boolean" && String(found.feePerTvl24h).trim() !== "" && Number.isFinite(Number(found.feePerTvl24h)) && Number(found.feePerTvl24h) >= 0 ? Number(found.feePerTvl24h) : null
   };
 }
 

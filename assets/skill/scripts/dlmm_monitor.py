@@ -221,13 +221,42 @@ def flush_tick_observers(pending):
             print('TICK_OBSERVATION_ERROR ' + type(error).__name__)
 
 
-def get_meteora_portfolio_positions(wallet_address):
+def observed_fee_yield(data):
+    """Unknown yield cannot become an observed zero or trigger a low-yield exit."""
+    if not isinstance(data, dict) or data.get("fee_per_tvl_24h_available") is False:
+        return None
+    raw = data.get("fee_per_tvl_24h")
+    if isinstance(raw, bool) or not isinstance(raw, (int, float, str)):
+        return None
+    try:
+        value = float(raw)
+    except (ValueError, OverflowError):
+        return None
+    return value if math.isfinite(value) and value >= 0 else None
+
+
+# The young in-range stop-loss grace needs the 24h fee rate. Native-first valuation skips the
+# per-position indexed read that used to supply it, so the SL branch fetches it on its own, bounded,
+# and only for that non-emergency decision. A failed or unknown read grants no grace. The bound is the
+# base read's own 30 s (run_command_json's default): a shorter one would close where the base deferred.
+SL_GRACE_FEE_TIMEOUT_SECS = 30
+
+
+def sl_grace_fee_context(data):
+    """(fee_per_tvl_24h, available) from an indexed per-position read; (0.0, False) when unknown."""
+    if not isinstance(data, dict) or data.get("success") is False:
+        return 0.0, False
+    fee = observed_fee_yield(data)
+    return (fee, True) if fee is not None else (0.0, False)
+
+
+def get_meteora_portfolio_positions(wallet_address, *, timeout=15):
     """Returns dict keyed by position address using Meteora Portfolio HTTP API.
     More reliable than DLMM SDK getAllLbPairPositionsByUser which requires fully initialized bin arrays."""
     try:
         url = f"{METEORA_PORTFOLIO_API}?user={wallet_address}"
         req = urllib.request.Request(url, headers={"User-Agent": "dlmm-lp/1.0"})
-        with urllib.request.urlopen(req, timeout=15) as resp:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
             data = json.loads(resp.read())
         sol_price_usd = float(data.get("solPrice") or 0.0)
         result = {}
@@ -254,7 +283,7 @@ def get_meteora_portfolio_positions(wallet_address):
                     "pnl_pct": float(pnl_pct) if pnl_pct is not None else None,
                     "pnl_sol": float(pnl_sol) if pnl_sol is not None else None,
                     "pnl_currency": "SOL",
-                    "fee_per_tvl_24h": float(pool_data.get("feePerTvl24h") or 0.0),
+                    "fee_per_tvl_24h": observed_fee_yield({"fee_per_tvl_24h": pool_data.get("feePerTvl24h")}),
                     "pool_price": float(pool_data.get("poolPrice") or 0.0),
                     "bin_step": float(pool_data.get("binStep") or 0.0),
                     "unclaimed_fees_sol": float(pool_data.get("unclaimedFeesSol") or 0.0),
@@ -735,31 +764,12 @@ def maybe_blacklist_rug(meta, pnl_pct, rug_event=None, live_liquidity_usd=None,
                   f"({offenses} distinct mints; {reason})")
 
 def send_event_alert(text):
-    """Push an event alert straight to the operator via `hermes send` — script-side
-    platform delivery that reuses the gateway's credentials (no LLM, no agent loop),
-    so trade events land in seconds instead of waiting for the next cron report.
-    Target comes from DLMM_ALERT_TARGET in the profile .env ("telegram",
-    "telegram:<chat_id>", "discord:#ops", ...); set it empty to disable alerts.
-    Best-effort: a delivery failure must never break the monitor tick."""
-    target = os.environ.get("DLMM_ALERT_TARGET", "telegram")
-    if not target:
-        return
-    import tempfile
-    path = None
+    """Persist operator alerts; network delivery must not delay settlement."""
     try:
-        with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as tf:
-            tf.write(text)
-            path = tf.name
-        subprocess.run(["hermes", "send", "-t", target, "-f", path, "-q"],
-                       timeout=30, capture_output=True)
-    except Exception as e:
-        print(f"⚠️ Event alert delivery failed (non-fatal): {e}")
-    finally:
-        if path:
-            try:
-                os.unlink(path)
-            except OSError:
-                pass
+        from dlmm_alerts import enqueue
+        enqueue(PROFILE_DIR, os.environ.get("DLMM_ALERT_TARGET", "telegram"), text)
+    except (OSError, ValueError) as exc:
+        print(f"⚠️ Event alert enqueue failed (non-fatal): {exc}")
 
 
 def trailing_floor_pct(peak_pnl, trailing_drop_pct):
@@ -908,7 +918,8 @@ def log_close(pool, pair, meta, pos_addr, pnl_pct, realized_sol, fee_per_tvl_24h
         "base_mint": meta.get("base_mint"),
         "mode": meta.get("mode"),
         "pnl_pct": round(float(pnl_pct), 4),
-        "pnl_sol": round(float(realized_sol), 6) if realized_sol is not None else None,
+        # Preserve a lamport: six decimals silently turn small losses into zero.
+        "pnl_sol": round(float(realized_sol), 9) if realized_sol is not None else None,
         "fee_per_tvl_24h": round(float(fee_per_tvl_24h), 4),
         "age_min": round(float(age_min), 1),
         # Canary arm (PULSE_HOLD_CANARY); null when the flag is off or the mode is not pulse.
@@ -1192,17 +1203,27 @@ def get_pool_liquidity_usd(pool, base_mint):
                 continue
             match = None
             for p in pairs:
-                if (p.get("pairAddress") or "").lower() == pool.lower():
+                if p.get("pairAddress") == pool and p.get("chainId", "solana") == "solana":
                     match = p
                     break
             if match is None:
                 continue
-            liq = float((match.get("liquidity") or {}).get("usd") or 0.0)
+            def finite_market_number(value):
+                if value is None or isinstance(value, bool):
+                    return None
+                try:
+                    number = float(value)
+                    return number if math.isfinite(number) else None
+                except (TypeError, ValueError):
+                    return None
+            liq = finite_market_number((match.get("liquidity") or {}).get("usd"))
+            if liq is not None and liq < 0:
+                liq = None
             changes = match.get("priceChange") or {}
             h1_raw = changes.get("h1")
-            h1 = float(h1_raw) if h1_raw is not None else None
+            h1 = finite_market_number(h1_raw)
             m5_raw = changes.get("m5")
-            m5 = float(m5_raw) if m5_raw is not None else None
+            m5 = finite_market_number(m5_raw)
             # Drop an impossible reading rather than the whole response: the
             # liquidity figure beside it is still usable, and every caller
             # already treats None as "unknown, do not act".
@@ -1424,7 +1445,11 @@ def settle_pending():
                 candidates.append((item.get("last_attempt", 0), path, item))
             except (OSError, ValueError) as exc:
                 print(f"⚠️ Invalid settlement marker {name}: {exc}")
-    for _, path, item in sorted(candidates):
+    # Previously unrouteable/uneconomic inventory must not displace a pending
+    # exit from this worker's single attempt. Preserve oldest-attempt fairness
+    # within each class; deferred inventory retains its 15-minute backoff.
+    for _, path, item in sorted(candidates, key=lambda candidate: (
+            candidate[2].get("state") == "deferred", candidate[0], candidate[1])):
         pos, mint = item["position"], item["mint"]
         # Keep unavailable/uneconomic inventory explicit and retry at a bounded
         # cadence. It is neither settled nor valued at zero.
@@ -1599,7 +1624,7 @@ def recover_position_metadata(pos_addr, pool):
 
 def build_report_row(pos_addr, pair, pool, meta, pool_liquidity_usd, pnl_pct, pnl_sol_actual,
                       in_range, fee_per_tvl_24h, api_available, bp, active_price, entry_price,
-                      peak_pnl, trailing_active, close_reason, now):
+                      peak_pnl, trailing_active, close_reason, now, *, fee_yield_available=True):
     """Builds one status-table row dict, shared by --report-only and live (HOLD) runs
     so both render through the same Telegram template instead of drifting per-run."""
     oor_val, _, _ = run_command(f"redis-cli get sol:dlmm:position:{pos_addr}:oor_since")
@@ -1616,14 +1641,14 @@ def build_report_row(pos_addr, pair, pool, meta, pool_liquidity_usd, pnl_pct, pn
         "pool_liquidity_usd": round(pool_liquidity_usd, 0) if pool_liquidity_usd is not None else None,
         "strategy": meta.get("strategy", "spot"),
         "pnl_pct": round(pnl_pct, 4),
-        "pnl_sol": round(pnl_sol_actual, 6) if pnl_sol_actual is not None else None,
+        "pnl_sol": round(pnl_sol_actual, 9) if pnl_sol_actual is not None else None,
         "in_range": in_range,
         "oor_minutes": round(oor_minutes, 1),
-        "fee_per_tvl_24h": round(fee_per_tvl_24h, 2),
+        "fee_per_tvl_24h": round(fee_per_tvl_24h, 2) if fee_yield_available else None,
         # Deterministic days-to-breakeven: loss% / (fee% earned per 24h).
         # Computed here so the AI does NOT do this division by hand (it gets it wrong).
         # Only meaningful when underwater AND earning fees; otherwise 0 (= no breakeven concern).
-        "break_even_days": round(abs(pnl_pct) / fee_per_tvl_24h, 2) if (pnl_pct < 0 and fee_per_tvl_24h > 0) else 0.0,
+        "break_even_days": (round(abs(pnl_pct) / fee_per_tvl_24h, 2) if (pnl_pct < 0 and fee_per_tvl_24h > 0) else 0.0) if fee_yield_available else None,
         "unclaimed_fees_sol": round(bp.get("unclaimed_fees_sol", 0.0) if (api_available and bp) else 0.0, 6),
         "pool_price": active_price,
         "entry_price": entry_price,
@@ -1662,7 +1687,9 @@ def render_status_report(report_rows, sol_price_usd, trailing_trigger_pct, min_f
             risk.append("⚠️ AI hold override active")
         else:
             risk.append("✅ No AI hold override")
-        if r["fee_per_tvl_24h"] >= min_fee_tvl_24h_limit:
+        if r["fee_per_tvl_24h"] is None:
+            risk.append("⚠️ Fee/TVL unavailable")
+        elif r["fee_per_tvl_24h"] >= min_fee_tvl_24h_limit:
             risk.append(f"✅ Healthy Fee/TVL ({r['fee_per_tvl_24h']:.2f}% ≥ {min_fee_tvl_24h_limit:.0f}% min)")
         else:
             risk.append(f"⚠️ Low Fee/TVL ({r['fee_per_tvl_24h']:.2f}% < {min_fee_tvl_24h_limit:.0f}% min)")
@@ -1674,6 +1701,8 @@ def render_status_report(report_rows, sol_price_usd, trailing_trigger_pct, min_f
             summary = f"⚠️ Rule triggered: {r['triggered_rules'][0]}. AI reviewing."
         elif not r["in_range"]:
             summary = f"⏳ Out of range {r['oor_minutes']:.0f}m. Monitoring."
+        elif r["fee_per_tvl_24h"] is None:
+            summary = "Fee yield unavailable. Monitoring position risk."
         else:
             summary = "Position healthy, earning fees. No action needed."
         # Pipe-table card: rendered natively by the deliverer's Bot API 10.1
@@ -1686,6 +1715,7 @@ def render_status_report(report_rows, sol_price_usd, trailing_trigger_pct, min_f
         if sol_price_usd:
             pnl_usd = (r['pnl_sol'] * sol_price_usd) if r.get('pnl_sol') is not None else (r['size_sol'] * (r['pnl_pct'] / 100) * sol_price_usd)
             pnl_usd_str = f" (${pnl_usd:+.2f})"
+        fee_yield_text = f"{r['fee_per_tvl_24h']:.2f}%" if r['fee_per_tvl_24h'] is not None else "unavailable"
         fees_usd_str = f" (${r['unclaimed_fees_sol'] * sol_price_usd:.2f})" if sol_price_usd else ""
         size_str = f"{r['size_sol']:.4f}".rstrip('0').rstrip('.')
         warnings = [b for b in risk if b.startswith("⚠️")]
@@ -1700,7 +1730,7 @@ def render_status_report(report_rows, sol_price_usd, trailing_trigger_pct, min_f
             "|--------|-------|",
             f"| PnL | {r['pnl_pct']:+.2f}%{pnl_usd_str} · peak {r['peak_pnl']:+.2f}% |",
             f"| Range | {range_str} · age {age_str} |",
-            f"| Fee/TVL 24h | {r['fee_per_tvl_24h']:.2f}% · unclaimed {r['unclaimed_fees_sol']:.4f} SOL{fees_usd_str} |",
+            f"| Fee/TVL 24h | {fee_yield_text} · unclaimed {r['unclaimed_fees_sol']:.4f} SOL{fees_usd_str} |",
             f"| Size | {size_str} SOL @ {r['entry_price']:.8f} → {r['pool_price']:.8f} |",
         ] + [f"- {b}" for b in warnings] + [
             "",
@@ -1879,7 +1909,7 @@ def main():
                 guard_bp = guard_bp_dict.get(cli.override_close) if guard_bp_dict else None
                 if guard_bp:
                     guard_pnl_pct = guard_bp.get("pnl_pct", 0.0)
-                    guard_fee_tvl = guard_bp.get("fee_per_tvl_24h", 0.0)
+                    guard_fee_tvl = observed_fee_yield(guard_bp) or 0.0
                     guard_in_range = not guard_bp.get("is_out_of_range", False)
                     if guard_pnl_pct is not None and guard_pnl_pct < 0 and guard_fee_tvl > 0:
                         guard_break_even = round(abs(guard_pnl_pct) / guard_fee_tvl, 2)
@@ -1968,14 +1998,8 @@ def main():
                         if mint_cd_key:
                             run_command(f"redis-cli expire \"{mint_cd_key}\" {escalated_secs}")
                         print(f"🔴 REPEAT LOSS #{loss_streak} in 7d — escalated {base_symbol_cd} cooldown to {escalated_secs // 3600}h")
-                else:
-                    run_command(f"redis-cli del \"sol:dlmm:loss_streak:{base_symbol_cd}\"")  # reset streak on profit
-                    # Match the auto-close path: profitable exit shortens to 15m.
-                    if realized_sol > 0 and not adverse_exit(reason_lower):
-                        run_command(f"redis-cli expire \"{cooldown_key}\" 900")
-                        if mint_cd_key:
-                            run_command(f"redis-cli expire \"{mint_cd_key}\" 900")
-                        print(f"🚫 Cooldown shortened to 15m for {base_symbol_cd} (profitable force-close)")
+                # A nonnegative pre-close mark is not a settled cash win. Keep
+                # the existing loss history and ordinary cooldown until expiry.
                 # operator_confirmed: this is the --close path, so "rug" in the
                 # reason was typed by a human looking at the pool. That IS the
                 # second opinion the automatic path has to fetch, and there is
@@ -2001,7 +2025,11 @@ def main():
     meteora_sol_price = 0.0
     wallet_address = get_wallet_address()
     if wallet_address:
-        bp_dict, bp_err = get_meteora_portfolio_positions(wallet_address)
+        # Discovery enriches known positions but must not consume a full risk
+        # cycle during an indexer outage. With no tracked positions, retain the
+        # longer recovery budget so orphan discovery can still complete.
+        discovery_timeout = 3 if active_positions else 15
+        bp_dict, bp_err = get_meteora_portfolio_positions(wallet_address, timeout=discovery_timeout)
         if bp_dict is not None:
             blockchain_positions = bp_dict
             api_available = True
@@ -2009,7 +2037,8 @@ def main():
             print(f"Meteora Portfolio API: {len(bp_dict)} position(s) found on-chain")
         else:
             print(f"Meteora Portfolio API failed ({bp_err}). Falling back to SDK.")
-            bp_list, bp_err2 = run_command_json(f"node {EXECUTOR_PATH} positions")
+            bp_list, bp_err2 = run_command_json(f"node {EXECUTOR_PATH} positions",
+                                                timeout=3 if active_positions else 30)
             if bp_list and isinstance(bp_list, list):
                 for bp in bp_list:
                     blockchain_positions[bp["position"]] = bp
@@ -2121,6 +2150,15 @@ def main():
         is_dry_run_stored = meta.get("tx_hash") == "DRY_RUN_TX_HASH"
         env_prefix = "DRY_RUN=true " if is_dry_run_stored else ""
         
+        # An indexer omission is not evidence that a tracked position is gone.
+        # Reuse one bounded native read before deciding to skip its risk checks.
+        if not bp and not is_dry_run_stored:
+            recovered_mark, _ = run_command_json(
+                f"node {shlex.quote(EXECUTOR_PATH)} pnl-onchain {shlex.quote(pool)} {shlex.quote(pos_addr)}",
+                timeout=3)
+            if verified_risk_mark(recovered_mark, pool, pos_addr, time.time()):
+                bp = {"native_prefetched": recovered_mark}
+
         if not bp and not is_dry_run_stored:
             if not api_available:
                 # API failed — cannot confirm position is gone, skip cleanup to avoid false wipe
@@ -2150,30 +2188,49 @@ def main():
         pnl_pct = 0.0
         pnl_data = None
         fee_per_tvl_24h = 0.0
+        fee_yield_available = False
 
         pnl_sol_actual = None  # Meteora-exact SOL P&L; used at close-booking instead of size*pct
+        indexed_pnl_available = False
+        # Native inventory is the risk source of first resort. Do not wait for a
+        # per-position indexer subprocess (up to 30 seconds) when it verifies.
+        native_mark_valid = False
+        native_mark, native_mark_err = (bp or {}).get("native_prefetched"), None
+        if not is_dry_run_stored:
+            if native_mark is None:
+                native_mark, native_mark_err = run_command_json(
+                    f"node {shlex.quote(EXECUTOR_PATH)} pnl-onchain {shlex.quote(pool)} {shlex.quote(pos_addr)}",
+                    timeout=3)
+            native_mark_valid = verified_risk_mark(native_mark, pool, pos_addr, time.time())
         if api_available and bp and bp.get("pnl_pct") is not None:
             # Indexed metrics remain the fallback and supply the 24h fee rate.
+            indexed_pnl_available = True
             in_range = not bp.get("is_out_of_range", False)
             pnl_pct = bp.get("pnl_pct", 0.0)
             pnl_sol_actual = bp.get("pnl_sol")  # exact SOL P&L from Meteora
-            fee_per_tvl_24h = bp.get("fee_per_tvl_24h", 0.0)
+            fee_yield = observed_fee_yield(bp)
+            fee_yield_available = fee_yield is not None
+            fee_per_tvl_24h = fee_yield if fee_yield_available else 0.0
             if bp.get("pool_price", 0.0) > 0:
                 active_price = bp["pool_price"]
-            print(f"Meteora Portfolio API: {pnl_pct:+.2f}% PnL | Fee/TVL 24h: {fee_per_tvl_24h:.2f}% | Range: {'🟢 In' if in_range else '🔴 Out'}")
-        elif not is_dry_run_stored:
-            # Per-position indexed metrics when the portfolio fast path failed.
+            fee_label = f"{fee_per_tvl_24h:.2f}%" if fee_yield_available else "unavailable"
+            print(f"Meteora Portfolio API: {pnl_pct:+.2f}% PnL | Fee/TVL 24h: {fee_label} | Range: {'🟢 In' if in_range else '🔴 Out'}")
+        elif not is_dry_run_stored and not native_mark_valid:
+            # Fall back to indexed metrics only when native inventory failed.
             pnl_data, pnl_err = run_command_json(f"node {EXECUTOR_PATH} pnl {pool} {pos_addr}")
             if pnl_data and pnl_data.get("success") != False:
+                indexed_pnl_available = True
                 pnl_pct = float(pnl_data.get("pnl_pct", 0.0))
                 pnl_sol_actual = pnl_data.get("pnl_sol")
                 in_range = pnl_data.get("in_range", True)
-                fee_per_tvl_24h = float(pnl_data.get("fee_per_tvl_24h", 0.0))
-                print(f"Executor PnL: {pnl_pct:+.2f}% | Fee/TVL 24h: {fee_per_tvl_24h:.2f}% | Range: {'🟢 In' if in_range else '🔴 Out'}")
+                fee_yield = observed_fee_yield(pnl_data)
+                fee_yield_available = fee_yield is not None
+                fee_per_tvl_24h = fee_yield if fee_yield_available else 0.0
+                fee_label = f"{fee_per_tvl_24h:.2f}%" if fee_yield_available else "unavailable"
+                print(f"Executor PnL: {pnl_pct:+.2f}% | Fee/TVL 24h: {fee_label} | Range: {'🟢 In' if in_range else '🔴 Out'}")
             else:
-                print(f"⚠️ SOL PnL unavailable for {pair}; retry next tick. Token price return is not LP return.")
-                continue
-        else:
+                print(f"⚠️ Indexed SOL PnL unavailable for {pair}; native inventory also unavailable.")
+        elif is_dry_run_stored:
             # Dry run
             ab_data, ab_err = run_command_json(f"node {EXECUTOR_PATH} active-bin {pool}")
             if ab_data:
@@ -2192,12 +2249,10 @@ def main():
         # Those different-time observations do not prove earlier-exit savings.
         # Read once per real tick. A verified mark also supplies current bounds,
         # bin and price, replacing the otherwise necessary active-bin command.
-        native_mark, native_mark_err = None, None
         if not is_dry_run_stored:
-            native_mark, native_mark_err = run_command_json(
-                f"node {shlex.quote(EXECUTOR_PATH)} pnl-onchain {shlex.quote(pool)} {shlex.quote(pos_addr)}",
-                timeout=3)
-            native_mark_valid = verified_risk_mark(native_mark, pool, pos_addr, time.time())
+            if not native_mark_valid and not indexed_pnl_available:
+                print(f"⚠️ SOL PnL unavailable for {pair}; retry next tick. Token price return is not LP return.")
+                continue
             native_price_available = False
             if native_mark_valid:
                 pnl_pct, pnl_sol_actual = native_mark["pnl_pct"], native_mark["pnl_sol"]
@@ -2415,7 +2470,15 @@ def main():
             emergency_close = True
             emergency_reason = close_reason
         elif pnl_pct <= stop_loss_pct:
-            if age_minutes_sl < 15 and in_range and fee_per_tvl_24h >= 10.0:
+            # Only where the base read the indexed position anyway (no portfolio row, real position)
+            # and only when grace is otherwise possible. The emergency branch above never waits.
+            if (age_minutes_sl < 15 and in_range and not fee_yield_available and native_mark_valid
+                    and not indexed_pnl_available and not is_dry_run_stored):
+                grace_data, _grace_err = run_command_json(f"node {EXECUTOR_PATH} pnl {pool} {pos_addr}",
+                                                          timeout=SL_GRACE_FEE_TIMEOUT_SECS)
+                fee_per_tvl_24h, fee_yield_available = sl_grace_fee_context(grace_data)
+                print(f"SL grace fee context: {f'{fee_per_tvl_24h:.2f}%' if fee_yield_available else 'unavailable'}")
+            if age_minutes_sl < 15 and in_range and fee_yield_available and fee_per_tvl_24h >= 10.0:
                 print(f"⏳ SL deferred: {age_minutes_sl:.0f}m old, in range, fee/TVL {fee_per_tvl_24h:.1f}% — grace until 15m or {emergency_floor_pct:.1f}% floor")
             else:
                 close_reason = f"Hard Stop-Loss hit ({pnl_pct:.2f}% <= {stop_loss_pct}%)"
@@ -2429,7 +2492,14 @@ def main():
         # because the recovery grace below reads the 5m candle. The exit-side
         # liquidity floor (5b) and the downtrend/fast-out exits (5c/5d) reuse
         # these values — still one fetch per position per cycle.
-        pool_liquidity_usd, price_change_h1, price_change_m5 = get_pool_liquidity_usd(pool, meta.get("base_mint"))
+        # Once the hard emergency floor fires, optional market enrichment must
+        # not delay the already-required exit (two HTTP endpoints can time out).
+        # Unknown values keep downstream enrichment-only rules inactive; the
+        # emergency reason is preserved below and still bypasses holds.
+        if emergency_close:
+            pool_liquidity_usd, price_change_h1, price_change_m5 = None, None, None
+        else:
+            pool_liquidity_usd, price_change_h1, price_change_m5 = get_pool_liquidity_usd(pool, meta.get("base_mint"))
 
         # 3c. Rug velocity gate: a 5m candle at or below RUG_M5_PCT is the token
         # dying in real time, not volatility — emergency close NOW, same class
@@ -2581,7 +2651,7 @@ def main():
         # another candidate should have. See MIN_FEE_TVL_24H_TIGHT_LIMIT.
         yield_limit = (min_fee_tvl_24h_tight_limit if is_tight_tp_pos
                        else min_fee_tvl_24h_limit)
-        if age_minutes >= yield_grace_minutes:
+        if age_minutes >= yield_grace_minutes and fee_yield_available:
             if fee_per_tvl_24h < yield_limit:
                 close_reason = f"Low yield (Fee/TVL 24h: {fee_per_tvl_24h:.2f}% < {yield_limit}% after {age_minutes:.1f}m)"
 
@@ -2916,7 +2986,7 @@ def main():
             report_rows.append(build_report_row(
                 pos_addr, pair, pool, meta, pool_liquidity_usd, pnl_pct, pnl_sol_actual,
                 in_range, fee_per_tvl_24h, api_available, bp, active_price, entry_price,
-                peak_pnl, trailing_active, close_reason, now,
+                peak_pnl, trailing_active, close_reason, now, fee_yield_available=fee_yield_available,
             ))
             continue
         if cli.report_only and enforce_emergency:
@@ -3165,12 +3235,8 @@ def main():
                                     f"\"{strike_why[:120]}\" ex {strike_cd_secs}")
                         print(f"⛔ Turnover pool cooled {strike_cd_secs // 3600}h — {strike_why}")
                     cooldown_secs = 7200 if is_dump_close else 3600  # 2h dump, 1h other
-                    # Ordinary profitable exits may cool for only 15m. Defensive
-                    # exits keep their full cooldown even when the LP mark is positive:
-                    # OP and Instinct fast-out dumps otherwise qualified for re-entry.
-                    if (realized_sol > 0
-                            and not adverse_exit(reason_lower)):
-                        cooldown_secs = 900
+                    # This is a pre-close LP mark, before final swap cash and
+                    # account costs. It cannot authorize a shorter cooldown.
                     if realized_sol < 0:
                         # Track repeat losses within a 7-day window and escalate cooldown duration
                         run_command(f"redis-cli incr \"{loss_streak_key}\"")
@@ -3180,14 +3246,14 @@ def main():
                         if loss_streak >= 2:
                             cooldown_secs = 259200 if loss_streak >= 3 else 86400  # 3+ losses→72h, 2 losses→24h
                             print(f"🔴 REPEAT LOSS #{loss_streak} in 7d — escalating {base_symbol_cd} cooldown to {cooldown_secs // 3600}h")
-                    else:
-                        run_command(f"redis-cli del \"{loss_streak_key}\"")  # reset streak on profit
+                    # A positive/zero mark cannot reset prior losses: recent
+                    # positive marks have settled negative after swaps and costs.
                     run_command(f"redis-cli set \"{cooldown_key}\" \"{close_reason[:120]}\" ex {cooldown_secs}")
                     mint_cd_key = mint_cooldown_key(meta)
                     if mint_cd_key:
                         run_command(f"redis-cli set \"{mint_cd_key}\" \"{close_reason[:120]}\" ex {cooldown_secs}")
                     cd_label = f"{cooldown_secs // 60}m" if cooldown_secs < 3600 else f"{cooldown_secs // 3600}h"
-                    print(f"🚫 Re-entry cooldown set for {base_symbol_cd}: {cd_label} (reason: {'profitable exit' if cooldown_secs == 900 else ('dump/momentum' if is_dump_close else 'normal exit')})")
+                    print(f"🚫 Re-entry cooldown set for {base_symbol_cd}: {cd_label} (reason: {'dump/momentum' if is_dump_close else 'normal exit'})")
 
                 # Low-yield exits also cool the POOL itself for 4h (a low-yield
                 # pool cooldown): the symbol cooldown above
@@ -3377,7 +3443,7 @@ Pre-close LP mark | {pnl_pct:+.2f}% ({realized_sol:+.4f} SOL) — estimate befor
             report_rows.append(build_report_row(
                 pos_addr, pair, pool, meta, pool_liquidity_usd, pnl_pct, pnl_sol_actual,
                 in_range, fee_per_tvl_24h, api_available, bp, active_price, entry_price,
-                peak_pnl, trailing_active, close_reason, now,
+                peak_pnl, trailing_active, close_reason, now, fee_yield_available=fee_yield_available,
             ))
 
     flush_tick_observers(pending_observers)
@@ -3389,16 +3455,6 @@ Pre-close LP mark | {pnl_pct:+.2f}% ({realized_sol:+.4f} SOL) — estimate befor
         print(render_status_report(report_rows, sol_price_usd, trailing_trigger_pct, min_fee_tvl_24h_limit, max_oor_minutes))
         print("MONITOR_REPORT:" + json.dumps({"positions": report_rows}))
 
-    # Darwinian signal-weights refresh. Self-guarded inside the script (recalcs
-    # at most every 6h and only with enough closed positions) — cheap no-op on
-    # most runs, and never allowed to fail the monitor.
-    try:
-        subprocess.run(
-            [sys.executable, os.path.join(SCRIPT_DIR, "dlmm_weights.py"), "--quiet"],
-            timeout=60,
-        )
-    except Exception:
-        pass
 
 if __name__ == "__main__":
     from dlmm_research_io import run_observed_main

@@ -248,9 +248,10 @@ class SuspectRiskTests(unittest.TestCase):
                     active_bin=-470, lower_bin=-465, upper_bin=-430, in_range=False,
                     unclaimed_fees_sol=.001, pool_price=.9, **changes)
 
-    def replay(self, verify, *, age=1, prior=False, indexed=-100, portfolio=True, adopted=False):
+    def replay(self, verify, *, age=1, prior=False, indexed=-100, portfolio=True, adopted=False, indexed_failure=False, omitted=False):
         source = Path(monitor.__file__).read_text()
-        code = textwrap.dedent(source[source.index("        # Get current pool price"):
+        start = "        # An indexer omission is not evidence" if omitted else "        # Get current pool price"
+        code = textwrap.dedent(source[source.index(start):
                                       source.index("        # Pool aggregates do not include")])
         calls = []
         scope = dict(vars(monitor), now=time.time(), meta=dict(deployed_at=time.time()-age*60,
@@ -261,6 +262,8 @@ class SuspectRiskTests(unittest.TestCase):
                      entry_price=1.0, bins_below=35,
                      pnl_pct=indexed, pnl_sol_actual=-.1, in_range=True, active_bin=-430,
                      pnl_data=None, stop_loss_pct=-8, fee_per_tvl_24h=1)
+        if omitted:
+            scope['bp'] = None
         def read(command, **kwargs):
             calls.append(command)
             if " pnl-onchain " in command:
@@ -269,6 +272,8 @@ class SuspectRiskTests(unittest.TestCase):
             if " active-bin " in command:
                 return {"binId":-430,"price":1.0},None
             self.assertIn(" pnl ", command)
+            if indexed_failure:
+                return None, "indexer unavailable"
             return {"success":True,"pnl_pct":indexed,"pnl_sol":indexed*.001,
                     "fee_per_tvl_24h":10.0,"in_range":True},None
         def redis(command):
@@ -284,6 +289,103 @@ class SuspectRiskTests(unittest.TestCase):
                                               source.index("        # 3. Pumped Far Above")])
                 exec(compile(risk, monitor.__file__, "exec"), scope)
         return scope, calls
+
+    def test_indexer_omission_cannot_hide_native_emergency(self):
+        for api_available in (True, False):
+            with self.subTest(api_available=api_available):
+                scope, calls = self.replay(self.mark(pct=-60), omitted=True, portfolio=api_available)
+                self.assertTrue(scope.get('guard_passed'))
+                self.assertTrue(scope['emergency_close'])
+                self.assertEqual(sum(' pnl-onchain ' in c for c in calls), 1)
+                self.assertFalse(any('srem sol:dlmm:active_positions' in c or f'del \"sol:dlmm:position:{POSITION}\"' in c for c in calls))
+
+    def test_old_omitted_position_with_valid_native_mark_is_still_managed(self):
+        scope, calls = self.replay(self.mark(pct=.1), omitted=True, age=180)
+        self.assertTrue(scope.get('guard_passed'))
+        self.assertFalse(scope['emergency_close'])
+        self.assertEqual(scope['pnl_pct'], .1)
+        self.assertEqual(sum(' pnl-onchain ' in c for c in calls), 1)
+
+    def test_unproved_omitted_position_keeps_grace_without_close(self):
+        for mark in (None, dict(self.mark(), pool='wrong'), dict(self.mark(), observed_at=1)):
+            scope, calls = self.replay(mark, omitted=True)
+            self.assertFalse(scope.get('guard_passed', False))
+            self.assertEqual(sum(' pnl-onchain ' in c for c in calls), 1)
+            self.assertFalse(any('srem sol:dlmm:active_positions' in c or f'del \"sol:dlmm:position:{POSITION}\"' in c for c in calls))
+
+    def test_native_emergency_skips_optional_market_fetch_but_keeps_rug_detection(self):
+        source = Path(monitor.__file__).read_text()
+        code = textwrap.dedent(source[source.index("        # 3b. DexScreener liquidity"):
+                                      source.index("        # 4. Out of Range (OOR)")])
+        emergency, _ = self.replay(self.mark(pct=-60), portfolio=False)
+        def unavailable(*args):
+            self.fail("Emergency exit waited for optional DexScreener request")
+        emergency['get_pool_liquidity_usd'] = unavailable
+        reason = emergency['emergency_reason']
+        exec(compile(code, monitor.__file__, 'exec'), emergency)
+        self.assertEqual(emergency['emergency_reason'], reason)
+        self.assertTrue(emergency['emergency_close'])
+        self.assertIsNone(emergency['pool_liquidity_usd'])
+        self.assertIsNone(emergency['price_change_m5'])
+        healthy, _ = self.replay(self.mark(pct=.1), indexed=.1)
+        calls = []
+        def rug_data(*args):
+            calls.append(args)
+            return 100000, -25, -30
+        healthy['get_pool_liquidity_usd'] = rug_data
+        exec(compile(code, monitor.__file__, 'exec'), healthy)
+        self.assertEqual(len(calls), 1)
+        self.assertTrue(healthy['emergency_close'])
+        self.assertIn('RUG velocity dump', healthy['emergency_reason'])
+
+    def test_discovery_outage_keeps_tracked_risk_checks_bounded(self):
+        source = Path(monitor.__file__).read_text()
+        start = source.index("    # Get current positions from Meteora Portfolio API")
+        code = source[start:source.index("    now = int(time.time())", start)]
+        for tracked, expected in ((['position'], [3, 3]), ([], [15, 30])):
+            calls = []
+            def indexed(wallet, *, timeout):
+                calls.append(timeout)
+                return None, 'indexer unavailable'
+            def sdk(command, *, timeout):
+                calls.append(timeout)
+                return None, 'discovery unavailable'
+            scope = dict(vars(monitor), active_positions=tracked,
+                         get_wallet_address=lambda: 'wallet',
+                         get_meteora_portfolio_positions=indexed, run_command_json=sdk)
+            with contextlib.redirect_stdout(io.StringIO()):
+                exec(compile(textwrap.dedent(code), monitor.__file__, 'exec'), scope)
+            self.assertEqual(calls, expected)
+            self.assertFalse(scope['api_available'])
+            self.assertEqual(scope['active_positions'], tracked)
+            self.assertEqual(scope['blockchain_positions'], {})
+
+    def test_verified_native_loss_does_not_wait_for_indexed_fallback(self):
+        state, calls = self.replay(self.mark(pct=-60), portfolio=False)
+        self.assertTrue(state["emergency_close"])
+        self.assertFalse(any(" pnl " in command for command in calls))
+        self.assertFalse(any(" active-bin " in command for command in calls))
+
+    def test_failed_native_read_retains_indexed_fallback_in_order(self):
+        state, calls = self.replay(None, portfolio=False, indexed=-5)
+        self.assertTrue(state.get("guard_passed"))
+        self.assertEqual(state["pnl_pct"], -5)
+        native = next(i for i, command in enumerate(calls) if " pnl-onchain " in command)
+        indexed = next(i for i, command in enumerate(calls) if " pnl " in command)
+        self.assertLess(native, indexed)
+
+    def test_indexer_outage_cannot_skip_native_emergency_exit(self):
+        state, calls = self.replay(self.mark(pct=-60), portfolio=False, indexed_failure=True)
+        self.assertTrue(state.get("guard_passed"))
+        self.assertEqual(state["pnl_pct"], -60)
+        self.assertTrue(state["emergency_close"])
+        self.assertEqual(sum(" pnl-onchain " in c for c in calls), 1)
+
+    def test_both_value_sources_unavailable_cannot_use_default_zero(self):
+        for native in (None, self.mark() | {"pool": "wrong-pool"}):
+            state, calls = self.replay(native, portfolio=False, indexed_failure=True)
+            self.assertFalse(state.get("guard_passed", False))
+            self.assertEqual(sum(" pnl-onchain " in c for c in calls), 1)
 
     def test_real_native_young_loss_reaches_risk_rules(self):
         for portfolio in (True, False):

@@ -117,6 +117,17 @@ The 60-transaction per-pass fetch budget resumes from the durable wallet cache;
 coverage is incomplete until the whole interval has been fetched. Trading during a
 multi-source snapshot invalidates it. Collector services never send transactions.
 
+## Post-close cooldowns
+
+The monitor's ordinary and forced-close paths retain their normal cooldown when
+only a nonnegative pre-close LP mark is available. That mark cannot shorten the
+cooldown to 15 minutes or clear the token's existing loss streak: a positive LP
+valuation can settle to negative native cash after a swap and account funding.
+Negative marks retain the existing escalation; loss history expires through its
+existing seven-day TTL. This does not add a cash-win reset or retrospectively
+rewrite Redis history. Recenter eligibility still passes the executor's separate
+root-accounting gate, and close/settlement execution is unchanged.
+
 ## Root policy
 
 All deploy callers with a root/recenter link use the same gate before signing.
@@ -198,6 +209,17 @@ the same pre-entry capital and bin snapshots. The holding-period comparison is
 gross and has an outcome-defined duration; it does not simulate the alternative
 exit policy, fill the unobserved gap, or establish executed IL or net profit.
 
+A tracked position omitted by the indexer receives one bounded three-second
+native risk read before the missing-position branch can skip it. A verified mark
+continues through the existing risk rules and is reused without another native
+read. The two-hour cleanup grace and RPC absence requirement remain in force
+when native evidence is unavailable; an indexer omission alone cannot remove
+tracking or manufacture a close. Missing or invalid indexed fee yield stays
+unknown: it cannot trigger the low-yield exit, and status reports show null yield
+and breakeven estimates instead of zero. A measured zero remains eligible for
+the existing age-qualified low-yield rule; native risk and fee-stall rules remain
+independent of this indexed metric.
+
 Native risk marks also expose the already-read per-bin position shares, raw
 inventory and unclaimed fees. After a normal rule-driven close attempt, the
 monitor appends that decision-time observation to
@@ -237,6 +259,14 @@ Only confirmed/finalized status with an explicit null error proves success. Miss
 processed or unavailable status keeps the submission uncertain; on-chain failures
 remain failures. Durable pending markers and retries of the same signed bytes remain
 in place.
+
+Monitor risk valuation first attempts the three-second native inventory read before
+starting any per-position indexed PnL fallback. A valid native result skips that
+fallback's potential 30-second wait; unavailable native data retains indexed
+fallback. Already fetched portfolio data still supplies fee-rate context. A verified native loss can
+therefore reach emergency stop rules during an indexer outage. If neither source
+provides usable valuation, the tick skips risk evaluation instead of treating the
+initialized zero PnL or token price return as a measured LP result.
 
 Funded-position closes broadcast their persisted signed bytes concurrently to
 the distinct configured RPC endpoints. Each signed transaction has one eight-second
@@ -1126,3 +1156,39 @@ retryable result without signing. The exclusion expires automatically; it does
 not permanently blacklist a venue or prove that another route would have been
 profitable. Failed instruction transfers revert, but their network fees
 remain paid, which is why a repeated failing route is worth excluding.
+
+### Unknown exit liquidity
+
+The exit-side reader preserves unknown liquidity instead of coercing a
+missing field to zero. Missing, boolean, negative and nonfinite depth cannot
+trigger a thin-pool exit; an explicit zero still can. Invalid momentum fields
+do not erase independently valid liquidity. Solana pool identity uses exact,
+case-sensitive addresses, and an explicitly different chain is rejected.
+These checks preserve existing risk thresholds and add no network requests.
+
+### Event alerts outside settlement
+
+The monitor persists event alerts in `memories/dlmm_alert_outbox` before
+continuing. A separate loop worker delivers one message per tick with a 30-second
+timeout and an exclusive delivery lock. Alert delivery cannot delay completion of
+the risk scan or startup of the settlement worker. Failed or timed-out deliveries
+remain queued across restarts; a timeout after remote acceptance can cause a
+duplicate on retry. An empty `DLMM_ALERT_TARGET` disables delivery. Queue files
+contain the original configured destination and message, with mode 0600.
+
+This removes a potential scheduling delay, not the requirement to prove a close,
+reconcile owned inventory, or simulate settlement recovery. It does not prove
+that an earlier swap would have obtained a better price.
+
+### Settlement retry ordering
+
+Pending exits take the worker's single settlement attempt before inventory
+previously deferred for missing routes or uneconomic recovery. Within each
+class, the oldest attempt still runs first. Deferred inventory retains its
+15-minute retry backoff and is retried when no pending exit consumes the slot;
+continuous pending exits can postpone it further. Ownership, pending-signature,
+slippage, and positive-recovery checks are unchanged.
+
+This stops a deferred no-route retry from running between attempts of a pending
+exit. It does not prove a particular saving or eliminate simulation, RPC, or
+market delays.
