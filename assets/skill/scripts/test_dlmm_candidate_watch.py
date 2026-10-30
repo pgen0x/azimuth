@@ -134,5 +134,163 @@ class CandidateWatchTests(unittest.TestCase):
         self.assertEqual(shadow.pre_entry_bin_coverage([late], samples, 10300)[0]['status'], 'unmeasured')
 
 
+class RejectIdentityTests(unittest.TestCase):
+    """Opt-in reject identity and bracket reads; both are no-ops unless enabled."""
+
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.profile = Path(self.directory.name)
+        self.memory = self.profile / 'memories'
+        self.env = patch.dict(os.environ, {'DRY_RUN': 'false'})
+        self.env.start()
+        self.addCleanup(self.env.stop)
+        os.environ.pop('DLMM_REJECT_IDENTITY', None)
+        os.environ.pop('DLMM_BRACKET_REJECTS', None)
+
+    def reject(self, **changes):
+        out = io.StringIO()
+        args = dict(dict(profile=self.profile, mode='pulse', gate='pvp', pool=POOL, mint=MINT,
+                         sol_is_x=False, name='FOO-SOL'), **changes)
+        with contextlib.redirect_stdout(out):
+            done = watch.record_pipeline_reject(**args)
+        return done, out.getvalue()
+
+    def test_identity_is_off_by_default(self):
+        self.assertEqual(self.reject(), (False, ''))
+        self.assertFalse((self.memory / watch.REJECT_FILENAME).exists())
+
+    def test_identity_line_and_row(self):
+        os.environ['DLMM_REJECT_IDENTITY'] = '1'
+        done, printed = self.reject()
+        self.assertTrue(done)
+        self.assertTrue(printed.startswith('REJECT_IDENTITY '))
+        line = json.loads(printed.split(' ', 1)[1])
+        row = shadow.rows(self.memory / watch.REJECT_FILENAME)[0]
+        self.assertEqual(line, row)
+        self.assertEqual((row['pool'], row['mode'], row['gate'], row['name']), (POOL, 'pulse', 'pvp', 'FOO-SOL'))
+        self.assertEqual(row['candidate'], dict(base_mint=MINT, sol_is_x=False))
+        self.assertTrue(row['id'].startswith('reject:'))
+        for bad in (dict(gate='Not A Slug'), dict(pool='invalid'), dict(mode='unknown'), dict(gate=None)):
+            self.assertEqual(self.reject(**bad), (False, ''))
+        self.assertEqual(len(shadow.rows(self.memory / watch.REJECT_FILENAME)), 1)
+
+    def test_identity_dry_run_prints_without_writing(self):
+        os.environ.update(DLMM_REJECT_IDENTITY='1', DRY_RUN='true')
+        done, printed = self.reject()
+        self.assertTrue(done and printed.startswith('REJECT_IDENTITY '))
+        self.assertFalse((self.memory / watch.REJECT_FILENAME).exists())
+
+    def test_identity_write_failure_never_raises(self):
+        os.environ['DLMM_REJECT_IDENTITY'] = '1'
+        with patch.object(watch.fcntl, 'flock', side_effect=BlockingIOError):
+            done, _ = self.reject()
+        self.assertFalse(done)
+
+    def test_every_pipeline_skip_line_is_followed_by_its_identity(self):
+        import ast
+        source = Path(pipeline.__file__).read_text()
+        body = [node for node in ast.walk(ast.parse(source)) if hasattr(node, 'body') and isinstance(node.body, list)]
+        skips = followed = 0
+        gates = set()
+        for parent in body:
+            for block in (parent.body, getattr(parent, 'orelse', []) or []):
+                for i, stmt in enumerate(block):
+                    call = getattr(stmt, 'value', None)
+                    if not (isinstance(stmt, ast.Expr) and isinstance(call, ast.Call)
+                            and getattr(call.func, 'id', None) == 'print' and call.args
+                            and isinstance(call.args[0], ast.JoinedStr)):
+                        continue
+                    head = call.args[0].values[0]
+                    if not (isinstance(head, ast.Constant) and head.value.startswith('Skipping ')
+                            and not head.value.startswith('Skipping malformed')):
+                        continue
+                    skips += 1
+                    # The identity precedes its skip line, so the daemon's last-line chat
+                    # summary (internal/deploy Summarize) can never be an identity line.
+                    prev = block[i - 1] if i > 0 else None
+                    if (isinstance(prev, ast.Expr) and isinstance(prev.value, ast.Call)
+                            and getattr(prev.value.func, 'id', None) == 'record_pipeline_reject'):
+                        followed += 1
+                        gate = prev.value.args[2].value
+                        self.assertRegex(gate, watch.REJECT_GATE)
+                        gates.add(gate)
+        # Floors keep the AST walk honest: master's pipeline has 29 skip sites over
+        # 28 distinct gates (bin_array_rent appears on both sizing paths).
+        self.assertGreaterEqual(skips, 29)
+        self.assertEqual(followed, skips)
+        self.assertGreaterEqual(len(gates), 28)
+
+    def test_reject_outcome_keeps_pool_identity(self):
+        row = dict(id='a', ts=100, mode='pulse', gate='cooldown', pool=POOL, snapshot={'pool_price': 1},
+                   candidate={'base_mint': MINT, 'sol_is_x': False})
+        out = shadow.rejected_outcome(row, 1.02, 1900)
+        self.assertEqual((out['pool'], out['base_mint'], out['status']), (POOL, MINT, 'measured'))
+
+    def pipeline_reject(self, ident, gate, ts, pool=POOL):
+        shadow.append(self.memory / shadow.PIPELINE_REJECT_FILENAME, dict(
+            id=ident, ts=ts, pool=pool, mode='pulse', gate=gate, name='FOO-SOL',
+            candidate=dict(base_mint=MINT, sol_is_x=False)))
+
+    def test_brackets_are_off_by_default_and_reads_unchanged(self):
+        self.pipeline_reject('reject:a', 'pvp', 9900)
+        other = POOL[:-1] + 'j'
+        calls = []
+        def read(command, **kwargs):
+            calls.append(command[3:])
+            return json.dumps(dict(snapshot(), pool=command[3])).encode()
+        candidates = {other: dict(pool=other, base_mint=MINT, mode='pulse', source_id='w', source_ts=9950)}
+        with patch.object(shadow.time, 'time', return_value=10000), \
+             patch.object(shadow.time, 'monotonic', return_value=0), \
+             patch.object(shadow.subprocess, 'check_output', side_effect=read):
+            result = shadow.collect_candidate_bins(self.profile, candidates, 40)
+        self.assertEqual(calls, [[other, '69', '16']])
+        self.assertNotIn('reject_brackets_scheduled', result)  # OFF adds no keys
+        self.assertFalse((self.memory / shadow.BRACKET_FILENAME).exists())
+
+    def test_bracket_baseline_is_stratified_then_terminal_on_same_anchor(self):
+        os.environ['DLMM_BRACKET_REJECTS'] = '1'
+        pool_b = POOL[:-1] + 'k'
+        # gate "pvp" already has a baseline today; "pool_cash_upper_bound" has none -> it goes first
+        shadow.append(self.memory / shadow.BRACKET_FILENAME, dict(
+            bracket_id='reject:old', bracket_gate='pvp', bracket_phase='baseline', pool=POOL[:-1] + 'm',
+            base_mint=MINT, status='observed', ts=5000, anchor_bin=0, collected_at=5000))
+        self.pipeline_reject('reject:pvp', 'pvp', 9800)
+        self.pipeline_reject('reject:cash', 'pool_cash_upper_bound', 9900, pool=pool_b)
+        self.pipeline_reject('reject:stale', 'momentum_m5_dump', 9000, pool=POOL[:-1] + 'n')   # > 10 min old
+        clock = [10000]
+        reads = []
+        def read(command, **kwargs):
+            reads.append(command[3:])
+            return json.dumps(dict(snapshot(), pool=command[3], ts=int(clock[0]))).encode()
+        with patch.object(shadow.time, 'time', side_effect=lambda: clock[0]), \
+             patch.object(shadow.time, 'monotonic', return_value=0), \
+             patch.object(shadow.subprocess, 'check_output', side_effect=read):
+            first = shadow.collect_candidate_bins(self.profile, {}, 40)
+            self.assertEqual(first['reject_brackets_scheduled'], 1)
+            self.assertEqual(reads, [[pool_b, '69', '16']])
+            row = [r for r in shadow.rows(self.memory / shadow.BRACKET_FILENAME) if r['bracket_id'] == 'reject:cash'][0]
+            self.assertEqual((row['bracket_phase'], row['status'], row['anchor_bin']), ('baseline', 'observed', 0))
+            reads.clear()
+            clock[0] = 10000 + shadow.BRACKET_HORIZON_SECONDS + 10
+            # A pool that already owns a due terminal keeps it; the bracket terminal waits.
+            busy = {pool_b: dict(pool=pool_b, base_mint=MINT, mode='pulse', source_id='f', source_ts=9000,
+                                 terminal_only=True, terminal_target_ts=clock[0] - 5, terminal_anchor_bin=3)}
+            shadow.index_reject_brackets(self.profile, busy, clock[0], float('inf'), {})
+            self.assertEqual(busy[pool_b]['terminal_anchor_bin'], 3)
+            second = shadow.collect_candidate_bins(self.profile, {}, 40)
+            self.assertGreaterEqual(second['reject_brackets_scheduled'], 1)
+            self.assertIn([pool_b, '69', '16', '0'], reads)
+            phases = [(r['bracket_id'], r['bracket_phase']) for r in shadow.rows(self.memory / shadow.BRACKET_FILENAME)]
+            self.assertIn(('reject:cash', 'terminal'), phases)
+            self.assertNotIn('reject:stale', [p[0] for p in phases])
+            # A completed bracket is never scheduled or read again, even inside its window.
+            reads.clear()
+            clock[0] += 300
+            third = shadow.collect_candidate_bins(self.profile, {}, 40)
+            self.assertEqual(third['reject_brackets_scheduled'], 0)
+            self.assertNotIn([pool_b, '69', '16', '0'], reads)
+
+
 if __name__ == '__main__':
     unittest.main()

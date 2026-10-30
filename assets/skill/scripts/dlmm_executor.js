@@ -1752,10 +1752,14 @@ async function binSnapshot(pool, lower, upper, mayRead = () => true) {
 
 // Background evidence only. The caller caps this process at three seconds;
 // never load a signing key or acquire a lock ahead of the trading workers.
-async function candidateBinSnapshot(poolAddress, below = 69, above = 16) {
+async function candidateBinSnapshot(poolAddress, below = 69, above = 16, fixedAnchor = null) {
   if (!Number.isInteger(below) || below < 0 || below > 69
       || !Number.isInteger(above) || above < 0 || above > 16) {
     throw new Error("Invalid candidate snapshot bounds");
+  }
+  // A fixed anchor re-reads a frozen range (bracket terminal reads); null keeps the active bin.
+  if (fixedAnchor !== null && (!Number.isSafeInteger(fixedAnchor) || Math.abs(fixedAnchor) > 100000)) {
+    throw new Error("Invalid candidate snapshot anchor");
   }
   const address = new PublicKey(poolAddress);
   const wallet = process.env.SOLANA_PUBLIC_KEY;
@@ -1771,7 +1775,7 @@ async function candidateBinSnapshot(poolAddress, below = 69, above = 16) {
     if (tokenY !== "So11111111111111111111111111111111111111112" || tokenX === tokenY) {
       throw new Error("Candidate snapshot requires SOL as token Y");
     }
-    const anchor = pool.lbPair.activeId;
+    const anchor = fixedAnchor === null ? pool.lbPair.activeId : fixedAnchor;
     if (!Number.isSafeInteger(anchor)) throw new Error("Invalid candidate active bin");
     const snapshot = await binSnapshot(pool, anchor - below, anchor + above, mayRead);
     if (snapshot.status === "deferred") return snapshot;
@@ -1847,9 +1851,10 @@ async function main() {
       } catch (_) { console.warn("[ACCOUNTING] Pool cash history publication failed; cached evidence will expire"); }
       console.log(JSON.stringify({recorded, nav}));
     } else if (command === "candidate-bin-snapshot") {
-      if (args.length < 2 || args.length > 4) throw new Error("Usage: candidate-bin-snapshot <pool> [below=69] [above=16]");
+      if (args.length < 2 || args.length > 5) throw new Error("Usage: candidate-bin-snapshot <pool> [below=69] [above=16] [fixed_anchor]");
       console.log(JSON.stringify(await candidateBinSnapshot(args[1],
-        args[2] === undefined ? 69 : Number(args[2]), args[3] === undefined ? 16 : Number(args[3]))));
+        args[2] === undefined ? 69 : Number(args[2]), args[3] === undefined ? 16 : Number(args[3]),
+        args[4] === undefined ? null : Number(args[4]))));
     } else if (command === "bin-snapshot") {
       const lower = Number(args[2]), upper = Number(args[3]);
       if (!Number.isInteger(lower) || !Number.isInteger(upper) || upper < lower || upper-lower > 200) throw new Error("Invalid snapshot bounds");

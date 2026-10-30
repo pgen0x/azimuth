@@ -55,11 +55,14 @@ class CloseBinObservationTests(unittest.TestCase):
                                                source.index('        # Execute close if triggered'))])
         for dry in (True,False):
             calls=[]
-            scope=dict(vars(monitor),close_reason='risk exit',pair='TEST-SOL',is_dry_run_stored=dry,
+            scope=dict(vars(monitor),pending_observers=[],close_reason='risk exit',pair='TEST-SOL',is_dry_run_stored=dry,
                        pos_addr=POSITION,pool=POOL,native_mark=self.mark(),wallet_address='wallet',emergency_close=True)
             scope['close_position']=lambda *a,**k:(calls.append('close') or (dict(success=False),None))
             scope['record_close_bin_observation']=lambda *a:calls.append('observation')
             with contextlib.redirect_stdout(io.StringIO()):exec(code,scope)
+            self.assertEqual(calls,['close'])
+            with patch.object(monitor, 'record_close_bin_observation', side_effect=lambda *a:calls.append('observation') or True):
+                monitor.flush_tick_observers(scope['pending_observers'])
             self.assertEqual(calls,['close'] if dry else ['close','observation'])
 
 
@@ -384,6 +387,138 @@ class SuspectRiskTests(unittest.TestCase):
         self.assertEqual(state["active_bin"],-470)
         self.assertEqual(state["active_price"],1)
         self.assertEqual(sum(" active-bin " in c for c in calls),1)
+
+
+class ShadowExitTests(unittest.TestCase):
+    """DLMM_SHADOW_EXITS records frozen research variants and never changes a decision."""
+
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.file = Path(self.directory.name) / "memories" / monitor.SHADOW_EXITS_FILE
+        for p in (patch.object(monitor, "PROFILE_DIR", self.directory.name),
+                  patch.dict(monitor.os.environ, {}, clear=False)):
+            p.start(); self.addCleanup(p.stop)
+        monitor.os.environ.pop("DLMM_SHADOW_EXITS", None)
+
+    def rows(self):
+        return [json.loads(l) for l in self.file.read_text().splitlines()] if self.file.exists() else []
+
+    def observe(self, position=POSITION, pnl=0.0, peak=0.0, trailing=False, signal=None, pnl_sol=None):
+        return monitor.shadow_exit_observe(position, "pulse", pnl, pnl_sol, peak, trailing,
+                                           {"bot_holders_pct": 25.0} if signal is None else signal)
+
+    def test_off_by_default_writes_nothing(self):
+        self.assertIsNone(self.observe(pnl=-1.0, peak=1.0))
+        self.assertEqual(self.rows(), [])
+
+    def test_one_row_per_variant_at_first_trigger(self):
+        monitor.os.environ["DLMM_SHADOW_EXITS"] = "1"
+        self.observe(pnl=0.4, peak=0.4)                       # entry row only; giveback not armed
+        self.observe(pnl=-0.2, peak=0.9)                      # 1.1 off a 0.9 peak: fires
+        self.observe(pnl=-0.9, peak=0.9, pnl_sol=-0.0009)     # already recorded: no new row
+        self.observe(pnl=-2.0, peak=3.0, trailing=True)       # armed trailing TP never counts
+        rows = self.rows()
+        self.assertEqual([r["variant"] for r in rows], ["half_bot21", "give_0.5_1.0"])
+        self.assertEqual((rows[0]["fired"], rows[0]["bot_holders_pct"]), (True, 25.0))
+        self.assertEqual((rows[1]["mark_pct"], rows[1]["peak_pct"], rows[1]["mark_sol"]), (-0.2, 0.9, None))
+        other = POSITION[:-1] + "x"
+        self.observe(position=other, pnl=0.0, peak=0.0, signal={"bot_holders_pct": 20.9})
+        self.observe(position=other, pnl=-2.0, peak=3.0, trailing=True)
+        self.assertEqual([(r["position"], r["variant"], r["fired"]) for r in self.rows()][2:],
+                         [(other, "half_bot21", False)])
+        third = POSITION[:-1] + "y"
+        self.observe(position=third, signal={"bot_holders_pct": "n/a"})
+        self.assertIsNone(self.rows()[-1]["fired"])
+
+    def test_never_raises_or_returns_a_value(self):
+        monitor.os.environ["DLMM_SHADOW_EXITS"] = "1"
+        for args in ((None, None, None, None, None, None, None), (POSITION, 1, float("nan"), "x", [], "t", "s")):
+            self.assertIsNone(monitor.shadow_exit_observe(*args))
+        self.file.parent.mkdir(parents=True, exist_ok=True)
+        self.file.write_text("not json\n")
+        with patch("builtins.open", side_effect=OSError("disk")):
+            self.assertIsNone(self.observe(pnl=-1.0, peak=1.0))
+
+    def main_slice(self):
+        import ast
+        tree = ast.parse(Path(monitor.__file__).read_text())
+        main = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "main")
+        def find(node):
+            for name in ("body", "orelse", "finalbody", "handlers"):
+                block = getattr(node, name, None)
+                if not isinstance(block, list):
+                    continue
+                for i, stmt in enumerate(block):
+                    if (isinstance(stmt, ast.If) and "DLMM_SHADOW_EXITS" in ast.unparse(stmt.test)):
+                        return block, i
+                    found = find(stmt)
+                    if found:
+                        return found
+            return None
+        block, i = find(main)
+        start = next(j for j, s in enumerate(block) if ast.unparse(s).startswith("peak_pnl = float(meta.get("))
+        end = next(j for j, s in enumerate(block) if j > i and isinstance(s, ast.If)
+                   and "GIVEBACK_ARM_PCT" in ast.unparse(s.test))
+        return block, i, compile(ast.fix_missing_locations(ast.Module(body=block[start:end + 1], type_ignores=[])),
+                                 "monitor-shadow-slice", "exec")
+
+    def run_ticks(self, code, flag, ticks):
+        if flag:
+            monitor.os.environ["DLMM_SHADOW_EXITS"] = "1"
+        else:
+            monitor.os.environ.pop("DLMM_SHADOW_EXITS", None)
+        metas = {}
+        trace = []
+        for position, mode, pnl in ticks:
+            commands = []
+            meta = metas.setdefault(position, {"mode": mode, "peak_pnl": 0.0, "trailing_active": False,
+                                               "signal": {"bot_holders_pct": 30.0}})
+            ns = dict(vars(monitor), pending_observers=[], meta=meta, pnl_pct=pnl, pnl_sol_actual=pnl / 1000, pos_addr=position,
+                      pair="TOKEN-SOL", fee_per_tvl_24h=20.0, turnover_trailing_trigger_pct=1.2,
+                      turnover_trailing_drop_pct=0.6, trailing_trigger_pct=3.0, trailing_drop_pct=1.5,
+                      is_dry_run_stored=False, run_command=commands.append, print=lambda *a, **k: None)
+            exec(code, ns)
+            trace.append((position, ns["close_reason"], json.dumps(meta, sort_keys=True), tuple(commands)))
+            monitor.flush_tick_observers(ns['pending_observers'])
+        return trace
+
+    def test_same_tick_sequence_gives_identical_close_actions_with_flag_on_or_off(self):
+        block, i, code = self.main_slice()
+        ticks = []
+        a, b, c = POSITION, POSITION[:-1] + "b", POSITION[:-1] + "c"
+        for pnl in (0.2, 0.9, -0.3, -0.5, 1.5, 1.0, 0.7):       # shadow giveback, then trailing TP + floor
+            ticks.append((a, "pulse", pnl))
+        for pnl in (1.0, 2.6, 0.0):                            # live peak-giveback stop (2.5 / 2.5)
+            ticks.append((b, "pulse", pnl))
+        for pnl in (0.6, -0.6, 4.0, 2.0):                      # non-tight mode, wide trailing pair
+            ticks.append((c, "multiday", pnl))
+        off = self.run_ticks(code, False, ticks)
+        self.assertEqual(self.rows(), [])
+        on = self.run_ticks(code, True, ticks)
+        self.assertEqual(on, off)
+        reasons = [r for _, r, _, _ in off if r]
+        self.assertTrue(any(r.startswith("Trailing Take-Profit hit") for r in reasons))
+        # With the tight trailing trigger (1.2%) below GIVEBACK_ARM_PCT (2.5%), a tight-mode
+        # position arms the trailing TP before its peak can reach the live giveback arm,
+        # so the live 2.5/2.5 rule cannot fire here; the shadow variant lives in that gap.
+        self.assertFalse(any(r.startswith("Peak-giveback stop") for r in reasons))
+        self.assertIn(("give_0.5_1.0", a), {(r["variant"], r["position"]) for r in self.rows()})
+        self.assertGreater(sum(1 for t in off if t[3]), 0)   # redis writes happened and matched ON/OFF
+
+    def test_io_is_after_the_entire_position_loop(self):
+        import ast
+        tree = ast.parse(Path(monitor.__file__).read_text())
+        main = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "main")
+        loops = [n for n in main.body if isinstance(n, ast.For) and ast.unparse(n.target) == 'pos_addr']
+        self.assertEqual(len(loops), 1)
+        forbidden = {'shadow_exit_observe', 'record_close_bin_observation', 'flush_tick_observers'}
+        self.assertFalse(any(isinstance(n, ast.Call) and getattr(n.func, 'id', None) in forbidden
+                             for n in ast.walk(loops[0])))
+        flush = [n for n in main.body if isinstance(n, ast.Expr) and isinstance(n.value, ast.Call)
+                 and getattr(n.value.func, 'id', None) == 'flush_tick_observers']
+        self.assertEqual(len(flush), 1)
+        self.assertGreater(main.body.index(flush[0]), main.body.index(loops[0]))
 
 
 if __name__ == "__main__":
