@@ -1,0 +1,10 @@
+[Unit]
+Description=Collect bounded native candidate price paths
+
+[Timer]
+OnBootSec=30
+OnUnitInactiveSec=60
+AccuracySec=5
+
+[Install]
+WantedBy=timers.target

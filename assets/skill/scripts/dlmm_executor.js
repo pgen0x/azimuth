@@ -2049,6 +2049,15 @@ async function main() {
           "--profile", PROFILE_DIR, "--sync-pool-memory"], {encoding:"utf8", timeout:20000});
       } catch (_) { console.warn("[ACCOUNTING] Pool cash history publication failed; cached evidence will expire"); }
       console.log(JSON.stringify({recorded, nav}));
+    } else if (command === "candidate-price-path") {
+      if (args.length !== 2) throw new Error("Usage: candidate-price-path <candidate-identities-json>");
+      const candidates = JSON.parse(args[1]);
+      const publicWallet = process.env.SOLANA_PUBLIC_KEY;
+      if (!publicWallet) throw new Error("Price observations require SOLANA_PUBLIC_KEY");
+      new PublicKey(publicWallet);
+      console.log(JSON.stringify(await runWithFailover(connection =>
+        require("./dlmm_price_path").observe(connection, DLMM.createProgram(connection), candidates,
+          PublicKey, () => !require("./dlmm_nav").walletTradeActive(publicWallet)))));
     } else if (command === "candidate-bin-snapshot") {
       if (args.length < 2 || args.length > 5) throw new Error("Usage: candidate-bin-snapshot <pool> [below=69] [above=16] [fixed_anchor]");
       console.log(JSON.stringify(await candidateBinSnapshot(args[1],

@@ -146,6 +146,37 @@ remain unknown; no counterfactual profit is invented for paths not executed.
 
 ## Shadow study
 
+`dlmm_candidate_replay.py --profile <profile> --output <new-directory>` replays
+recorded candidate forecasts independently of live entries. It binds each anchor
+to its original native snapshots, reserves nonoverlapping pool intervals before
+examining outcomes, and compares the original geometry with a range one bin below
+the active price. Missing terminal observations remain unmeasured. The model caps
+inferred shares at 1% of each observed bin's supply and applies explicit network,
+entry-token and exit-token cost assumptions. Results are hypothetical ticket
+sensitivities, not funded portfolio returns: concurrent pools, uncertain fills,
+rent timing and market response still require separate validation. The command
+only reads profile evidence and refuses to overwrite an existing output directory.
+
+`dlmm_candidate_paper.py` collects prospective paired observations without opening
+live positions. The `azimuth-sol-candidate-paper.timer` runs once a minute, with
+at most two open paper cohorts and one native snapshot per run. Entry uses a fresh
+snapshot and already collected prior counters; terminal collection takes priority
+after the frozen one-hour horizon. Fresh ExactIn sell quotes replace the offline
+token haircut. Config and evaluator hashes are frozen, and stale/missing evidence
+remains unmeasured. The runner respects wallet trading activity and never signs or
+submits transactions. Quoted paper net still assumes inferred shares, estimated
+network/composition costs and returned rent; it does not prove executable profit
+or model a wallet's available capital.
+
+`dlmm_candidate_portfolio.simulate` adds a finite cash budget to modeled tickets.
+Entry reserves the ticket, rent allowance and estimated costs before admitting
+another ticket. Capital returns only at the modeled observation/exit time;
+retained ATA rent returns after an explicit cleanup delay. Unmeasured exits keep
+their escrow unavailable and make final equity/net unknown. Cash conservation
+checks prevent counting reserved costs twice or treating missing outcomes as
+zero-return exits. This improves capacity modeling without converting hypothetical
+quotes or pool marks into proved wallet profit.
+
 Scanner cooldown, momentum, audit and bundler/insider rejects preserve full candidate,
 pool and gate evidence under stable five-minute cohort IDs. Repeated IDs count once.
 Forward horizons are pulse 30 minutes, turnover 1 hour, casual 4 hours, multiday 24
@@ -1264,6 +1295,110 @@ Missing or invalid references do not remove positions from cash acceptance. The
 report keeps modeled fee and settled cash separate: their ratio is not forecast
 accuracy, and a verified reference is not evidence of profit. Existing entries
 without a saved reference remain unmeasured; this command never backfills them.
+
+
+### Paired net exit experiment
+
+`dlmm_net_experiment.py backtest --profile <profile> --output <new-directory>`
+compares recorded live entries/exits against fixed quote-based exit rules:
+0.1% net take-profit, 1% net stop, and both. Entry timing, capital, and LP
+allocation are held fixed. This is an exit-policy experiment, not a historical
+re-execution of every version of the scanner or a new entry strategy.
+
+Training precedes the chronological validation split. Only finalized lifecycle
+costs whose trade and rent facts were already observed before that split train
+the frozen p90 cost budget. Quotes include pool fees, price impact, and the
+minimum output under quoted slippage; the budget covers observed network costs,
+failed submissions, nonrefundable costs and cleanup. Full refundable rent return
+is an explicit assumption. Extra-cost and unrecovered-ATA-rent stress cases are
+reported. Hypothetical transactions can cost differently or fail, so modeled
+net returns are not proved realized profit after all costs.
+
+Missing quote opportunities cannot be recreated: the partial replay retains the
+actual baseline exit when no observed quote triggers. Quote coverage, unknown
+outcomes, and modeled-exit counts remain visible. Shared refund fees for actual
+fallback exits are grouped once. Historical policies changed over the sample;
+the recorded baseline must not be labeled a full backtest of today's code.
+
+`dry-tick` records new actual entry identities after config freeze, reads one
+position's native inventory and a sell quote, and freezes the first decision
+per alternative. It only invokes `pnl-onchain`, never deploy/close/swap. It does
+not alter the live trader. The timer samples one least-recently-observed open
+position per minute, with a 20-second quote budget. Missing native reads or quotes
+stay unmeasured. Closed pairs are reconciled in `dry-summary.json`; the current
+strategy uses actual cash, and alternate earlier exits stay explicitly modeled.
+A config hash prevents silent parameter changes mid-experiment. Use a new output
+directory for a new protocol. The daily report is not a performance guarantee.
+
+`dlmm_net_search.py` searches a fixed 29-policy exit grid on the October 18–19
+UTC training interval, selecting only from training net returns under an extra
+100,000-lamport cost per modeled exit. At least ten evaluated entries and three
+modeled exits are required for ranking. The winner is frozen to disk before
+loading the October 20-to-original-experiment-freeze challenge period.
+`--entry-stage` then explores twelve pre-entry fee/activity filters around that
+training-selected exit. This second stage reuses an already inspected challenge
+period and must not be described as independent validation. Neither historical
+selection can authorize live promotion.
+
+Both selected configurations run under the read-only `azimuth-sol-net-research@`
+timer template, independently of the original experiment. New entries after each
+config freeze are paired with the current trader. An entry-filter rejection is
+recorded as a skipped trade with zero trading cash flow, not a profitable exit;
+the baseline still retains its realized result. Missing pre-entry features do
+not qualify. Skips do not simulate reinvestment of freed capital. Live strategy
+parameters are unchanged; prospective outcomes may disprove either candidate.
+
+The optional dry-run entry filter `min_pool_fee_pct` uses the recorded signal's
+pool fee percentage with a pre-entry gate timestamp no more than 120 seconds old.
+Missing/nonfinite fee evidence fails eligibility. This fee tier is not earned
+yield. The fee-2% / net-TP-0.05% hypothesis has its own frozen prospective config
+(`net-fee-tier-20261021-v1`); historical training and later challenge were positive
+but an earlier cohort was negative. The later challenge was already inspected,
+so it cannot validate this new filter independently. No live promotion is enabled.
+
+# Frozen exit execution sensitivity
+
+Native price-path research uses `dlmm_price_path.py` and the optional
+`azimuth-sol-price-path.timer` (60 seconds after each completed run). It rotates
+through up to 30 recent candidate identities per tick using one confirmed
+`getMultipleAccountsInfoAndContext` batch per RPC attempt, without reading bin
+arrays, loading a private wallet, or signing transactions. RPC failover may make
+additional attempts; the outer process has a 25-second timeout. Wallet activity
+defers a read. Pool ownership, decoded token identity, bin step, and active bin
+must validate; missing accounts remain unmeasured. Facts retain RPC slot and local
+request/observation timestamps in `dlmm_candidate_price_paths.jsonl`. This is
+prospective sampled price movement, not fee evidence, exact intraminute OHLC,
+finalized accounting, or an entry gate. Existing sparse history is not backfilled.
+
+`dlmm_price_path_features.py --input <price-path-journal> --cutoff <unix-time>`
+computes read-only movement diagnostics using only records collected by that
+cutoff. It requires at least ten minutes of history, gaps no larger than three
+minutes, and a latest observation no older than two minutes. Duplicate slots do
+not extend history; conflicting same-slot values, regressing slots, or changing
+bin steps invalidate the path. Request/observation/collection timing must be
+ordered and bounded. Observed drawdown and range remain lower bounds between
+samples. These features neither prove net profitability nor change live entry.
+
+The frozen `net-path-20261021-v1` paired dry run tests that history against actual
+future entries: absolute observed net movement must be at most one quarter of
+the deployed width, and observed span at most half. It keeps the live exit policy
+to isolate entry selection. Missing history skips the hypothetical entry; skips
+are not wins. Per-entry evidence is cut off at the recorded deployment second,
+hashed, and frozen on first evaluation. Later observations cannot change the
+decision. Both exit policies are empty, so this comparison needs no new native
+inventory or sell quotes. It remains asynchronous shadow eligibility with
+finalized cash as the outcome, not a live gate or proof of profitable selection.
+
+`dlmm_net_execution_stress.py --source <search/result.json> --quotes
+<memories/dlmm_liquidation_quotes.jsonl> --output <new-report.json>` evaluates
+the already selected training and validation exits under 0%, 1%, 3%, and 5%
+reductions in minimum token sale proceeds. It matches the exact position and
+decision timestamp and requires native inventory evidence. Missing or conflicting
+sale evidence leaves the aggregate unknown. Native SOL inventory and refundable
+rent are not shocked. Actual-exit fallback remains unchanged, and no strategy is
+reselected. These are sensitivity scenarios, not measured latency losses or
+executable fills; they do not authorize live promotion. The command refuses to
+overwrite an existing report.
 
 ### SOL BidAsk coverage under the bin limit
 

@@ -1,0 +1,10 @@
+[Unit]
+Description=Observe candidate paper entries and exits independently of live trades
+
+[Timer]
+OnBootSec=45
+OnUnitInactiveSec=60
+AccuracySec=5
+
+[Install]
+WantedBy=timers.target

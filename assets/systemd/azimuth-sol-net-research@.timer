@@ -1,0 +1,10 @@
+[Unit]
+Description=Read-only observations for frozen net research %i
+
+[Timer]
+OnBootSec=30
+OnUnitInactiveSec=120
+AccuracySec=5
+
+[Install]
+WantedBy=timers.target
