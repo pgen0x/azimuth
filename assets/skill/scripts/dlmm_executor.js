@@ -721,6 +721,13 @@ async function deployPosition(poolAddressStr, amountX, amountY, binsBelow, binsA
         const pool = await DLMM.create(connection, new PublicKey(poolAddressStr));
         if (!dry) await assertNoTokenExposure(pool, wallet);
         const activeBin = await pool.getActiveBin();
+        // getActiveBin fetches fresh state, while the SDK liquidity builder
+        // uses lbPair.activeId cached at pool creation. Never combine a range
+        // from one anchor with liquidity amounts/slippage from another.
+        if (!Number.isSafeInteger(activeBin.binId)
+            || activeBin.binId !== pool.lbPair.activeId) {
+          throw new Error("ENTRY REFUSED: active bin changed during entry preparation");
+        }
         const minBinId = activeBin.binId - binsBelow;
         const maxBinId = activeBin.binId + binsAbove;
         const tokenXDecimals = await getTokenDecimals(connection, pool.lbPair.tokenXMint);
@@ -755,7 +762,7 @@ async function deployPosition(poolAddressStr, amountX, amountY, binsBelow, binsA
         try { snapshots = await entryBinSnapshots(pool, minBinId, maxBinId, studySide); }
         catch { console.warn("[SHADOW] Entry bin snapshot unavailable"); }
 
-        const persistEntry = () => {
+        const persistEntry = (preSignBinCheck) => {
           const recordedAt = Date.now() / 1000;
           const feeForecast = require("./dlmm_entry_forecast").entryForecastReference(
             path.join(PROFILE_DIR, "memories", "dlmm_candidate_fee_forecasts.jsonl"), {
@@ -770,6 +777,8 @@ async function deployPosition(poolAddressStr, amountX, amountY, binsBelow, binsA
             entry_bin: activeBin.binId, entry_price: pool.fromPricePerLamport(Number(activeBin.price)),
             bins_below: binsBelow, bins_above: binsAbove, bin_step: Number(pool.lbPair.binStep),
             amount_x: amountX, amount_y: amountY, position_creation: positionCreation,
+            position_pda_history_outcome: pdaHistory?.reason || "not_started_or_unavailable",
+            pre_sign_bin_check: preSignBinCheck,
             deployed_at: Math.floor(recordedAt), fee_forecast_reference: feeForecast,
           }), { mode: 0o600, flag: positionCreation.kind === "wallet_pda" ? "wx" : "w" });
         };
@@ -792,7 +801,22 @@ async function deployPosition(poolAddressStr, amountX, amountY, binsBelow, binsA
             signers = [wallet, newPosition];
             await simulate(tx);
           }
-          if (!submitted) persistEntry();
+          // Snapshot/build/simulation can outlive the range selected above.
+          // A SOL-only ladder already outside the active bin starts idle and
+          // still pays entry/close fees. Recheck before persistence/signing;
+          // this does not guarantee the bin cannot move after submission.
+          let preSignBinCheck = null;
+          if (studySide) {
+            const latestBin = await pool.getActiveBin();
+            if (!Number.isSafeInteger(latestBin.binId)
+                || latestBin.binId < minBinId || latestBin.binId > maxBinId) {
+              throw new Error("ENTRY REFUSED: active bin left planned SOL BidAsk range before signing");
+            }
+            preSignBinCheck = { active_bin: latestBin.binId, lower_bin: minBinId,
+              upper_bin: maxBinId, observed_at: Date.now() / 1000,
+              basis: "rpc_read_before_first_transaction_signing; not_landed_bin" };
+          }
+          if (!submitted) persistEntry(preSignBinCheck);
           tx.sign(...signers);
           const raw = tx.serialize();
           const signature = bs58.encode(tx.signature);

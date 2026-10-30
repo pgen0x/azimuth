@@ -441,12 +441,12 @@ the burned amount as `burned_raw` next to the refunded lamports.
 
 The scheduled unit passes `--batch`, which waits for at least two eligible
 accounts to share one network fee. A singleton is reclaimed immediately when
-its rent exceeds free native cash above the executor's existing 0.2 SOL reserve;
+its rent exceeds free native cash above the executor's existing 0.02 SOL reserve;
 this also avoids retaining a large account balance. It can also run when the
 measured net refund restores the pipeline's minimum entry liquidity:
-0.2 SOL reserve + 0.045 SOL rent allowance + 0.1 SOL minimum ticket = 0.345 SOL.
+0.02 SOL reserve + 0.045 SOL rent allowance + 0.1 SOL minimum ticket = 0.165 SOL.
 The 0.045 SOL allowance covers the observed 0.043414 SOL position/ATA rent;
-the executor still simulates the exact transaction and enforces the 0.2 SOL
+the executor still simulates the exact transaction and enforces the 0.02 SOL
 post-entry reserve before signing. Larger actual costs can still refuse entry.
 These amounts share `dlmm_cash_policy.json` between the pipeline and
 executor. The policy is loaded on entry/maintenance paths; exit reconciliation
@@ -1154,13 +1154,24 @@ entry refuses a sale; the live balance must still match before signing. This
 permits independently proved new lots even when earlier ledger residues remain
 unresolved, without selling old inventory or rewriting historical accounting.
 
-Batch risk sizing applies the existing conviction multiplier before selecting
+Batch and AI-selected signal risk sizing apply the existing conviction multiplier before selecting
 an executable candidate. If the rounded ticket falls below the configured
 minimum, that candidate is skipped instead of increasing its size back to the
 minimum. A valid runner-up can still be selected; an explicit pool choice in a
-batch is checked again before deployment. This enforces the existing risk
+signal is checked again before deployment. AI-selected records receive the same
+per-candidate conviction adjustments once from the original signal score;
+within-batch ranking adjustments require multiple candidates and therefore do
+not apply to a singleton. Manual discovery retains its existing sizing.
+This enforces the existing risk
 budget and does not establish profitability or protect against a high-score
 pool collapsing. It does not modify exits or existing positions.
+
+Accepted automatic entries carry `risk_sizing` in the executor context persisted
+before transaction submission: original and adjusted scores, adjustment notes,
+requested ticket, multiplier, accepted ticket and configured minimum. This is
+decision provenance, not a profit prediction. Manual discovery has no such
+proof, and historical entries without it remain unknown rather than being
+backfilled with today's policy or weights.
 
 Native inventory verification recognizes both ordinary position initialization
 and wallet-PDA initialization. PDA funding must bind the same payer, base wallet,
@@ -1388,3 +1399,83 @@ rent are not shocked. Actual-exit fallback remains unchanged, and no strategy is
 reselected. These are sensitivity scenarios, not measured latency losses or
 executable fills; they do not authorize live promotion. The command refuses to
 overwrite an existing report.
+
+### SOL BidAsk coverage under the bin limit
+
+The Python entry path rejects SOL BidAsk candidates when the 20% minimum
+price-range coverage requires more than the existing 100-bin technical limit.
+It does not silently clamp an unsupported range into a narrower position.
+Candidates are checked before winner selection, and the geometry helper also
+rejects invalid or unsupported bin steps for other callers. The production Go
+screen's 80–125 bin-step band retains its existing 53/44/35-bin geometry at
+steps 80/100/125. Coverage describes a price range, not a loss cap or a profit
+guarantee. Supporting correlated assets at smaller steps requires an explicit
+strategy-specific range policy, not bypassing this check.
+
+### Consistent entry bin anchor
+
+The installed DLMM SDK's `getActiveBin()` fetches pool state independently,
+while `initializePositionAndAddLiquidityByStrategy()` uses cached
+`lbPair.activeId` for the instruction's active-bin anchor. Entry refuses a
+noninteger or changed fresh bin before building or signing, so range selection
+and the SDK builder use the same anchor. A later normal scanner pass may
+reconsider the pool; this refusal does not submit a transaction or immediately
+retry a moving price. This check adds no RPC reads and does not eliminate price
+movement after the reads, replace on-chain slippage checks, or prove that
+historical out-of-range exits were caused by this mismatch.
+
+### Entry liquidity versus the exit floor
+
+The predeploy gate reuses its existing DexScreener token response to inspect
+the exact Solana pool's liquidity, while momentum retains its deepest-venue
+selection. Known liquidity below the monitor's configured
+`MIN_EXIT_LIQUIDITY_USD` rejects that candidate before further entry checks.
+Pool addresses are case-sensitive. A different venue, missing liquidity,
+negative value, boolean or nonfinite value cannot establish pool depth;
+unknown data keeps the existing entry behavior. Evidence and the configured
+floor are retained in `entry_live_gates`. This adds no HTTP calls and cannot
+prevent liquidity disappearing after the observation. Historical thin-pool
+exits alone do not prove the same liquidity was available to read before entry.
+
+### Position PDA history diagnostics
+
+Entry provenance retains `position_pda_history_outcome`, a fixed reason code
+from the optional lookup (`unused`, `history_exists`, `http_error`, `rpc_error`,
+`invalid_history_response`, `history_read_failed`, `history_timeout`,
+`wait_window_elapsed`, `cancelled`, or `not_started_or_unavailable`). No endpoint
+or raw error is retained. This describes the history lookup, not every possible
+rewrite or simulation fallback: `unused` with keypair creation still requires
+examining later checks. The existing 300 ms wait window, background lifetime,
+single lookup and unsigned fallback remain; no retry or additional RPC is added.
+
+### Repeat-entry cash loss refusal
+
+The pipeline now rejects a pool with at least two closes in its last-ten,
+30-day history when the proved aggregate cash upper bound is strictly negative.
+It reads the local cash-history cache once per batch and binds each pool to the
+current Redis close count and latest timestamp, including the separate original
+journal binding for recovered closes. Evidence must be at most 900 seconds old,
+cover every selected root, and use an exact, bounded or upper-only cash basis.
+Unknown, stale, ambiguous or changed history does not trigger this cash refusal;
+existing mark-loss and other entry gates still apply. This is a risk control,
+not a claim that historical rejected trades would have lost or future entries
+will profit. The same rule applies to direct and agent-selected pipeline calls.
+
+### Two recent individually proved pool losses
+
+Pool memory also refuses a repeat entry when each of the two newest closed
+positions on that pool has a strictly negative cash upper bound after matched
+rent refunds. Older incomplete inventory stays unknown; this rule makes no
+claim about the pool's lifetime or thirty-day aggregate profit.
+
+The two proofs bind position, root, and close timestamp to the latest live
+journal records. Both must be single-position, settled roots with unambiguous
+refund ownership. Shared cleanup fees retain individual conservative bounds;
+those bounds are never summed. A newer recovered close absent from the live
+journal, zero/positive/unknown outcome, tied close timestamps, or a stale cache
+prevents this new refusal. The existing aggregate-loss rule remains available.
+
+It targets pools with repeated small net losses despite older attribution gaps.
+It is an entry risk constraint, not proof of improved trading returns: it can
+also skip a future winner. Forward evaluation must retain rejected candidates
+and all executed losses rather than claiming saved money from rejection alone.

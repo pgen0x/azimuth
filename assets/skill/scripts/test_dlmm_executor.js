@@ -20,7 +20,7 @@ const key = (value) => ({ toString: () => value });
 const wallet = { publicKey: key(`test-wallet-${worker ? "swap" : process.pid}`) };
 const transaction = () => ({ signature: Buffer.from([1]), sign(...signers) {signCalls++;lastSignedKeys=signers.map(s=>s.publicKey.toString());}, compileMessage() { return {}; }, serialize() { return Buffer.from(this.recentBlockhash); } });
 const pool = {
-  pubkey: key("pool"), lbPair: { tokenXMint: key("TOKEN"), tokenYMint: key("So11111111111111111111111111111111111111112"), binStep: 100 },
+  pubkey: key("pool"), lbPair: { activeId: 0, tokenXMint: key("TOKEN"), tokenYMint: key("So11111111111111111111111111111111111111112"), binStep: 100 },
   program: { account: {
     positionV2: { all: async () => { reads++; return positions; } },
     lbPair: { fetch: async () => ({ tokenXMint: key("TOKEN"), tokenYMint: key("SOL") }) },
@@ -269,7 +269,7 @@ vm.runInNewContext("const productionExitTransport=confirmExitTransaction;confirm
     await assert.rejects(snapshot("pool"), /RPC endpoints failed/);
     pool.lbPair.tokenYMint = key("So11111111111111111111111111111111111111112");
     pool.getActiveBin = previousActive;
-    delete pool.getBinsBetweenLowerAndUpperBound; delete pool.lbPair.activeId;
+    delete pool.getBinsBetweenLowerAndUpperBound;
     delete pool.tokenX; delete pool.tokenY;
     vm.runInNewContext("getWallet = candidateOriginalWallet;", sandbox);
   }
@@ -322,7 +322,7 @@ vm.runInNewContext("const productionExitTransport=confirmExitTransaction;confirm
       assert.equal(out.accountExists,state === "race"); // monitor must verify disappearance
     }
   }
-  reservePost=199999999;
+  reservePost=19999999;
   await assert.rejects(swapToken("So11111111111111111111111111111111111111112","TOKEN",0.1),/native reserve/);
   assert.equal(sends,0);
   reservePost=300000000;
@@ -1023,20 +1023,61 @@ vm.runInNewContext("const productionExitTransport=confirmExitTransaction;confirm
   execFileSync(process.execPath, ["-e", code]);
   await release();
   await (await acquireDeployLock(wallet.publicKey.toString()))();
+  // A fresh range anchor must agree with the cached SDK instruction anchor.
+  // Both directions and malformed reads refuse before any build or signature.
+  const originalActiveRead = pool.getActiveBin;
+  const beforeDrift = {builds, sends, signCalls};
+  for (const binId of [-1, 1, NaN, undefined]) {
+    pool.getActiveBin = async () => ({binId, price: "1"});
+    const refused = await deploy();
+    assert.equal(refused.success, false);
+    assert.match(refused.error, /active bin changed/);
+    assert.deepEqual({builds, sends, signCalls}, beforeDrift);
+    assert.ok(!fs.existsSync(marker));
+  }
+  pool.getActiveBin = originalActiveRead;
+  // The initial anchor can agree, then become stale during build/simulation.
+  // Refuse either side of the funded range, or an invalid fresh observation,
+  // without sending, signing or recording a position as deployed.
+  for (const movedBin of [3, -21, NaN]) {
+    let activeReads = 0;
+    pool.getActiveBin = async () => ({binId: ++activeReads === 1 ? 0 : movedBin, price: "1"});
+    const before = {sends, signCalls};
+    const entries = path.join(root, "memories/dlmm_entries");
+    const priorFiles = fs.existsSync(entries) ? fs.readdirSync(entries).sort() : [];
+    const refused = await deploy();
+    assert.equal(refused.success, false);
+    assert.match(refused.error, /left planned SOL BidAsk range before signing/);
+    assert.deepEqual({sends, signCalls}, before);
+    assert.deepEqual(fs.readdirSync(entries).sort(), priorFiles);
+    assert.ok(!fs.existsSync(marker));
+  }
+  pool.getActiveBin = originalActiveRead;
+  let validRangeReads = 0;
+  pool.getActiveBin = async () => ({binId: ++validRangeReads === 1 ? 0 : -1, price: "1"});
   const parallel = await Promise.allSettled([deploy(), deploy()]);
+  pool.getActiveBin = originalActiveRead;
   assert.equal(parallel.filter((r) => r.status === "fulfilled" && r.value.success).length, 1);
   assert.equal(lastSlippage, 10);
   assert.equal(sends, 1);
   assert.equal(lastMaxRetries, 20);
   assert.equal((await deploy()).pending, true); // prior blockhash still valid
   assert.equal(sends, 1);
-  const provenance = JSON.parse(fs.readFileSync(path.join(root, "memories/dlmm_entries/position-1.json")));
+  const deployedPosition = parallel.find(r => r.status === "fulfilled" && r.value.success).value.position;
+  const provenance = JSON.parse(fs.readFileSync(path.join(root, "memories/dlmm_entries", `${deployedPosition}.json`)));
   assert.deepEqual(provenance.signal.entry_live_gates, entryGates);
   assert.equal(provenance.dev, "developer");
   assert.equal(provenance.signal.holders, 0); assert.equal(provenance.signal.unique_traders, 100);
   assert.equal(provenance.mode, "turnover"); assert.equal(provenance.recenter_of, "root");
   assert.equal(provenance.pool, "pool");
   assert.equal(provenance.bin_step, 100);
+  assert.equal(provenance.entry_bin, 0);
+  assert.equal(provenance.pre_sign_bin_check.active_bin, -1);
+  assert.equal(provenance.pre_sign_bin_check.lower_bin, -20);
+  assert.equal(provenance.pre_sign_bin_check.upper_bin, 0);
+  assert.ok(Number.isFinite(provenance.pre_sign_bin_check.observed_at));
+  assert.equal(provenance.pre_sign_bin_check.basis,
+    "rpc_read_before_first_transaction_signing; not_landed_bin");
   height = 151;
   positions = [{ publicKey: key("existing"), account: { lbPair: key("pool") } }];
   assert.match((await deploy()).error, /pool already has position/); assert.equal(sends, 1);
@@ -1054,13 +1095,13 @@ vm.runInNewContext("const productionExitTransport=confirmExitTransaction;confirm
   clearMarker(); sendError = false;
   const beforeReserve = sends;
   const entriesBeforeReserve=fs.readdirSync(path.join(root,"memories/dlmm_entries")).length;
-  for (const post of [163759911,199999999,undefined]) {
+  for (const post of [16375991,19999999,undefined]) {
     reservePost=post;
     assert.match((await deploy()).error,/native reserve/);
     assert.equal(sends,beforeReserve);
     assert.equal(fs.readdirSync(path.join(root,"memories/dlmm_entries")).length,entriesBeforeReserve);
   }
-  reservePost=200000000; reserveError="failed";
+  reservePost=20000000; reserveError="failed";
   assert.match((await deploy()).error,/unmeasured/);
   reserveError=null;reserveChanged=true;
   assert.match((await deploy()).error,/unmeasured/);
@@ -1078,13 +1119,13 @@ vm.runInNewContext("const productionExitTransport=confirmExitTransaction;confirm
   await assert.rejects(deploy(), /RPC endpoints failed/); assert.equal(sends, 6);
   await assert.rejects(deployPosition("pool", 0, -1, 20, 0), /Invalid deploy/);
   clearMarker(); height = 151; confirmationError = false;
-  reservePost=200000000; // exact reserve boundary remains permitted
+  reservePost=20000000; // exact reserve boundary remains permitted
   assert.equal((await deploy()).success, true); assert.equal(sends, 7); // expired reservation recovers
   clearMarker();reservePost=300000000;
   const oldCreates=pool.createExtendedEmptyPosition;
   pool.createExtendedEmptyPosition=async()=>[transaction(),transaction()];
   let reserveSteps=0;
-  Connection.prototype.simulateTransaction=async()=>({context:{slot:10},value:{err:null,accounts:[{lamports:++reserveSteps===1?300000000:199999999}]}});
+  Connection.prototype.simulateTransaction=async()=>({context:{slot:10},value:{err:null,accounts:[{lamports:++reserveSteps===1?300000000:19999999}]}});
   const partialReserve=await deployPosition("pool",0,0.1,80,0,"bid_ask",1000);
   assert.equal(partialReserve.pending,true);assert.equal(sends,8);
   assert.match(partialReserve.error,/native reserve/);
@@ -1156,7 +1197,7 @@ vm.runInNewContext("const productionExitTransport=confirmExitTransaction;confirm
   assert.equal(JSON.parse(fs.readFileSync(path.join(root,"memories/dlmm_entries",fallbackEntry.position+".json"))).position_creation.kind,"keypair");
   assert.equal(fs.existsSync(path.join(root,"memories/dlmm_entries/pda-simulation-fallback.json")),false);
   Connection.prototype.simulateTransaction=defaultSimulation;clearMarker();
-  pdaMode="reserve-floor";reservePost=199999999;
+  pdaMode="reserve-floor";reservePost=19999999;
   const beforePdaFloor=sends;
   assert.match((await deploy()).error,/native reserve/);assert.equal(sends,beforePdaFloor);
   assert.equal(fs.existsSync(path.join(root,"memories/dlmm_entries/pda-reserve-floor.json")),false);
@@ -1385,7 +1426,7 @@ vm.runInNewContext("const productionExitTransport=confirmExitTransaction;confirm
   assert.equal(deferred.deferred, true);assert.equal(deferred.reason, "waiting_for_second_empty_account");
   assert.equal(deferred.batch_minimum_accounts, 2);assert.equal(sends, beforeBatch);assert.equal(feeReads, 0);
   assert.equal(fs.existsSync(path.join(root,"memories/dlmm_pending_rent",wallet.publicKey.toString()+".json")),false);
-  batchBalance = 200000000 + 1488440;
+  batchBalance = 20000000 + 1488440;
   assert.equal((await reclaimEmptyAccounts(true,true)).deferred,true);assert.equal(sends,beforeBatch);
   for (const invalid of [null, true, -1, NaN, Infinity, Number.MAX_SAFE_INTEGER+1]) {
     batchBalance=invalid;
@@ -1394,7 +1435,7 @@ vm.runInNewContext("const productionExitTransport=confirmExitTransaction;confirm
   }
   balanceError=true;
   assert.equal((await reclaimEmptyAccounts(true,true)).reason,"native_balance_unmeasured");
-  balanceError=false;batchBalance=200000000+1488440-1;
+  balanceError=false;batchBalance=20000000+1488440-1;
   assert.equal((await reclaimEmptyAccounts(true,true)).fee_lamports,5000);assert.equal(sends,beforeBatch+1);
   batchBalance=300000000;tokenAccounts=[account("eligible"),account("safe-2022",{extensions:[{extension:"immutableOwner"}]},{owner:token2022})];
   const readsBeforeBatch=batchBalanceReads;
@@ -1408,14 +1449,14 @@ vm.runInNewContext("const productionExitTransport=confirmExitTransaction;confirm
   env.DRY_RUN="true";batchBalance=0;
   assert.equal((await reclaimEmptyAccounts(true,true)).dry_run,true);assert.equal(sends,beforeBatch+4);
   delete env.DRY_RUN;
-  tokenAccounts=[account("eligible")];batchBalance=343630923;
+  tokenAccounts=[account("eligible")];batchBalance=163630923;
   const beforeEntryRent=sends;
   const entryReady=await reclaimEmptyAccounts(true,true);
-  assert.equal(entryReady.entry_liquidity_floor_lamports,345000000);
+  assert.equal(entryReady.entry_liquidity_floor_lamports,165000000);
   assert.equal(entryReady.entry_liquidity_shortfall_lamports,1369077);
   assert.equal(entryReady.fee_lamports,5000);assert.equal(sends,beforeEntryRent+1);
-  assert.equal(batchBalance+entryReady.recovered_lamports_before_fee-entryReady.fee_lamports,345114363);
-  batchBalance=345000000-1488440+5000;
+  assert.equal(batchBalance+entryReady.recovered_lamports_before_fee-entryReady.fee_lamports,165114363);
+  batchBalance=165000000-1488440+5000;
   assert.equal((await reclaimEmptyAccounts(true,true)).fee_lamports,5000);assert.equal(sends,beforeEntryRent+2);
   batchBalance--;
   const feeCount=feeReads,signCount=signCalls;
@@ -1423,12 +1464,12 @@ vm.runInNewContext("const productionExitTransport=confirmExitTransaction;confirm
   assert.equal(stillShort.reason,"singleton_net_below_entry_floor");
   assert.equal(feeReads,feeCount+1);assert.equal(signCalls,signCount);assert.equal(sends,beforeEntryRent+2);
   assert.equal(fs.existsSync(path.join(root,"memories/dlmm_pending_rent",wallet.publicKey.toString()+".json")),false);
-  for(const balance of [345000000,345000000-1488440-1]){
+  for(const balance of [165000000,165000000-1488440-1]){
     batchBalance=balance;const beforeFee=feeReads;
     assert.equal((await reclaimEmptyAccounts(true,true)).reason,"waiting_for_second_empty_account");
     assert.equal(feeReads,beforeFee);assert.equal(sends,beforeEntryRent+2);
   }
-  batchBalance=343630923;fee=null;
+  batchBalance=163630923;fee=null;
   await assert.rejects(reclaimEmptyAccounts(true,true),/unknown or uneconomic/);
   assert.equal(signCalls,signCount);assert.equal(sends,beforeEntryRent+2);fee=5000;
   Connection.prototype.getBalanceAndContext=balanceReader;

@@ -118,5 +118,12 @@ async function render(tab, payload, fail=false) {
   assert(rhEmpty.log.includes('No log lines retained'), 'empty log state');
   const rhFail = await render('robinhood', null, true);
   assert(rhFail.html.includes('Could not load this section'), 'robinhood error state');
-  console.log('dashboard render: 37 synthetic cases passed');
+  // The overview must not restate a fixed SOL entry floor: the cash policy decides entry.
+  for (const native of [0.1, 0.2, 1, null]) {
+    const ov = await render('overview', {nav: {native_sol: native, ts: 1}, services: [], sources: []});
+    assert(!/0\.35|Below 0\.|floor/.test(ov.html), 'no hard-coded entry floor');
+    assert(!ov.html.includes('meets the'), 'a static balance never reads as entry authorization');
+    assert(ov.html.includes('configured cash policy'), 'neutral entry-policy note');
+  }
+  console.log('dashboard render: 41 synthetic cases passed');
 })().catch(error => {console.error(error); process.exitCode = 1;});

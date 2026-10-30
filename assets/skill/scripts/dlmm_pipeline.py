@@ -11,9 +11,10 @@ import re
 import math
 import shlex
 from pathlib import Path
+from dlmm_pool_cash_gate import negative_pool_cash
 from local_indicators import check_local_indicators
 from tz_util import local_time_str
-from dlmm_monitor import position_live_onchain
+from dlmm_monitor import position_live_onchain, load_soul_dlmm_params as load_exit_params
 from dlmm_weights import ranking_weight_context
 from dlmm_candidate_watch import record_pipeline_candidates, record_pipeline_reject
 
@@ -535,7 +536,7 @@ def compute_deploy_amount(wallet_sol):
     deployable = max(0.0, wallet_sol - reserve)
     dynamic = deployable * pct
     if dynamic < floor:
-        return max(minimum, round(dynamic, 2)) if wallet_sol - reserve >= minimum else 0.0
+        return minimum  # Small wallets keep a minimum-sized ticket, preserving room for other positions.
     result = min(ceil, dynamic)
     return round(result, 2)
 
@@ -718,12 +719,19 @@ def predeploy_live_gate_reject(candidate, deploy_sol, timeframe):
     base_mint = candidate.get("base_mint", "")
     if not base_mint:
         return "base mint unavailable"
-    m5, h1, h6, h24 = get_momentum(base_mint)
+    pool_evidence = {"pool_liquidity_usd": None}
+    m5, h1, h6, h24 = get_momentum(base_mint, pool=candidate["pool"], evidence=pool_evidence)
+    exit_floor = load_exit_params()["MIN_EXIT_LIQUIDITY_USD"]
     checks = candidate["entry_live_gates"] = {
         "observed_at": int(time.time()), "checked_deploy_sol": deploy_sol, "fee_timeframe": timeframe,
         "m5_pct": m5, "h1_pct": h1, "h6_pct": h6, "h24_pct": h24,
         "screened_fee_tvl_ratio": None, "live_fee_tvl_ratio": None, "price_impact_pct": None,
+        "pool_liquidity_usd": pool_evidence["pool_liquidity_usd"],
+        "exit_liquidity_floor_usd": exit_floor,
     }
+    liquidity = pool_evidence["pool_liquidity_usd"]
+    if liquidity is not None and liquidity < exit_floor:
+        return f"pool liquidity ${liquidity:,.0f} below exit floor ${exit_floor:,.0f}"
     if m5 is not None:
         print(f"Pre-deploy momentum check {candidate['name']}: 5m price change = {m5:+.2f}%")
         if m5 < -5.0:
@@ -780,7 +788,7 @@ DEV_BLOCKLIST_MAX = int(os.environ.get("DEV_BLOCKLIST_MAX", "12"))
 MINT_BLACKLIST_MAX = int(os.environ.get("MINT_BLACKLIST_MAX", "20"))
 
 
-def get_momentum(mint):
+def get_momentum(mint, *, pool=None, evidence=None):
     """Returns (m5_pct, h1_pct, h6_pct, h24_pct) price change from DexScreener, or
     (None, None, None, None) on failure. Screens ALL candidates, not just the winner.
 
@@ -799,6 +807,22 @@ def get_momentum(mint):
         with urllib.request.urlopen(req, timeout=8) as resp:
             data = json.loads(resp.read())
         pairs = data.get("pairs") or []
+        # Reuse this response for entry/exit consistency. Momentum still uses
+        # the deepest venue, but only the exact Solana pool can prove depth.
+        if pool is not None and evidence is not None:
+            evidence["pool_liquidity_usd"] = None
+            for pair in pairs:
+                if pair.get("chainId") != "solana" or pair.get("pairAddress") != pool:
+                    continue
+                value = (pair.get("liquidity") or {}).get("usd")
+                try:
+                    if value is not None and not isinstance(value, bool):
+                        value = float(value)
+                        if math.isfinite(value) and value >= 0:
+                            evidence["pool_liquidity_usd"] = value
+                except (TypeError, ValueError):
+                    pass
+                break
         if not pairs:
             return None, None, None, None
         deepest = max(pairs, key=lambda p: float((p.get("liquidity") or {}).get("usd") or 0.0))
@@ -937,6 +961,8 @@ def risk_scaled_ticket(deploy_sol, score, mode):
     """Keep the existing risk multiplier without raising a subminimum ticket."""
     if score is None:
         return deploy_sol, 1.0
+    if type(score) not in (int, float) or not math.isfinite(score):
+        return 0.0, 0.0
     floor = BATCH_CONVICTION_FLOOR.get(mode, 12.0)
     margin = max(0.0, min(1.0, (float(score) - floor) / 40.0))
     multiplier = 0.5 + 0.5 * margin
@@ -961,6 +987,10 @@ def apply_batch_conviction(candidates, mode="multiday"):
     """
     survivors = []
     for c in candidates:
+        score = c.get("score")
+        if type(score) not in (int, float) or not math.isfinite(score):
+            print(f"Batch reject {c.get('name', '?')} - invalid conviction score")
+            continue
         # Token has produced almost no swap fees globally = bundled/inorganic.
         # Only the truly-dead tail hard-rejects; the 30-SOL line is a penalty
         # below. Absent field = unknown (fail-open), never zero.
@@ -980,6 +1010,7 @@ def apply_batch_conviction(candidates, mode="multiday"):
 
     weights = load_signal_weights(mode)
     for c in survivors:
+        c["_conviction_input_score"] = c.get("score")
         adj = 0.0
         notes = []
 
@@ -1148,13 +1179,18 @@ def sol_bidask_bins(bin_step):
     downside. Bins compound: price after n down-bins = (1+step)^-n, so
     n = ln(1-coverage) / -ln(1+step). Clamped to the deployable band, then
     re-widened if that clamp left the range under SOL_BIDASK_MIN_COVERAGE."""
-    step = max(bin_step, 1) / 10000.0
+    if type(bin_step) not in (int, float) or not math.isfinite(bin_step) or bin_step <= 0:
+        raise ValueError("SOL BidAsk requires a finite positive bin step")
+    step = bin_step / 10000.0
     def bins_for(coverage):
         return int(math.ceil(math.log(1.0 - coverage) / -math.log1p(step)))
     bins = max(MIN_BINS_BELOW, min(MAX_BINS_BELOW, bins_for(SOL_BIDASK_COVERAGE)))
     floor_bins = bins_for(SOL_BIDASK_MIN_COVERAGE)
+    if floor_bins > BINS_BELOW_HARD_MAX:
+        raise ValueError(f"SOL BidAsk minimum {SOL_BIDASK_MIN_COVERAGE:.0%} coverage requires "
+                         f"{floor_bins} bins, above the {BINS_BELOW_HARD_MAX}-bin limit")
     if bins < floor_bins:
-        bins = min(BINS_BELOW_HARD_MAX, floor_bins)
+        bins = floor_bins
     return bins
 
 def select_batch_strategy(c, mode):
@@ -1278,8 +1314,9 @@ def main():
 
     sol_balance = get_wallet_sol_balance()
     # Hard gate: abort entire pipeline (including analyze-only) if wallet too thin to deploy anything useful
-    if sol_balance < 0.25 and os.environ.get("DRY_RUN") != "true":
-        print(f"[SKIP] Wallet {sol_balance:.3f} SOL < 0.25 SOL minimum — aborting pipeline (no SOL to deploy)")
+    entry_floor = sum(CASH_POLICY[key] for key in ("native_reserve_lamports", "entry_rent_allowance_lamports", "minimum_entry_lamports")) / 1e9
+    if sol_balance < entry_floor and os.environ.get("DRY_RUN") != "true":
+        print(f"[SKIP] Wallet {sol_balance:.3f} SOL < {entry_floor:.3f} SOL entry minimum including reserve and rent")
         defer_capacity_signals(cli)
         sys.exit(0)
     deploy_sol = compute_deploy_amount(sol_balance)
@@ -1357,8 +1394,14 @@ def main():
         if missing:
             print(f"Aborting: --from-signal record missing required fields: {', '.join(missing)} (see docs/SIGNAL_SCHEMA.md)")
             sys.exit(1)
-        candidates = [signal_record]
-        print(f"Using signalled candidate {candidates[0].get('name')} ({candidates[0].get('pool')}) — discovery/screen skipped")
+        print(f"Using signalled candidate {signal_record.get('name')} ({signal_record.get('pool')}) — discovery/screen skipped")
+        # The AI forwards an original signal record, not a conviction-adjusted
+        # score. Apply the same per-candidate policy once before risk sizing.
+        # A singleton has no cross-candidate rank adjustment.
+        candidates = apply_batch_conviction([signal_record], mode)
+        if not candidates:
+            print("Signalled candidate failed conviction gates.")
+            sys.exit(0)
         pools = []
     else:
         pools = fetch_top_pools(timeframe)
@@ -1520,6 +1563,13 @@ def main():
     open_base_mints = {op.get("base_mint") for op in open_pos if op.get("base_mint")}
     open_base_symbols = {op.get("base_symbol", "").upper() for op in open_pos if op.get("base_symbol")}
 
+    # One local cache read per batch; the per-pool gate binds it to the live
+    # close journal below. Missing/stale cash leaves existing checks intact.
+    cash_raw, _, cash_code = run_command('redis-cli get "sol:dlmm:cash_history"', timeout=2)
+    try:
+        cash_history_cache = json.loads(cash_raw) if cash_code == 0 else {}
+    except (ValueError, TypeError):
+        cash_history_cache = {}
     valid_candidates = []
     for c in candidates:
         if c["pool"] in open_pools:
@@ -1591,7 +1641,16 @@ def main():
         # sol:dlmm:history:pool:<pool> by the monitor. Two or more past closes
         # netting at or below POOL_MEMORY_NET_FLOOR_PCT = this pool has really
         # cost us — hard skip. No history (fresh pool) passes untouched.
-        hist_raw, _, _ = run_command(f"redis-cli lrange \"sol:dlmm:history:pool:{c['pool']}\" 0 9")
+        hist_raw, _, hist_code = run_command(f"redis-cli lrange \"sol:dlmm:history:pool:{c['pool']}\" 0 9")
+        cash_loss = negative_pool_cash(cash_history_cache, c['pool'], hist_raw, time.time()) if hist_code == 0 else None
+        if cash_loss is not None:
+            if cash_loss.get("scope") == "each_of_latest_two":
+                record_pipeline_reject(PROFILE_DIR, mode, "pool_cash_two_negative", c.get("pool"), c.get("base_mint"), c.get("sol_is_x"), c.get("name"))
+                print(f"Skipping {c['name']} - pool cash memory: latest two positions each proved net-negative after costs")
+            else:
+                record_pipeline_reject(PROFILE_DIR, mode, "pool_cash_upper_bound", c.get("pool"), c.get("base_mint"), c.get("sol_is_x"), c.get("name"))
+                print(f"Skipping {c['name']} - pool cash memory: {cash_loss['closes']} closes, net cash upper bound {cash_loss['cash_upper_sol']:+.9f} SOL")
+            continue
         if hist_raw and hist_raw != "(nil)":
             past_pnls = []
             for line in hist_raw.splitlines():
@@ -1649,6 +1708,15 @@ def main():
             mom_adj += max(-5.0, min(5.0, m5)) * 0.5
         c["score"] += mom_adj
         c["momentum_adj"] = round(mom_adj, 1)
+        intended_strategy = cli.strategy or (select_batch_strategy(c, mode) if batch_mode
+                                             else params.get("STRATEGY", "spot"))
+        if intended_strategy == "sol_bidask":
+            try:
+                sol_bidask_bins(c.get("bin_step", 100))
+            except ValueError as error:
+                record_pipeline_reject(PROFILE_DIR, mode, "strategy_geometry", c.get("pool"), c.get("base_mint"), c.get("sol_is_x"), c.get("name"))
+                print(f"Skipping {c['name']} - {error}")
+                continue
         valid_candidates.append(c)
 
     if not valid_candidates:
@@ -1730,6 +1798,7 @@ def main():
         sys.exit(0)
 
     # --pool override: AI specified which pool to deploy
+    risk_sizing = None
     winner = None
     if cli.pool:
         for c in valid_candidates:
@@ -1747,7 +1816,7 @@ def main():
         # the whole batch (the agent flow only ever checked its single pick).
         winner = None
         for c in valid_candidates:
-            if batch_mode:
+            if batch_mode or getattr(cli, "from_signal", None):
                 candidate_ticket, _ = risk_scaled_ticket(deploy_sol, c.get("score"), mode)
                 if candidate_ticket == 0:
                     record_pipeline_reject(PROFILE_DIR, mode, "risk_ticket_min", c.get("pool"), c.get("base_mint"), c.get("sol_is_x"), c.get("name"))
@@ -1802,9 +1871,9 @@ def main():
         others = ", ".join(c["base_symbol"] for c in valid_candidates if c is not winner) or "none"
         print(f"BATCH_PICK: {winner['base_symbol']} (score {winner['score']:.1f}) over [{others}]")
 
-    # Apply the same risk budget used during batch selection. A pool override
+    # Apply the same risk budget to both signal paths. A pool override
     # must not bypass it, and the minimum ticket must not undo the reduction.
-    if batch_mode:
+    if batch_mode or getattr(cli, "from_signal", None):
         original_deploy = deploy_sol
         deploy_sol, risk_multiplier = risk_scaled_ticket(deploy_sol, winner.get("score"), mode)
         if deploy_sol == 0:
@@ -1813,6 +1882,16 @@ def main():
         if risk_multiplier < 1.0:
             print(f"Risk-scaled ticket: {winner['base_symbol']} score {winner['score']:.1f} "
                   f"-> {risk_multiplier:.2f}x ({original_deploy:.2f} -> {deploy_sol:.2f} SOL)")
+        risk_sizing = {
+            "version": 1, "source": "from_batch" if batch_mode else "from_signal",
+            "mode": mode, "input_score": winner.get("_conviction_input_score"),
+            "adjusted_score": winner.get("score"),
+            "score_adjustment": winner.get("_conviction_adj"),
+            "adjustment_notes": list(winner.get("_conviction_notes", [])),
+            "requested_ticket_sol": original_deploy, "multiplier": risk_multiplier,
+            "accepted_ticket_sol": deploy_sol,
+            "minimum_entry_lamports": CASH_POLICY["minimum_entry_lamports"],
+        }
 
     # 5. Indicators Check (batch mode already ran this inside the pick loop)
     if params.get("INDICATORS_ENABLED") and not batch_mode:
@@ -1996,6 +2075,8 @@ def main():
     # A timed-out sender can still land. Adoption must retain the same risk
     # identity and learner inputs as normal registration after confirmation.
     entry_context = {key: winner.get(key) for key in ("pair", "base_mint", "base_symbol", "sol_is_x", "dev")}
+    if risk_sizing is not None:
+        entry_context["risk_sizing"] = risk_sizing
     entry_context.update(entry_id=entry_id, pair=winner["name"], mode=mode, strategy=strategy, size_sol=deploy_sol,
                          signal={key: winner.get(key) for key in (
                              "score", "organic_score", "fee_tvl_ratio", "fee_active_tvl_ratio",

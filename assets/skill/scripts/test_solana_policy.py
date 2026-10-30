@@ -382,19 +382,23 @@ def main():
          patch.object(pipeline, "get_momentum", return_value=(0, 0, 0, 0)):
         assert "dropped 75.0%" in pipeline.predeploy_live_gate_reject(
             {"pool": "pool", "name": "test", "base_mint": "mint", "fee_tvl_ratio": 0.2}, 0.1, "5m")
-    assert pipeline.compute_deploy_amount(0.30718357) == 0
-    assert pipeline.compute_deploy_amount(0.344) == 0
-    assert pipeline.compute_deploy_amount(0.344999999) == 0
-    assert pipeline.compute_deploy_amount(0.345) == 0.1
+    # Two 0.1 SOL entries fit this wallet with 0.045 SOL rent allowance each.
+    assert pipeline.compute_deploy_amount(0.342863115) == 0.1
+    assert pipeline.compute_deploy_amount(0.342863115 - 0.145) == 0.1
+    assert pipeline.compute_deploy_amount(0.342863115 - 2 * 0.145) == 0
+    assert pipeline.compute_deploy_amount(0.30718357) == 0.1
+    assert pipeline.compute_deploy_amount(0.344) == 0.1
+    assert pipeline.compute_deploy_amount(0.164999999) == 0
+    assert pipeline.compute_deploy_amount(0.165) == 0.1
     assert pipeline.compute_deploy_amount(0.346556150) == 0.1
-    assert pipeline.compute_deploy_amount(0.461554584) == 0.12
+    assert pipeline.compute_deploy_amount(0.461554584) == 0.1
     assert sum(pipeline.CASH_POLICY[key] for key in ('native_reserve_lamports',
-               'entry_rent_allowance_lamports', 'minimum_entry_lamports')) == 345000000
+               'entry_rent_allowance_lamports', 'minimum_entry_lamports')) == 165000000
     assert pipeline.compute_deploy_amount((348630923+1488440-5000)/1e9) == 0.1
 
     # Both real CLI capital gates must agree with the shared policy. An empty
     # batch stops after these gates, before any candidate/trade path can run.
-    for balance, passed in [(0.344999999, False), (0.345, True), (0.346556150, True)]:
+    for balance, passed in [(0.164999999, False), (0.165, True), (0.342863115, True)]:
         with patch.object(sys, "argv", ["dlmm_pipeline.py", "--mode", "turnover", "--from-batch", "[]"]), \
                 patch.object(pipeline, "record_pipeline_candidates"), \
                 patch.object(pipeline, "load_soul_dlmm_params", return_value={**pipeline.MODE_DEFAULTS["turnover"], "MIN_ORGANIC_SCORE": 60}), \
@@ -421,6 +425,15 @@ def main():
     assert pipeline.risk_scaled_ticket(.1, 52, "multiday") == (.1, 1)
     assert pipeline.risk_scaled_ticket(.12, 106.788112, "turnover") == (.12, 1)
     assert pipeline.risk_scaled_ticket(.12, None, "turnover") == (.12, 1)
+    # Python min/max can turn NaN into the maximum multiplier. Invalid signal
+    # scores must be rejected before enrichment/weights or automatic sizing.
+    for invalid in [float("nan"), float("inf"), -float("inf"), "NaN", "Infinity", "75", True, {}, []]:
+        assert pipeline.risk_scaled_ticket(.1, invalid, "turnover") == (0, 0)
+        with patch.object(pipeline, "load_signal_weights", side_effect=AssertionError("invalid score reached fit")), \
+                contextlib.redirect_stdout(io.StringIO()):
+            assert pipeline.apply_batch_conviction([{"name":"invalid", "score":invalid}], "turnover") == []
+    with contextlib.redirect_stdout(io.StringIO()):
+        assert pipeline.apply_batch_conviction([{"name":"missing"}], "turnover") == []
     # Execute the actual selection+sizing block: a subminimum first candidate
     # must not consume market reads or prevent a valid runner-up from winning.
     source = Path(pipeline.__file__).read_text()
@@ -446,6 +459,46 @@ def main():
                 assert expected is not None and ns["winner"]["pool"] == expected
                 assert ns["deploy_sol"] == .1
         assert market_reads == (["high"] if expected else [])
+
+    # AI-selected records enter with the original signal score. Exercise the
+    # actual parsing/conviction branch and selection block together: penalties
+    # apply once, and --pool cannot bypass the same minimum-ticket decision.
+    signal_branch = next(n for n in ast.walk(ast.parse(source))
+                         if isinstance(n, ast.If) and ast.unparse(n.test) == "cli.from_signal")
+    signal_code = compile(ast.Module(body=signal_branch.body, type_ignores=[]),
+                          pipeline.__file__, "exec")
+    for score, ticket, override, expected_score, expected_ticket in [
+        (75, .1, None, 50, None), (75, .1, "high", 50, None),
+        (75, .2, None, 50, .15), (95, .1, None, 70, .1),
+        (40, .1, None, None, None),
+    ]:
+        record = dict(high, score=score, tvl=20000, gmgn_dev_status="creator_close")
+        ns = dict(vars(pipeline), cli=argparse.Namespace(pool=override, strategy="sol_bidask",
+                  from_signal=json.dumps(record)), batch_mode=False, deploy_sol=ticket,
+                  mode="turnover", params={}, timeframe="30m")
+        market_reads = []
+        ns["check_bin_coverage"] = lambda pool,*args: market_reads.append(pool) or {"deployable":True}
+        with patch.object(pipeline, "load_signal_weights", return_value={}), \
+                contextlib.redirect_stdout(io.StringIO()):
+            try:
+                exec(signal_code, ns)
+                assert ns["candidates"][0]["score"] == expected_score
+                ns["valid_candidates"] = ns["candidates"]
+                exec(selection, ns)
+            except SystemExit as exc:
+                assert expected_ticket is None and exc.code == 0
+            else:
+                assert expected_ticket is not None and ns["deploy_sol"] == expected_ticket
+                evidence = ns["risk_sizing"]
+                assert evidence["source"] == "from_signal"
+                assert evidence["input_score"] == score
+                assert evidence["adjusted_score"] == expected_score
+                assert evidence["score_adjustment"] == -25
+                assert evidence["requested_ticket_sol"] == ticket
+                assert evidence["accepted_ticket_sol"] == expected_ticket
+                assert evidence["minimum_entry_lamports"] == 100000000
+        if expected_ticket is None:
+            assert not market_reads
 
     # The risk/override paths must never execute a token swap. Only the explicit
     # manual-cleanup branch may do so; pending settlement runs in its own worker.
@@ -555,11 +608,12 @@ def main():
                   mcap=None)
     ns=dict(vars(pipeline),winner=winner,entry_id="entry",mode="pulse",strategy="sol_bidask",
             deploy_sol=.12,amount_x=0,amount_y=.12,bins_below=44,bins_above=0,
-            strategy_type="bid_ask",slippage_bps=1000)
+            strategy_type="bid_ask",slippage_bps=1000,risk_sizing=evidence)
     start=source.index("    entry_context =");end=source.index('    print(f"Running deploy:',start)
     exec(compile(textwrap.dedent(source[start:end]),pipeline.__file__,"exec"),ns)
     encoded=shlex.split(ns["deploy_cmd"])[0].split("=",1)[1]
     persisted=json.loads(encoded)
+    assert persisted["risk_sizing"] == evidence
     assert persisted["signal"]["entry_live_gates"]==checks
     assert persisted["dev"]=="developer"
     assert persisted["signal"]["holders"]==0 and persisted["signal"]["global_fees_sol"]==0
@@ -571,6 +625,13 @@ def main():
     assert json.loads(json.dumps(ns["tracking_data"],allow_nan=False))["signal"]["entry_live_gates"]==checks
     assert ns["tracking_data"]["signal"]==persisted["signal"]
     assert ns["tracking_data"]["dev"]==persisted["dev"]
+    # Manual discovery has no automatic sizing proof; do not inherit a caller's
+    # object or manufacture one when the automatic policy was not evaluated.
+    ns["risk_sizing"] = None
+    ns["winner"]["risk_sizing"] = {"source": "forged"}
+    start=source.index("    entry_context =");end=source.index('    print(f"Running deploy:',start)
+    exec(compile(textwrap.dedent(source[start:end]),pipeline.__file__,"exec"),ns)
+    assert "risk_sizing" not in ns["entry_context"]
     with patch.dict(os.environ,DRY_RUN="true"),patch.object(pipeline,"get_momentum",side_effect=AssertionError("dry run fetched market")):
         dry=dict(candidate,entry_live_gates={"forged":True})
         assert pipeline.predeploy_live_gate_reject(dry,.1,"5m") is None

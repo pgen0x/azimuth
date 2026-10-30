@@ -12,25 +12,28 @@ function historyRead(url, address, fetchFn, timeoutMs) {
   const history = {address, waitUntil: performance.now() + 300, settled: false, unused: false};
   let timer, resolve;
   history.read = new Promise(done => {resolve = done;});
-  const finish = unused => {
+  const finish = (unused, reason) => {
     if (history.settled) return;
     history.settled = true;
     history.unused = unused === true;
+    history.reason = reason;
     clearTimeout(timer);
     controller.abort();
     resolve(history.unused);
   };
-  history.cancel = () => finish(false);
-  timer = setTimeout(history.cancel, timeoutMs);
+  history.cancel = (reason = 'cancelled') => finish(false, reason);
+  timer = setTimeout(() => history.cancel('history_timeout'), timeoutMs);
   void (async () => {
     try {
       const response = await fetchFn(url, {method: 'POST', headers: {'content-type': 'application/json'},
         signal: controller.signal, body: JSON.stringify({jsonrpc: '2.0', id: 1,
           method: 'getSignaturesForAddress', params: [address, {limit: 1, commitment: 'confirmed'}]})});
-      if (!response.ok) return finish(false);
+      if (!response.ok) return finish(false, 'http_error');
       const data = await response.json();
-      finish(!data.error && Array.isArray(data.result) && data.result.length === 0);
-    } catch { finish(false); }
+      if (data.error) return finish(false, 'rpc_error');
+      if (!Array.isArray(data.result)) return finish(false, 'invalid_history_response');
+      finish(data.result.length === 0, data.result.length === 0 ? 'unused' : 'history_exists');
+    } catch { finish(false, 'history_read_failed'); }
   })();
   return history;
 }
@@ -41,11 +44,14 @@ async function historyUnused(history) {
   // the original 300 ms window measured from the start of the lookup.
   const remaining = Number.isFinite(history.waitUntil)
     ? Math.min(300, history.waitUntil - performance.now()) : 0;
-  if (remaining <= 0) return false;
+  if (remaining <= 0) {
+    history.cancel?.('wait_window_elapsed');
+    return false;
+  }
   let timer;
   try {
     return await Promise.race([history.read, new Promise(resolve => {
-      timer = setTimeout(() => resolve(false), remaining);
+      timer = setTimeout(() => { history.cancel?.('wait_window_elapsed'); resolve(false); }, remaining);
     })]);
   } finally {
     clearTimeout(timer);
