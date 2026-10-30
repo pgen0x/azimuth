@@ -126,6 +126,101 @@ def record_close_bin_observation(mark, pool, position, reason, decision_at):
         return False  # Telemetry must not change close handling or its verdict.
 
 
+# Opt-in research shadow (DLMM_SHADOW_EXITS=1). Frozen variants from exit-tail and
+# gap-entry that history cannot promote; they need forward evidence, so each live
+# position records, once per variant, the first tick a variant WOULD have acted
+# and the mark at that tick. It never changes a decision: it uses values queued during the tick
+# and flushes after all risk/close handling, with no RPC/API call and no return value.
+# Later analysis joins memories/dlmm_shadow_exits.jsonl to realized_sol.
+SHADOW_EXITS_FILE = "dlmm_shadow_exits.jsonl"
+SHADOW_GIVEBACK_VARIANTS = {"give_0.5_1.0": (0.5, 1.0)}   # (peak arm %, giveback %), trailing TP not armed
+SHADOW_HALF_BOT_PCT = 21.0                                 # half_bot21: entry would have been half-sized
+
+
+def shadow_exit_observe(position, mode, pnl_pct, pnl_sol, peak_pnl, trailing_active, signal,
+                        observed_at=None):
+    """Post-risk, opt-in first-trigger journal; at-most-once marker claims.
+
+    No journal scan or marker pruning. A claim is not proof of a persisted row:
+    a crash/failed write can lose an observation, which must remain unknown.
+    """
+    if os.environ.get("DLMM_SHADOW_EXITS") != "1":
+        return None
+    import hashlib, stat
+    from dlmm_research_io import research_writer, research_write
+    marker_dir_name = "dlmm_shadow_exits.d"
+    max_bytes = 64 * 1024 * 1024
+
+    def event_id(variant):
+        return hashlib.sha256(f"{position}|{variant}".encode()).hexdigest()[:32]
+
+    try:
+        if not isinstance(position, str) or not re.fullmatch(r"[A-Za-z0-9:._-]{1,64}", position):
+            return None
+        now = time.time() if observed_at is None else observed_at
+        base = dict(position=position, mode=mode if isinstance(mode, str) and len(mode) <= 16 else None, ts=now)
+        proposed = []
+        bot = signal.get("bot_holders_pct") if isinstance(signal, dict) else None
+        known = isinstance(bot, (int, float)) and not isinstance(bot, bool) and math.isfinite(bot)
+        proposed.append(dict(base, variant="half_bot21", fired=(bot >= SHADOW_HALF_BOT_PCT) if known else None,
+                             bot_holders_pct=bot if known else None))
+        numbers = all(isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+                      for v in (pnl_pct, peak_pnl))
+        for variant, (arm, drop) in SHADOW_GIVEBACK_VARIANTS.items():
+            if numbers and trailing_active is not True and peak_pnl >= arm and peak_pnl - pnl_pct >= drop:
+                proposed.append(dict(base, variant=variant, fired=True, mark_pct=pnl_pct, peak_pct=peak_pnl,
+                                     mark_sol=pnl_sol if isinstance(pnl_sol, (int, float)) and not isinstance(pnl_sol, bool)
+                                     and math.isfinite(pnl_sol) else None))
+        memory = os.path.join(PROFILE_DIR, "memories")
+        markers = os.path.join(memory, marker_dir_name)
+        # lstat rejects a symlink directory even on the dedup fast path. The fd
+        # and relative marker opens also protect against a directory replacement
+        # between lstat and claim. No entry is ever removed here.
+        try:
+            if not stat.S_ISDIR(os.lstat(markers).st_mode):
+                raise OSError('marker_not_directory')
+        except FileNotFoundError:
+            pass
+        proposed = [r for r in proposed if not os.path.lexists(os.path.join(markers, event_id(r["variant"])))]
+        if not proposed:
+            return None
+        os.makedirs(markers, mode=0o700, exist_ok=True)
+        marker_fd = os.open(markers, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            proposed = [dict(row, event_id=event_id(row['variant'])) for row in proposed]
+            payloads = [(row['event_id'], (json.dumps(row, allow_nan=False) + "\n").encode())
+                        for row in proposed]
+            with research_writer(os.path.join(memory, SHADOW_EXITS_FILE),
+                                 sum(len(data) for _, data in payloads), max_bytes) as fd:
+                rows = []
+                for ident, data in payloads:
+                    try:
+                        os.close(os.open(ident, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                                         0o600, dir_fd=marker_fd))
+                    except FileExistsError:
+                        continue
+                    rows.append(data)
+                if rows:
+                    research_write(fd, b"".join(rows))
+        finally:
+            os.close(marker_fd)
+    except Exception as error:
+        print('SHADOW_EXIT_OBSERVATION_ERROR ' + type(error).__name__)
+    return None
+
+
+def flush_tick_observers(pending):
+    """Only called after ALL positions have completed risk/close handling."""
+    for kind, args in pending:
+        try:
+            if kind == 'shadow':
+                shadow_exit_observe(*args)
+            elif not record_close_bin_observation(*args):
+                print('CLOSE_BIN_OBSERVATION_ERROR unmeasured')
+        except Exception as error:
+            print('TICK_OBSERVATION_ERROR ' + type(error).__name__)
+
+
 def get_meteora_portfolio_positions(wallet_address):
     """Returns dict keyed by position address using Meteora Portfolio HTTP API.
     More reliable than DLMM SDK getAllLbPairPositionsByUser which requires fully initialized bin arrays."""
@@ -1938,6 +2033,7 @@ def main():
 
     now = int(time.time())
     report_rows = []
+    pending_observers = []  # bounded in-memory snapshots; no observer I/O on the risk path
 
     # --- Reconciliation: adopt/reclaim on-chain positions Redis doesn't know about ---
     # The wide-range deploy path can mint a position NFT and then fail to add liquidity,
@@ -2305,6 +2401,12 @@ def main():
                 if not is_dry_run_stored:
                     run_command(f"redis-cli set \"sol:dlmm:position:{pos_addr}\" '{json.dumps(meta)}'")
 
+        if os.environ.get("DLMM_SHADOW_EXITS") == "1" and len(pending_observers) < 256:
+            signal = meta.get("signal")
+            pending_observers.append(('shadow', (
+                pos_addr, meta.get("mode"), pnl_pct, pnl_sol_actual, peak_pnl, trailing_active,
+                {"bot_holders_pct": signal.get("bot_holders_pct")} if isinstance(signal, dict) else None,
+                time.time())))
         # 1b. Peak-giveback stop — the rail under the arming threshold. Only for
         # positions the trailing TP never armed (an armed one is owned by the
         # ratchet and by the fast-out), and only for the tight modes, whose band
@@ -2874,8 +2976,8 @@ def main():
             close_res, close_err = close_position(pos_addr, env_prefix,
                                                  wallet_address, is_dry_run_stored,
                                                  emergency_exit=emergency_close)
-            if not is_dry_run_stored and not (close_res or {}).get("dryRun"):
-                record_close_bin_observation(native_mark, pool, pos_addr, close_reason, close_decision_at)
+            if not is_dry_run_stored and not (close_res or {}).get("dryRun") and len(pending_observers) < 256:
+                pending_observers.append(('close', (native_mark, pool, pos_addr, close_reason, close_decision_at)))
 
             if close_res and close_res.get("success"):
                 position_closed_this_cycle = True
@@ -3295,6 +3397,10 @@ Pre-close LP mark | {pnl_pct:+.2f}% ({realized_sol:+.4f} SOL) — estimate befor
                 peak_pnl, trailing_active, close_reason, now,
             ))
 
+    flush_tick_observers(pending_observers)
+    if len(pending_observers) == 256:
+        print("TICK_OBSERVATION_LIMIT evidence_may_be_missing")
+
     if cli.report_only or report_rows:
         sol_price_usd = meteora_sol_price
         print(render_status_report(report_rows, sol_price_usd, trailing_trigger_pct, min_fee_tvl_24h_limit, max_oor_minutes))
@@ -3312,5 +3418,5 @@ Pre-close LP mark | {pnl_pct:+.2f}% ({realized_sol:+.4f} SOL) — estimate befor
         pass
 
 if __name__ == "__main__":
-    main()
-    
+    from dlmm_research_io import run_observed_main
+    run_observed_main('monitor', main, regular_tick=not sys.argv[1:])
