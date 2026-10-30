@@ -10,7 +10,8 @@ import (
 )
 
 func TestReadOnlyCachedAPI(t *testing.T) {
-	s := &server{data: object{"live": object{"dust": object{"runs": 3}}, "north_star": object{"days": []any{}}, "nav": object{"nav_sol": nil, "native_sol": 0.0}, "journal": []any{object{"stage": "swap", "evidence": object{"signature": "proof-1"}}, object{"stage": "gate", "evidence": object{"pool": "pool-2"}}}}}
+	s := &server{data: object{"live": object{"dust": object{"runs": 3}}, "by_tz": object{"UTC": object{"north_star": object{"days": []any{}}}}, "nav": object{"nav_sol": nil, "native_sol": 0.0}, "journal": []any{object{"stage": "swap", "evidence": object{"signature": "proof-1"}}, object{"stage": "gate", "evidence": object{"pool": "pool-2"}}}}}
+	cookie := signIn(t, s)
 	for _, tc := range []struct {
 		method, path, host string
 		status             int
@@ -23,11 +24,13 @@ func TestReadOnlyCachedAPI(t *testing.T) {
 		{"POST", "/api/redis", "localhost", 405, "read only"},
 		{"GET", "/api/overview", "attacker.example", 403, "localhost only"},
 		{"GET", "/api/capital", "localhost", 200, `"north_star":{"days":[]}`},
-		{"GET", "/api/live", "localhost", 200, `"live":{"dust":{"runs":3}}`},
+		{"GET", "/api/live", "localhost", 200, `"live":{"dust":{"runs":3},`},
 		{"GET", "/api/command", "localhost", 404, "404"},
+		{"GET", "/api/capital?tz=Mars/Olympus", "localhost", 200, `"tz_fallback":true`},
 	} {
 		r := httptest.NewRequest(tc.method, tc.path, nil)
 		r.Host = tc.host
+		r.AddCookie(cookie)
 		w := httptest.NewRecorder()
 		s.ServeHTTP(w, r)
 		if w.Code != tc.status || !strings.Contains(w.Body.String(), tc.want) {
@@ -65,14 +68,14 @@ with tempfile.TemporaryDirectory() as tmp:
     assert event_time({'ts':None,'observed_at':456}) == 456
     rows,meta=tail(Path(tmp)/'absent')
     assert rows==[] and meta['status']=='missing'
-    profile=Path(tmp)/'solanza'; state=Path(tmp)/'state'; memory=profile/'memories'
+    profile=Path(tmp)/'testprofile'; state=Path(tmp)/'state'; memory=profile/'memories'
     memory.mkdir(parents=True); state.mkdir()
     (memory/'dlmm_wallet_transactions.jsonl').write_text(json.dumps({'signature':'proof','failed':False,'slot':123,'fee_lamports':5000,'block_time':100,'observed_at':200})+'\n')
     (memory/'dlmm_transactions.jsonl').write_text(json.dumps({'signature':'proof','kind':'deploy','ts':90})+'\n')
     (memory/'dlmm_realized.jsonl').write_text(json.dumps({'position':'p','closed_at':150,'fetched_at':250})+'\n')
     (memory/'dlmm_closes.jsonl').write_text(json.dumps({'position':'old','pnl_sol':0.5,'closed_at':160})+'\n'+json.dumps({'position':'new','pnl_sol':-0.1,'pnl_basis':'pre_swap_mark','closed_at':170})+'\n')
     (state/'solana_deliveries.jsonl').write_text(json.dumps({'delivery_id':'delivery','stage':'prepared','ts':80})+'\n')
-    identity=json.dumps(['solanza','dlmm-signal','delivery'],separators=(',',':')).encode()
+    identity=json.dumps(['testprofile','dlmm-signal','delivery'],separators=(',',':')).encode()
     with sqlite3.connect(profile/'state.db') as db:
         db.execute('CREATE TABLE sessions (id, source, model, started_at, ended_at, end_reason, message_count, tool_call_count, chat_id)')
         db.execute('INSERT INTO sessions VALUES (?,?,?,?,?,?,?,?,?)',('session','webhook','markt',81,None,None,1,1,'webhook:v2:'+base64.urlsafe_b64encode(identity).decode().rstrip('=')))
@@ -120,8 +123,10 @@ with tempfile.TemporaryDirectory() as tmp:
     lines=[json.dumps(r) for r in rows]; assert len({len(x) for x in lines})==1
     p.write_text(''.join(x+'\n' for x in lines))
     assert nav_at(p,30)==rows[2] and nav_at(p,29)==rows[1] and nav_at(p,9) is None
-with tempfile.TemporaryDirectory() as tmp:
-    memory=Path(tmp); day=86400; base=20000*day-WIB
+# Day 20000 = 2024-10-04; neither zone observed DST then. Sao_Paulo covers a negative offset.
+for TZ,OFF in (('Asia/Jakarta',7*3600),('America/Sao_Paulo',-3*3600),('UTC',0)):
+  with tempfile.TemporaryDirectory() as tmp:
+    memory=Path(tmp); day=86400; base=20000*day-OFF
     snaps=[{'ts':base+3600,'native_sol':1.0,'lp_mark_sol':0.5,'refundable_rent_sol':0.25,'known_asset_subtotal_sol':2.0,'external_flow_lamports':0,'wallet_history_complete':True,
             'issues':['unpriced_token:m1'],'tokens':[{'mint':'m2','mark_error':'quote_budget_deferred'}]},
            {'ts':base+day+3600,'native_sol':1.2,'lp_mark_sol':None,'refundable_rent_sol':0.25,'known_asset_subtotal_sol':None,'external_flow_lamports':0,'wallet_history_complete':False},
@@ -129,7 +134,7 @@ with tempfile.TemporaryDirectory() as tmp:
            {'ts':base+4*day+60,'native_sol':1.2,'lp_mark_sol':0.5,'refundable_rent_sol':0.25,'known_asset_subtotal_sol':2.3,'external_flow_lamports':100000000,'wallet_history_complete':True},
            {'ts':base+5*day+60,'native_sol':1.3,'lp_mark_sol':0.5,'refundable_rent_sol':0.25,'known_asset_subtotal_sol':2.4,'external_flow_lamports':100000000,'wallet_history_complete':True}]
     (memory/'dlmm_nav.jsonl').write_text(''.join(json.dumps(r)+'\n' for r in snaps))
-    out={d['day']:d for d in north_star(memory,base+5*day+120,days=6)['days']}
+    out={d['day']:d for d in north_star(memory,base+5*day+120,days=6,tz=TZ)['days']}
     d=[out[time.strftime('%Y-%m-%d',time.gmtime((20000+i)*day))] for i in range(-1,6)]
     assert d[0]['status']=='no_snapshot'
     assert d[1]['cash_sol']==1.75 and d[1]['unpriced_tokens']==1 and d[1]['quote_deferred_tokens']==1 and 'd_cash_sol' not in d[1]
@@ -213,16 +218,23 @@ with tempfile.TemporaryDirectory() as tmp:
     assert d['liquid_native_gain_sol'] is None and d['nav_effect_sol'] is None
     def broken(cmd,**k): raise OSError('no journal')
     assert dust_ledger(m,1000,run=broken)['status']=='unavailable'
-    day=86400; base=20000*day-WIB
-    (m/'dlmm_realized.jsonl').write_text(''.join(json.dumps(r)+'\n' for r in [
-        {'position':'a','closed_at':base+10,'realized_sol':0.5},{'position':'b','closed_at':base+20,'realized_sol':None},
-        {'position':'c','closed_at':base+30,'realized_sol':-0.2},{'position':'old','closed_at':base-10,'realized_sol':9.0},
-        {'position':'a','closed_at':base+10,'realized_sol':0.25}]))
-    (m/'dlmm_closes.jsonl').write_text(''.join(json.dumps({'position':p,'mode':md})+'\n' for p,md in [('a','pulse'),('b','pulse'),('old','pulse')]))
-    r=realized_by_mode(m,base)
-    cell=r['days'][time.strftime('%Y-%m-%d',time.gmtime(20000*day))]
-    assert cell['pulse']=={'closes':2,'measured':1,'unmeasured':1,'realized_sol':0.25}  # last row per position wins
-    assert cell['unknown']=={'closes':1,'measured':1,'unmeasured':0,'realized_sol':-0.2} and len(r['days'])==1
+    for TZ,OFF in (('Asia/Jakarta',7*3600),('America/Sao_Paulo',-3*3600),('UTC',0)):
+        day=86400; base=20000*day-OFF
+        (m/'dlmm_realized.jsonl').write_text(''.join(json.dumps(r)+'\n' for r in [
+            {'position':'a','closed_at':base+10,'realized_sol':0.5},{'position':'b','closed_at':base+20,'realized_sol':None},
+            {'position':'c','closed_at':base+30,'realized_sol':-0.2},{'position':'old','closed_at':base-10,'realized_sol':9.0},
+            {'position':'a','closed_at':base+10,'realized_sol':0.25}]))
+        (m/'dlmm_closes.jsonl').write_text(''.join(json.dumps({'position':p,'mode':md})+'\n' for p,md in [('a','pulse'),('b','pulse'),('old','pulse')]))
+        r=realized_by_mode(m,base,TZ); assert r['tz']==TZ
+        cell=r['days'][time.strftime('%Y-%m-%d',time.gmtime(20000*day))]
+        assert cell['pulse']=={'closes':2,'measured':1,'unmeasured':1,'realized_sol':0.25}  # last row per position wins
+        assert cell['unknown']=={'closes':1,'measured':1,'unmeasured':0,'realized_sol':-0.2} and len(r['days'])==1
+    # A DST zone: the same close lands on different local days either side of the boundary.
+    rows=[{'position':'x','closed_at':1730606400,'realized_sol':0.1}]  # 2024-11-03 04:00 UTC = 00:00 EDT
+    (m/'dlmm_realized.jsonl').write_text(json.dumps(rows[0])+'\n')
+    assert list(realized_by_mode(m,0,'America/New_York')['days'])==['2024-11-03']
+    assert list(realized_by_mode(m,0,'Pacific/Kiritimati')['days'])==['2024-11-03']
+    assert list(realized_by_mode(m,0,'Pacific/Pago_Pago')['days'])==['2024-11-02']
 `
 	out, err := exec.Command("python3", "-c", code).CombinedOutput()
 	if err != nil {
@@ -243,9 +255,11 @@ func TestEveryPanelRetainsCollectionFailure(t *testing.T) {
 	s := &server{failure: "Synthetic collection failure", data: object{
 		"collected_at": 123, "hermes": object{"profile": "fixture"}, "redis": object{"status": "disabled"},
 	}}
-	for _, panel := range []string{"overview", "capital", "live", "evaluation", "journal", "hermes", "redis"} {
+	cookie := signIn(t, s)
+	for _, panel := range []string{"overview", "capital", "live", "journal", "hermes", "redis"} {
 		r := httptest.NewRequest("GET", "/api/"+panel, nil)
 		r.Host = "localhost"
+		r.AddCookie(cookie)
 		w := httptest.NewRecorder()
 		s.ServeHTTP(w, r)
 		if w.Code != 200 || !strings.Contains(w.Body.String(), `"collection_error":"Synthetic collection failure"`) || !strings.Contains(w.Body.String(), `"collected_at":123`) {
@@ -259,11 +273,13 @@ func TestEveryPanelRetainsCollectionFailure(t *testing.T) {
 
 func TestCapitalLiveLocalReadOnlyMatrix(t *testing.T) {
 	s := &server{data: object{"collected_at": 123}}
+	cookie := signIn(t, s)
 	for _, path := range []string{"/api/capital", "/api/live"} {
 		for _, host := range []string{"localhost", "127.0.0.1:8787", "[::1]:8787", "attacker.invalid", "192.0.2.1:8787"} {
 			for _, method := range []string{"GET", "HEAD", "POST", "PUT", "DELETE", "PATCH"} {
 				r := httptest.NewRequest(method, path, nil)
 				r.Host = host
+				r.AddCookie(cookie)
 				w := httptest.NewRecorder()
 				s.ServeHTTP(w, r)
 				want := 200

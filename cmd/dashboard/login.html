@@ -1,0 +1,15 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>azimuth · sign in</title><link rel="icon" href="/favicon.svg" type="image/svg+xml"><link rel="stylesheet" href="/ui.css"></head>
+<body><div class="frame bare"><main class="login">
+<section class="p" aria-labelledby="title">
+<div class="brand"><img src="/favicon.svg" alt=""><div><h1 id="title" class="word">azimuth</h1><small class="muted">Operations dashboard · read only · loopback</small></div></div>
+{{if .Problem}}<p role="alert" class="note warn">{{.Problem}}</p>
+<p class="muted">Generate a hash with <code>azimuth-dashboard -hash-password</code>, put it in the unit's environment file and restart the dashboard unit. See docs/DASHBOARD_DEPLOY.md.</p>
+{{else}}<form method="post" action="/login">
+<label for="password">Password</label>
+<input id="password" name="password" type="password" autocomplete="current-password" required autofocus{{if .Message}} aria-describedby="msg" aria-invalid="true"{{end}}>
+{{if .Message}}<p id="msg" role="alert" class="err">{{.Message}}</p>{{end}}
+<button type="submit"{{if .Locked}} disabled{{end}}>Unlock dashboard</button>
+</form>{{end}}
+</section></main></div></body></html>

@@ -6,7 +6,7 @@ Run from the repository root (Go 1.22+, Python 3; existing PyYAML enables Hermes
 rtk go run ./cmd/dashboard
 ```
 
-Open http://127.0.0.1:8787. From your laptop, run `ssh -N -L 8787:127.0.0.1:8787 oc` (replace `oc` with your SSH host alias), then open that same address locally. The listener accepts loopback IPs only, rejects non-local Host headers, and exposes only GET/HEAD. For remote use, forward the localhost port over the existing SSH connection. No public listener, trading service restart, Telegram test, transaction, inference or RPC is needed.
+A password hash is required (see [Sign-in](#sign-in)); without it the dashboard serves no data. Open http://127.0.0.1:8787. From your laptop, run `ssh -N -L 8787:127.0.0.1:8787 <ssh-host>` (replace `<ssh-host>` with your SSH host or alias), then open that same address locally. The listener accepts loopback IPs only, rejects non-local Host headers, and exposes only GET/HEAD, apart from the `/login` and `/logout` form posts. For remote use, forward the localhost port over the existing SSH connection. No public listener, trading service restart, Telegram test, transaction, inference or RPC is needed.
 
 Build a standalone binary (HTML and collector are embedded):
 
@@ -16,7 +16,7 @@ rtk proxy /tmp/azimuth-dashboard
 rtk go test ./cmd/dashboard
 ```
 
-Flags: `-listen`, `-profile`, `-state`, `-env-file`, `-redis`, `-dedup-prefix`, `-since` (live-change cutover, unix seconds; 0 = the last 7 days). Defaults use `~/.hermes/profiles/solanza`, `~/.local/state/azimuth`, and repository `.env`. Only `REDIS_ADDR`, `REDISCLI_AUTH`, and `REDIS_SEEN_KEY` are read from that file; matching environment variables override file settings. `-redis disabled` skips Redis. Missing Redis configuration disables its panel. No credential is returned or logged. Config metadata is field-allowlisted; prompts, session messages, private keys and bot credentials are excluded.
+Flags: `-listen`, `-profile`, `-state`, `-env-file`, `-redis`, `-dedup-prefix`, `-since` (live-change cutover, unix seconds; 0 = the last 7 days). Defaults use `~/.hermes/profiles/dlmm`, `~/.local/state/azimuth`, and repository `.env`; pass `-profile` when your Hermes profile has another name. The dashboard exits at startup if the profile directory does not exist, rather than serve empty panels. Only `REDIS_ADDR`, `REDISCLI_AUTH`, and `REDIS_SEEN_KEY` are read from that file; matching environment variables override file settings. `-redis disabled` skips Redis. Missing Redis configuration disables its panel. No credential is returned or logged. Config metadata is field-allowlisted; prompts, session messages, private keys and bot credentials are excluded.
 
 For a persistent user service, build the binary and install the included unit:
 
@@ -27,7 +27,44 @@ rtk proxy systemctl --user daemon-reload
 rtk proxy systemctl --user enable --now azimuth-dashboard.service
 ```
 
-The unit reads only the three Redis settings through the command, rather than importing the full trading environment. The installation example is for a first install. For updates, use the [SHA-pinned deployment and rollback runbook](DASHBOARD_DEPLOY.md); do not build over the running binary or reuse a fixed backup name.
+The unit reads only the three Redis settings through the command, rather than importing the full trading environment. The unit passes no `-profile`, so it uses `~/.hermes/profiles/dlmm`; for another profile, add a drop-in such as `~/.config/systemd/user/azimuth-dashboard.service.d/profile.conf` that clears and restates the command (`ExecStart=` on one line, then `ExecStart=%h/.local/bin/azimuth-dashboard -env-file <repo>/.env -profile %h/.hermes/profiles/<name>`), then `systemctl --user daemon-reload`. The installation example is for a first install. For updates, use the [SHA-pinned deployment and rollback runbook](DASHBOARD_DEPLOY.md); do not build over the running binary or reuse a fixed backup name.
+
+## Sign-in
+
+Every page and every `/api/*` route needs a session. Only `/login`, `/favicon.svg` and `/ui.css` answer
+without one: HTML routes redirect to `/login`, API routes return `401`.
+
+- The password is checked against `DASHBOARD_PASSWORD_HASH`, a PBKDF2-HMAC-SHA256 hash (600,000 iterations,
+  16-byte random salt, 32-byte key, constant-time compare) in the form
+  `pbkdf2-sha256:<iterations>:<salt>:<key>`. PBKDF2 is built from the standard library because the module
+  targets Go 1.22 and pulling in `x/crypto` for scrypt/argon2id would raise its Go version and dependencies.
+- Generate a hash: the command reads one line from stdin without a prompt or echo control, so pipe the
+  password from a password manager (or type it and press Enter in a private terminal). Nothing is stored or
+  logged:
+
+  ```sh
+  rtk proxy "$HOME/.local/bin/azimuth-dashboard" -hash-password
+  ```
+
+- If the variable is missing or malformed the server refuses to serve data (fail closed) and the login page
+  says why.
+- Sessions are random 256-bit tokens in an `HttpOnly`, `SameSite=Strict` cookie, held in memory only (a
+  restart signs everyone out), valid 12 hours, at most 32 at once. The cookie is not `Secure` because the
+  listener is plain HTTP on loopback; reach it over an SSH tunnel.
+- Five failed attempts within 10 minutes pause sign-in until the oldest failure ages out. One password check
+  runs at a time. Cross-site posts to `/login` and `/logout` are refused.
+
+The unit drop-in that supplies the hash is in [DASHBOARD_DEPLOY.md](DASHBOARD_DEPLOY.md#password-hash).
+
+## Time zones
+
+The API carries UTC epochs only. Daily series (`/api/capital` north star and calendar, `/api/live` realized per
+mode) are split into days in the viewer's IANA time zone: the page sends
+`Intl.DateTimeFormat().resolvedOptions().timeZone` as `?tz=`. The server validates the name with Go's embedded
+zone database; a missing value means UTC, an invalid one falls back to UTC with `tz_fallback: true`. Each
+response states the zone it used in `tz`. A zone is computed on first request (about a second) and kept in the
+30-second refresh for the six most recently used zones, UTC always included. Every time the page displays names
+its zone.
 
 ## JSON API
 
@@ -35,29 +72,28 @@ The unit reads only the three Redis settings through the command, rather than im
 | --- | --- |
 | `/api/overview` | Latest persisted NAV, source freshness, unit states, collector timestamp/error |
 | `/api/journal?q=IDENTIFIER&stage=swap&offset=0` | 50 rows/page, case-insensitive filter, exact stage filter, retained-tail match count |
-| `/api/evaluation` | Existing evaluation JSON, source file, generation and window timestamps |
-| `/api/capital` | North star per WIB day (cash, known, deltas, unpriced/deferred SPL counts, external-flow delta) and the 14-day NAV bridge |
-| `/api/live` | Dust rent ledger and realized PnL by mode and WIB day since the `-since` cutover |
+| `/api/capital?tz=ZONE` | North star per local day over six weeks (cash, known, deltas, unpriced/deferred SPL counts, external-flow delta) and the 14-day NAV bridge |
+| `/api/live?tz=ZONE` | Dust rent ledger and realized PnL by mode and local day since the `-since` cutover |
 | `/api/hermes` | Profile/model/fallback configuration, skills, gateway state, recent session metadata |
 | `/api/redis` | Timestamped fixed capacity keys, position tracking sample, cooldown and dedup TTLs |
 
-Refreshes serve an immutable in-memory snapshot. A background collector updates every 30 seconds with a 20-second deadline. Collection failure retains the previous snapshot and exposes an error. Browser activity never invokes NAV collection, accounting evaluation, blockchain RPC, model/provider probes or Helius Wallet API.
+Refreshes serve an immutable in-memory snapshot. A background collector updates every 30 seconds with a 60-second deadline per run (a slow run delays the next one; runs never overlap). Collection failure retains the previous snapshot and exposes an error. Browser activity never invokes NAV collection, accounting runs, blockchain RPC, model/provider probes or Helius Wallet API.
 
 ## Source traceability and scope
 
 - NAV: `memories/dlmm_nav.jsonl`; native SOL, SPL marks, LP marks and recoverable account reserves remain separate. Unknown NAV stays JSON null and displays Unknown.
 - Journal: delivery/rejection files under state, and transaction/fact/wallet-fact, close, decision, rent and realized journals under profile memories. Each row carries a source path, observed time and explicit evidence identifiers. Each journal reads at most 2 MiB / 500 complete recent rows; NAV retains one row. Partial final lines are omitted; invalid lines and truncated coverage are reported. These are source tails, not exhaustive historical counts.
-- North star (Capital tab): latest snapshot per WIB day, including null values, with selection coverage. Cash is native + LP mark + refundable rent; known also includes SPL marks. Missing/unknown days break deltas. See the bounds and large-file ordering limitation below.
+- North star (Capital tab): latest snapshot per local day in the requested zone, including null values, with selection coverage. Cash is native + LP mark + refundable rent; known also includes SPL marks. Missing/unknown days break deltas. See the bounds and large-file ordering limitation below.
 - NAV bridge (Capital tab, issue #93): known-SOL deltas and a source-qualified decomposition using transaction-kind, wallet, realized and close journals. Complete measured components reconcile; incomplete components stay null. Unattributed cash stays separate from rent. Snapshot history coverage and every journal status are exposed. It is not NAV/ROI or withdrawal + fees - deposit.
 - Live changes: deduplicated rent-unit receipt claims, separately verified transaction/account results, measured costs and explicit unknown totals. Realized PnL by mode uses close time and the close journal; wholly unmeasured cohorts remain null. The rules and coverage limits below apply to both views.
 - NAV ordering (fix2): over 4 MiB the NAV journal is binary-searched within 8 MiB / 256 reads / 2 s per lookup. Whole-file ordering is not provable there, so each lookup checks the timestamps of every row it visited including every row of the backward scan, plus one neighbour line on each side of the selected row (`ordering_assumption: visited_window_monotonic`); only an observed inversion marks that day partial. `dlmm_closes.jsonl` only labels bridge modes: legacy corrupt lines are reported as `closes_invalid_lines`, and make the bridge incomplete only when a lifecycle in the window has no mode (`mode_unknown`).
 - Close marks: `pnl_sol` in `dlmm_closes.jsonl` is the mark read one tick before the close, not realized cash. The journal passes the row's `pnl_basis` through and labels older rows without one `mark_unlabeled`; realized figures come only from `dlmm_realized.jsonl` (`realized_sol`, null = unmeasured).
 - Entry metadata: latest 100 `memories/dlmm_entries/*.json`; metadata is not proof of a landed deployment.
 - Routing: last 100 `entry_route=` markers from the actual `azimuth.service` journal within 48 hours. Only mode, route, reason and timestamp are extracted. No free-form service logs or Hermes tool messages are exposed.
-- Session correlations: exact legacy or v2 webhook identity for deliveries, against the latest 40 session metadata rows in read-only SQLite. Existing evaluation delivery correlations are also retained with their report source. No time/pool heuristic invents a trade link; incomplete coverage remains uncorrelated. An HTTP 202, route/probe result or open session is not execution proof.
-- Evaluations: newest generated valid report among the latest 50 modified `reviews/*/evaluation.json` files, each capped at 32 MiB. Existing calculations are displayed without recomputing finance. LP wins use full-life LP positions; cash-positive roots use settled roots. Incomplete roots, carry-in closes, Meridian cohorts, pooled cash and matched refund evidence retain their source bases. Shared refunds are never independently summed or allocated. Root cash, pooled cash and refund groups overlap. Root cash excludes refunds that require grouping multiple roots; the matched-refund table shows the corresponding group cash including those refunds. Compare their root sets before drawing conclusions.
+- Session correlations: exact legacy or v2 webhook identity for deliveries, against the latest 40 session metadata rows in read-only SQLite. No time/pool heuristic invents a trade link; incomplete coverage remains uncorrelated. An HTTP 202, route/probe result or open session is not execution proof.
+- This bot only: the dashboard has no evaluation or comparison view. As a guard, the collector also drops, recursively, any snapshot key containing `comparison`, `reference_bot`, `other_bot` or `lp_comparison` (case-insensitive), so such data reaches neither a page nor the JSON API. To hide more key names, set `DASHBOARD_HIDE_KEYS` in the dashboard's environment to a comma-separated list of case-insensitive substrings, for example `DASHBOARD_HIDE_KEYS=somebot,peer_wallet`. The pages render what the collector returns and apply no filter of their own.
 - Hermes: selected `config.yaml` fields, installed profile skill names and read-only `state.db` metadata. Provider and bot delivery availability remain Unknown without a probe. Gateway state comes from systemd.
-- Services: fixed scanner, gateway, SOL monitor, accounting, rent and daily-review services/timers using selected systemd properties. Inactive oneshots can be healthy; a failed run can be a busy-wallet deferral rather than an infrastructure failure.
+- Services: the scanner, gateway, SOL monitor, accounting and rent services/timers this repository ships, using selected systemd properties. `DASHBOARD_EXTRA_UNITS` adds your own user units (comma-separated `name.service` / `name.timer`, at most 16; other names are ignored). Inactive oneshots can be healthy; a failed run can be a busy-wallet deferral rather than an infrastructure failure.
 - Redis: `SCARD`, one bounded `SSCAN` of `sol:dlmm:active_positions`, and pipelined `TTL`/bounded `GETRANGE` for at most 400 derived keys. At most 100 recent candidate records and 100 active members inform the sample. Position fields are allowlisted; arbitrary stored error strings are not exposed. No KEYS, writes, arbitrary-key or command endpoint. TTL -2 means missing, -1 means no expiry, null means read failure. All TTLs are observations at the displayed timestamp.
 
 Native SOL increases include recovered principal/rent and transfers; they do not establish profit. The existing 0.20 SOL reserve + 0.05 allowance + 0.10 minimum position rule is displayed as a 0.35 SOL floor; this dashboard never authorizes or changes entry behavior.
@@ -101,7 +137,7 @@ unrelated panels. These are resource and evidence limits, not profit claims.
 
 ## Verified deployment reports
 
-The Solanza `dlmm-report-guard` Hermes plugin uses official pre/post tool hooks and
+The `dlmm-report-guard` Hermes plugin uses official pre/post tool hooks and
 `transform_llm_output`. For the `dlmm-signal` webhook it injects a fresh nonce into
 a direct terminal pipeline call, accepts a receipt only from that call's successful
 completed result, and replaces AI deployment text with the pipeline's exact values.
@@ -112,16 +148,15 @@ not profit. Rejections without deployment claims keep their AI narrative.
 
 Install into the target profile's `plugins/dlmm-report-guard/` by copying
 `assets/hermes/plugins/dlmm-report-guard/{plugin.yaml,__init__.py}`; then run
-`hermes -p solanza plugins enable dlmm-report-guard --no-allow-tool-override` and
-`hermes -p solanza plugins doctor dlmm-report-guard --ci`. Set
+`hermes -p <profile> plugins enable dlmm-report-guard --no-allow-tool-override` and
+`hermes -p <profile> plugins doctor dlmm-report-guard --ci`. Set
 `display.platforms.webhook.streaming: false` so provisional model text cannot
 precede the final guard. Restart the gateway after checking no deployment is in
 flight. The plugin needs no dependencies and does not change model order or risk.
 
 The dashboard journal reads only `dlmm_report_guard.jsonl` metadata (session ID,
 status, receipt count, timestamp), never raw messages, tool output or receipt nonce.
-Evaluation also correlates allowlisted public position/signature IDs and dry-run/
-verification flags from guarded outputs. Legacy receipt counts alone never prove
+Legacy receipt counts alone never prove
 execution. Output preparation is separate from session closure and Telegram delivery;
 no lifecycle state proves a worker is live or permits retrying a batch.
 The guard is scoped to this profile and route, bounds in-memory state to 256 turns,

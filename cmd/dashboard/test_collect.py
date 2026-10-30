@@ -167,11 +167,11 @@ class CollectorTests(unittest.TestCase):
             for r in rows: h.write(json.dumps(dict(r,pad='x'*pad))+'\n')
         self.assertGreater((self.m/'dlmm_nav.jsonl').stat().st_size,c.NAV_FULL_SCAN_BYTES)
     def test_large_monotonic_nav_gives_deltas(self):
-        day=86400;base=20000*day-c.WIB
+        day=86400;base=20000*day+3*3600  # local midnight in America/Sao_Paulo (UTC-3)
         rows=[dict(ts=base+i*day+j*2400,native_sol=1.0+i*.01,lp_mark_sol=0.0,refundable_rent_sol=.01,known_asset_subtotal_sol=1.01+i*.01,
                    external_flow_lamports=0,wallet_history_complete=True) for i in range(4) for j in range(30)]
         self._big_nav(rows)
-        ns=c.north_star(self.m,base+3*day+20*3600,days=3)
+        ns=c.north_star(self.m,base+3*day+20*3600,days=3,tz='America/Sao_Paulo')
         full=[d for d in ns['days'] if d['status']=='ok']
         self.assertEqual(len(full),3);self.assertEqual(ns['days'][-1]['status'],'partial_day')
         for d in ns['days'][1:]:
@@ -225,9 +225,9 @@ class CollectorTests(unittest.TestCase):
         self.assertEqual(meta['visited_rows'],len({off for off,_,_ in reads}))  # every row read is checked
         self.assertLess(meta['read_calls'],c.NAV_LOOKUP_READS);self.assertLess(meta['read_bytes'],c.NAV_LOOKUP_BYTES)
     def test_backward_scan_inversion_blocks_the_next_days_delta(self):
-        day=20000;end=day*86400-c.WIB+86400
+        day=20000;end=day*86400-7*3600+86400  # end of a local day in Asia/Jakarta (UTC+7)
         rows,changed,cutoff,reads,spy=self._backscan_counterexample(base=end-1-15090)
-        ns=c.north_star(self.m,cutoff+14000,days=1)
+        ns=c.north_star(self.m,cutoff+14000,days=1,tz='Asia/Jakarta')
         first,last=ns['days']
         self.assertEqual(first['status'],'partial_source');self.assertTrue(first['source']['out_of_order'])
         self.assertNotIn('d_cash_sol',last);self.assertNotIn('d_known_sol',last);self.assertEqual(ns['status'],'partial')
@@ -265,14 +265,20 @@ class CollectorTests(unittest.TestCase):
         rows(f,[dict(ts=10,native_sol=1),dict(ts=20,native_sol=2),dict(ts=20,native_sol=3)])
         with f.open('a') as h:h.write('{"ts":21')
         self.assertEqual(c.nav_at(f,20)['native_sol'],3)
-    def test_north_star_latest_unknown_and_wib(self):
-        base=20000*DAY-c.WIB;f=self.m/'dlmm_nav.jsonl'
-        bad=snap(base+20,2,None)
-        rows(f,[snap(base+10,1,1),bad,snap(base+DAY+10,3,2)])
-        days=c.north_star(self.m,base+DAY+20,1)['days']
-        self.assertEqual(days[0]['ts'],base+20);self.assertIsNone(days[1]['d_cash_sol'])
-        rows(f,[snap(base-1,1,1),snap(base,2,2),snap(base+DAY-1,3,3),snap(base+DAY,4,4)])
-        self.assertEqual([x['native_sol'] for x in c.north_star(self.m,base+DAY,2)['days']],[1,3,4])
+    def test_north_star_latest_unknown_and_zone(self):
+        for tz,off in (('Asia/Jakarta',7*3600),('America/Sao_Paulo',-3*3600),('UTC',0)):
+            with self.subTest(tz=tz):
+                base=20000*DAY-off;f=self.m/'dlmm_nav.jsonl'
+                bad=snap(base+20,2,None)
+                rows(f,[snap(base+10,1,1),bad,snap(base+DAY+10,3,2)])
+                ns=c.north_star(self.m,base+DAY+20,1,tz)
+                self.assertEqual(ns['tz'],tz);days=ns['days']
+                self.assertEqual([d['day'] for d in days],['2024-10-04','2024-10-05'])
+                self.assertEqual(days[0]['ts'],base+20);self.assertIsNone(days[1]['d_cash_sol'])
+                rows(f,[snap(base-1,1,1),snap(base,2,2),snap(base+DAY-1,3,3),snap(base+DAY,4,4)])
+                self.assertEqual([x['native_sol'] for x in c.north_star(self.m,base+DAY,2,tz)['days']],[1,3,4])
+    def test_unknown_zone_is_an_unavailable_panel(self):
+        self.assertEqual(c.panel(c.north_star,self.m,T,1,'Mars/Olympus')['status'],'unavailable')
     def test_nav_read_work_caps(self):
         f=self.m/'dlmm_nav.jsonl';f.write_bytes(b'x'*(10*1024*1024)+b'\n')
         meta={};self.assertIsNone(c.nav_at(f,20,meta=meta));self.assertEqual(meta['status'],'line_cap')
@@ -287,8 +293,45 @@ class CollectorTests(unittest.TestCase):
         state=self.m/'state';state.mkdir()
         rows(memory/'dlmm_realized.jsonl',[dict(position=[],closed_at=T,realized_sol=.1)])
         with patch.object(c.subprocess,'run',runner()),patch.object(c,'bounded_run',runner()):
+            d=c.collect(profile,state,1,('UTC','America/Sao_Paulo'))
+        self.assertIn('nav',d);self.assertIn('journal',d);self.assertEqual(set(d['by_tz']),{'UTC','America/Sao_Paulo'})
+        self.assertNotEqual(d['by_tz']['America/Sao_Paulo']['realized']['status'],'ok')
+        self.assertEqual(d['by_tz']['America/Sao_Paulo']['north_star']['tz'],'America/Sao_Paulo')
+
+class OwnOnlyTests(unittest.TestCase):
+    """Owner policy: no comparison with another bot reaches the dashboard."""
+    def test_drops_other_bot_keys_recursively_and_keeps_own_cohort(self):
+        other='otherbot'  # made-up name, hidden only through the operator deny-list
+        report={'lp_comparison':{'azimuth':{'lp_pnl_sol':0.1,'note':'own'},other:{'lp_pnl_sol':0.2}},
+                'limits':[{other.upper()+'_cohort':1,'kept':2}],'nested':{'Reference_Bot_wallet':'x','ok':{'Comparison':3,'v':4}},
+                'bin_width_holding_replay':[{'limitation':'Gross allocation comparison'}]}
+        with patch.dict(os.environ,{'DASHBOARD_HIDE_KEYS':' '+other+' ,,'}):
+            out=c.own_only(report)
+        self.assertNotIn('lp_comparison',out);self.assertEqual(out['limits'],[{'kept':2}])
+        self.assertEqual(out['nested'],{'ok':{'v':4}})
+        self.assertEqual(out['bin_width_holding_replay'],report['bin_width_holding_replay'])  # values are untouched
+        self.assertNotIn(other,json.dumps(out).lower())
+    def test_generic_markers_apply_without_a_deny_list(self):
+        with patch.dict(os.environ,{'DASHBOARD_HIDE_KEYS':''}):
+            out=c.own_only({'otherbot_pnl':1,'Other_Bot':2,'lp_comparison':3,'reference_bot':4,'own':5})
+        self.assertEqual(out,{'otherbot_pnl':1,'own':5})  # names are never built in
+    def test_unit_list_is_shipped_units_plus_validated_extras(self):
+        self.assertTrue(all(u.startswith(('azimuth','hermes-gateway')) for u in c.unit_list('')))
+        self.assertNotIn('daily',' '.join(c.unit_list('')))
+        units=c.unit_list('my-job.timer, my-job.service,bad name.service,../x.service,my-job.timer,azimuth.service')
+        self.assertEqual(units[len(c.UNITS):],['my-job.timer','my-job.service'])
+        self.assertEqual(units.count('azimuth.service'),1)
+    def test_collect_has_no_evaluation_and_no_other_bot(self):
+        other='otherbot'
+        profile=self.m/'profile';(profile/'memories').mkdir(parents=True)
+        state=self.m/'state';(state/'reviews'/'r1').mkdir(parents=True)
+        (state/'reviews'/'r1'/'evaluation.json').write_text(json.dumps({'generated_at':5,'lp_comparison':{'azimuth':{},other:{}}}))
+        rows(profile/'memories'/'dlmm_nav.jsonl',[{'ts':1,'native_sol':1,other+'_wallet':'x'}])
+        with patch.object(c.subprocess,'run',runner()),patch.object(c,'bounded_run',runner()),patch.dict(os.environ,{'DASHBOARD_HIDE_KEYS':other}):
             d=c.collect(profile,state,1)
-        self.assertIn('nav',d);self.assertIn('journal',d)
-        self.assertNotEqual(d['live']['realized']['status'],'ok')
+        self.assertNotIn('evaluation',d);self.assertNotIn(other,json.dumps(d).lower())
+        self.assertEqual(d['nav']['native_sol'],1)
+    setUp=CollectorTests.setUp
+    tearDown=CollectorTests.tearDown
 
 if __name__=='__main__': unittest.main()
