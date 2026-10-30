@@ -134,7 +134,7 @@ class CollectorTests(unittest.TestCase):
             start=time.monotonic();r=c.bounded_run(['journalctl'],timeout=.1)
             self.assertEqual(r.capture_status,'timeout');self.assertLess(time.monotonic()-start,4)
     def test_bridge_cash_oracle(self):
-        bridge_fixture(self.m);b=c.nav_bridge(self.m,T,1);parts={r['key']:r['sol'] for r in b['components']}
+        bridge_fixture(self.m);b=c.nav_bridge(self.m,T,1);parts={r['component']:r['sol'] for r in b['components']}
         self.assertEqual(b['status'],'ok');self.assertTrue(b['native_identity_exact'])
         self.assertAlmostEqual(parts['lp_realized'],.1);self.assertAlmostEqual(parts['network_fees'],-.00001)
         self.assertAlmostEqual(sum(parts.values()),.09999)
@@ -156,7 +156,7 @@ class CollectorTests(unittest.TestCase):
                         self.assertEqual(b['status'],'ok');self.assertGreater(b['closes_invalid_lines'],0);self.assertEqual(b['mode_unknown'],0)
                         continue
                     self.assertNotEqual(b['status'],'ok');self.assertTrue(b['incomplete_sources'])
-                    self.assertIsNone(next(x['sol'] for x in b['components'] if x['key']=='rent_ledger'))
+                    self.assertIsNone(next(x['sol'] for x in b['components'] if x['component']=='rent_ledger'))
     def test_bridge_closes_corruption_that_drops_a_mode_is_incomplete(self):
         bridge_fixture(self.m);f=self.m/'dlmm_closes.jsonl'
         f.write_text('broken\n')  # every label gone: the window lifecycle is now mode-unknown
@@ -239,16 +239,21 @@ class CollectorTests(unittest.TestCase):
             if field=='wallet_delta_lamports':self.assertIsNone(b['native_identity_exact'])
             else:
                 key='network_fees' if field=='fee_lamports' else 'rent_permanent'
-                self.assertIsNone(next(x['sol'] for x in b['components'] if x['key']==key))
+                self.assertIsNone(next(x['sol'] for x in b['components'] if x['component']==key))
         bridge_fixture(self.m);f=self.m/'dlmm_nav.jsonl';data=[json.loads(l) for l in f.read_text().splitlines()];data[-1]['wallet_history_complete']=False;rows(f,data)
         b=c.nav_bridge(self.m,T,1);self.assertNotEqual(b['status'],'ok');self.assertIsNone(b['native_identity_exact'])
         self.assertTrue(all(v['sol'] is None for v in b['fees_by_kind'].values()))
         bridge_fixture(self.m);f=self.m/'dlmm_wallet_transactions.jsonl';data=[json.loads(l) for l in f.read_text().splitlines()]
         data[0]['token_rent_evidence']={'funded':[{'lamports':None}],'refunded':[]};rows(f,data)
         b=c.nav_bridge(self.m,T,1);self.assertIn('ata_funding',b['incomplete_values'])
+    def test_bridge_component_ids_survive_the_shared_sensor(self):
+        # The served payload goes through clean(); component ids must not read as credentials.
+        bridge_fixture(self.m);b=c.clean(c.nav_bridge(self.m,T,1))
+        ids=[r['component'] for r in b['components']]
+        self.assertIn('unexplained',ids);self.assertNotIn('[masked]',json.dumps(b['components']))
     def test_unattributed_cash_not_rent(self):
         bridge_fixture(self.m);rows(self.m/'dlmm_transactions.jsonl',[])
-        b=c.nav_bridge(self.m,T,1);p={r['key']:r for r in b['components']}
+        b=c.nav_bridge(self.m,T,1);p={r['component']:r for r in b['components']}
         self.assertNotEqual(b['status'],'ok');self.assertIsNone(p['rent_ledger']['sol'])
         self.assertEqual(p['rent_ledger']['measured_subtotal_sol'],0)
         self.assertAlmostEqual(p['unattributed_cash']['measured_subtotal_sol'],.1)

@@ -171,7 +171,7 @@ with tempfile.TemporaryDirectory() as tmp:
     (m/'dlmm_transactions.jsonl').write_text(''.join(json.dumps(r)+'\n' for r in kinds))
     (m/'dlmm_realized.jsonl').write_text(json.dumps({'position':'P','realized_sol':0.03})+'\n'+json.dumps({'position':'Q','realized_sol':None})+'\n')
     (m/'dlmm_closes.jsonl').write_text(json.dumps({'position':'P','mode':'pulse'})+'\n')
-    r=nav_bridge(m,T,days=1); c={x['key']:x['sol'] for x in r['components']}
+    r=nav_bridge(m,T,days=1); c={x['component']:x['sol'] for x in r['components']}
     assert r['status']=='ok' and r['native_identity_exact'] and r['transactions']==5
     assert abs(c['lp_realized']-0.03)<1e-12 and abs(c['network_fees']+0.00002)<1e-12
     assert abs(c['swap_residual']-(0.009005-(0.03-0.02001)))<1e-12 and abs(c['spl_mark']-0.02)<1e-12

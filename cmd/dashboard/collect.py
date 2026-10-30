@@ -506,7 +506,8 @@ def nav_bridge(memory, now, days=14):
         if key in ('spl_mark','spl_coverage','lp_unrealized'): known=not any(incomplete(sources[x]) for x in ('nav_start','nav_end'))
         if key=='network_fees': known=not incomplete(sources['wallet_transactions']) and not unknown.intersection(('fee_lamports','transaction_slot','wallet_history_incomplete'))
         if key=='rent_permanent': known=not incomplete(sources['wallet_transactions']) and not unknown.intersection(('nonrefundable_account_cost_lamports','transaction_slot','wallet_history_incomplete'))
-        component_rows.append(dict(key=key,label=label,sol=value if known else None,measured_subtotal_sol=value if key!='unexplained' else None))
+        # 'component', not 'key': a bare 'key' field is a credential name to the shared sensor.
+        component_rows.append(dict(component=key,label=label,sol=value if known else None,measured_subtotal_sol=value if key!='unexplained' else None))
     if any(c['sol'] is None for c in component_rows[:-1]): component_rows[-1]['sol']=None
     out.update(status='incomplete_sources' if incomplete_sources else 'unmeasured_values' if unknown else 'ok', incomplete_sources=incomplete_sources,
                incomplete_values=sorted(unknown),

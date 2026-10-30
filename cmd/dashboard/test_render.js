@@ -40,7 +40,7 @@ async function render(tab, payload, fail=false) {
   assert(r.html.includes('Verified fees · SOL</span><strong>Unknown</strong>'));
   assert(r.html.includes('Forfeited quote · SOL</span><strong>Unknown</strong>'));
   const capital = await render('capital', {north_star: {days: []}, nav_bridge: {status: 'incomplete_sources', native_identity_exact: null,
-    incomplete_sources: ['transaction_kinds'], fees_by_kind: {unknown: {sol: null}}, components: [{key: 'rent_ledger', label: 'Rent', sol: null}]}});
+    incomplete_sources: ['transaction_kinds'], fees_by_kind: {unknown: {sol: null}}, components: [{component: 'rent_ledger', label: 'Rent', sol: null}]}});
   assert(capital.html.includes('transaction_kinds') && capital.html.includes('native identity Unknown'));
   assert(!capital.html.includes('<td>0</td>'));
   // Charts: unmeasured days are hatched, never drawn or labelled as zero; day labels name the zone.
@@ -51,8 +51,9 @@ async function render(tab, payload, fail=false) {
     {day:'2024-10-06',status:'partial_day',cash_sol:0.999,known_sol:1.19,d_cash_sol:0,d_known_sol:0}];
   const charted = await render('capital', {tz:'America/Sao_Paulo', tz_fallback:false, north_star:{status:'ok',days},
     nav_bridge:{status:'incomplete_sources',incomplete_sources:['closes'],d_known_sol:-0.01,components:[
-      {key:'network_fees',label:'Network fees',sol:-0.003},{key:'lp_realized',label:'LP realized',sol:null,measured_subtotal_sol:-0.02},{key:'unexplained',label:'Unexplained',sol:null}]}});
+      {component:'network_fees',label:'Network fees',sol:-0.003},{component:'lp_realized',label:'LP realized',sol:null,measured_subtotal_sol:-0.02},{component:'unexplained',label:'Unexplained',sol:null}]}});
   const h = charted.html;
+  assert(h.includes('Unexplained <span class="badge">residual</span>'), 'residual badge keyed by component id');
   assert(h.includes('days in America/Sao_Paulo') && h.includes('4 Oct 2024 (America/Sao_Paulo)'), 'zone named on day labels');
   assert(h.includes('class="cell pos-3"') && h.includes('class="cell neg-3"') && h.includes('class="cell unk"'), 'calendar states');
   assert(h.includes('+3.00') && h.includes('−4.00') && h.includes('class="cell  today"'), 'signed mSOL values and today marker');
