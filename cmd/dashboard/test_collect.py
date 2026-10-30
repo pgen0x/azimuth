@@ -20,6 +20,12 @@ DAY=86400
 def rows(path, data):
     path.write_text(''.join(json.dumps(r)+'\n' for r in data))
 
+def frozen_clock():
+    """nav_at stops after 2 s of wall-clock time. That budget is real time, so on a slow or loaded host a
+    large-file fixture could stop early and prove nothing (this flaked in CI). Fixtures that test ordering
+    logic freeze the clock; the read-call and byte caps still apply unchanged."""
+    return patch.object(c.time,'monotonic',return_value=0.0)
+
 def snap(ts,slot,native=5,**kw):
     return dict(ts=ts,slot=slot,native_sol=native,spl_mark_sol=0,lp_mark_sol=0,
                 refundable_rent_sol=0,known_asset_subtotal_sol=native,tokens=[],issues=[],
@@ -171,7 +177,7 @@ class CollectorTests(unittest.TestCase):
         rows=[dict(ts=base+i*day+j*2400,native_sol=1.0+i*.01,lp_mark_sol=0.0,refundable_rent_sol=.01,known_asset_subtotal_sol=1.01+i*.01,
                    external_flow_lamports=0,wallet_history_complete=True) for i in range(4) for j in range(30)]
         self._big_nav(rows)
-        ns=c.north_star(self.m,base+3*day+20*3600,days=3,tz='America/Sao_Paulo')
+        with frozen_clock():ns=c.north_star(self.m,base+3*day+20*3600,days=3,tz='America/Sao_Paulo')
         full=[d for d in ns['days'] if d['status']=='ok']
         self.assertEqual(len(full),3);self.assertEqual(ns['days'][-1]['status'],'partial_day')
         for d in ns['days'][1:]:
@@ -180,21 +186,20 @@ class CollectorTests(unittest.TestCase):
         rows=[dict(ts=100*i,native_sol=1.0) for i in range(120)]
         rows.insert(21,dict(ts=1,native_sol=9.0))  # out-of-order neighbour right after the pick for t=2000
         self._big_nav(rows)
-        meta={};row=c.nav_at(self.m/'dlmm_nav.jsonl',2000,meta=meta)
+        with frozen_clock():meta={};row=c.nav_at(self.m/'dlmm_nav.jsonl',2000,meta=meta)
         self.assertIn(row['ts'],(1,2000));self.assertEqual(meta['status'],'partial');self.assertTrue(meta['out_of_order'])
-        meta={};c.nav_at(self.m/'dlmm_nav.jsonl',500,meta=meta)  # inversion far from this pick
+        with frozen_clock():meta={};c.nav_at(self.m/'dlmm_nav.jsonl',500,meta=meta)  # inversion far from this pick
         self.assertEqual(meta['status'],'ok')
     def test_neighbour_lines_catch_an_unvisited_inversion(self):
         # Found by search: the binary search never visits the inverted row; only the +1 neighbour read sees it.
         rows=[dict(ts=100*i,native_sol=1.0) for i in range(120)]
         rows.insert(20,dict(ts=1850,native_sol=2.0))
         self._big_nav(rows)
-        meta={};c.nav_at(self.m/'dlmm_nav.jsonl',1900,meta=meta)
+        with frozen_clock():meta={};c.nav_at(self.m/'dlmm_nav.jsonl',1900,meta=meta)
         self.assertEqual(meta['status'],'partial');self.assertTrue(meta['out_of_order'])
     def _backscan_counterexample(self,base=0):
         """Codex fix3 P1 probe: 300 rows / ~4.8 MB; one row that only previous()'s backward scan
         reads is moved past the cutoff. Returns (rows, changed index, cutoff, reads, spy)."""
-        import inspect
         rows=[dict(ts=base+i*100,native_sol=1.0,lp_mark_sol=0.0,refundable_rent_sol=0.0,
                    known_asset_subtotal_sol=1.0,external_flow_lamports=0) for i in range(300)]
         cutoff=base+15090
@@ -202,12 +207,20 @@ class CollectorTests(unittest.TestCase):
             with (self.m/'dlmm_nav.jsonl').open('w') as h:
                 for r in rows: h.write(json.dumps(dict(r,pad='x'*16000))+'\n')
         original=c._nav_line;reads=[]
+        def in_previous():
+            frame=sys._getframe(1)
+            while frame is not None:
+                if frame.f_code.co_name=='previous': return True
+                frame=frame.f_back
+            return False
         def spy(*a,**k):
             item=original(*a,**k)
-            if item: reads.append((item[0],item[2],any(fr.function=='previous' for fr in inspect.stack())))
+            if item: reads.append((item[0],item[2],in_previous()))
             return item
         write()
-        with patch.object(c,'_nav_line',side_effect=spy):c.nav_at(self.m/'dlmm_nav.jsonl',cutoff,meta={})
+        probe={}
+        with patch.object(c,'_nav_line',side_effect=spy),frozen_clock():c.nav_at(self.m/'dlmm_nav.jsonl',cutoff,meta=probe)
+        self.assertEqual(probe['status'],'ok',probe)  # a lookup cut short by a budget proves nothing
         other={ts for _,ts,prev in reads if not prev}
         only_prev=sorted({(ts-base)//100 for _,ts,prev in reads if prev and ts not in other and ts<base+14900})
         self.assertTrue(only_prev,'fixture no longer exercises the backward scan')
@@ -219,7 +232,7 @@ class CollectorTests(unittest.TestCase):
         rows,changed,cutoff,reads,spy=self._backscan_counterexample()
         self.assertEqual(changed,146)  # the exact row of codex's counterexample
         meta={}
-        with patch.object(c,'_nav_line',side_effect=spy):c.nav_at(self.m/'dlmm_nav.jsonl',cutoff,meta=meta)
+        with patch.object(c,'_nav_line',side_effect=spy),frozen_clock():c.nav_at(self.m/'dlmm_nav.jsonl',cutoff,meta=meta)
         self.assertIn(15050,[ts for _,ts,prev in reads if prev])  # the inversion was read, by previous()
         self.assertEqual(meta['status'],'partial');self.assertTrue(meta['out_of_order']);self.assertTrue(c.incomplete(meta))
         self.assertEqual(meta['visited_rows'],len({off for off,_,_ in reads}))  # every row read is checked
@@ -227,7 +240,7 @@ class CollectorTests(unittest.TestCase):
     def test_backward_scan_inversion_blocks_the_next_days_delta(self):
         day=20000;end=day*86400-7*3600+86400  # end of a local day in Asia/Jakarta (UTC+7)
         rows,changed,cutoff,reads,spy=self._backscan_counterexample(base=end-1-15090)
-        ns=c.north_star(self.m,cutoff+14000,days=1,tz='Asia/Jakarta')
+        with frozen_clock():ns=c.north_star(self.m,cutoff+14000,days=1,tz='Asia/Jakarta')
         first,last=ns['days']
         self.assertEqual(first['status'],'partial_source');self.assertTrue(first['source']['out_of_order'])
         self.assertNotIn('d_cash_sol',last);self.assertNotIn('d_known_sol',last);self.assertEqual(ns['status'],'partial')
@@ -279,6 +292,14 @@ class CollectorTests(unittest.TestCase):
                 self.assertEqual([x['native_sol'] for x in c.north_star(self.m,base+DAY,2,tz)['days']],[1,3,4])
     def test_unknown_zone_is_an_unavailable_panel(self):
         self.assertEqual(c.panel(c.north_star,self.m,T,1,'Mars/Olympus')['status'],'unavailable')
+    def test_nav_wall_clock_budget_still_stops_a_slow_lookup(self):
+        rows=[dict(ts=100*i,native_sol=1.0) for i in range(120)]
+        self._big_nav(rows)
+        import itertools
+        clock=itertools.count(0,0.5)  # every clock read is half a second later
+        with patch.object(c.time,'monotonic',side_effect=lambda:next(clock)):
+            meta={};self.assertIsNone(c.nav_at(self.m/'dlmm_nav.jsonl',2000,meta=meta))
+        self.assertEqual(meta['status'],'work_cap')
     def test_nav_read_work_caps(self):
         f=self.m/'dlmm_nav.jsonl';f.write_bytes(b'x'*(10*1024*1024)+b'\n')
         meta={};self.assertIsNone(c.nav_at(f,20,meta=meta));self.assertEqual(meta['status'],'line_cap')
