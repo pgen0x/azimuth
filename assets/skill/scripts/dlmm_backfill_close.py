@@ -22,12 +22,12 @@ line of the cycle that fired the exit carries every field this needs:
 Then, e.g.:
 
     python3 dlmm_backfill_close.py \
-      --position <POSITION> --pool AeUfFU6L... --pair CHANCE-SOL \
-      --base-mint JCKwsT8U... --mode turnover \
-      --pnl-pct 0.4723 --pnl-sol -0.000204 \
-      --fee-per-tvl 1.27 --age-min 41.1 \
-      --closed-at 2026-07-30T02:15:47+07:00 \
-      --reason "Trailing Take-Profit hit (Peak: 1.24%, Current: 0.47%)"
+      --position <POSITION> --pool <POOL> --pair FOO-SOL \
+      --base-mint <MINT> --mode turnover \
+      --pnl-pct 0.50 --pnl-sol 0.001 \
+      --fee-per-tvl 1.00 --age-min 30 \
+      --closed-at 2024-01-01T12:00:00Z \
+      --reason "Trailing Take-Profit hit (Peak: 1.50%, Current: 0.50%)"
 
 `--check-chain` refuses to write while the Meteora portfolio API still lists the
 position. Re-running is safe: the position address is the idempotency key.
@@ -39,6 +39,8 @@ import os
 import subprocess
 import sys
 import urllib.request
+
+import tz_util
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 # Three hops up from scripts/ is the profile, exactly like dlmm_monitor.py — but
@@ -105,8 +107,8 @@ def parse_args(argv):
     p.add_argument("--age-min", type=float, default=0.0)
     p.add_argument("--reason", required=True)
     p.add_argument("--closed-at", required=True,
-                   help="ISO-8601 close time; a bare timestamp is read as local "
-                        "time (e.g. 2026-07-30T02:15:47+07:00)")
+                   help="ISO-8601 close time with an offset (e.g. 2026-07-29T19:15:47Z); "
+                        "a bare timestamp is read in DLMM_TZ (default UTC)")
     p.add_argument("--txs", default="", help="comma-separated tx hashes, if known")
     p.add_argument("--source", default="monitor-backfill",
                    help="journal 'source' field (default monitor-backfill)")
@@ -136,7 +138,7 @@ def main(argv=None):
         print(f"❌ --closed-at is not ISO-8601: {e}")
         return 2
     if closed_at.tzinfo is None:
-        closed_at = closed_at.astimezone()
+        closed_at = closed_at.replace(tzinfo=tz_util.zone())
     ts = int(closed_at.timestamp())
 
     if args.check_chain:
@@ -206,8 +208,8 @@ def main(argv=None):
     redis("expire", hist_key, "2592000")
     print(f"pool memory {hist_key} -> len {redis('llen', hist_key)}")
 
-    # Daily counters, keyed on the LOCAL close date like the monitor's own path.
-    pnl_key = f"sol:dlmm:pnl:daily:{closed_at.astimezone().strftime('%Y-%m-%d')}"
+    # Daily counters, keyed on the close date in DLMM_TZ like the monitor's own path.
+    pnl_key = f"sol:dlmm:pnl:daily:{tz_util.local_date_str(closed_at.timestamp())}"
     cur = redis("hget", pnl_key, "total_sol")
     cur_f = float(cur) if cur and cur != "(nil)" else 0.0
     redis("hset", pnl_key, "total_sol", str(cur_f + entry["pnl_sol"]))

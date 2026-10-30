@@ -3,17 +3,12 @@ import asyncio
 import json
 import os
 import subprocess
+import sys
 import urllib.request
 import urllib.error
 from datetime import datetime, timedelta
 from hindsight_client import Hindsight
 
-try:
-    from zoneinfo import ZoneInfo
-except ImportError:
-    from backports.zoneinfo import ZoneInfo
-
-WIB = ZoneInfo("Asia/Jakarta")
 
 # Resolved from this file's own location (<profile>/skills/solana-web3/scripts/) so the
 # script works whether it's a copy or a symlink into a Hermes profile.
@@ -21,6 +16,15 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROFILE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(SCRIPT_DIR)))
 PROFILE_NAME = os.path.basename(PROFILE_DIR)
 SOUL_PATH = os.path.join(PROFILE_DIR, "SOUL.md")
+
+# Operator zone for day keys and card times: tz_util in the solana-dlmm skill is the single
+# source (assets/skill/scripts in the repo, which this file is symlinked from;
+# <profile>/skills/solana-dlmm/scripts once installed).
+for _tz_dir in (os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "scripts"),
+                os.path.join(PROFILE_DIR, "skills", "solana-dlmm", "scripts")):
+    if os.path.isfile(os.path.join(_tz_dir, "tz_util.py")) and _tz_dir not in sys.path:
+        sys.path.append(_tz_dir)
+from tz_util import local_dt, local_time_str  # noqa: E402
 
 
 def run_command(cmd, timeout=5):
@@ -94,7 +98,7 @@ async def fetch_hindsight_memories():
 
 def main():
     print("# DLMM STRATEGY PERFORMANCE GATHERER\n")
-    print(f"Current Time (WIB): {datetime.now(WIB).strftime('%Y-%m-%d %H:%M:%S')}\n")
+    print(f"Current Time: {local_time_str('%Y-%m-%d %H:%M:%S %Z')}\n")
     
     # 1. Gather Binance Web3 Wallet On-Chain Stats
     print("## 1. Binance Web3 Wallet On-Chain Stats (7D)")
@@ -127,7 +131,7 @@ def main():
 
     # 1b. Gather Redis realization PnL statistics for last 7 days
     print("## 1b. Past 7 Days Realized PnL (Redis)")
-    today = datetime.now(WIB)
+    today = local_dt()  # daily keys are cut in DLMM_TZ, matching monitor_positions
     pnl_records = []
 
     

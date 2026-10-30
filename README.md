@@ -219,8 +219,8 @@ SOLANA_RPC_URLS=https://mainnet.helius-rpc.com/?api-key=YOUR_KEY,https://api.mai
 DLMM_ALERT_TARGET=telegram        # instant trade-event alerts (close/rebalance/compound)
                                   # sent script-side via `hermes send` — no LLM tokens.
                                   # "platform" or "platform:chat_id"; empty disables.
-DLMM_TZ=Asia/Jakarta              # timezone for every report-card timestamp (IANA name,
-                                  # e.g. America/New_York; empty/unset = system zone)
+DLMM_TZ=UTC                       # report-card times and daily buckets (any IANA name,
+                                  # e.g. America/New_York; empty/unset = UTC)
 DLMM_STATS_HOUR=09                # daily scoreboard send hour in DLMM_TZ (00-23, default 09)
 ```
 
@@ -476,7 +476,7 @@ python3 <profile>/skills/solana-dlmm/scripts/dlmm_stats.py [--hours 24] [--send]
 Deterministic metlex-style card (closes, win rate, avg hold, realized PnL,
 fees-vs-IL split, volume churned, per-mode breakdown, rebalance-chain PnL)
 built from the Meteora portfolio API + close journal + Redis — no LLM. The
-monitor loop auto-sends it daily at 09:00 WIB via `hermes send` when
+monitor loop auto-sends it daily at `DLMM_STATS_HOUR` (default 09) in `DLMM_TZ` via `hermes send` when
 `DLMM_ALERT_TARGET` is set.
 
 ## Example output
@@ -486,13 +486,13 @@ the live card carries only measured ones — the prompt never lets it fabricate 
 size/entry/TX):
 
 ```
-🤖 AI Pick — multiday · 14:32 WIB
+🤖 AI Pick — multiday · 14:32 UTC
 
 Candidates screened: 5
 Chose: world-SOL over 4 others — highest organic score, healthiest fee/TVL
 Strategy: custom_ratio_spot — meme-pool volatility, symmetric range fits
 
-`CQEYFv3KGnJ6xxRyrUNWbXjPHGnbyCbjuZDTGocV92ug`
+`<POOL>`
 
 | Metric | Value |
 |---|---|

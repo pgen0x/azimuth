@@ -57,7 +57,7 @@ journaled like any other close, distinguished by its `reason` prefix
 AI-closed/rule-closed closes stay comparable.
 
 Its third role writes no state at all: the `sol_dlmm_daily_proposal` cron
-(21:00 WIB) reads a precomputed evidence brief
+(21:00 in the Hermes profile time zone) reads a precomputed evidence brief
 (`assets/hermes/scripts/sol_dlmm_proposal_brief.py`) and **proposes** threshold
 changes to the operator over Telegram. It is declared with **no toolsets** —
 withholding `terminal` is what makes "propose, never apply" structural instead
