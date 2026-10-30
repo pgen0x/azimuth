@@ -148,6 +148,35 @@ func TestAIHealthProbeCachedForPollInterval(t *testing.T) {
 	}
 }
 
+// A healthy probe may route batches to Hermes for less than one poll interval
+// only: at exactly one interval old it must be re-run, never reused.
+func TestAIHealthProbeCacheExpiresAtOneInterval(t *testing.T) {
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "probe-runs")
+	script := filepath.Join(dir, "probe.sh")
+	body := fmt.Sprintf("#!/bin/sh\nprintf x >> %q\necho healthy\n", marker)
+	if err := os.WriteFile(script, []byte(body), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	s := &Scanner{cfg: config.Config{AIHealthCmd: script, PollInterval: time.Minute}}
+	if _, err, _, cached := s.probeAI(context.Background()); err != nil || cached {
+		t.Fatalf("first probe = err %v, cached %v", err, cached)
+	}
+	s.aiProbeCheckedAt = time.Now().Add(-s.cfg.PollInterval)
+	if _, err, _, cached := s.probeAI(context.Background()); err != nil || cached {
+		t.Fatalf("probe one interval old = err %v, cached %v; want a fresh run", err, cached)
+	}
+	if data, err := os.ReadFile(marker); err != nil || len(data) != 2 {
+		t.Fatalf("probe runs = %q, err %v; want 2", data, err)
+	}
+	// Zero/unset poll interval falls back to a one-minute window, not "cache forever".
+	s.cfg.PollInterval = 0
+	s.aiProbeCheckedAt = time.Now().Add(-time.Minute)
+	if _, _, _, cached := s.probeAI(context.Background()); cached {
+		t.Fatal("zero poll interval reused a one-minute-old probe")
+	}
+}
+
 func testEntryRouting(t *testing.T, healthCmd string, status int, wantWebhook, wantDirect bool) {
 	t.Setenv("SOLANA_DELIVERY_PATH", filepath.Join(t.TempDir(), "deliveries.jsonl"))
 	t.Helper()
