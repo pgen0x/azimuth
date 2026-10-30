@@ -186,6 +186,7 @@ const rejects = callback => assert.throws(callback, /Native risk mark unavailabl
   // Exercise production executor: no indexed HTTP call, signer or transaction send.
   let sdkData = data, nativeAccount = native, signatures = history, signerCalls = 0, rpcCalls = 0, fundingTx = tx;
   class Connection {
+    async getMultipleAccountsInfoAndContext() { throw new Error("unexpected account batch read"); }
     async getAccountInfo() {rpcCalls++; return {owner: key(programId), data: Buffer.from([1,2,3,4,5,6,7,8])};}
     async getParsedTransaction() {rpcCalls++; return fundingTx;}
     async getSignaturesForAddress(_key, options, commitment) {assert.equal(options.limit, 2); assert.equal(commitment, "confirmed"); return signatures;}

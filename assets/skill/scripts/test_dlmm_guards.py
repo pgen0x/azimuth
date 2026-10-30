@@ -255,7 +255,7 @@ def main():
         path.unlink()
         # Route/fee failures remain inventory, with backoff and no global entry
         # block. Unknown RPC failures must remain pending instead.
-        for reason in ("swap_no_route", "net_recovery_below_floor", "net_recovery_unmeasured"):
+        for reason in ("swap_no_route", "net_recovery_below_floor", "swap_quote_threshold_unavailable", "net_recovery_unmeasured"):
             monitor.queue_settlement("position")
             with patch.object(monitor, "run_command_json", side_effect=[({"success": True, "amount_raw": "1"}, None), ({"success": False, "reason": reason}, None)]) as run:
                 monitor.settle_pending()
@@ -278,6 +278,18 @@ def main():
                 failed_resume.assert_called_once_with("redis-cli DEL sol:dlmm:capacity:wallet", timeout=2)
             else:
                 path.unlink()
+        # A pending signature outranks any route reason: never defer it, so the
+        # next tick reconciles the signed swap instead of backing off from it.
+        monitor.queue_settlement("position")
+        pending_result = {"success": False, "pending": True, "reason": "swap_quote_threshold_unavailable"}
+        with patch.object(monitor, "run_command_json", side_effect=[({"success": True, "amount_raw": "1"}, None), (pending_result, None)]):
+            monitor.settle_pending()
+        item = json.loads(path.read_text())
+        assert item["state"] == "pending" and "reason" not in item and "remaining_raw" not in item
+        with patch.object(monitor, "run_command_json", side_effect=[({"success": True, "amount_raw": "1"}, None), (pending_result, None)]) as again:
+            monitor.settle_pending()
+        assert again.call_count == 2
+        path.unlink()
 
     # Empty indexer results never authorize deletion of a live/unknown position,
     # including orphan metadata and its risk-state keys.

@@ -8,6 +8,7 @@ const fs = require("fs");
 const path = require("path");
 const net = require("net");
 const riskMark = require("./dlmm_risk_mark");
+const {deduplicateAccountReads} = require("./dlmm_rpc_accounts");
 
 // Resolved from the invoked path (process.argv[1]), NOT __dirname — Node always
 // realpaths __dirname/__filename through symlinks, which would resolve to this repo
@@ -77,6 +78,7 @@ async function runWithFailover(fn) {
     try {
       const connection = new Connection(rpcUrl, { commitment: "confirmed", disableRetryOnRateLimit: true,
         fetch: (url, options) => fetch(url, { ...options, signal: AbortSignal.timeout(8000) }) });
+      deduplicateAccountReads(connection);
       return await fn(connection);
     } catch (err) {
       if (err.riskMarkUnavailable || err.message?.startsWith("ENTRY REFUSED:") || err.message?.startsWith("Rent reclaim refused:")) throw err;
@@ -154,6 +156,7 @@ async function confirmSignedTransaction(connection, strategy, raw, options = CON
       if (!status.err) throw new Error("Transaction confirmation unmeasured");
       const error = new Error(`Transaction failed: ${JSON.stringify(status.err)}`);
       error.transactionFailed = true;
+      error.chainError = status.err;
       throw error;
     }
     const remaining = deadline - Date.now();
@@ -406,7 +409,11 @@ async function reconcilePendingSwap(connection, pendingPath, label = "Swap") {
   const status = (await connection.getSignatureStatuses(
     [pending.signature], { searchTransactionHistory: true }
   )).value[0];
-  if (status?.err) {
+  // An error is a verdict only once confirmed: a "processed" failure can be dropped
+  // with its block and the same signed bytes can still land before expiry, so it
+  // stays pending (below) and no new swap is signed against the same inventory.
+  if (status?.err && ["confirmed", "finalized"].includes(status.confirmationStatus)) {
+    require("./dlmm_route_retry").recordFailure(pendingPath, pending.routeContext, status.err);
     fs.rmSync(pendingPath, { force: true });
     return null;
   }
@@ -847,6 +854,37 @@ async function deployPosition(poolAddressStr, amountX, amountY, binsBelow, binsA
 
 
 async function findPoolForPosition(connection, wallet, positionAddressStr) {
+  // A local entry is only a pool hint. Prove program, account type, pool and
+  // wallet ownership on chain before avoiding the wallet-wide SDK scan.
+  let poolHint = null;
+  if (path.basename(positionAddressStr) === positionAddressStr) {
+    try {
+      const entry = JSON.parse(fs.readFileSync(path.join(PROFILE_DIR, "memories", "dlmm_entries",
+        `${positionAddressStr}.json`), "utf8"));
+      if (entry.position === positionAddressStr && typeof entry.pool === "string") {
+        poolHint = new PublicKey(entry.pool);
+      }
+    } catch { /* Legacy or invalid local evidence uses ordinary discovery. */ }
+  }
+  if (poolHint) {
+    const positionKey = new PublicKey(positionAddressStr);
+    const account = await connection.getAccountInfo(positionKey, "confirmed");
+    const idl = DLMM.IDL;
+    const discriminator = idl.accounts.find(a => a.name === "PositionV2")?.discriminator;
+    if (account && account.owner.toString() === idl.address && discriminator
+        && account.data.subarray(0, 8).equals(Buffer.from(discriminator))) {
+      const pool = await DLMM.create(connection, poolHint);
+      const native = pool.program.coder.accounts.decode("positionV2", account.data);
+      if (native.owner.toString() === wallet.publicKey.toString()
+          && native.lbPair.toString() === poolHint.toString()) {
+        const positionData = await pool.getPosition(positionKey);
+        if (positionData.publicKey.toString() === positionAddressStr
+            && positionData.positionData.owner.toString() === wallet.publicKey.toString()) {
+          return { pool, positionData, poolAddressStr: poolHint.toString() };
+        }
+      }
+    }
+  }
   // Try SDK first
   const allPositions = await DLMM.getAllLbPairPositionsByUser(connection, wallet.publicKey);
   for (const [lbPairKey, posData] of allPositions) {
@@ -942,26 +980,59 @@ async function claimFees(positionAddressStr) {
   });
 }
 
+// Best-effort phase boundaries: never persist endpoint URLs, errors or signed bytes.
+function closePreparationObserver(position, emptyOnly) {
+  try {
+    const { performance } = require("node:perf_hooks");
+    const started = performance.now();
+    const attempt = require("node:crypto").randomUUID();
+    const journal = path.join(PROFILE_DIR, "memories", "dlmm_close_preparations.jsonl");
+    let previous = started;
+    return (stage, signature = null) => {
+      try {
+        const now = performance.now();
+        const record = { version: 1, attempt, position, empty_only: emptyOnly, stage,
+          observed_at: Date.now() / 1000, elapsed_ms: now - started,
+          since_previous_ms: now - previous, signature,
+          basis: "client_preparation_observation_not_finalized_execution" };
+        previous = now;
+        fs.mkdirSync(path.dirname(journal), { recursive: true, mode: 0o700 });
+        fs.appendFileSync(journal, JSON.stringify(record) + "\n", { mode: 0o600 });
+      } catch (_) { /* Timing evidence must never prevent an exit. */ }
+    };
+  } catch (_) { return () => {}; }
+}
+
 async function closePosition(positionAddressStr, emptyOnly = false) {
   if (process.env.DRY_RUN === "true" && (positionAddressStr.includes("DRY_RUN") || positionAddressStr.length < 32)) {
     console.warn(JSON.stringify({ success: true, dryRun: true, txHashes: ["DRY_RUN_TX_HASH"] }));
     return { success: true, dryRun: true, txHashes: ["DRY_RUN_TX_HASH"] };
   }
   new PublicKey(positionAddressStr);
-  const release = await acquireSwapLock(`close-${positionAddressStr}`);
+  const observe = closePreparationObserver(positionAddressStr, emptyOnly);
+  observe("started");
+  let release;
   try {
-    return await closePositionLocked(positionAddressStr, emptyOnly);
+    release = await acquireSwapLock(`close-${positionAddressStr}`);
+    observe("lock_acquired");
+    const result = await closePositionLocked(positionAddressStr, emptyOnly, observe);
+    observe(result.success ? "completed" : result.pending ? "pending" : "refused");
+    return result;
+  } catch (error) {
+    observe("failed");
+    throw error;
   } finally {
-    await release();
+    if (release) await release();
   }
 }
 
-async function closePositionLocked(positionAddressStr, emptyOnly = false) {
+async function closePositionLocked(positionAddressStr, emptyOnly = false, observe = () => {}) {
   const pendingDir = path.join(PROFILE_DIR, "memories", "dlmm_pending_closes");
   const pendingPath = path.join(pendingDir, `${positionAddressStr}.json`);
   let submittedSignature;
   let submissionError;
   if (fs.existsSync(pendingPath)) {
+    observe("pending_reconciliation_started");
     const pending = JSON.parse(fs.readFileSync(pendingPath, "utf8"));
     if (emptyOnly && !pending.emptyOnly) return { success: false, pending: true,
       error: "Existing withdrawal requires normal close reconciliation" };
@@ -998,7 +1069,9 @@ async function closePositionLocked(positionAddressStr, emptyOnly = false) {
     }
     const wallet = getWallet();
 
+    observe("lookup_started");
     const foundPos = await findPoolForPosition(connection, wallet, positionAddressStr);
+    observe("lookup_completed");
     if (!foundPos) {
       throw new Error(`Position ${positionAddressStr} not found for user ${wallet.publicKey.toString()}`);
     }
@@ -1014,7 +1087,9 @@ async function closePositionLocked(positionAddressStr, emptyOnly = false) {
     }
 
     const sendClose = async (tx) => {
+      observe("blockhash_started");
       const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash("confirmed");
+      observe("blockhash_completed");
       tx.recentBlockhash = blockhash;
       tx.feePayer = wallet.publicKey;
       tx.sign(wallet);
@@ -1027,6 +1102,7 @@ async function closePositionLocked(positionAddressStr, emptyOnly = false) {
         raw: raw.toString("base64") }), { mode: 0o600, flush: true });
       fs.renameSync(tmp, pendingPath);
       submittedSignature = signature;
+      observe("signed_and_persisted", signature);
       console.warn(`[TX] ${JSON.stringify({stage: "close-send", signature: submittedSignature,
         position: positionAddressStr, blockhash, lastValidBlockHeight})}`);
       // The persisted signature is reused across concurrent RPC broadcasts and
@@ -1042,6 +1118,7 @@ async function closePositionLocked(positionAddressStr, emptyOnly = false) {
         submissionError = err.message;
         throw err;
       }
+      observe("confirmation_completed", signature);
       fs.rmSync(pendingPath, { force: true });
       submittedSignature = null;
       return signature;
@@ -1050,7 +1127,9 @@ async function closePositionLocked(positionAddressStr, emptyOnly = false) {
     // The program checks emptiness atomically. Never withdraw liquidity on this path,
     // even if a deposit lands after the SDK read above.
     if (emptyOnly) {
+      observe("empty_close_build_started");
       const txs = await pool.closePositionIfEmpty({ owner: wallet.publicKey, position: positionData });
+      observe("empty_close_build_completed");
       const txHashes = [];
       for (const tx of Array.isArray(txs) ? txs : [txs]) txHashes.push(await sendClose(tx));
       return { success: true, txHashes };
@@ -1064,6 +1143,7 @@ async function closePositionLocked(positionAddressStr, emptyOnly = false) {
 
     const txHashes = [];
     try {
+      observe("withdrawal_build_started");
       const closeTx = await pool.removeLiquidity({
         user: wallet.publicKey,
         position: positionData.publicKey,
@@ -1072,6 +1152,7 @@ async function closePositionLocked(positionAddressStr, emptyOnly = false) {
         bps: new BN(10000), // 100%
         shouldClaimAndClose: true
       });
+      observe("withdrawal_build_completed");
       for (const tx of Array.isArray(closeTx) ? closeTx : [closeTx]) {
         txHashes.push(await sendClose(tx));
       }
@@ -1080,6 +1161,7 @@ async function closePositionLocked(positionAddressStr, emptyOnly = false) {
       // the SDK snapshot positively proves every liquidity share is zero.
       if (submittedSignature || positionIsEmpty(positionData) !== true) throw rmErr;
       console.warn(`[DLMM] removeLiquidity failed (${rmErr.message}); attempting closePositionIfEmpty for empty position ${positionAddressStr}`);
+      observe("empty_recovery_started");
       // Empty-position recovery has no combined withdrawal transaction; claim first.
       try {
         const claimTxs = await pool.claimSwapFee({
@@ -1443,7 +1525,7 @@ async function swapToken(inputMintStr, outputMintStr, amountFloat, maxPriceImpac
     }
 
     // Fetch quote outside runWithFailover as it's a HTTP call to Jupiter, then execute/send via standard RPC rotation
-    let quoteResponse, quoteObservedAt, inputRaw, selectedSlippageBps = slippageBps;
+    let quoteResponse, quoteObservedAt, inputRaw, excludedDex = "", selectedSlippageBps = slippageBps;
     try {
     // 1. Get input decimals
     let decimals = 9;
@@ -1459,6 +1541,7 @@ async function swapToken(inputMintStr, outputMintStr, amountFloat, maxPriceImpac
       return { success: false, aborted: true, reason: "settlement_amount_mismatch" };
     }
     inputRaw = amountRaw;
+    excludedDex = require("./dlmm_route_retry").excluded(pendingPath, process.env.DLMM_SETTLEMENT_POSITION);
 
     // 2. Fetch a quote within the authorized slippage limit.
     // The explicit small-settlement allowance caps another 200 bps at the
@@ -1468,21 +1551,40 @@ async function swapToken(inputMintStr, outputMintStr, amountFloat, maxPriceImpac
     let lastErr = null;
     for (const bps of slippageLadder) {
       try {
-        const quoteUrl = `https://api.jup.ag/swap/v1/quote?inputMint=${input_mint}&outputMint=${output_mint}&amount=${amountRaw}&slippageBps=${bps}`;
+        const quoteUrl = `https://api.jup.ag/swap/v1/quote?inputMint=${input_mint}&outputMint=${output_mint}&amount=${amountRaw}&slippageBps=${bps}${excludedDex ? `&excludeDexes=${encodeURIComponent(excludedDex)}` : ""}`;
         const quoteRes = await fetch(quoteUrl, { signal: AbortSignal.timeout(8000) });
         if (!quoteRes.ok) {
           const body = await quoteRes.text();
           let code;
           try { code = JSON.parse(body).errorCode; } catch { /* Non-JSON failures remain unknown. */ }
           if (quoteRes.status === 400 && ["COULD_NOT_FIND_ANY_ROUTE", "NO_ROUTES_FOUND", "TOKEN_NOT_TRADABLE"].includes(code)) {
-            return { success: false, aborted: true, reason: "swap_no_route" };
+            return { success: false, aborted: true, reason: excludedDex ? "swap_route_cooldown_no_route" : "swap_no_route" };
+          }
+          if (quoteRes.status === 400 && code === "CANNOT_COMPUTE_OTHER_AMOUNT_THRESHOLD") {
+            // A one-lamport output cannot retain a positive rounded threshold
+            // at nonzero slippage. Requote once with a STRICTER zero allowance;
+            // owned inventory and exact net-cash simulation remain mandatory.
+            if (inventory && minNetLamports !== null && bps > 0 && !slippageLadder.includes(0)) {
+              await new Promise(resolve => setTimeout(resolve, 2100));
+              slippageLadder.push(0);
+              continue;
+            }
+            return { success: false, aborted: true, reason: "swap_quote_threshold_unavailable" };
           }
           lastErr = `Jupiter quote API error: ${quoteRes.status} ${body}`;
           continue;
         }
         const q = await quoteRes.json();
+        if (excludedDex && (!Array.isArray(q?.routePlan) || !q.routePlan.length
+            || q.routePlan.some(r => !r?.swapInfo?.label || r.swapInfo.label === excludedDex))) {
+          return { success: false, aborted: true, reason: "swap_route_exclusion_unverified" };
+        }
         if (inventory && (q?.inputMint !== input_mint || q?.outputMint !== output_mint || q?.inAmount !== amountRaw)) {
           return { success: false, aborted: true, reason: "settlement_quote_mismatch" };
+        }
+        if (bps === 0 && slippageBps !== 0 && (q?.outAmount !== "1" || q?.otherAmountThreshold !== "1"
+            || q?.swapMode !== "ExactIn" || q?.slippageBps !== 0)) {
+          return { success: false, aborted: true, reason: "swap_quote_threshold_unavailable" };
         }
         if (!q || !q.outAmount || q.outAmount === "0") {
           lastErr = `Jupiter returned empty quote at slippage ${bps}bps (no route/liquidity)`;
@@ -1527,8 +1629,25 @@ async function swapToken(inputMintStr, outputMintStr, amountFloat, maxPriceImpac
     }
 
     // 3. Price-impact guard — abort before signing if impact exceeds threshold (protects large exits on low-TVL pools)
-    const impactPct = parseFloat(quoteResponse.priceImpactPct || "0") * 100;
-    if (impactPct > maxPriceImpactPct) {
+    // Jupiter Metis returns a decimal fraction, unlike the DLMM SDK's percent.
+    // Unknown or malformed impact must not silently become zero or NaN.
+    const impactRaw = quoteResponse.priceImpactPct;
+    const validImpactText = typeof impactRaw === "string"
+      && /^(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/.test(impactRaw);
+    const impactFraction = validImpactText ? Number(impactRaw) : NaN;
+    if (!Number.isFinite(impactFraction) || impactFraction < 0 || impactFraction > 1
+        || !Number.isFinite(maxPriceImpactPct) || maxPriceImpactPct < 0) {
+      return { success: false, aborted: true, reason: "price_impact_unmeasured" };
+    }
+    const impactPct = impactFraction * 100;
+    // A strict one-lamport dust recovery can lose less than one additional
+    // lamport to quoted impact (<50%), while atomically returning owned rent.
+    // This never relaxes ordinary swap limits or bypasses net-cash simulation.
+    const oneLamportRecovery = inventory && minNetLamports !== null && slippageBps > 0
+      && selectedSlippageBps === 0 && quoteResponse.outAmount === "1"
+      && quoteResponse.otherAmountThreshold === "1" && quoteResponse.slippageBps === 0
+      && quoteResponse.swapMode === "ExactIn" && impactFraction < 0.5;
+    if (impactPct > maxPriceImpactPct && !oneLamportRecovery) {
       return {
         success: false,
         aborted: true,
@@ -1539,7 +1658,7 @@ async function swapToken(inputMintStr, outputMintStr, amountFloat, maxPriceImpac
       };
     }
     if (impactPct > 1) {
-      console.warn(`[DLMM] Swap price impact ${impactPct.toFixed(2)}% (within ${maxPriceImpactPct}% limit)`);
+      console.warn(`[DLMM] Swap price impact ${impactPct.toFixed(2)}% (${oneLamportRecovery && impactPct > maxPriceImpactPct ? "strict one-lamport recovery; exact net-cash simulation required" : `within ${maxPriceImpactPct}% limit`})`);
     }
     } catch (err) {
       throw new Error(`Failed to fetch quote from Jupiter: ${err.message}`);
@@ -1588,6 +1707,7 @@ async function swapToken(inputMintStr, outputMintStr, amountFloat, maxPriceImpac
     let transaction = VersionedTransaction.deserialize(swapTransactionBuf);
     let tokenRentCloseIncluded = false;
     let ordinaryTokenRentClose = false;
+    let netRecoveryEvidence = null;
     
     const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash("confirmed");
     transaction.message.recentBlockhash = blockhash;
@@ -1598,7 +1718,10 @@ async function swapToken(inputMintStr, outputMintStr, amountFloat, maxPriceImpac
       if (!Number.isSafeInteger(out) || !Number.isSafeInteger(minimum) || minimum <= 0 || minimum > out) {
         return { success: false, aborted: true, reason: "net_recovery_invalid_quote" };
       }
+      const recoveryMeasurements = new WeakMap();
       const measureRecovery = async (candidate, readConnection = connection) => {
+        const messageHash = require("crypto").createHash("sha256")
+          .update(candidate.message.serialize()).digest("hex");
         const before = await readConnection.getBalanceAndContext(wallet.publicKey, "confirmed");
         const simulated = await readConnection.simulateTransaction(candidate, {
           commitment: "confirmed", sigVerify: false, minContextSlot: before.context.slot,
@@ -1609,6 +1732,16 @@ async function swapToken(inputMintStr, outputMintStr, amountFloat, maxPriceImpac
         const post = simulated.value.accounts?.[0]?.lamports;
         if (simulated.value.err || !Number.isSafeInteger(post) || !Number.isSafeInteger(before.value)
             || before.value !== after.value) return null;
+        const currentHash = require("crypto").createHash("sha256")
+          .update(candidate.message.serialize()).digest("hex");
+        if (currentHash !== messageHash) return null;
+        recoveryMeasurements.set(candidate, {
+          message_sha256: messageHash,
+          simulation_slot: simulated.context.slot,
+          wallet_read_before_slot: before.context.slot,
+          wallet_read_after_slot: after.context.slot,
+          simulated_wallet_delta_lamports: post - before.value,
+        });
         return post - before.value - (out - minimum);
       };
       let conservativeNet = await measureRecovery(transaction);
@@ -1641,6 +1774,17 @@ async function swapToken(inputMintStr, outputMintStr, amountFloat, maxPriceImpac
         return { success: false, aborted: true, reason: "net_recovery_below_floor",
           conservativeNetLamports: conservativeNet, minNetLamports };
       }
+      // Preserve the exact selected simulation's gate value, including any
+      // accepted rent-close variant. This is cash recovery, not position profit.
+      netRecoveryEvidence = {
+        version: 1, recorded_at: Date.now() / 1000,
+        ...recoveryMeasurements.get(transaction),
+        conservative_wallet_delta_lamports: conservativeNet,
+        required_minimum_lamports: minNetLamports,
+        reserved_quote_slippage_lamports: out - minimum,
+        token_rent_close_included: tokenRentCloseIncluded,
+        basis: "unsigned_selected_transaction_simulated_wallet_delta_minus_quote_slippage; includes_account_debits_and_refunds; not_realized_proceeds_or_position_profit",
+      };
     }
     if (input_mint === "So11111111111111111111111111111111111111112") {
       await assertNativeReserve(connection, wallet, transaction);
@@ -1650,11 +1794,12 @@ async function swapToken(inputMintStr, outputMintStr, amountFloat, maxPriceImpac
     // 5. Send and confirm
     const rawTransaction = transaction.serialize();
     const signedTxid = bs58.encode(transaction.signatures[0]);
+    const routeContext = require("./dlmm_route_retry").context(quoteResponse, transaction, process.env.DLMM_SETTLEMENT_POSITION);
     fs.mkdirSync(pendingDir, { recursive: true, mode: 0o700 });
     const markerTmp = `${pendingPath}.${process.pid}.tmp`;
     fs.writeFileSync(markerTmp, JSON.stringify({ signature: signedTxid, blockhash,
       lastValidBlockHeight, inputMint: input_mint, outputMint: output_mint,
-      inputAmount: quoteResponse.inAmount, outputAmount: quoteResponse.outAmount }), { mode: 0o600 });
+      inputAmount: quoteResponse.inAmount, outputAmount: quoteResponse.outAmount, routeContext }), { mode: 0o600 });
     fs.renameSync(markerTmp, pendingPath);
     const txid = signedTxid;
     recordSubmission(wallet, process.env.DLMM_SETTLEMENT_POSITION, "swap", signedTxid, lastValidBlockHeight, {
@@ -1662,9 +1807,13 @@ async function swapToken(inputMintStr, outputMintStr, amountFloat, maxPriceImpac
       in_amount: quoteResponse.inAmount, out_amount: quoteResponse.outAmount,
       minimum_out_amount: quoteResponse.otherAmountThreshold ?? null,
       authorized_slippage_bps: selectedSlippageBps, context_slot: quoteResponse.contextSlot ?? null,
+      excluded_dexes: excludedDex ? [excludedDex] : [],
+      route_labels: (Array.isArray(quoteResponse.routePlan) ? quoteResponse.routePlan : []).slice(0, 16).map(r => r?.swapInfo?.label)
+        .filter(label => typeof label === "string").map(label => label.slice(0, 80)),
       small_settlement_requote: smallSettlement && selectedSlippageBps === 300,
       token_rent_close_included: tokenRentCloseIncluded,
       ordinary_token_rent_close: ordinaryTokenRentClose,
+      ...(netRecoveryEvidence ? { net_recovery: netRecoveryEvidence } : {}),
       price_impact_pct: quoteResponse.priceImpactPct ?? null,
       basis: "provider_quote_before_broadcast; raw_token_units; not_realized_proceeds",
     });
@@ -1676,6 +1825,7 @@ async function swapToken(inputMintStr, outputMintStr, amountFloat, maxPriceImpac
       else await confirmSignedTransaction(connection, strategy, rawTransaction, options);
     } catch (err) {
       if (err.transactionFailed) {
+        require("./dlmm_route_retry").recordFailure(pendingPath, routeContext, err.chainError);
         fs.rmSync(pendingPath, { force: true });
         return { success: false, txHash: txid, error: err.message };
       }
@@ -1698,6 +1848,7 @@ async function swapToken(inputMintStr, outputMintStr, amountFloat, maxPriceImpac
           error: `Swap confirmation pending: ${err.message}` };
       }
       if (status.err) {
+        require("./dlmm_route_retry").recordFailure(pendingPath, routeContext, status.err);
         fs.rmSync(pendingPath, { force: true });
         return { success: false, txHash: txid,
           error: `Swap failed: ${JSON.stringify(status.err)}` };
