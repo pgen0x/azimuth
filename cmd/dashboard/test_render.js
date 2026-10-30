@@ -4,7 +4,8 @@ const fs = require('node:fs'), vm = require('node:vm'), assert = require('node:a
 const script = fs.readFileSync(__dirname + '/index.html', 'utf8').match(/<script>([\s\S]*?)<\/script>/)[1];
 async function render(tab, payload, fail=false) {
   const content = {innerHTML: ''}, stamp = {textContent: ''}, intervals = [], calls = [];
-  const document = {querySelector: s => s === '#content' ? content : s === '#stamp' ? stamp : {}, querySelectorAll: () => []};
+  const els = {'#content': content, '#stamp': stamp, '#rhlog': {innerHTML: ''}, '#rhcount': {textContent: ''}};
+  const document = {querySelector: s => els[s] || {}, querySelectorAll: () => []};
   const fixtures = {overview: {nav: {}, services: [], sources: []}, capital: {north_star: {days: []}, nav_bridge: {}},
     live: {live: {}}, journal: {rows: [], total_in_retained_tail: 0}, hermes: {}, redis: {rows: []}};
   const ctx = {document, Date, console, fetch: async url => {
@@ -18,11 +19,11 @@ async function render(tab, payload, fail=false) {
   const first = content.innerHTML, before = calls.length;
   intervals.forEach(fn => fn()); await new Promise(resolve => setImmediate(resolve));
   assert(!/NaN|undefined/.test(first), first);
-  return {html: first, stamp: stamp.textContent, timerFetches: calls.length - before};
+  return {html: first, stamp: stamp.textContent, timerFetches: calls.length - before, calls, log: els['#rhlog'].innerHTML, count: els['#rhcount'].textContent};
 }
 (async () => {
   const warning = 'Local collection failed; last successful snapshot retained';
-  for (const tab of ['capital', 'live', 'journal', 'hermes', 'redis', 'overview']) {
+  for (const tab of ['capital', 'live', 'robinhood', 'journal', 'hermes', 'redis', 'overview']) {
     const r = await render(tab, {collected_at: 123, collection_error: warning, rows: [], total_in_retained_tail: 0, services: [], sources: []});
     assert(r.html.includes(warning) && r.html.includes('role="alert"'), tab);
     assert(r.stamp.includes('Observed') && !r.stamp.endsWith('Unknown'), tab);
@@ -84,5 +85,33 @@ async function render(tab, payload, fail=false) {
   const ov = await render('overview', filtered);
   assert(!ov.html.toLowerCase().includes(other) && ov.html.includes('&quot;own&quot;: 2'), 'no other-bot keys in raw evidence');
   assert(!/evaluation/i.test(ov.html), 'no evaluation section');
-  console.log('dashboard render: 23 synthetic cases passed');
+  // Robinhood: inactive monitor still shows history; money per asset; unmeasured and mark rows never read as money.
+  const KEY = 'ab'.repeat(32);
+  const rh = await render('robinhood', {collected_at: 200000, tz: 'UTC', monitor_active: false,
+    unit: {Id: 'azimuth-rh-monitor.service', ActiveState: 'inactive', SubState: 'dead', UnitFileState: 'disabled'},
+    modes: {status: 'ok', started_at: 1000, flags: {robinhood: false, 'rh-turnover': true}},
+    logs: [{time: 300, unit: 'azimuth-rh-monitor.service', line: 'turnover re-center ok'}, {time: 200, unit: 'azimuth.service', line: 'scanner[rh-turnover]: gas spike <b>'}],
+    positions: [{protocol: 'v4', token_id: '1', pool: '0x' + 'c'.repeat(40), strategy: 'weth_below', quote: 'ETH', token: '0xT', tick_lower: -600, tick_upper: 0, minted_at: 100, age_s: 90000, last_failed_close: {time: 150, reason: 'revert'}}],
+    stranded: {open: [{symbol: 'XYZ', token: '0x' + 'd'.repeat(40), amount_raw: '107037025008', reason: 'no pool', time: 120, attempts: 4, next_try: 130}], resolved: []},
+    closes: {tz: 'UTC', status: 'ok', closes_total: 3, skipped: {failed: 1, dry_run: 0}, gas: {gas_eth: 0.003, gas_txs: 5, metered: 2, unmetered: 1},
+      totals: {ETH: {closes: 2, measured: 1, unmeasured: 1, realized_quote: 0.01, mark_flagged: 1}, USDG: {closes: 1, measured: 0, unmeasured: 1, realized_quote: null, mark_flagged: 0}},
+      days: {'1970-01-02': {ETH: {closes: 2, measured: 1, unmeasured: 1, realized_quote: 0.01}}, '1970-01-03': {USDG: {closes: 1, measured: 0, unmeasured: 1, realized_quote: null}}},
+      closes: [{time: 90000, reason: 'fill', asset: 'ETH', realized_quote: null, pnl_basis: 'mark', mark_flagged: true, pnl_pct: 90, age_min: 30, gas_eth: null},
+               {time: 86500, reason: 'turnover re-center', asset: 'ETH', realized_quote: 0.01, pnl_basis: 'realized', mark_flagged: false, pnl_pct: 2, age_min: 5, gas_eth: 0.001, gas_txs: 3}]}});
+  assert(rh.calls.some(u => /^\/api\/robinhood\?tz=.+&n=200$/.test(u)), 'viewer zone and default log length requested');
+  assert(rh.html.includes('Monitor inactive') && rh.html.includes('weth_below'), 'inactive monitor keeps history');
+  assert(rh.html.includes('Realized · USDG</span><strong>Unknown</strong>'), 'wholly unmeasured USDG is Unknown, not 0');
+  assert(rh.html.includes('+0.010000') && rh.html.includes('mark: value left behind') && rh.html.includes('Unmeasured'), 'mark row is flagged, not money');
+  assert(rh.html.includes('>−0.003000<') && rh.html.includes('1 unmetered'), 'gas is a cost, unmetered counted');
+  assert(rh.html.includes('No USDG') === false && /hatch|url\(#h/.test(rh.html), 'unmeasured day hatched');
+  assert(rh.html.includes('107037025008') && rh.html.includes('raw units'), 'stranded amount labelled raw');
+  assert(!rh.html.includes(KEY), 'no key-shaped data');
+  assert(rh.log.includes('turnover re-center ok') && rh.log.includes('&lt;b&gt;') && !rh.log.includes('<b>'), 'log escaped');
+  assert(rh.count.startsWith('2 of 2'), 'log count');
+  const rhEmpty = await render('robinhood', {collected_at: 1, unit: {}, modes: {status: 'unknown', flags: {}, note: 'azimuth.service is not running'}, logs: [], positions: [], stranded: {}, closes: {totals: {}, days: {}, closes: []}});
+  assert(rhEmpty.html.includes('Robinhood modes unknown') && rhEmpty.html.includes('No ETH closes in this window.'), 'empty robinhood');
+  assert(rhEmpty.log.includes('No log lines retained'), 'empty log state');
+  const rhFail = await render('robinhood', null, true);
+  assert(rhFail.html.includes('Could not load this section'), 'robinhood error state');
+  console.log('dashboard render: 34 synthetic cases passed');
 })().catch(error => {console.error(error); process.exitCode = 1;});
