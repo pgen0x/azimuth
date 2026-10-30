@@ -20,6 +20,12 @@ DAY=86400
 def rows(path, data):
     path.write_text(''.join(json.dumps(r)+'\n' for r in data))
 
+def frozen_clock():
+    """nav_at stops after 2 s of wall-clock time. That budget is real time, so on a slow or loaded host a
+    large-file fixture could stop early and prove nothing (this flaked in CI). Fixtures that test ordering
+    logic freeze the clock; the read-call and byte caps still apply unchanged."""
+    return patch.object(c.time,'monotonic',return_value=0.0)
+
 def snap(ts,slot,native=5,**kw):
     return dict(ts=ts,slot=slot,native_sol=native,spl_mark_sol=0,lp_mark_sol=0,
                 refundable_rent_sol=0,known_asset_subtotal_sol=native,tokens=[],issues=[],
@@ -134,7 +140,7 @@ class CollectorTests(unittest.TestCase):
             start=time.monotonic();r=c.bounded_run(['journalctl'],timeout=.1)
             self.assertEqual(r.capture_status,'timeout');self.assertLess(time.monotonic()-start,4)
     def test_bridge_cash_oracle(self):
-        bridge_fixture(self.m);b=c.nav_bridge(self.m,T,1);parts={r['key']:r['sol'] for r in b['components']}
+        bridge_fixture(self.m);b=c.nav_bridge(self.m,T,1);parts={r['component']:r['sol'] for r in b['components']}
         self.assertEqual(b['status'],'ok');self.assertTrue(b['native_identity_exact'])
         self.assertAlmostEqual(parts['lp_realized'],.1);self.assertAlmostEqual(parts['network_fees'],-.00001)
         self.assertAlmostEqual(sum(parts.values()),.09999)
@@ -156,7 +162,7 @@ class CollectorTests(unittest.TestCase):
                         self.assertEqual(b['status'],'ok');self.assertGreater(b['closes_invalid_lines'],0);self.assertEqual(b['mode_unknown'],0)
                         continue
                     self.assertNotEqual(b['status'],'ok');self.assertTrue(b['incomplete_sources'])
-                    self.assertIsNone(next(x['sol'] for x in b['components'] if x['key']=='rent_ledger'))
+                    self.assertIsNone(next(x['sol'] for x in b['components'] if x['component']=='rent_ledger'))
     def test_bridge_closes_corruption_that_drops_a_mode_is_incomplete(self):
         bridge_fixture(self.m);f=self.m/'dlmm_closes.jsonl'
         f.write_text('broken\n')  # every label gone: the window lifecycle is now mode-unknown
@@ -171,7 +177,7 @@ class CollectorTests(unittest.TestCase):
         rows=[dict(ts=base+i*day+j*2400,native_sol=1.0+i*.01,lp_mark_sol=0.0,refundable_rent_sol=.01,known_asset_subtotal_sol=1.01+i*.01,
                    external_flow_lamports=0,wallet_history_complete=True) for i in range(4) for j in range(30)]
         self._big_nav(rows)
-        ns=c.north_star(self.m,base+3*day+20*3600,days=3,tz='America/Sao_Paulo')
+        with frozen_clock():ns=c.north_star(self.m,base+3*day+20*3600,days=3,tz='America/Sao_Paulo')
         full=[d for d in ns['days'] if d['status']=='ok']
         self.assertEqual(len(full),3);self.assertEqual(ns['days'][-1]['status'],'partial_day')
         for d in ns['days'][1:]:
@@ -180,21 +186,20 @@ class CollectorTests(unittest.TestCase):
         rows=[dict(ts=100*i,native_sol=1.0) for i in range(120)]
         rows.insert(21,dict(ts=1,native_sol=9.0))  # out-of-order neighbour right after the pick for t=2000
         self._big_nav(rows)
-        meta={};row=c.nav_at(self.m/'dlmm_nav.jsonl',2000,meta=meta)
+        with frozen_clock():meta={};row=c.nav_at(self.m/'dlmm_nav.jsonl',2000,meta=meta)
         self.assertIn(row['ts'],(1,2000));self.assertEqual(meta['status'],'partial');self.assertTrue(meta['out_of_order'])
-        meta={};c.nav_at(self.m/'dlmm_nav.jsonl',500,meta=meta)  # inversion far from this pick
+        with frozen_clock():meta={};c.nav_at(self.m/'dlmm_nav.jsonl',500,meta=meta)  # inversion far from this pick
         self.assertEqual(meta['status'],'ok')
     def test_neighbour_lines_catch_an_unvisited_inversion(self):
         # Found by search: the binary search never visits the inverted row; only the +1 neighbour read sees it.
         rows=[dict(ts=100*i,native_sol=1.0) for i in range(120)]
         rows.insert(20,dict(ts=1850,native_sol=2.0))
         self._big_nav(rows)
-        meta={};c.nav_at(self.m/'dlmm_nav.jsonl',1900,meta=meta)
+        with frozen_clock():meta={};c.nav_at(self.m/'dlmm_nav.jsonl',1900,meta=meta)
         self.assertEqual(meta['status'],'partial');self.assertTrue(meta['out_of_order'])
     def _backscan_counterexample(self,base=0):
         """Codex fix3 P1 probe: 300 rows / ~4.8 MB; one row that only previous()'s backward scan
         reads is moved past the cutoff. Returns (rows, changed index, cutoff, reads, spy)."""
-        import inspect
         rows=[dict(ts=base+i*100,native_sol=1.0,lp_mark_sol=0.0,refundable_rent_sol=0.0,
                    known_asset_subtotal_sol=1.0,external_flow_lamports=0) for i in range(300)]
         cutoff=base+15090
@@ -202,12 +207,20 @@ class CollectorTests(unittest.TestCase):
             with (self.m/'dlmm_nav.jsonl').open('w') as h:
                 for r in rows: h.write(json.dumps(dict(r,pad='x'*16000))+'\n')
         original=c._nav_line;reads=[]
+        def in_previous():
+            frame=sys._getframe(1)
+            while frame is not None:
+                if frame.f_code.co_name=='previous': return True
+                frame=frame.f_back
+            return False
         def spy(*a,**k):
             item=original(*a,**k)
-            if item: reads.append((item[0],item[2],any(fr.function=='previous' for fr in inspect.stack())))
+            if item: reads.append((item[0],item[2],in_previous()))
             return item
         write()
-        with patch.object(c,'_nav_line',side_effect=spy):c.nav_at(self.m/'dlmm_nav.jsonl',cutoff,meta={})
+        probe={}
+        with patch.object(c,'_nav_line',side_effect=spy),frozen_clock():c.nav_at(self.m/'dlmm_nav.jsonl',cutoff,meta=probe)
+        self.assertEqual(probe['status'],'ok',probe)  # a lookup cut short by a budget proves nothing
         other={ts for _,ts,prev in reads if not prev}
         only_prev=sorted({(ts-base)//100 for _,ts,prev in reads if prev and ts not in other and ts<base+14900})
         self.assertTrue(only_prev,'fixture no longer exercises the backward scan')
@@ -219,7 +232,7 @@ class CollectorTests(unittest.TestCase):
         rows,changed,cutoff,reads,spy=self._backscan_counterexample()
         self.assertEqual(changed,146)  # the exact row of codex's counterexample
         meta={}
-        with patch.object(c,'_nav_line',side_effect=spy):c.nav_at(self.m/'dlmm_nav.jsonl',cutoff,meta=meta)
+        with patch.object(c,'_nav_line',side_effect=spy),frozen_clock():c.nav_at(self.m/'dlmm_nav.jsonl',cutoff,meta=meta)
         self.assertIn(15050,[ts for _,ts,prev in reads if prev])  # the inversion was read, by previous()
         self.assertEqual(meta['status'],'partial');self.assertTrue(meta['out_of_order']);self.assertTrue(c.incomplete(meta))
         self.assertEqual(meta['visited_rows'],len({off for off,_,_ in reads}))  # every row read is checked
@@ -227,7 +240,7 @@ class CollectorTests(unittest.TestCase):
     def test_backward_scan_inversion_blocks_the_next_days_delta(self):
         day=20000;end=day*86400-7*3600+86400  # end of a local day in Asia/Jakarta (UTC+7)
         rows,changed,cutoff,reads,spy=self._backscan_counterexample(base=end-1-15090)
-        ns=c.north_star(self.m,cutoff+14000,days=1,tz='Asia/Jakarta')
+        with frozen_clock():ns=c.north_star(self.m,cutoff+14000,days=1,tz='Asia/Jakarta')
         first,last=ns['days']
         self.assertEqual(first['status'],'partial_source');self.assertTrue(first['source']['out_of_order'])
         self.assertNotIn('d_cash_sol',last);self.assertNotIn('d_known_sol',last);self.assertEqual(ns['status'],'partial')
@@ -239,16 +252,21 @@ class CollectorTests(unittest.TestCase):
             if field=='wallet_delta_lamports':self.assertIsNone(b['native_identity_exact'])
             else:
                 key='network_fees' if field=='fee_lamports' else 'rent_permanent'
-                self.assertIsNone(next(x['sol'] for x in b['components'] if x['key']==key))
+                self.assertIsNone(next(x['sol'] for x in b['components'] if x['component']==key))
         bridge_fixture(self.m);f=self.m/'dlmm_nav.jsonl';data=[json.loads(l) for l in f.read_text().splitlines()];data[-1]['wallet_history_complete']=False;rows(f,data)
         b=c.nav_bridge(self.m,T,1);self.assertNotEqual(b['status'],'ok');self.assertIsNone(b['native_identity_exact'])
         self.assertTrue(all(v['sol'] is None for v in b['fees_by_kind'].values()))
         bridge_fixture(self.m);f=self.m/'dlmm_wallet_transactions.jsonl';data=[json.loads(l) for l in f.read_text().splitlines()]
         data[0]['token_rent_evidence']={'funded':[{'lamports':None}],'refunded':[]};rows(f,data)
         b=c.nav_bridge(self.m,T,1);self.assertIn('ata_funding',b['incomplete_values'])
+    def test_bridge_component_ids_survive_the_shared_sensor(self):
+        # The served payload goes through clean(); component ids must not read as credentials.
+        bridge_fixture(self.m);b=c.clean(c.nav_bridge(self.m,T,1))
+        ids=[r['component'] for r in b['components']]
+        self.assertIn('unexplained',ids);self.assertNotIn('[masked]',json.dumps(b['components']))
     def test_unattributed_cash_not_rent(self):
         bridge_fixture(self.m);rows(self.m/'dlmm_transactions.jsonl',[])
-        b=c.nav_bridge(self.m,T,1);p={r['key']:r for r in b['components']}
+        b=c.nav_bridge(self.m,T,1);p={r['component']:r for r in b['components']}
         self.assertNotEqual(b['status'],'ok');self.assertIsNone(p['rent_ledger']['sol'])
         self.assertEqual(p['rent_ledger']['measured_subtotal_sol'],0)
         self.assertAlmostEqual(p['unattributed_cash']['measured_subtotal_sol'],.1)
@@ -279,6 +297,14 @@ class CollectorTests(unittest.TestCase):
                 self.assertEqual([x['native_sol'] for x in c.north_star(self.m,base+DAY,2,tz)['days']],[1,3,4])
     def test_unknown_zone_is_an_unavailable_panel(self):
         self.assertEqual(c.panel(c.north_star,self.m,T,1,'Mars/Olympus')['status'],'unavailable')
+    def test_nav_wall_clock_budget_still_stops_a_slow_lookup(self):
+        rows=[dict(ts=100*i,native_sol=1.0) for i in range(120)]
+        self._big_nav(rows)
+        import itertools
+        clock=itertools.count(0,0.5)  # every clock read is half a second later
+        with patch.object(c.time,'monotonic',side_effect=lambda:next(clock)):
+            meta={};self.assertIsNone(c.nav_at(self.m/'dlmm_nav.jsonl',2000,meta=meta))
+        self.assertEqual(meta['status'],'work_cap')
     def test_nav_read_work_caps(self):
         f=self.m/'dlmm_nav.jsonl';f.write_bytes(b'x'*(10*1024*1024)+b'\n')
         meta={};self.assertIsNone(c.nav_at(f,20,meta=meta));self.assertEqual(meta['status'],'line_cap')
@@ -333,5 +359,235 @@ class OwnOnlyTests(unittest.TestCase):
         self.assertEqual(d['nav']['native_sol'],1)
     setUp=CollectorTests.setUp
     tearDown=CollectorTests.tearDown
+
+KEY='ab'*32  # synthetic 64-hex, shaped like a private key
+def rh_run(active='inactive', start='@1000', toggles='robinhood=false, rh-turnover=true', log=None):
+    """Fake bounded_run keyed on argv: systemd state, the scanner start line and unit journals."""
+    def run(argv, **kw):
+        joined=' '.join(argv); out=''
+        if argv[:2]==['systemctl','--user'] and 'azimuth-rh-monitor.service' in argv:
+            out='Id=azimuth-rh-monitor.service\nActiveState=%s\nUnitFileState=disabled\n' % active
+        elif argv[:2]==['systemctl','--user']: out=start+'\n'
+        elif 'scanner: started' in joined:
+            out=json.dumps({'MESSAGE':'scanner: started (interval=1m0s, pulse=true, %s)' % toggles,'__REALTIME_TIMESTAMP':'1000000000'})+'\n'
+        elif 'azimuth-rh-monitor.service' in argv:
+            out=''.join(json.dumps({'MESSAGE':m,'__REALTIME_TIMESTAMP':str(t*1000000)})+'\n' for t,m in (log or []))
+        return SimpleNamespace(stdout=out,stderr='',returncode=0,capture_status='ok')
+    return run
+
+class RobinhoodTests(unittest.TestCase):
+    setUp=CollectorTests.setUp
+    tearDown=CollectorTests.tearDown
+    def closes(self,where=None):
+        rows((where or self.m)/'uni_closes.jsonl',[
+            {'ts':86400*3,'tokenId':'1','pool':'0xp1','reason':'turnover re-center','success':True,'dry_run':False,'protocol':'v3','quote_symbol':'WETH','realized_quote':0.01,'pnl_basis':'realized','pnl_pct':95.0,'gas_eth':'0.001','gas_txs':3},
+            {'ts':86400*3+60,'tokenId':'7','pool':'0xp7','reason':'turnover rung filled','success':True,'dry_run':False,'protocol':'v4','quote_symbol':'ETH','realized_quote':-0.004,'pnl_basis':'realized','pnl_pct':-4,'gas_eth':'0.002','gas_txs':2},
+            {'ts':86400*4,'tokenId':'8','pool':'0xp8','reason':'ladder idle','success':True,'dry_run':False,'protocol':'v3','quote_symbol':'WETH','realized_quote':None,'pnl_pct':1},
+            {'ts':86400*4+5,'tokenId':'9','pool':'0xp9','reason':'ladder stale','success':True,'dry_run':False,'protocol':'v3','quote_symbol':'USDG','realized_quote':1.5,'pnl_basis':'realized','pnl_pct':2},
+            {'ts':86400*4+9,'tokenId':'10','pool':'0xpa','reason':'fill','success':True,'dry_run':False,'protocol':'v3','quote_symbol':'WETH','realized_quote':0.5,'pnl_basis':'mark','stranded':{'symbol':'X'},'pnl_pct':90},
+            {'ts':86400*5,'tokenId':'2','pool':'0xp2','reason':'rpc https://rpc.example/KEY failed','success':False,'dry_run':False,'protocol':'v3','realized_quote':9.0,'pnl_basis':'realized','quote_symbol':'WETH'},
+            {'ts':86400*5,'tokenId':'11','pool':'0xpb','reason':'dry','success':True,'dry_run':True,'quote_symbol':'WETH','realized_quote':5.0,'pnl_basis':'realized'}])
+    def test_closes_success_only_per_asset_null_counted_mark_flagged(self):
+        self.closes()
+        d=c.rh_closes(self.m,'UTC')
+        self.assertEqual(d['skipped'],{'failed':1,'dry_run':1})
+        eth,usdg=d['totals']['ETH'],d['totals']['USDG']
+        self.assertAlmostEqual(eth['realized_quote'],0.006)  # WETH v3 + native ETH v4, never the failed or dry-run rows
+        self.assertEqual((eth['closes'],eth['measured'],eth['unmeasured'],eth['mark_flagged']),(4,2,2,1))
+        self.assertEqual((usdg['realized_quote'],usdg['closes']),(1.5,1))  # never summed with ETH
+        self.assertAlmostEqual(d['gas']['gas_eth'],0.003);self.assertEqual((d['gas']['gas_txs'],d['gas']['unmetered']),(5,3))
+        mark=next(r for r in d['closes'] if r['token_id']=='10')
+        self.assertTrue(mark['mark_flagged']);self.assertIsNone(mark['realized_quote'])  # a mark is not money
+        self.assertIsNone(next(r for r in d['closes'] if r['token_id']=='8')['realized_quote'])
+        self.assertEqual(d['days']['1970-01-05']['ETH']['unmeasured'],2)
+    def test_day_buckets_follow_the_viewer_zone(self):
+        rows(self.m/'uni_closes.jsonl',[{'ts':86400*3+3600,'tokenId':'1','success':True,'quote_symbol':'WETH','realized_quote':0.1,'pnl_basis':'realized'}])
+        self.assertEqual(list(c.rh_closes(self.m,'UTC')['days']),['1970-01-04'])
+        self.assertEqual(list(c.rh_closes(self.m,'America/Sao_Paulo')['days']),['1970-01-03'])  # UTC-3
+    def test_positions_open_only_without_a_successful_close_and_keyed_by_protocol(self):
+        self.closes()
+        rows(self.m/'uni_positions.jsonl',[{'tokenId':'1','pool':'0xp1','token0':'0xT','token1':'0xQ','quote':'0xQ','quoteSymbol':'WETH','strategy':'weth_below','tickLower':-600,'tickUpper':0,'ts':86400},
+                                           {'tokenId':'2','pool':'0xp2','token0':'0xT','token1':'0xQ','quote':'0xQ','quoteSymbol':'WETH','strategy':'weth_below','ts':86400},
+                                           {'tokenId':'11','pool':'0xpb','quoteSymbol':'WETH','strategy':'weth_below','ts':86400}])
+        rows(self.m/'uni_v4_positions.jsonl',[{'tokenId':'1','protocol':'v4','pool':'0xv','key':{'currency0':'0x0','currency1':'0xT'},'quote':'0x0','quoteSymbol':'ETH','strategy':'weth_ladder','ts':86400*2}])
+        out=c.robinhood(self.m,86400*6,run=rh_run())
+        got={(p['protocol'],p['token_id']):p for p in out['positions']}
+        self.assertEqual(set(got),{('v3','2'),('v3','11'),('v4','1')})  # dry-run close leaves 11 open; v4 #1 is not v3 #1
+        self.assertEqual(got[('v3','2')]['token'],'0xT')
+        self.assertNotIn('rpc.example',got[('v3','2')]['last_failed_close']['reason'])
+        self.assertEqual(got[('v4','1')]['token'],'0xT');self.assertEqual(got[('v4','1')]['age_s'],86400*4)
+    def test_status_inactive_unit_toggles_and_redacted_logs(self):
+        log=[(50,'rpc https://rh.example/v2/'+KEY+' timeout'),(60,'PRIVATE_KEY='+KEY+' tokenId=1 gas'),(65,'tokenId=817 gas 0.0001 ETH'),(70,'tx 0x'+KEY+' re-center ok')]
+        out=c.robinhood(self.m,100,run=rh_run(log=log))
+        self.assertFalse(out['monitor_active']);self.assertEqual(out['unit']['ActiveState'],'inactive')
+        self.assertEqual(out['modes']['flags'],{'robinhood':False,'rh-turnover':True});self.assertEqual(out['modes']['started_at'],1000)
+        text=json.dumps(out['logs'])
+        self.assertNotIn(KEY,text);self.assertNotIn('rh.example',text)
+        self.assertIn('PRIVATE_KEY=[masked to end of line]',text);self.assertIn('tokenId=817 gas',text)  # a field name, not a secret
+        self.assertEqual([r['time'] for r in out['logs']],[70,65,60,50])
+        self.assertEqual(out['positions'],[]);self.assertEqual(out['stranded']['open'],[])  # no journals: empty, not an error
+    def test_modes_unknown_when_scanner_not_running(self):
+        out=c.robinhood(self.m,100,run=rh_run(start='@0'))
+        self.assertEqual(out['modes']['status'],'unknown');self.assertIn('not running',out['modes']['note'])
+    def test_stranded_latest_line_per_token_wins(self):
+        rows(self.m/'uni_stranded.jsonl',[{'ts':1,'tokenId':'1','token':'0xA','symbol':'A','amount':'5','reason':'no pool','resolved':False},
+                                          {'ts':2,'tokenId':'1','token':'0xa','symbol':'A','amount':'5','reason':'sold','resolved':True,'weth_out':'0.1'},
+                                          {'ts':3,'tokenId':'2','token':'0xB','symbol':'B','amount':'7','reason':'quote 0','resolved':False,'attempts':4}])
+        rows(self.m/'uni_positions.jsonl',[{'tokenId':'2','pool':'0xpool2','ts':1}])
+        st=c.robinhood(self.m,100,run=rh_run())['stranded']
+        self.assertEqual([(r['symbol'],r['pool'],r['amount_raw']) for r in st['open']],[('B','0xpool2','7')])
+        self.assertEqual([r['symbol'] for r in st['resolved']],['A'])
+    def test_collect_and_daily_carry_robinhood(self):
+        (self.m/'memories').mkdir();self.closes(self.m/'memories')
+        with patch.object(c.subprocess,'run',runner()),patch.object(c,'bounded_run',rh_run()):
+            d=c.collect(self.m,self.m,1,('UTC',))
+        self.assertIn('robinhood',d);self.assertEqual(d['by_tz']['UTC']['robinhood']['totals']['USDG']['closes'],1)
+
+# Synthetic secrets in every form the review reproduced; none may reach any API payload.
+SECRETS=['wss://rpc.example/v2/SYNTHETIC_CREDENTIAL_A','HTTPS://rpc.example/v2/SYNTHETIC_CREDENTIAL_B',
+         'MNEMONIC="alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima"',
+         'PRIVATE_KEY: SYNTHETIC_PRIVATE_VALUE','{"api_key": "SYNTHETIC_JSON_VALUE", "next": "SYNTHETIC_TAIL"}',
+         "seed_phrase = 'SYNTHETIC quoted words'",'HELIUS_API_KEY = SYNTHETIC spaced value','Authorization: Bearer SYNTHETIC_BEARER',
+         'ws://127.0.0.1:8899/SYNTHETIC_LOCAL_RPC']
+SECRETS += [name + '=SYNTHETIC_VALUE public tail' for name in (
+    'TOKEN', 'KEY', 'AUTH', 'CUSTOM_TOKEN_SUFFIX', 'SECRET', 'PASSWORD', 'MNEMONIC',
+    'SEED', 'PRIVATE', 'API_KEY', 'BEARER', 'PREFIX_KEY_SUFFIX', 'TOKEN_PREFIX',
+    'RPC', 'URL')]
+SECRETS += ['tokenId=817 pool=0xabc TOKEN=SYNTHETIC_AFTER_PUBLIC',
+            'Authorization: Basic SYNTHETIC_BASIC public tail',
+            'Bearer SYNTHETIC_INLINE public tail', 'sk-SYNTHETIC_INLINE public tail',
+            'VERYLONGCUSTOMENDPOINTSCHEME+TLS://rpc.example/SYNTHETIC_LONG_SCHEME',
+            # Prose forms with no single-word name before a separator.
+            'Seed phrase: SYNTHETIC_SEED alpha bravo', 'mnemonic SYNTHETIC_PROSE alpha bravo lima',
+            'wallet recovery words SYNTHETIC_RECOVERY', 'export backup-phrase=SYNTHETIC_BACKUP',
+            # The mask sentinel is untrusted text: it must not shield a later secret on the same line.
+            'prior [masked to end of line] mnemonic SYNTHETIC_BYPASS alpha bravo',
+            'prior [masked to end of line] TOKEN=SYNTHETIC_BYPASS_ASSIGNMENT',
+            '"mnemonic": "SYNTHETIC_QUOTED_PROSE alpha"']
+LEAKS=('SYNTHETIC','bravo','lima','rpc.example','127.0.0.1')
+
+class RedactionTests(unittest.TestCase):
+    setUp=CollectorTests.setUp
+    tearDown=CollectorTests.tearDown
+    def assertClean(self,payload):
+        text=json.dumps(payload)
+        for leak in LEAKS: self.assertNotIn(leak,text)
+    def test_shared_helper_masks_every_form_and_keeps_public_fields(self):
+        for secret in SECRETS:
+            with self.subTest(secret=secret):
+                self.assertClean(c.clean(secret));self.assertClean(c.clean(c.rh_redact(secret)))
+        kept='tokenId=817 gas 0.0001 ETH re-center; token_id: 5; pool=0xabc'
+        self.assertEqual(c.clean(kept),kept);self.assertEqual(c.rh_redact(kept),kept)
+        self.assertEqual(c.clean('first line ok\nPRIVATE_KEY=x y\nlast line ok'),'first line ok\nPRIVATE_KEY=[masked to end of line]\nlast line ok')
+    def test_nested_secret_keys_and_public_identifiers_in_final_payload(self):
+        profile=self.m/'p';memory=profile/'memories';memory.mkdir(parents=True);state=self.m/'s';state.mkdir()
+        names=['mnemonic','seed','seed_phrase','private_key','secret','token','password','api_key','auth',
+               'TOKEN','KEY','AUTH','CUSTOM_TOKEN_SUFFIX','PRIVATE','BEARER','Authorization']
+        secrets={name: {'nested': ['SYNTHETIC_STRUCTURED_SECRET']} for name in names}
+        public={'tokenId':'817','token_id':'818','TOKEN_ID':'819','pool':'pool-public',
+                'pool_id':'pool-id-public','mint':'mint-public','address':'address-public',
+                'public_key':'key-public','SOLANA_PUBLIC_KEY':'wallet-public',
+                'token_address':'token-public','base_mint':'base-public'}
+        evidence={'outer':[{'fields':secrets,'public':public}]}
+        rows(memory/'dlmm_closes.jsonl',[{'position':'p','closed_at':2,'evidence':evidence}])
+        with patch.object(c.subprocess,'run',runner()),patch.object(c,'bounded_run',rh_run()):
+            d=c.collect(profile,state,1,('UTC',))
+        result=next(e['evidence']['evidence']['outer'][0] for e in d['journal'] if e['stage']=='exit')
+        self.assertEqual(result['fields'], {name:'[masked]' for name in names})
+        self.assertEqual(result['public'],public)
+        self.assertClean(d)
+        public_line=' '.join(name+'='+value for name,value in public.items())
+        self.assertEqual(c.clean(public_line),public_line)
+        self.assertEqual(c.rh_redact(public_line),public_line)
+        self.assertEqual(c.clean({'outer':[public]}),{'outer':[public]})
+
+    def test_line_masking_keeps_following_public_lines(self):
+        for name in ('TOKEN','KEY','AUTH','MNEMONIC','SEED','PRIVATE','BEARER','CUSTOM_TOKEN_SUFFIX'):
+            with self.subTest(name=name):
+                raw='public first\r\n'+name+'="SYNTHETIC value" public tail\r\ntokenId=817 mint=public\n'
+                self.assertEqual(c.clean(raw),'public first\r\n'+name+'=[masked to end of line]\r\ntokenId=817 mint=public\n')
+
+    def test_final_api_composition_for_every_log_panel(self):
+        """collect() is exactly what the Go server caches and serves: journal evidence, Robinhood logs,
+        close reasons, failed-close reasons on open positions and stranded reasons all pass through it."""
+        profile=self.m/'p';memory=profile/'memories';memory.mkdir(parents=True);state=self.m/'s';state.mkdir()
+        rows(state/'solana_rejects.jsonl',[{'ts':1,'reason':s,'gate':'g'} for s in SECRETS])
+        rows(memory/'dlmm_closes.jsonl',[{'position':'p','closed_at':2,'reason':s,'error':s} for s in SECRETS])
+        rows(memory/'uni_closes.jsonl',[{'ts':3,'tokenId':str(i),'success':i>0,'quote_symbol':'WETH','reason':s} for i,s in enumerate(SECRETS)]+
+                                       [{'ts':3,'tokenId':'failed'+str(i),'success':False,'reason':secret} for i,secret in enumerate(SECRETS)])
+        rows(memory/'uni_positions.jsonl',[{'tokenId':'failed'+str(i),'pool':'0xp','ts':1,'token0':'public-token','token1':'public-quote','quote':'public-quote'} for i in range(len(SECRETS))])
+        rows(memory/'uni_stranded.jsonl',[{'ts':4,'tokenId':'99','token':'0x%d' % i,'symbol':'S','amount':'1','reason':s,'resolved':False} for i,s in enumerate(SECRETS)])
+        # Hermes session metadata is another panel served from the same final payload.
+        import sqlite3
+        with sqlite3.connect(profile/'state.db') as db:
+            db.execute('CREATE TABLE sessions (id, source, model, started_at, ended_at, end_reason, message_count, tool_call_count, chat_id)')
+            db.executemany('INSERT INTO sessions VALUES (?,?,?,?,?,?,?,?,?)',
+                [(str(i),secret,secret,1,None,secret,0,0,'') for i,secret in enumerate(SECRETS)])
+        log=[(10+i,s) for i,s in enumerate(SECRETS)]
+        def log_run(argv, **kwargs):
+            if argv[0]=='journalctl' and 'azimuth.service' in argv and 'scanner: started' not in argv:
+                return SimpleNamespace(stdout=''.join(json.dumps({'MESSAGE':'scanner[rh-turnover]: '+secret,
+                    '__REALTIME_TIMESTAMP':str((100+i)*1000000)})+'\n' for i,secret in enumerate(SECRETS)),
+                    stderr='',returncode=0,capture_status='ok')
+            return rh_run(log=log)(argv, **kwargs)
+        with patch.object(c.subprocess,'run',runner()),patch.object(c,'bounded_run',log_run):
+            d=c.collect(profile,state,1,('UTC','America/Sao_Paulo'))
+        rh=d['robinhood']
+        self.assertEqual(len(rh['logs']),2*len(SECRETS));self.assertEqual(len(rh['stranded']['open']),len(SECRETS))
+        self.assertEqual({row['unit'] for row in rh['logs']},{'azimuth.service','azimuth-rh-monitor.service'})
+        self.assertEqual(len(rh['positions']),len(SECRETS))
+        self.assertTrue(all(p['last_failed_close']['reason'] for p in rh['positions']))
+        self.assertTrue(d['hermes']['sessions'])
+        self.assertTrue(all(p['token_address']=='public-token' and p['token']=='[masked]' for p in rh['positions']))
+        self.assertEqual({p['token_address'] for p in rh['stranded']['open']},{'0x%d' % i for i in range(len(SECRETS))})
+        self.assertTrue(any(e['stage']=='gate' for e in d['journal']));self.assertTrue(any(e['stage']=='exit' for e in d['journal']))
+        self.assertEqual(len(d['by_tz']['UTC']['robinhood']['closes']),len(SECRETS)-1)
+        self.assertClean(d)
+        with patch.object(c.subprocess,'run',runner()),patch.object(c,'bounded_run',rh_run(log=log)):
+            self.assertClean(c.clean(c.daily(profile,1,('Asia/Tokyo',))))  # the per-zone refresh path
+
+class RobinhoodReviewTests(unittest.TestCase):
+    setUp=CollectorTests.setUp
+    tearDown=CollectorTests.tearDown
+    def test_missing_or_unsupported_quote_asset_is_never_summed(self):
+        rows(self.m/'uni_closes.jsonl',[
+            {'ts':86400,'tokenId':'1','success':True,'realized_quote':1,'pnl_basis':'realized'},
+            {'ts':86400,'tokenId':'2','success':True,'quote_symbol':'UNSUPPORTED','realized_quote':100,'pnl_basis':'realized'},
+            {'ts':86400,'tokenId':'3','success':True,'quote_symbol':None,'realized_quote':5,'pnl_basis':'realized'},
+            {'ts':86400,'tokenId':'4','success':True,'quote_symbol':'weth','realized_quote':0.5,'pnl_basis':'realized'}])
+        d=c.rh_closes(self.m)
+        unknown=d['totals']['unknown']
+        self.assertEqual((unknown['closes'],unknown['measured'],unknown['unmeasured'],unknown['realized_quote']),(3,0,3,None))
+        self.assertEqual(d['totals']['ETH']['realized_quote'],0.5)
+        self.assertIsNone(d['days']['1970-01-02']['unknown']['realized_quote'])
+        row=next(r for r in d['closes'] if r['token_id']=='2')
+        self.assertIsNone(row['realized_quote']);self.assertEqual(row['unit_unknown_value'],100)  # evidence, not money
+    def test_stranded_pool_join_keeps_the_protocol(self):
+        rows(self.m/'uni_positions.jsonl',[{'tokenId':'1','pool':'pool-v3','ts':1}])
+        rows(self.m/'uni_v4_positions.jsonl',[{'tokenId':'1','protocol':'v4','pool':'pool-v4','ts':1}])
+        rows(self.m/'uni_stranded.jsonl',[{'ts':2,'tokenId':'1','token':'0xA','symbol':'A','amount':'1','resolved':False}])
+        rows(self.m/'uni_v4_stranded.jsonl',[{'ts':3,'tokenId':'1','token':'0xB','symbol':'B','amount':'2','resolved':True,'quote_out':'0.2','quote_symbol':'ETH'}])
+        st=c.robinhood(self.m,10,run=rh_run())['stranded']
+        self.assertEqual([(r['protocol'],r['symbol'],r['pool']) for r in st['open']],[('v3','A','pool-v3')])
+        self.assertEqual([(r['protocol'],r['pool'],r['quote_out'],r['quote']) for r in st['resolved']],[('v4','pool-v4','0.2','ETH')])
+    def test_fifo_and_symlink_journals_are_refused_without_blocking(self):
+        import signal
+        def stop(*a): raise AssertionError('collector blocked on a non-regular file')
+        old=signal.signal(signal.SIGALRM,stop);signal.alarm(10)
+        try:
+            os.mkfifo(self.m/'uni_stranded.jsonl')
+            real=self.m/'real.jsonl';rows(real,[{'ts':1,'token':'0xA','resolved':False}])
+            (self.m/'uni_v4_stranded.jsonl').symlink_to(real)
+            os.mkfifo(self.m/'uni_closes.jsonl')
+            out=c.robinhood(self.m,10,run=rh_run())
+            self.assertEqual([s['status'] for s in out['stranded']['sources']],['unavailable','unavailable'])
+            self.assertEqual(out['stranded']['open'],[])
+            self.assertEqual(c.rh_closes(self.m)['status'],'unavailable')
+            rows_,meta=c.tail(self.m/'uni_stranded.jsonl');self.assertEqual((rows_,meta['status']),([],'unavailable'))
+            self.assertEqual(c.tail(self.m/'absent.jsonl')[1]['status'],'missing')
+            os.mkfifo(self.m/'report.json')
+            with self.assertRaises(OSError): c.read_json(self.m/'report.json')
+        finally:
+            signal.alarm(0);signal.signal(signal.SIGALRM,old)
 
 if __name__=='__main__': unittest.main()

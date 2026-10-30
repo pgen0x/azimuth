@@ -260,7 +260,12 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch r.URL.Path {
 	case "/api/overview":
 		value = object{"collected_at": data["collected_at"], "collection_error": failure, "nav": data["nav"], "services": data["services"], "sources": data["sources"]}
-	case "/api/capital", "/api/live":
+	case "/api/capital", "/api/live", "/api/robinhood":
+		lines, ok := logLines(r.URL.Query().Get("n"))
+		if !ok {
+			http.Error(w, "invalid n: use 1 to 1000", 400)
+			return
+		}
 		tz, fallback := requestZone(r.URL.Query().Get("tz"))
 		panels, problem := s.daily(data, tz)
 		if panels == nil && tz != "UTC" {
@@ -270,6 +275,8 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		zoneInfo := object{"tz": tz, "tz_fallback": fallback, "tz_error": problem}
 		if r.URL.Path == "/api/capital" {
 			value = object{"north_star": panels["north_star"], "nav_bridge": data["nav_bridge"]}
+		} else if r.URL.Path == "/api/robinhood" {
+			value = robinhoodView(data, panels, lines)
 		} else {
 			live := object{"realized": panels["realized"]}
 			if old, ok := data["live"].(map[string]any); ok {

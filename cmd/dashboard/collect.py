@@ -5,7 +5,21 @@ from types import SimpleNamespace
 from datetime import datetime, timedelta, time as clock
 from zoneinfo import ZoneInfo
 
-SECRET = re.compile(r"(password|secret|credential|authorization|api.?key|private.?key|access.?token|bot.?token|system_prompt|model_config|origin_json)", re.I)
+SECRET = re.compile(r"(password|passwd|passphrase|secret|credential|authorization|mnemonic|(?:seed|recovery|backup)[ _-]?(?:phrase|words)|api.?key|private.?key|access.?token|auth.?token|bot.?token|refresh.?token|system_prompt|model_config|origin_json)", re.I)
+# Public identity fields are not credentials, even when written in upper case.
+PUBLIC_FIELDS = frozenset(('tokenid', 'token_id', 'pool', 'poolid', 'pool_id', 'mint',
+    'address', 'pubkey', 'public_key', 'solana_public_key', 'base_mint', 'quote_mint',
+    'input_mint', 'output_mint', 'token_address', 'pool_address'))
+SECRET_NAMES = frozenset(('key', 'token', 'auth', 'seed', 'private', 'bearer', 'rpc', 'url'))
+ENV_SECRET = re.compile(r'KEY|TOKEN|AUTH|SECRET|PASS|MNEMONIC|SEED|PRIVATE|BEARER|RPC|URL')
+
+
+def secret_name(name):
+    name = str(name)
+    if name.lower() in PUBLIC_FIELDS:
+        return False
+    return (name.lower() in SECRET_NAMES or bool(SECRET.search(name))
+            or (name.isupper() and bool(ENV_SECRET.search(name))))
 # Owner policy: the dashboard reports this bot only, never a comparison with another bot.
 # Keys are dropped on generic markers; an operator adds names through DASHBOARD_HIDE_KEYS
 # (comma-separated, case-insensitive substrings), so no name has to live in this repository.
@@ -27,15 +41,48 @@ def unit_list(extra=None):
     raw = os.environ.get('DASHBOARD_EXTRA_UNITS', '') if extra is None else extra
     more = [u.strip() for u in raw.split(',') if UNIT_NAME.match(u.strip()) and u.strip() not in UNITS]
     return [*UNITS, *dict.fromkeys(more)][:len(UNITS) + 16]
-URL = re.compile(r"https?://[^\s\"<>]+")
+# RFC-style schemes have no fixed length limit; endpoint paths may contain credentials.
+URL = re.compile(r"(?i)\b[a-z][a-z0-9+.-]*://[^\s\"'<>]+")
+# Inspect every assignment/header name, so a public field before a secret cannot hide it.
+ASSIGNMENT = re.compile(r"""(?<![\w.-])(["']?)([a-zA-Z_][a-zA-Z0-9_.-]*)\1[ \t]*[:=]""")
+INLINE_CREDENTIAL = re.compile(r'(?i)\b(?:bearer[ \t]+|sk-)[A-Za-z0-9_.-]+.*$')
+# Wallet phrases are often written as prose ("Seed phrase: ...", "mnemonic alpha bravo ..."), with no
+# single-word name before a separator, so the words themselves mask the rest of the line.
+# A bare word with nothing after it (a dictionary key such as "mnemonic") is left for the key check.
+SECRET_PHRASE = re.compile(r'(?i)\b(mnemonic|(?:seed|recovery|backup|secret)[ _-]?(?:phrase|words))\b(.*)$')
+MASKED = '[masked to end of line]'
+
+
+def _mask_phrase(match):
+    rest = match[2]
+    if not rest.strip():
+        return match[0]
+    separator = '=' if rest.lstrip(' \t"\'').startswith((':', '=')) else ' '
+    return match[1] + separator + MASKED
+
+
+def redact_text(value):
+    lines = []
+    for line in value.splitlines(keepends=True):
+        ending = line[len(line.rstrip('\r\n')):]
+        # Prose wallet phrases first and unconditionally: text already carrying the mask sentinel is
+        # untrusted input, so an earlier "[masked to end of line]" can never shield a later secret.
+        line = SECRET_PHRASE.sub(_mask_phrase, line[:len(line) - len(ending)]) + ending
+        for match in ASSIGNMENT.finditer(line):
+            if secret_name(match[2]):
+                line = line[:match.start()] + match[2] + '=' + MASKED + ending
+                break
+        line = URL.sub('[endpoint masked]', line)
+        lines.append(INLINE_CREDENTIAL.sub(MASKED, line))
+    return ''.join(lines)
+
 
 def clean(value):
     if isinstance(value, dict):
-        return {clean(str(k)): '[masked]' if SECRET.search(str(k)) else clean(v) for k,v in value.items()}
+        return {clean(str(k)): '[masked]' if secret_name(k) else clean(v) for k,v in value.items()}
     if isinstance(value, list): return [clean(v) for v in value]
     if isinstance(value, str):
-        value = URL.sub('[endpoint masked]', value)
-        return re.sub(r'(?i)\b(bearer\s+|sk-)[A-Za-z0-9_.-]+', '[masked]', value)
+        return redact_text(value)
     if isinstance(value,float) and not math.isfinite(value): return None
     return value
 
@@ -96,7 +143,8 @@ def tail(path, limit=500, budget=2*1024*1024):
     meta = {'path': str(path), 'status': 'missing', 'truncated': False, 'invalid_lines': 0}
     rows = []
     try:
-        with path.open('rb') as f:
+        # Regular files only: a FIFO or symlink is refused instead of blocking the collector.
+        with open_regular(path) as f:
             stat=os.fstat(f.fileno()); offset=max(0,stat.st_size-budget); f.seek(offset)
             data=f.read(budget)
         meta.update(status='ok', modified_at=stat.st_mtime, bytes=stat.st_size, truncated=offset>0)
@@ -112,7 +160,8 @@ def tail(path, limit=500, budget=2*1024*1024):
             except (ValueError,UnicodeDecodeError): meta['invalid_lines']+=1
         meta['truncated'] |= len(rows)>limit
         rows=rows[-limit:]
-    except OSError: pass
+    except FileNotFoundError: pass
+    except OSError: meta['status']='unavailable'; meta['error']='not a readable regular file'
     meta['rows']=len(rows)
     return rows,meta
 
@@ -121,9 +170,13 @@ def event_time(row):
 
 def select(d, keys): return {k:d.get(k) for k in keys.split()}
 
+def read_regular(path, cap):
+    with open_regular(path) as f: data=f.read(cap+1)
+    if len(data)>cap: raise ValueError('file exceeds its read cap')
+    return data
+
 def read_json(path):
-    if path.stat().st_size>32*1024*1024: raise ValueError('report exceeds 32 MiB')
-    return json.loads(path.read_text())
+    return json.loads(read_regular(path, 32*1024*1024))
 
 # Day buckets follow the viewer's IANA zone (validated by the Go server); timestamps stay UTC epochs.
 def zone(tz): return ZoneInfo(tz or 'UTC')
@@ -453,7 +506,8 @@ def nav_bridge(memory, now, days=14):
         if key in ('spl_mark','spl_coverage','lp_unrealized'): known=not any(incomplete(sources[x]) for x in ('nav_start','nav_end'))
         if key=='network_fees': known=not incomplete(sources['wallet_transactions']) and not unknown.intersection(('fee_lamports','transaction_slot','wallet_history_incomplete'))
         if key=='rent_permanent': known=not incomplete(sources['wallet_transactions']) and not unknown.intersection(('nonrefundable_account_cost_lamports','transaction_slot','wallet_history_incomplete'))
-        component_rows.append(dict(key=key,label=label,sol=value if known else None,measured_subtotal_sol=value if key!='unexplained' else None))
+        # 'component', not 'key': a bare 'key' field is a credential name to the shared sensor.
+        component_rows.append(dict(component=key,label=label,sol=value if known else None,measured_subtotal_sol=value if key!='unexplained' else None))
     if any(c['sol'] is None for c in component_rows[:-1]): component_rows[-1]['sol']=None
     out.update(status='incomplete_sources' if incomplete_sources else 'unmeasured_values' if unknown else 'ok', incomplete_sources=incomplete_sources,
                incomplete_values=sorted(unknown),
@@ -626,6 +680,187 @@ def realized_by_mode(memory, since, tz='UTC'):
         else: cell['unmeasured']+=1
     return {'tz':tz,'since':since,'status':'partial' if incomplete(meta) or incomplete(closemeta) else 'ok','sources':{'realized':meta,'closes':closemeta},'days':days,'basis':'Measured subtotal of realized_sol by close time (local day in the viewer time zone) and mode. Null realized = unmeasured; a wholly unmeasured cohort is Unknown, not 0.'}
 
+# Robinhood Chain (Uniswap v3/v4). Read only: executor/monitor journals, systemd state and unit journals;
+# no RPC. Ether has two spellings (v3 WETH, v4 native ETH), so both settle as ETH; USDG is never summed with it.
+RH_UNIT = 'azimuth-rh-monitor.service'
+RH_ASSET = {'WETH':'ETH','ETH':'ETH','USDG':'USDG'}
+RH_HEX64 = re.compile(r'\b(?:0x)?[0-9a-fA-F]{64}\b')
+RH_LOG_CAP = 1000
+
+def rh_redact(text):
+    """The shared redaction (URLs, rest of any secret-bearing line) plus every 64-hex string, which can be a
+    private key (transaction hashes look the same and are masked too)."""
+    return RH_HEX64.sub('[64-hex masked]', redact_text(str(text)))[:2000]
+
+def rh_time(v):
+    return None if not number(v) else v/1000 if v > 1e12 else v
+
+def rh_asset(symbol):
+    """ETH (WETH or native) or USDG; anything else has no known unit and is never summed."""
+    return RH_ASSET.get(symbol.upper()) if isinstance(symbol, str) else None
+
+def rh_float(v):
+    try: f = float(v)
+    except (TypeError, ValueError): return None
+    return f if math.isfinite(f) else None
+
+def rh_key(row, proto):
+    t = row.get('tokenId')
+    return (row.get('protocol') or proto, str(t)) if isinstance(t, (str, int)) and str(t) else None
+
+def rh_messages(stdout):
+    for line in stdout.splitlines():
+        try: e = json.loads(line)
+        except ValueError: continue
+        msg = e.get('MESSAGE')
+        if isinstance(msg, list): msg = bytes(x for x in msg if isinstance(x, int) and 0 <= x < 256).decode('utf-8', 'replace')
+        if not isinstance(msg, str): continue
+        try: t = int(e.get('__REALTIME_TIMESTAMP'))/1e6
+        except (TypeError, ValueError): t = None
+        yield t, msg
+
+def rh_journal(argv, unit, run):
+    try: out = run(argv, timeout=10, cap=4*1024*1024)
+    except OSError: return [], {'unit':unit, 'status':'unavailable', 'lines':0}
+    status = getattr(out, 'capture_status', 'ok')
+    rows = [{'time':t, 'unit':unit, 'line':rh_redact(m)} for t, m in rh_messages(out.stdout)]
+    return rows, {'unit':unit, 'status':status if status != 'ok' else 'ok' if out.returncode in (0, 1) else 'unavailable', 'lines':len(rows)}
+
+def rh_status(run):
+    """Monitor unit state, and the Robinhood toggles from the scanner's own start line."""
+    try:
+        out = run(['systemctl','--user','show',RH_UNIT,'--property=Id,LoadState,ActiveState,SubState,UnitFileState,Result,ActiveEnterTimestamp,InactiveEnterTimestamp'], timeout=4)
+        unit = dict(l.split('=', 1) for l in out.stdout.splitlines() if '=' in l)
+    except OSError: unit = {}
+    unit = unit or {'Id':RH_UNIT, 'ActiveState':'unknown'}
+    modes = {'status':'unknown', 'flags':{}, 'note':'No scanner start line was found for the current azimuth.service run.'}
+    try:
+        start = run(['systemctl','--user','show','azimuth.service','--timestamp=unix','-p','ActiveEnterTimestamp','--value'], timeout=4).stdout.strip().lstrip('@')
+        if not start.isdigit() or int(start) <= 0:
+            modes['note'] = 'azimuth.service is not running; its Robinhood modes are unknown.'
+        else:
+            t = int(start)
+            # The scanner logs its toggles once at startup, so a five-minute window keeps this read cheap.
+            out = run(['journalctl','--user','-u','azimuth.service','--since','@%d' % t,'--until','@%d' % (t+300),'--grep','scanner: started','-n','1','-o','json','--output-fields=MESSAGE','--no-pager'], timeout=8, cap=256*1024)
+            for _, msg in rh_messages(out.stdout):
+                flags = {k: v == 'true' for k, v in re.findall(r'\b(robinhood|rh-[a-z-]+)=(true|false)\b', msg)}
+                if flags: modes = {'status':'ok', 'started_at':t, 'flags':flags, 'note':'From the scanner start line of the current azimuth.service run.'}
+    except OSError: pass
+    return unit, modes
+
+def rh_minted(memory):
+    minted, sources = {}, []
+    for name, proto in (('uni_positions.jsonl','v3'), ('uni_v4_positions.jsonl','v4')):
+        rows, meta = read_jsonl(memory/name); sources.append(meta)
+        for r in rows:
+            k = rh_key(r, proto)
+            if k: minted[k] = r
+            else: meta['invalid_lines'] += 1; meta['status'] = 'partial'
+    return minted, sources
+
+def rh_positions(memory, closes, now):
+    """Open = minted in a position journal with no successful, non-dry-run close for the same protocol and
+    tokenId. Journals, not a chain read: a position closed outside the monitor still shows here."""
+    minted, sources = rh_minted(memory)
+    done = {rh_key(c, 'v3') for c in closes if c.get('success') is True and not c.get('dry_run')}
+    failed = {rh_key(c, 'v3'): c for c in closes if c.get('success') is not True}
+    out = []
+    for k, r in minted.items():
+        if k in done: continue
+        t = rh_time(r.get('ts')); key = r.get('key') if isinstance(r.get('key'), dict) else {}
+        quote = r.get('quote') if isinstance(r.get('quote'), str) else ''
+        pair = [x for x in (r.get('token0') or key.get('currency0'), r.get('token1') or key.get('currency1')) if isinstance(x, str)]
+        f = failed.get(k)
+        token_address = next((x for x in pair if quote and x.lower() != quote.lower()), None)
+        out.append({'protocol':k[0], 'token_id':k[1], 'pool':r.get('pool'), 'strategy':r.get('strategy'),
+                    'quote':r.get('quoteSymbol') or ('WETH' if r.get('wethIn') else None),
+                    'token':token_address, 'token_address':token_address,
+                    'tick_lower':r.get('tickLower'), 'tick_upper':r.get('tickUpper'), 'entry_tick':r.get('entryTick'),
+                    'rung':r.get('rung'), 'rungs':r.get('rungs'), 'quote_in':r.get('quoteIn') or r.get('wethIn'),
+                    'minted_at':t, 'age_s':now-t if t else None,
+                    'last_failed_close':{'time':rh_time(f.get('ts')), 'reason':rh_redact(f.get('reason', ''))} if f else None})
+    out.sort(key=lambda p: p['minted_at'] or 0, reverse=True)
+    return out, sources
+
+def rh_add(cell, measured, value):
+    cell['closes'] += 1
+    if measured: cell['measured'] += 1; cell['realized_quote'] = (cell['realized_quote'] or 0)+value
+    else: cell['unmeasured'] += 1
+
+def rh_closes(memory, tz='UTC', limit=200):
+    """Money = realized_quote over pnl_basis == 'realized' rows of successful, non-dry-run closes, per quote asset.
+    A null figure is unmeasured and counted, never 0; pnl_pct is a mark and ranks only. A row whose quote asset is
+    missing or unsupported has no known unit: it lands in 'unknown', counted unmeasured, never summed."""
+    rows, meta = read_jsonl(memory/'uni_closes.jsonl')
+    minted, _ = rh_minted(memory)
+    z = zone(tz); totals, days, table = {}, {}, []
+    gas = {'gas_eth':None, 'gas_txs':0, 'metered':0, 'unmetered':0}
+    skipped = {'failed':0, 'dry_run':0}
+    for c in rows:
+        if c.get('success') is not True: skipped['failed'] += 1; continue
+        if c.get('dry_run'): skipped['dry_run'] += 1; continue
+        t = rh_time(c.get('ts')); known = rh_asset(c.get('quote_symbol')); asset = known or 'unknown'; rq = c.get('realized_quote')
+        measured = known is not None and c.get('pnl_basis') == 'realized' and number(rq)
+        mark = c.get('pnl_basis') == 'mark' or bool(c.get('stranded') or c.get('unclaimed'))
+        cell = totals.setdefault(asset, {'closes':0, 'measured':0, 'unmeasured':0, 'realized_quote':None, 'mark_flagged':0})
+        rh_add(cell, measured, rq); cell['mark_flagged'] += mark
+        g = rh_float(c.get('gas_eth'))
+        if g is None: gas['unmetered'] += 1
+        else:
+            gas['metered'] += 1; gas['gas_eth'] = (gas['gas_eth'] or 0)+g
+            gas['gas_txs'] += c['gas_txs'] if type(c.get('gas_txs')) is int else 0
+        if t is None: meta['invalid_lines'] += 1; meta['status'] = 'partial'
+        else:
+            day = days.setdefault(local_day(t, z).isoformat(), {})
+            rh_add(day.setdefault(asset, {'closes':0, 'measured':0, 'unmeasured':0, 'realized_quote':None}), measured, rq)
+        k = rh_key(c, 'v3')
+        table.append({'time':t, 'protocol':k[0] if k else None, 'token_id':k[1] if k else None, 'pool':c.get('pool'),
+                      'strategy':(minted.get(k) or {}).get('strategy'), 'reason':rh_redact(c.get('reason', '')),
+                      'quote':c.get('quote_symbol'), 'asset':asset, 'realized_quote':rq if measured else None,
+                      'unit_unknown_value':rq if known is None and number(rq) else None,
+                      'pnl_basis':c.get('pnl_basis'), 'mark_flagged':mark, 'pnl_pct':c.get('pnl_pct'),
+                      'age_min':c.get('age_min'), 'gas_eth':g, 'gas_txs':c.get('gas_txs')})
+    table.sort(key=lambda r: r['time'] or 0, reverse=True)
+    return {'tz':tz, 'status':meta['status'] if meta['status'] != 'ok' else 'partial' if incomplete(meta) else 'ok', 'source':meta, 'totals':totals, 'gas':gas,
+            'days':days, 'closes':table[:limit], 'closes_total':len(table), 'skipped':skipped,
+            'basis':'Successful, non-dry-run closes from uni_closes.jsonl. Realized = realized_quote summed over pnl_basis "realized" rows, per quote asset (v3 WETH and v4 native ETH are both ETH; USDG is separate; a missing or unsupported quote asset has no known unit and is never summed). Rows without a realized figure are unmeasured and counted, never 0. pnl_pct is a mark against the marked value and only ranks.'}
+
+def rh_stranded(memory, minted):
+    """Latest line per token wins, so a resolved line retires an earlier open one (the executors' own rule)."""
+    pools = {k: r.get('pool') for k, r in minted.items()}  # (protocol, tokenId): ids collide across v3/v4
+    latest, sources = {}, []
+    for name, proto in (('uni_stranded.jsonl','v3'), ('uni_v4_stranded.jsonl','v4')):
+        rows, meta = tail(memory/name, limit=50000, budget=4*1024*1024); sources.append(meta)
+        for r in rows:
+            if isinstance(r.get('token'), str): latest[(proto, r['token'].lower())] = (proto, r)
+    out = [{'protocol':proto, 'token':r.get('token'), 'token_address':r.get('token'), 'symbol':r.get('symbol'), 'amount_raw':r.get('amount'),
+            'token_id':r.get('tokenId'), 'pool':pools.get((proto, str(r.get('tokenId')))), 'reason':rh_redact(r.get('reason', '')),
+            'time':rh_time(r.get('ts')), 'attempts':r.get('attempts'), 'next_try':rh_time(r.get('next_try')),
+            'resolved':bool(r.get('resolved')), 'quote':r.get('quote_symbol'),
+            # v3 sweeps write weth_out, v4 writes quote_out; the raw scalar is kept with whatever unit label exists.
+            'quote_out':r.get('weth_out') if r.get('weth_out') is not None else r.get('quote_out')}
+           for proto, r in latest.values()]
+    out.sort(key=lambda r: r['time'] or 0, reverse=True)
+    return {'open':[r for r in out if not r['resolved']], 'resolved':[r for r in out if r['resolved']][:10], 'sources':sources}
+
+def robinhood(memory, now, run=None):
+    run = run or bounded_run
+    unit, modes = rh_status(run)
+    logs, log_sources = [], []
+    for argv, name in ((['journalctl','--user','-u',RH_UNIT,'-n',str(RH_LOG_CAP),'-o','json','--output-fields=MESSAGE','--no-pager'], RH_UNIT),
+                       (['journalctl','--user','-u','azimuth.service','--since','-48h','--grep','(?i)\\[rh-|robinhood','-n',str(RH_LOG_CAP),'-o','json','--output-fields=MESSAGE','--no-pager'], 'azimuth.service')):
+        rows, meta = rh_journal(argv, name, run); logs += rows; log_sources.append(meta)
+    logs.sort(key=lambda r: r['time'] or 0, reverse=True)
+    closes, closes_meta = read_jsonl(memory/'uni_closes.jsonl')
+    positions, position_sources = rh_positions(memory, closes, now)
+    minted, _ = rh_minted(memory)
+    return {'unit':unit, 'monitor_active':unit.get('ActiveState') == 'active', 'modes':modes,
+            'logs':logs[:RH_LOG_CAP], 'log_sources':log_sources,
+            'log_scope':'Last %d lines of %s, plus Robinhood lines of azimuth.service from the last 48 hours. URLs, secret-like NAME=value pairs and 64-hex strings are masked.' % (RH_LOG_CAP, RH_UNIT),
+            'positions':positions, 'position_sources':position_sources+[closes_meta],
+            'position_scope':'Open per the journals: minted with no successful close recorded. Not a chain read.',
+            'stranded':rh_stranded(memory, minted)}
+
 def panel(call, *args):
     """Malformed evidence in one new panel cannot freeze unrelated collections."""
     try: return call(*args)
@@ -636,7 +871,7 @@ def cutover(since, now): return float(since) if since and float(since)>0 else no
 def daily(profile, since, zones, now=None):
     """Day-bucketed panels, once per requested IANA zone."""
     now=now or time.time(); memory=profile/'memories'; since=cutover(since,now)
-    return {'collected_at':now,'by_tz':{tz:{'north_star':panel(north_star,memory,now,CALENDAR_DAYS,tz),'realized':panel(realized_by_mode,memory,since,tz)} for tz in zones}}
+    return {'collected_at':now,'by_tz':{tz:{'north_star':panel(north_star,memory,now,CALENDAR_DAYS,tz),'realized':panel(realized_by_mode,memory,since,tz),'robinhood':panel(rh_closes,memory,tz)} for tz in zones}}
 
 def collect(profile, state, since=None, zones=('UTC',)):
     now=time.time();memory=profile/'memories';sources=[];events=[]
@@ -667,7 +902,7 @@ def collect(profile, state, since=None, zones=('UTC',)):
     hermes={'profile':profile.name,'config_status':'missing','sessions':[],'session_note':'An open session row is not proof that a process is alive. No messages or prompts are read.'}
     try:
         import yaml
-        try: cfg=yaml.safe_load((profile/'config.yaml').read_text()) or {}
+        try: cfg=yaml.safe_load(read_regular(profile/'config.yaml', 1024*1024)) or {}
         except yaml.YAMLError as err: raise ValueError('invalid config') from err
         if not isinstance(cfg,dict): raise ValueError('invalid config')
         model=cfg.get('model',{})
@@ -721,7 +956,7 @@ def collect(profile, state, since=None, zones=('UTC',)):
         except (OSError,ValueError): pass
     hermes['gateway'] = next((s for s in services if s.get('Id')=='hermes-gateway.service'), {'ActiveState':'unknown'})
     events.sort(key=lambda e:e.get('time') or 0,reverse=True)
-    return clean(own_only({'collected_at':now,**daily(profile,since,zones,now),'nav_bridge':panel(nav_bridge,memory,now),'live':{'dust':panel(dust_ledger,memory,since)},'nav':nav[-1] if nav else {},'journal':events,'sources':sources,'hermes':hermes,'services':services}))
+    return clean(own_only({'collected_at':now,**daily(profile,since,zones,now),'nav_bridge':panel(nav_bridge,memory,now),'live':{'dust':panel(dust_ledger,memory,since)},'robinhood':panel(robinhood,memory,now),'nav':nav[-1] if nav else {},'journal':events,'sources':sources,'hermes':hermes,'services':services}))
 
 if __name__=='__main__':
     # argv: profile state since [zones,comma,separated] [daily]; `daily` refreshes only the day-bucketed panels.
