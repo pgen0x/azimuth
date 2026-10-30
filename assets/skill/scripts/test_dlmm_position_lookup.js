@@ -15,7 +15,7 @@ async function run(change={}) {
     return {publicKey:key('position'),positionData:{owner:key('wallet')},...change.position};
   }};
   const account={owner:key('program'),data:Buffer.from([1,2,3,4,5,6,7,8]),...change.account};
-  const connection={getAccountInfo:async()=>{if(change.rpcError)throw Error('RPC unavailable');return account;}};
+  const connection={getAccountInfo:async()=>{if(change.rpcError)throw Error('RPC unavailable');return change.accountNull?null:account;}};
   const context={Buffer,path,PROFILE_DIR:'/profile',PublicKey:Key,AbortSignal,
     fs:{readFileSync:()=>{if(change.missing)throw Error('missing');return JSON.stringify(change.entry||{position:'position',pool:'pool'});}},
     DLMM:{IDL:{address:'program',accounts:[{name:'PositionV2',discriminator:[1,2,3,4,5,6,7,8]}]},
@@ -33,6 +33,10 @@ async function run(change={}) {
     r=await run(change);assert.equal(r.result,null);assert.equal(r.wide,1);assert.equal(r.targeted,0);
   }
   r=await run({position:{positionData:{owner:key('other')}}});assert.equal(r.result,null);assert.equal(r.wide,1);
+  // The SDK position must be the requested one, not just any position owned by the wallet.
+  r=await run({position:{publicKey:key('other')}});assert.equal(r.result,null);assert.equal(r.wide,1);
+  // A missing account is not verification: fall back without reading the hinted pool.
+  r=await run({accountNull:true});assert.equal(r.result,null);assert.equal(r.wide,1);assert.equal(r.poolReads,0);
   await assert.rejects(run({rpcError:true}),/RPC unavailable/);
   console.log('Targeted position lookup verifies native ownership and pool; legacy discovery retained');
 })().catch(error=>{console.error(error);process.exitCode=1;});
