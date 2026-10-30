@@ -2199,7 +2199,7 @@ def main():
                 # Ask the breaker about the window BEFORE writing this close
                 # into it. Recording first made the very first re-center of a
                 # pool read its own number back and veto itself: on 2026-08-07
-                # a position booked -0.01747 (the executor's weth_out bug,
+                # a position booked a loss well past the floor (the executor's weth_out bug,
                 # fixed in the same change) and recenter_ok declined on the
                 # -0.004 floor with `recenters` at 1 and no prior history. The
                 # breaker exists to stop a pool that has been bleeding ACROSS a
