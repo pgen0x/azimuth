@@ -2,7 +2,7 @@
 """Reconcile the local DLMM close journal against the Meteora portfolio API.
 
 The journal (memories/dlmm_closes.jsonl) is self-reported by dlmm_monitor.py and
-historically missed ~95% of closes; the Meteora datapi portfolio endpoint supplies an independent LP view.
+can miss closes (it is self-reported); the Meteora datapi portfolio endpoint supplies an independent LP view.
 Neither this API nor its calendar measures wallet cash profit after settlement. This script diffs the two and prints:
 
   * overall wallet PnL from the API (SOL-denominated),
