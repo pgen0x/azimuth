@@ -20,7 +20,7 @@ sys.path.insert(0, str(HERE.parents[2] / "skill/scripts"))
 import dlmm_pipeline as pipeline
 
 with tempfile.TemporaryDirectory() as tmp:
-    home = Path(tmp) / "solanza"
+    home = Path(tmp) / "example"
     plugin = home / "plugins/dlmm-report-guard"
     script = home / "skills/solana-dlmm/scripts/dlmm_pipeline.py"
     plugin.mkdir(parents=True)
@@ -28,7 +28,7 @@ with tempfile.TemporaryDirectory() as tmp:
     script.touch()
     with sqlite3.connect(home / "state.db") as db:
         db.execute("CREATE TABLE sessions(id TEXT, source TEXT, chat_id TEXT)")
-        identity = base64.urlsafe_b64encode(json.dumps(["solanza", "dlmm-signal", "delivery"]).encode()).decode().rstrip("=")
+        identity = base64.urlsafe_b64encode(json.dumps(["example", "dlmm-signal", "delivery"]).encode()).decode().rstrip("=")
         db.executemany("INSERT INTO sessions VALUES (?,?,?)", [
             ("session", "webhook", "webhook:v2:" + identity),
             ("other", "telegram", "123"),

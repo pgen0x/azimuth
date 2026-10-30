@@ -100,9 +100,8 @@ found"). `loginctl enable-linger $USER` is what keeps them alive across logout.
 | `azimuth-rh-monitor` | Robinhood Chain exit loop (`uni_monitor_loop.sh`); installed disabled | `install.sh` ← `assets/systemd/azimuth-rh-monitor.service` |
 | `hermes-gateway-<profile>` | Hermes gateway that receives the webhook, and ticks the profile's cron jobs | Hermes, not this repo |
 
-Units named after other agents (e.g. a separate LLM LP agent) may also be
-running on the same box; they are **not** this repo's and `install.sh` must
-never write them.
+Units not listed here are **not** this repo's, and `install.sh` must never
+write them.
 
 ```bash
 journalctl --user -u azimuth -f          # live tail
@@ -133,13 +132,12 @@ one pass per enabled mode per `POLL_INTERVAL`.
     When changing gates or thresholds, keep them in sync with that upstream, or
     note the divergence — the comments cite where each value came from.
     Two modes are this daemon's own: `Turnover` (30m, `category=all`,
-    `sort=fee:desc`) and `Pulse` (5m, `category=trending`) — a port of the
-    reference bot's screen. Same TVL/mcap/holder band, different discovery
-    window, so they surface largely disjoint pools; running both makes entries
-    the **union** of the two screens. Gates only some modes want (volatility
-    ceiling, yield-decline, warning severity, verified) are zero-disabled
-    `ModeParams` fields, so a new mode that omits one silently opts out — set
-    them explicitly.
+    `sort=fee:desc`) and `Pulse` (5m, `category=trending`). Same TVL/mcap/holder
+    band, different discovery window, so they surface largely disjoint pools;
+    running both makes entries the **union** of the two screens. Gates only
+    some modes want (volatility ceiling, yield-decline, warning severity,
+    verified) are zero-disabled `ModeParams` fields, so a new mode that omits
+    one silently opts out — set them explicitly.
   - `momentum.go` — best-effort DexScreener downtrend gate (fail-open).
   - `audit.go` — best-effort Jupiter token-audit gate (fail-open): hard-rejects
     >30% bot holders, enriches signals with bot % + global fees paid.
@@ -226,8 +224,8 @@ one pass per enabled mode per `POLL_INTERVAL`.
     replaced the ladders on evidence, not taste — 104 live ladder rung closes
     produced **zero** fee-positive exits (63 `ladder idle`, 30 `ladder stale`,
     11 fills averaging −9.48%). The diagnosis is *not* "one-sided doesn't work":
-    the on-chain fee meter shows the rung NEAREST spot earning (GME rung 0:
-    0.002039 USDG/214m) while outer rungs read exactly 0. Two thirds of a wall's
+    the on-chain fee meter shows the rung NEAREST spot earning (GME rung 0)
+    while outer rungs read exactly 0. Two thirds of a wall's
     capital sat where the market never came. One rung concentrates it there, and
     the re-pin loop is what keeps it there. The mode pins its own strategy in
     `sizeFor` instead of inheriting `ROBINHOOD_DEPLOY_STRATEGY`; that pin is also
@@ -421,7 +419,7 @@ one pass per enabled mode per `POLL_INTERVAL`.
   healthy positions, and since that rule blacklists via `rug_event`
   (PnL-independent, by design) each false read cost a 7d mint ban plus a 30d
   deployer ban. Eleven such bans starved Solana of every entry for 12h on
-  2026-08-14 while the comparison bot entered the same pools green. Pinned by
+  2026-08-14 while those same pools traded green. Pinned by
   `internal/meteora/momentum_test.go`.
 - **Redis TTL is per-key on purpose.** `SetNX` per pool gives each an independent
   rolling `SEEN_TTL`. The old `SAdd`+`Expire` refreshed the whole set's TTL every
@@ -437,7 +435,7 @@ one pass per enabled mode per `POLL_INTERVAL`.
   and the 20s loop retries with every rule still armed; unmeasurable keeps
   trusting the report. STACY-SOL is why: on 2026-08-31 a fast-out exit printed
   `✅ Successfully closed`, journaled -1.66% and dropped the Redis key while
-  0.2511 SOL sat in the position — unmanaged for 68 minutes, reclaimed at
+  most of the ticket still sat in the position — unmanaged for 68 minutes, reclaimed at
   -23.73%, realized -20.51%. Paired with that, the reclaim path
   (`recover_position_metadata`) rebuilds an adopted position's pair, mint, mode
   and mint TIME from the close journal instead of adopting it blank: a blank
@@ -474,7 +472,7 @@ one pass per enabled mode per `POLL_INTERVAL`.
 - **Neither is `pnl_sol`, on Solana.** In `dlmm_closes.jsonl` both figures are the
   MARK the monitor read one tick before it closed, and the Portfolio API returns
   `-100%` for a position it has not indexed yet — so three closes on 2026-08-17..18
-  booked -1.41 SOL that the chain never took (deposit == withdrawal on all three).
+  booked full-size losses that the chain never took (deposit == withdrawal on all three).
   `dlmm_realized.py` writes the arbiter to `memories/dlmm_realized.jsonl` (deposit /
   withdrawal / fee flows per closed position, joined on `position`), and the
   scoreboard, the weight learner and the proposal brief all read `realized_sol`

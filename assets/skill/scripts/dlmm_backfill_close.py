@@ -22,7 +22,7 @@ line of the cycle that fired the exit carries every field this needs:
 Then, e.g.:
 
     python3 dlmm_backfill_close.py \
-      --position HdBALwyq... --pool AeUfFU6L... --pair CHANCE-SOL \
+      --position <POSITION> --pool AeUfFU6L... --pair CHANCE-SOL \
       --base-mint JCKwsT8U... --mode turnover \
       --pnl-pct 0.4723 --pnl-sol -0.000204 \
       --fee-per-tvl 1.27 --age-min 41.1 \

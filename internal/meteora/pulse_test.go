@@ -44,7 +44,7 @@ func pulsePool() Pool {
 	}
 }
 
-// The whole point of the mode: a pool the reference bot would open and the
+// The whole point of the mode: a pool the pulse screen would open and the
 // turnover screen throws away. If this ever passes both, the two screens have
 // converged and the second mode is only costing API calls.
 func TestPulseAdmitsWhatTurnoverRejects(t *testing.T) {
@@ -95,9 +95,9 @@ func TestPulseGates(t *testing.T) {
 	}
 }
 
-// The gates pulse deliberately DROPS. These are the ones that let the
-// reference bot into trending pools that are not high-fee oscillators; if a
-// future edit re-tightens them, this mode stops reproducing its picks.
+// The gates pulse deliberately DROPS. These are the ones that let pulse into
+// trending pools that are not high-fee oscillators; if a future edit
+// re-tightens them, this mode stops admitting those picks.
 func TestPulseDropsTurnoverOnlyGates(t *testing.T) {
 	tests := []struct {
 		name   string

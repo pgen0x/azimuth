@@ -12,7 +12,7 @@ from unittest.mock import patch
 import dlmm_monitor as monitor
 
 
-POSITION = "AeEqD9BwdPtYt7fpvo8q6U7KBvyEaMUZAnhTmZZc5CB8"
+POSITION = "Hjx4rHHpQ6pGD8yJeqSutrVYHEJ1XxKtjEhGzmuMb4MC"
 POOL = "3BCeknAQpHELGfKhUb9mnKuLC3Eg3qjJrZ5B7fqC1xSW"
 
 

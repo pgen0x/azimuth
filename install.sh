@@ -91,7 +91,7 @@ raw = json.load(open(dst))
 wrapped = isinstance(raw, dict)
 existing = raw.get("jobs", []) if wrapped else raw
 # Match on id AND name. Name alone is not an identity: the operator renames
-# jobs per profile ("DLMM ..." -> "Solanza ..."), and a name-only check then
+# jobs per profile ("DLMM ..." -> "<Profile> ..."), and a name-only check then
 # re-appended the template under an id that was already live — two entries
 # sharing one id, one still carrying the REPLACE_ME deliver placeholder, both
 # claiming the same schedule.
@@ -158,6 +158,16 @@ echo "→ npm install (Meteora SDK) in repo"
 
 echo "→ Building Go daemon"
 ( cd "$REPO" && go build -o azimuth . ) && echo "   built $REPO/azimuth"
+
+echo "→ Rendering optional Solana units into $PROFILE/systemd"
+# Accounting, shadow and rent-recovery timers are opt-in, so they are only
+# rendered for this profile, never written into the live unit directory.
+mkdir -p "$PROFILE/systemd"
+for u in azimuth-sol-accounting azimuth-sol-shadow azimuth-sol-rent; do
+  sed "s#__PROFILE__#$PROFILE#g" "$REPO/assets/systemd/$u.service" > "$PROFILE/systemd/$u.service"
+  cp "$REPO/assets/systemd/$u.timer" "$PROFILE/systemd/$u.timer"
+done
+echo "   to enable one: cp $PROFILE/systemd/<unit>.{service,timer} ~/.config/systemd/user/"
 
 echo "→ Installing user systemd services"
 # Three user units, all WantedBy=default.target (so `loginctl enable-linger` is

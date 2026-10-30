@@ -287,7 +287,7 @@ end (2 position slots, tight-range `custom_ratio_spot` preferred).
 
 ### Pulse mode
 
-`pulse` is a port of a reference bot's own screen. It sits on the **same**
+`pulse` is a second screen. It sits on the **same**
 TVL/mcap/holder band as `turnover` ($10k–$150k TVL, $150k–$10M mcap, ≥500
 holders, bin step 80–125, organic ≥60), and the point is not the band — it is
 the **window**. `turnover` queries `category=all` on a 30m timeframe sorted by
@@ -481,8 +481,9 @@ monitor loop auto-sends it daily at 09:00 WIB via `hermes send` when
 
 ## Example output
 
-The agent reports each deploy decision as a card like this (real values, not
-placeholders — the prompt never lets it fabricate a size/entry/TX):
+The agent reports each deploy decision as a card like this (illustrative values;
+the live card carries only measured ones — the prompt never lets it fabricate a
+size/entry/TX):
 
 ```
 🤖 AI Pick — multiday · 14:32 WIB
@@ -496,8 +497,8 @@ Strategy: custom_ratio_spot — meme-pool volatility, symmetric range fits
 | Metric | Value |
 |---|---|
 | Token | world |
-| Decision | ✅ DEPLOYED (multiday) pos DoSj3Ga... |
-| Size | 1.03 SOL |
+| Decision | ✅ DEPLOYED (multiday) pos <POSITION> |
+| Size | <SIZE> SOL |
 | Range | 62↓ 62↑ bins |
 | Fee/TVL | 10.8%/d |
 | Score | 290.7 |

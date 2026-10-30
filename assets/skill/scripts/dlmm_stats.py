@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""DLMM fast-cycle scoreboard — the metlex.io/portfolio card for this bot.
+"""DLMM fast-cycle scoreboard — a portfolio card for this bot.
 
-Computes the metrics rival bot screenshots brag about (positions/24h, avg
-hold, realized profit, volume churned) plus the ones that actually decide
+Computes the headline throughput metrics (positions/24h, avg hold, realized
+profit, volume churned) plus the ones that actually decide
 whether the fast-cycle rules earn: fees vs principal change, win rate, per-mode
 breakdown, and rebalance-chain PnL per pool (the circuit-breaker's view).
 
@@ -74,7 +74,7 @@ def load_closes(cutoff_ts):
                 continue
             closes.append(rec)
     # The journal's pnl_sol is a mark, and a mark can be pure fiction: three
-    # closes in the 2026-08-17..18 window booked -1.41 SOL that the chain shows
+    # closes in the 2026-08-17..18 window booked full-size losses that the chain shows
     # was never lost. Prefer the reconciled on-chain flows wherever they exist
     # (dlmm_realized.py); rows it hasn't fetched keep the mark.
     return apply_realized(closes, os.path.join(PROFILE_DIR, "memories", "dlmm_realized.jsonl"))

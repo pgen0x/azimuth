@@ -77,7 +77,7 @@ MIN_AGE_MIN_BEFORE_SL = 5.0        # grace so a fresh mint's settling isn't an S
 # Consecutive failed close attempts after which a position is declared
 # UNCLOSABLE and skipped for the rest of this process's life.
 #
-# Some closes can never succeed. On 2026-08-09 position #634693 (BLINK, a pool
+# Some closes can never succeed. On 2026-08-09 a BLINK position (a pool
 # the security gate convicted as a honeypot 20 minutes after the mint) failed
 # `collect` with `TF` — the token blocks transfers, so the withdraw can never
 # settle — and the loop retried it every 40s for 75 minutes: 78 attempts, 78
@@ -94,8 +94,8 @@ MAX_CLOSE_FAILURES = int(os.environ.get("UNI_MAX_CLOSE_FAILURES", "5"))
 # --- ask side: the second leg of a round trip -------------------------------
 # A turnover bid that fills is holding the token. Until 2026-08-09 that bag was
 # market-sold on the spot, which cost -4.9% per fill and WAS this venue's entire
-# deficit: the 13 untouched rungs earned +0.00039 ETH between them while 5 fills
-# lost -0.00231. Breakeven needed a fill rate under 6.1%; the measured rate was
+# deficit: the 5 fills lost about six times what the 13 untouched rungs earned
+# between them. Breakeven needed a fill rate under 6.1%; the measured rate was
 # 27.8%. Tuning the bid cannot close a 4.6x gap, because moving the rung away
 # from spot to fill less also earns less — the two move together.
 #
@@ -292,8 +292,8 @@ LADDER_FILL_HARD_PCT = float(os.environ.get("UNI_LADDER_FILL_HARD_PCT", "-8.0"))
 # rung 2 — so a per-rung verdict closes the far side of a wall while the near
 # side is still earning, ratcheting the wall thinner every window until only
 # rung 0 is left. The first working on-chain fee meter (feesQuote, landed the
-# same day) made that visible on eight live usdg_ladder rungs: GME rung 0 had
-# 0.002039 USDG in 214m and NVDA rung 0 0.000297 in 136m, while NVDA rungs 1-2
+# same day) made that visible on eight live usdg_ladder rungs: GME rung 0 and
+# NVDA rung 0 both earned within a few hours, while NVDA rungs 1-2
 # and all three TSLA rungs read exactly 0 — judged per rung, five of the eight
 # would have been torn out of three walls that were working as designed. That
 # is the shape this file's own header block describes: the reference LP's
@@ -2199,7 +2199,7 @@ def main():
                 # Ask the breaker about the window BEFORE writing this close
                 # into it. Recording first made the very first re-center of a
                 # pool read its own number back and veto itself: on 2026-08-07
-                # position #616818 booked -0.01747 (the executor's weth_out bug,
+                # a position booked a loss well past the floor (the executor's weth_out bug,
                 # fixed in the same change) and recenter_ok declined on the
                 # -0.004 floor with `recenters` at 1 and no prior history. The
                 # breaker exists to stop a pool that has been bleeding ACROSS a
@@ -2235,7 +2235,7 @@ def main():
             # that hangs past the loop's patience, an unhandled error further
             # down the pass — never reached the save, and the next process loaded
             # a state with no `close_fails` at all. The cap could therefore never
-            # be reached: position #634693 was re-attempted 93 times in 85
+            # be reached: the BLINK position was re-attempted 93 times in 85
             # minutes on 2026-08-09 against MAX_CLOSE_FAILURES=5, each attempt
             # journaled with success=false. Writing here makes the counter
             # durable no matter what happens to the rest of the tick, which is

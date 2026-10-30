@@ -18,7 +18,7 @@ type ModeParams struct {
 	MinHolders      int     // MIN_HOLDERS
 	MinDailyFee     float64 // absolute daily-fee floor (USD)
 	MinOrganic      float64 // shared MIN_ORGANIC_SCORE
-	MinQuoteOrganic float64 // quote-token organic floor (ported from the reference config)
+	MinQuoteOrganic float64 // quote-token organic floor
 	MinBinStep      int     // DLMM bin-step floor (0 disables the gate)
 	MaxBinStep      int     // DLMM bin-step ceiling (0 disables the gate)
 
@@ -29,8 +29,8 @@ type ModeParams struct {
 	MinSwapCount     float64 // swaps in window (wash-trade guard, with MinUniqueTraders)
 	MinUniqueTraders float64 // unique traders in window
 
-	// Pulse-mode gates. Zero-disabled like the block above; the reference
-	// bot screens on the ACTIVE-TVL fee ratio and a raw window-volume floor
+	// Pulse-mode gates. Zero-disabled like the block above; pulse screens
+	// on the ACTIVE-TVL fee ratio and a raw window-volume floor
 	// instead of on fee/TVL plus an absolute daily-fee floor.
 	MinFeeActiveTVL float64 // fee/active-TVL floor for the window (percent)
 	MinVolumeUSD    float64 // raw window volume floor (USD)
@@ -64,11 +64,10 @@ type ModeParams struct {
 	// Measured 2026-08-13 14:57-15:59: turnover ran 63 consecutive cycles with an
 	// empty batch off a 5-pool universe, and the long legs are what emptied it —
 	// BOIÚNA on 6h -24.6%, MARIO64 on 24h -72.9%, CHAM on 6h -79.7%. In the same
-	// window a reference bot with no long-horizon gate opened BOIÚNA three times
-	// (14:55, 15:10, 15:21), held 5-6 minutes each, and closed all three
-	// positive. Its seven closes over 13:35-15:21 returned +$0.171 against this
-	// daemon's single close of +$0.078 — better per trade here, 2.2x less in
-	// total, which is a volume problem and not a selection problem.
+	// window BOIÚNA offered three 5-6 minute oscillations (14:55, 15:10, 15:21)
+	// that each closed positive on the fee take for a position without a
+	// long-horizon gate, while this daemon made one close all window — a volume
+	// problem, not a selection problem.
 	// The APR trap the long legs were built for (a collapsing price paying huge
 	// fees on the way down) is still caught, by m5 and h1: a token actually
 	// dying prints on the short horizons too, and those are the only horizons a
@@ -84,7 +83,7 @@ type ModeParams struct {
 }
 
 // Casual and Multiday mirror the two isolated budgets in the pipeline.
-// Bin-step band (80–125) ported from the reference config config; tune per strategy.
+// Bin-step band (80–125); tune per strategy.
 //
 // DIVERGENCE from dlmm_pipeline.py: casual MinFeeTVL is 0.1, not the upstream
 // 0.3. The API's fee_tvl_ratio is scoped to the queried timeframe, so for the
@@ -93,13 +92,13 @@ type ModeParams struct {
 // 0.1 (~4.8%/day pace) still sits ~5x above multiday's 1%/day bar.
 var (
 	// MinHolders recalibrated 2026-07-15 against the 14d close journal (102
-	// live closes, net -0.09 SOL): big losers entered at median 7.8k holders,
-	// winners at 13.6k. Backtest: casual >=10k flips the mode +0.002 -> +0.126
-	// SOL (keeps 20/32 trades); multiday >=5k flips -0.014 -> +0.056 (17/23).
+	// live closes, net negative): big losers entered at median 7.8k holders,
+	// winners at 13.6k. Backtest: casual >=10k turns the mode from flat to
+	// clearly positive (keeps 20/32 trades); multiday >=5k turns it from
+	// negative to positive (17/23).
 	// Holder count is token-level, so it is the one gate not confounded by the
 	// per-mode discovery window.
-	// MaxMcap (ported from the reference config, which caps at 10M on a 5m
-	// degen window): a tail guard, not a fit gate. Every strategy assumption
+	// MaxMcap (10M, sized for a 5m degen window): a tail guard, not a fit gate. Every strategy assumption
 	// here (volatility harvest, momentum entries, 30m/24h fee windows) is a
 	// memecoin assumption; a $100M+ token passing the fee/TVL bar is almost
 	// always a major having a busy day, where those assumptions don't hold.
@@ -133,7 +132,7 @@ var (
 	// MinFeeTVL 0.15/30m ~= 7.2%/day pace. Bin band widened to 250: high-fee
 	// launch pools cluster at bin step 100-400.
 	// 2026-07-28: TVL band, mcap band and bin-step ceiling realigned to the
-	// reference bot's live screen, which is the one currently printing gains.
+	// pulse screen's band, which was the one printing gains.
 	// TVL 10k-150k (was 5k-300k): below 10k our ticket moves the price and the
 	// exit swap strands; above 150k our share of the fee split is noise. Mcap
 	// 150k-10M (was >=1M, no ceiling): the 150k-1M band is where fee-capture
@@ -193,9 +192,8 @@ var (
 	// is a SOL-side ladder harvesting fees from oscillation, and the monitor's
 	// OOR fuse — not the entry — is what bounds the downside. Measured
 	// 2026-08-01: the gate rejected Chiikawa 30+ times across 19:49-20:26 (1h
-	// -7% to -23%, 5m -3% to -8.8%); the reference bot, which has no momentum
-	// gate at all ("efficiency only, no momentum/change_pct, per design"),
-	// entered at 20:25 inside that window and closed +1.39% on the fee take.
+	// -7% to -23%, 5m -3% to -8.8%), yet a position opened at 20:25 inside
+	// that window would have closed +1.39% on the fee take.
 	// Turnover keeps the gate's SHORT legs only (SkipLongHorizonMomentum, added
 	// 2026-08-13): its 30m fee-sorted screen is exactly where the APR trap lives
 	// (a collapsing price paying huge fees on the way down), and m5/h1 are the
@@ -217,7 +215,7 @@ var (
 )
 
 // Degen Score targets — each liquidity-relative sub-score saturates here.
-// Ported from the reference config; inputs are normalized to a 30m reference window.
+// Inputs are normalized to a 30m reference window.
 const (
 	degenRefMinutes      = 30.0
 	degenTargetVolRatio  = 20.0    // (30m) volume/active_tvl for a full trading sub-score
@@ -248,7 +246,7 @@ func Screen(p Pool, mp ModeParams) (*Candidate, string) {
 		return nil, "non-SOL pool"
 	}
 
-	// Authoritative API risk flags (ported from the reference config) — cheaper than parsing
+	// Authoritative API risk flags — cheaper than parsing
 	// the warnings array and caught before any threshold math.
 	if p.HasCriticalWarnings {
 		return nil, "base token critical warnings"
@@ -320,7 +318,7 @@ func Screen(p Pool, mp ModeParams) (*Candidate, string) {
 	}
 
 	// Pulse-mode gates (zero-disabled for the other modes). fee/ACTIVE-TVL
-	// is the reference bot's core selectivity gate: it measures the fee pace
+	// is pulse's core selectivity gate: it measures the fee pace
 	// against the liquidity actually in range, so a pool parking most of its
 	// TVL in dead bins can't dilute its way past the bar the way fee/TVL lets it.
 	if mp.MinFeeActiveTVL > 0 && p.FeeActiveTVLRatio < mp.MinFeeActiveTVL {
@@ -380,7 +378,7 @@ func Screen(p Pool, mp ModeParams) (*Candidate, string) {
 		}
 	}
 
-	// Bin-step band gate (ported from the reference config). 0 endpoints disable each side.
+	// Bin-step band gate. 0 endpoints disable each side.
 	binStep := p.DlmmParams.BinStep
 	if mp.MinBinStep > 0 && binStep < mp.MinBinStep {
 		return nil, fmt.Sprintf("bin_step %d < %d", binStep, mp.MinBinStep)
@@ -453,7 +451,7 @@ func degenScore(p Pool, tfMinutes float64) float64 {
 	tfScale := degenRefMinutes / tfMinutes
 
 	// When the API omits the precomputed ratios, derive them from the raw
-	// window volume/fee (mirrors the reference config). Without this, a missing ratio
+	// window volume/fee. Without this, a missing ratio
 	// zeroes the sub-score, zeroes the whole degen score, and the caller
 	// falls back to the additive score — which silently bypasses the
 	// lone-candidate conviction gate (additive scores sit near 75+).

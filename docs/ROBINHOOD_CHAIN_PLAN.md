@@ -140,10 +140,9 @@ Strategies: `balanced_tight` (swap half, ±range% band) and `weth_below`
 Wallet: `EVM_PRIVATE_KEY` in profile `.env` accepts a dedicated 0x-hex key OR
 the base58 Solana secret (ed25519 seed reused as secp256k1 scalar) — the
 Solana-derived account is the current setup. Read-only + DRY_RUN paths tested
-live. **Wallet funded 2026-07-13**: `0x94098ccD4536729AAEcc113C313E11926A5bec2d`
-(Phantom-exported EVM key, standard BIP44 path — NOT the ed25519-seed-derived
-stopgap account) holds ~0.00104 ETH (gas) + 0.0085 WETH (LP capital), both
-bridged from BNB/SOL via Across/Mayan.
+live. Live execution needs an EVM wallet funded with ETH for gas and WETH (or
+USDG) for LP capital; a standard BIP44 EVM key is preferred over the
+ed25519-seed-derived stopgap account.
 
 **Automatic dispatch landed** (commit f1504bf, `internal/robinhood/deploy.go`
 + `Scanner.robinhoodDeploy`): mirrors Solana's `DEPLOY_CMD` pattern exactly —
@@ -161,7 +160,7 @@ closed by hand via `uni_executor.js close --id N`.
 qualifying batch. Went live after the paper-mode (`DRY_RUN=true`) pick→deploy
 log path was observed end-to-end and Phase 3 (monitor exits) landed, so a
 deployed position auto-closes on the exit rules rather than sitting open until
-closed by hand. Capital is the funded wallet's ~0.0085 WETH; `uni_executor.js`
+closed by hand. Capital is the funded wallet's WETH balance; `uni_executor.js`
 sizes each deploy from that balance.
 
 **Remaining**: gate calibration from live journals (Phase 4) — no code gaps in
@@ -219,7 +218,7 @@ cron. Distinct from the systemd loop: the loop *acts* (closes), the cron only
   `{"positions":[]}`; a positions-read failure → `{"positions":[],"error":...}`
   so the agent surfaces the error instead of fabricating a card.
 - Cron `rh_dlmm_position_monitor` in `assets/hermes/cron_jobs_template.json`
-  (installed live in the `solanza` profile, `deliver=telegram`, every 30m,
+  (installed live in the operator's profile, `deliver=telegram`, every 30m,
   `terminal` toolset only). Prompt hard-forbids trading (no executor, no
   close/mint) and copies the script's card verbatim; empty positions → `[SILENT]`.
 - Validated 2026-07-13: `hermes cron run` → ok, 0 open positions → SILENT (no
@@ -360,9 +359,9 @@ What landed (discovery/screening only — **no v4 execution**):
 
 ### Phase 7 — v4 execution ✅ (LIVE 2026-07-15)
 
-Validation round-trip completed on-chain 2026-07-15 (position 96988,
-CASHCAT/WETH 0.2888%: mint 0.002 WETH → state → collect → close, net cost
-~0.000015 WETH + gas), then `ROBINHOOD_V4_EXECUTOR_CMD` enabled in the live
+Validation round-trip completed on-chain 2026-07-15 (one position,
+CASHCAT/WETH 0.2888%: mint a dust-sized WETH position → state → collect → close, net cost
+dust plus gas), then `ROBINHOOD_V4_EXECUTOR_CMD` enabled in the live
 daemon env and the service restarted. Two chain-specific findings from the
 rollout, both fixed in `uni_v4_executor.js`:
 
@@ -697,7 +696,7 @@ tokenized equity is the least collapse-prone base asset on the chain.
   | 1% | 200 | 3 | **200** — quantized down |
 
   At the 0.3% majority tier 120 was two spacings — near the narrowest rung the
-  pool can express — and the $2 rung floor caps a ~$7 commit at 3 rungs, i.e.
+  pool can express — and the $2 rung floor caps a small commit (e.g. $7) at 3 rungs, i.e.
   3.6% of covered downside. 240 gives 7.2% at 3 rungs, 12% at five. But
   `rungWidth` rounds to whole spacings, so at the 1% tier 240 collapses to a
   single 200-tick spacing and the widening changed nothing there — minted rungs
@@ -912,9 +911,8 @@ evidence kills which:
   "turnover keeps its tight two-sided range" and misled the first cut of this
   port on 2026-08-07; it has been corrected in place.)
 - **The five-rung wall** was not wrong for being one-sided. The on-chain fee
-  meter (§4b) shows rung 0 earning while rungs 1–2 read exactly 0 — GME rung 0
-  took 0.002039 USDG in 214m, NVDA rung 0 0.000297 in 136m, every outer rung
-  nothing. Two thirds of the capital sat below a market that never came for it.
+  meter (§4b) shows rung 0 earning while rungs 1–2 read exactly 0 — GME and
+  NVDA rung 0 both earned, every outer rung nothing. Two thirds of the capital sat below a market that never came for it.
 
 So the shape is **one rung**: all of the commit at the tick-spacing boundary
 adjacent to spot, where the fees demonstrably were, re-pinned by the loop

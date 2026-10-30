@@ -87,7 +87,7 @@ Every element of `payload` is one candidate pool with these fields:
 
 | Field | Meaning |
 |-------|---------|
-| `mode` | `casual` (30m plays), `multiday` (24h+ holds), `turnover` (30m fee-capture on small high-fee pools) or `pulse` (5m trending, a port of the reference bot's own screen) — same for every element; drives which budget/params the agent uses |
+| `mode` | `casual` (30m plays), `multiday` (24h+ holds), `turnover` (30m fee-capture on small high-fee pools) or `pulse` (5m trending) — same for every element; drives which budget/params the agent uses |
 | `timeframe` | discovery timeframe the pool trended on |
 | `pool` | Meteora DLMM pool address |
 | `name` | pair name (e.g. `CATWIF-SOL`) |

@@ -53,7 +53,7 @@ type Config struct {
 	EnableCasual   bool
 	EnableMultiday bool
 	EnableTurnover bool
-	// EnablePulse runs the ported reference-bot screen (5m/trending)
+	// EnablePulse runs the pulse screen (5m/trending)
 	// alongside turnover (30m/all), so entries are the union of both screens
 	// instead of only the pools turnover's window happens to surface.
 	EnablePulse bool
@@ -187,7 +187,7 @@ type Config struct {
 	RobinhoodDeployModes map[string]bool
 	// RobinhoodExecutorCmd is the whitespace-split command line for
 	// uni_executor.js, e.g.
-	// "node /home/ubuntu/.hermes/profiles/<profile>/skills/solana-dlmm/scripts/uni_executor.js".
+	// "node <profile>/skills/solana-dlmm/scripts/uni_executor.js".
 	// Wallet keys stay in the profile .env — the executor loads them itself.
 	RobinhoodExecutorCmd string
 	// RobinhoodV4ExecutorCmd is the same for uni_v4_executor.js, the v4
@@ -202,7 +202,7 @@ type Config struct {
 	// (robinhood.ComputeDeployAmount) — the venue's port of the Solana
 	// pipeline's compute_deploy_amount. Replaces the old fixed
 	// ROBINHOOD_DEPLOY_AMOUNT_WETH, which minted a flat 0.003 WETH regardless of
-	// wallet size (~17% of a 0.0174 WETH stack) and never grew with the balance.
+	// wallet size (a small fraction of it) and never grew with the balance.
 	RobinhoodSize robinhood.SizeParams
 	// RobinhoodSizeUSDG sizes USDG-quoted v4 deploys from the live USDG
 	// balance — same shape, dollar units (USDG's 6 decimals are already

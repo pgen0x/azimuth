@@ -180,20 +180,11 @@ def get_meteora_portfolio_positions(wallet_address):
 # it exists to catch, so it fired at PnL -15.64% and -8.34% on a rule written
 # for -5%. Between -5% and -25% nothing closed unconditionally. Six closes
 # produced the entire day's loss while 33 others returned ~0.
-# -8.0 is the value used by a reference LP running the same screen and the same
-# trailing pair (1.2/0.6) at materially better win rate over the same window.
-# Its SL carries no confirmation leg either — that is the point: an
-# unconditional floor is what the fast rails were standing in for and could not
-# deliver. Caveat for whoever revisits this: that reference also runs an LLM
-# review over every open position on a 5m cadence, which this bot has no
-# equivalent of, so an unknown share of its edge is judgment rather than
-# threshold. Treat -8.0 as calibrated, not proven.
-# Was -12.0 from 2026-08-26 to 2026-08-31, on the argument that "that
-# reference's own config defaults to -50%". That premise read the reference's
-# CODE DEFAULT (config.js: `u.stopLossPct ?? -50`), not the config it actually
-# runs: its user-config.json sets `stopLossPct: -8`, so the live reference has
-# been at -8 the whole time and the -50 was never a threshold anyone traded.
-# Restored to -8.0 to match. This constant is a FALLBACK only — SOUL.md
+# -8.0 is an unconditional floor with no confirmation leg — that is the point:
+# an unconditional floor is what the fast rails were standing in for and could
+# not deliver. Treat -8.0 as calibrated, not proven.
+# Was -12.0 from 2026-08-26 to 2026-08-31, on a misread code default (-50%)
+# rather than a live-traded threshold. Restored to -8.0. This constant is a FALLBACK only — SOUL.md
 # section 9 "Hard Stop-Loss" governs at runtime and already reads -8.0, which
 # is why live closes journal "Hard Stop-Loss hit (-10.07% <= -8.0%)" while this
 # line said -12. Aligning the two so a profile without a SOUL.md does not
@@ -214,9 +205,9 @@ OOR_DOWNSIDE_MAX_MINUTES = 5
 # fee-capture capital, so it re-centers after minutes — not the multi-hour
 # patience of the thesis modes. The 20s monitor loop makes this cadence real.
 # 2 -> 5 on 2026-08-12: the 21-close sample that justified it (all fired at
-# 2.1-2.2m, averaged +0.0006 SOL) was an aggregate mean that hid tail
+# 2.1-2.2m, averaged near flat) was an aggregate mean that hid tail
 # variance. 2026-08-21: URANUS-SOL rode the full unconditional 5.2m and
-# realized -8.5% of ticket (-0.0398 SOL) — this IS the token-side "falling
+# realized -8.5% of ticket — this IS the token-side "falling
 # bag" direction (turnover_max_oor_minutes governs oor_token_side, see the
 # oor_limit_minutes selection below), so letting it ride 5m rather than
 # cutting near 2m converts idle-capital churn into a directional loss
@@ -229,15 +220,15 @@ TURNOVER_MAX_OOR_MINUTES = 3
 # against the chance price walks back INTO range (fees resume) or keeps
 # running (pump-out). Measured over the 24h to 2026-08-10: turnover's six
 # SOL-side OOR closes averaged +0.01% — it exits before a single fee accrues —
-# while the reference bot waiting 5m on the same event averaged +0.04% and the
-# pumps it held instead of cutting averaged +0.38% (n=10). Token-side keeps
+# while waiting 5m on the same event measured +0.04% and the pumps held
+# instead of cut averaged +0.38% (n=10). Token-side keeps
 # the 2m fuse: there the position IS a falling token bag.
 TURNOVER_SOL_SIDE_OOR_MINUTES = 5
 # Turnover rebalance circuit breaker: re-centers stop once the pool's cumulative
 # realized PnL across rebalance closes (24h window) drops below this many SOL.
 # Was -0.05 while the count backstop sat at 20/24h; neither ever fired. Measured
-# over the 24h to 2026-08-14: the worst single pool lost -0.0288 SOL across its
-# whole re-center run, so a -0.05 floor cannot be reached before the run ends on
+# over the 24h to 2026-08-14: the worst single pool's whole re-center run lost
+# well short of -0.05, so a -0.05 floor cannot be reached before the run ends on
 # its own. Set below the observed per-pool damage so it stops a losing pool
 # DURING the run rather than after it.
 TURNOVER_CB_LOSS_SOL = -0.015
@@ -248,14 +239,13 @@ TURNOVER_CB_LOSS_SOL = -0.015
 # Niles -0.77 +2.90 -4.48; cc +0.14 -4.57; MARIO64 -0.03 -5.21). The re-pin is
 # a bid resting under a market: while the pool oscillates it earns ~0.1%, and
 # when the pool finally trends it hands back 4-5% at once. Bounding the run
-# bounds how many times we offer that trade. 3/24h matches the reference bot's
-# oorCooldownTriggerCount, which works the same book and never took a downtrend
-# close in the same window.
+# bounds how many times we offer that trade. 3/24h is the smallest budget that
+# still lets an oscillating pool re-pin through a normal day.
 TURNOVER_RECENTER_STRIKES = 3
 # Exhausting the strikes cools the POOL, not just the symbol — the symbol
 # cooldown is as short as 15m after a profitable exit, and the daemon would
-# re-signal the same pool straight back into a fresh run. Matches the reference
-# bot's oorCooldownHours and the pipeline's own repeat-deploy churn guard
+# re-signal the same pool straight back into a fresh run. Matches the
+# pipeline's own repeat-deploy churn guard
 # (dlmm_pipeline.py: 3 deploys/24h -> 12h pool cooldown), which never saw these
 # runs because a monitor re-center never passes through the deploy path.
 TURNOVER_STRIKE_COOLDOWN_HOURS = 12
@@ -274,7 +264,7 @@ TURNOVER_STRIKE_COOLDOWN_HOURS = 12
 # +0.13% (<30m) / +0.24% (<60m) / +0.10% (<120m) / -0.19% (>=120m), win rate
 # 68.4 / 69.7 / 51.3 / 42.9. A 60m bar cannot touch the two best buckets — they
 # closed on their own before it — so its whole blast radius is the 67 closes
-# (14.5%) that ran past 60m, whose combined realized PnL is -0.0064 SOL.
+# (14.5%) that ran past 60m, whose combined realized PnL is slightly negative.
 # NOT an exit: the reason string carries no loss or income-death keyword, so a
 # PROFITABLE close routes straight back through is_turnover_churn and re-pins at
 # the current bin, while a losing one takes the normal exit + cooldown. That
@@ -292,25 +282,22 @@ TRAILING_DROP_PCT = 1.5
 # band, so a 5% trigger never arms and the mode's only profitable exit becomes an
 # upside-OOR pump-out. That starves is_turnover_churn (which requires
 # realized_sol > 0) and collapses the cadence back to the cooldown path. Values
-# match the reference bot's live closes ("peak 1.45% -> current 0.64%"), which
-# turn ~30 closes/day. Turnover also skips the fee/TVL trigger scaling below: its
+# sit inside the observed fee-capture win band (peaks ~1.45% giving back to
+# ~0.64%), a pair that supports ~30 closes/day. Turnover also skips the fee/TVL trigger scaling below: its
 # income is fee_pct x churn, not price, so a yield-scaled price trigger is the
 # wrong axis — and that scaler's 2.0 floor would swallow a 1.2 trigger anyway.
 TURNOVER_TRAILING_TRIGGER_PCT = 1.2
 TURNOVER_TRAILING_DROP_PCT = 0.6
 MIN_FEE_TVL_24H_LIMIT = 1.0
 # ...and 1.0% is a solvency bar, not an earning bar: at that pace a position pays
-# back 1% of TVL a day, of which our share is our liquidity over the pool's. The
-# reference bot holds the same book to 7% and turns its capital over twice as
-# fast for it (median hold 20.6m against this daemon's 33m, 47 closes/24h against
-# 27, on FEWER slots — 3 against turnover 2 + pulse 4). Slots were never the
-# constraint here: the 24h to 2026-08-14 logged ZERO "Max positions reached"
+# back 1% of TVL a day, of which our share is our liquidity over the pool's. A
+# fee-capture ticket earns by turning over (median hold was 33m, 27 closes/24h).
+# Slots were never the constraint here: the 24h to 2026-08-14 logged ZERO "Max positions reached"
 # aborts and 196 cycles of "already exposed to all winners", so throughput is
 # bounded by how long each ticket sits, and 11 of 27 closes sat past 54m. This
 # bar is what ends that sit. Tight-scoped, not global: a multiday ticket is
 # supposed to hold through a slow window, a fee-capture one is not. Set below
-# the reference's 7% because our exit also has the fee-pace-death rail underneath
-# it, which reads realized SOL rather than the pool's advertised ratio.
+# 7% because the exit also has the fee-pace-death rail underneath it, which reads realized SOL rather than the pool's advertised ratio.
 MIN_FEE_TVL_24H_TIGHT_LIMIT = 5.0
 MIN_AGE_BEFORE_YIELD_CHECK = 60.0
 # ...but 60m was calibrated on modes that enter a pool with hours of history.
@@ -363,8 +350,8 @@ SUSPECT_PNL_RETRY_TTL_SECS = 300
 # The legacy executor `pnl` reads the same not-yet-indexed API, so both
 # sides agreed on -100.00% three times in 48h (2026-08-17..18) and the EMERGENCY SL
 # closed three healthy positions at age 0.0-0.1m. Every one returned its full deposit
-# on-chain (deposit == withdrawal, 0.0000 SOL realized) while the journal booked
-# -1.41 SOL of loss that never happened — money the stats, the weight learner and the
+# on-chain (deposit == withdrawal, nothing realized) while the journal booked
+# three full-size losses that never happened — money the stats, the weight learner and the
 # daily book all then treated as real. Under this age an unverified catastrophic
 # read remains a skipped tick. A complete native inventory/funding proof can now
 # confirm a genuine loss even during this grace period.
@@ -381,7 +368,7 @@ FAST_EXIT_M5_PCT = -3.0
 # UNDERWATER, which is where it used to be forbidden (the rule above requires an
 # armed trailing TP and a position still in profit). Measured over 7d of live
 # closes: the `downtrend` bucket is the single biggest real loss maker — 9 closes,
-# 0% win rate, -0.257 SOL — and it books an average -4.82% against triggers of
+# 0% win rate, net negative — and it books an average -4.82% against triggers of
 # -2.5%/-3.0%, because a one-sided SOL position that is underwater IS a token bag
 # and the close swaps it out at the bottom of the move. This leg does not wait for
 # the level; it fires while the pool is still moving. Tight modes only: their whole
@@ -394,16 +381,15 @@ FAST_EXIT_UNDERWATER_PNL_PCT = -1.5
 # leg at -2.5%/-3%. That gap is where the losers live: of the four worst closes in
 # the 24h to 2026-08-19, three peaked at +0.51%/+0.75%/+0.76% and were booked at
 # -4.12%/-3.32%/-3.27%. Over 7d the rule below would have fired on 8 of the 12
-# closes worse than -1% (which booked -0.133 SOL between them) against 2 eventual
-# winners worth +0.011 SOL that dipped that far and recovered — a 12:1 trade.
+# closes worse than -1% against 2 eventual winners that dipped that far and
+# recovered — roughly a 12:1 trade by realized value.
 # Deliberately NOT a take-profit: the giveback lands near flat, well under
 # TRAILING_MIN_LOCK_PCT, so it must never route through the TP/cooldown path.
 # Widened 0.5/1.5 -> 2.5/2.5 on 2026-08-26: the 08-19 sample that motivated the
-# tight version was a 12:1 edge, but the 24h/7d comparison against a reference
-# bot running the same screen showed the opposite on Sue-SOL/Token-SOL/PANTS-SOL
-# — the same pool re-pinned, stopped on a dip that then reversed into a large
-# win the reference caught. That reference arms its own trailing rail at +3%
-# peak, not +0.5%; 2.5/2.5 moves partway there without fully matching it.
+# tight version was a 12:1 edge, but later 24h/7d closes showed the opposite on
+# Sue-SOL/Token-SOL/PANTS-SOL — the same pool re-pinned, stopped on a dip that
+# then reversed into a large win. A +3% arm would have held them; 2.5/2.5 moves
+# partway there.
 # Re-tune again once enough post-change closes accumulate to judge the swap.
 GIVEBACK_ARM_PCT = 2.5
 GIVEBACK_DROP_PCT = 2.5
@@ -418,10 +404,10 @@ DOWNTREND_PNL_PCT = -5.0
 # -5.5% downtrend close costs 3-5 wins to repay — and it is the same
 # is_tight_tp_pos set that already gets its own trailing pair for that reason.
 # Measured 2026-08-08..08-13 on the live book: of 18 closes held past 120m, 15
-# left via fee-pace-death / low-yield / OOR and landed ~0.00 SOL (one +3.41% at
+# left via fee-pace-death / low-yield / OOR and landed near flat (one +3.41% at
 # 231m), so length is not the defect. The 3 that left through THIS rule booked
-# -0.0296 / -0.0274 / -0.0288 SOL — together more than every gain in the 30-120m
-# buckets, against +0.0037 SOL for the average turnover churn. MARIO64-SOL
+# three losses that together exceeded every gain in the 30-120m buckets, each
+# several times the average turnover churn gain. MARIO64-SOL
 # (2026-08-13, 170m, -5.21%) is the shape: fee/TVL 15.1% so low yield could not
 # fire, in range so no OOR fuse, peak under the 1.2% trigger so the ratchet never
 # armed — no rule could speak until -5%. The 1h leg stays at -5%: that threshold
@@ -445,20 +431,19 @@ DOWNTREND_PNL_ONLY_PCT = -6.0
 # tight tolerance never got to speak: a one-sided SOL position moves ~1/5 of the
 # token, so PnL crosses -2.5% long before DexScreener's h1 window has aggregated
 # the decline that authorises the close. Booked PnL was -2.80 / -4.48 / -4.57 /
-# -5.21% against a win band of 1.2-2.5% — -0.0821 SOL from those 4 closes against
-# +0.0374 SOL from the other 23, i.e. the whole day's loss. Only the PnL leg is
+# -5.21% against a win band of 1.2-2.5% — those 4 closes outweighed the other
+# 23 combined, i.e. the whole day's loss. Only the PnL leg is
 # knowable in real time, so for the tight modes it is the primary rail, not the
 # fallback: unconfirmed at -2.5% fires first, the confirmed leg at -2.5% only when
 # h1 happens to arrive early enough to matter, the -8% floor unchanged. Tightened
 # from -3.0 on 2026-08-30 per the daily proposal cron: "downtrend dump,
 # unconfirmed" was the worst non-thin exit rule over the preceding 7d (16 closes,
-# 0% win rate, -0.0724 SOL net) and none of those 16 recovered before -3%.
+# 0% win rate, net negative) and none of those 16 recovered before -3%.
 DOWNTREND_PNL_ONLY_TIGHT_PCT = -2.5
 # OOR-upside profit lock: above range the position is fully converted to SOL
 # (PnL frozen, fees stopped); at or above this banked gain, close immediately
 # instead of riding the OOR fuse and risking a retrace back into range.
-# Ported from the reference bot's "OOR upside + profitable → close IMMEDIATELY";
-# threshold sits above the round-trip swap cost lock, so any real banked gain
+# Rule: "OOR upside + profitable → close IMMEDIATELY"; threshold sits above the round-trip swap cost lock, so any real banked gain
 # closes rather than riding a retrace. Lowered 3.0 -> 1.5 on 2026-07-19: with
 # the sol_bidask ladder an upside OOR means the whole deploy sold into the
 # pump — consensus is "above range = you already won, bank it"; waiting only
@@ -473,12 +458,12 @@ OOR_RECOVERY_GRACE_MINUTES = 5
 # dying in real time — close IMMEDIATELY as an emergency (bypasses grace, AI
 # holds, indicator timing, report-only), same class as the emergency SL floor.
 # This is the fast tail defense that lets the hard SL sit wide: the 30d
-# portfolio-API tail (9 closes <= -8% = -1.10 SOL) came from dumps that gapped
+# portfolio-API tail (9 closes <= -8%) came from dumps that gapped
 # through slow rules. Fail-open: missing DexScreener m5 never fires it.
 RUG_M5_PCT = -20.0
 # Fee-pace-death exit: fees are the product; when they stop, the position is
 # pure token risk with no income. 26 of the 40 churn closes (-2..0%) in the
-# 30d ground truth earned < 0.01 SOL in fees — capital parked in pools that
+# 30d ground truth earned almost nothing in fees — capital parked in pools that
 # never printed. If unclaimed fees grow less than FEE_STALL_MIN_PCT of
 # position value across a FEE_STALL_WINDOW_MINUTES window (>= ~1%/day pace,
 # the community "close below 1%/day, no question" line), rotate out. Only
@@ -490,8 +475,8 @@ FEE_STALL_MIN_AGE_MINUTES = 45.0
 # Rug blacklist floor: a realized close at or below this is rug territory — no
 # re-entry thesis survives it in the near term. The mint and the deployer wallet
 # (when deploy metadata carries one) each go into a TTL'd Redis key, both
-# checked by the pipeline before any deploy. Ported from the reference bot's
-# token-blacklist / dev-blocklist, auto-added instead of agent-curated.
+# checked by the pipeline before any deploy. A token-blacklist / dev-blocklist,
+# auto-added instead of agent-curated.
 RUG_BLACKLIST_PNL_PCT = -30.0
 # Mint blacklist TTL. This was a permanent SADD until 2026-08-07. Discovery
 # recycles a small pool of tickers cycle after cycle, so a monotonic blocklist
@@ -506,8 +491,8 @@ RUG_BLACKLIST_TTL_SEC = int(float(os.environ.get("RUG_BLACKLIST_TTL_DAYS", "7"))
 # once is a rug factory and — unlike a mint — can mint again. That half-fix
 # reproduced the same starvation one level up. Measured 2026-08-12: the set held
 # 26 wallets at `ttl -1`, and TWO of them accounted for 99 rejected candidates,
-# including 4 of the 6 batches pulse sent that morning — while the comparison
-# agent, whose dev blocklist is empty, entered two of those same pools green.
+# including 4 of the 6 batches pulse sent that morning — while two of those
+# same pools went on to trade green.
 # A launchpad-scale deployer signs a large fraction of the venue's memecoins, so
 # banning it forever bans a slice of the universe forever, and the rejects are
 # silent exactly like the mint case. Longer than the mint window because the
@@ -516,8 +501,8 @@ DEV_BLOCKLIST_TTL_SEC = int(float(os.environ.get("DEV_BLOCKLIST_TTL_DAYS", "30")
 # Liquidity collapse required to turn a rug_event into a BAN — never into an
 # exit, which stays instant and unconditional. The velocity gate reads a 5m
 # PRICE candle, and -20% in 5m on a memecoin is a Tuesday: of the 19
-# rug-velocity bans live on 2026-08-16, the comparison agent had entered
-# several of the same pools green. A rug is liquidity LEAVING, so that is what
+# rug-velocity bans live on 2026-08-16, several of the same pools went on to
+# trade green. A rug is liquidity LEAVING, so that is what
 # a ban has to see. Measured against the entry TVL the pipeline snapshots into
 # meta["signal"]["tvl"].
 RUG_LIQ_DROP_PCT = float(os.environ.get("RUG_LIQ_DROP_PCT", "-50.0"))
@@ -1072,7 +1057,7 @@ def implausible_change(pct):
     all. Those five false reads each wrote a 7d mint ban and a 30d deployer ban
     (maybe_blacklist_rug takes the rug_event path, which ignores PnL by
     design), and that blacklist is what starved Solana entries for 12h on
-    2026-08-14 while a comparison bot entered the same pools green.
+    2026-08-14 while the same pools traded green.
 
     The source is pair confusion, not corruption: DexScreener aggregates every
     pool of a token, and a dead husk beside a live pool quotes a real -99.96%
@@ -1202,8 +1187,8 @@ def position_gone_onchain(wallet_address, pos_addr, attempts=2, gap_s=6):
     return all(verdicts)
 
 # A position still holding this much quote after a close that reported success
-# did not actually close. Well under any real ticket (the smallest observed is
-# ~0.16 SOL). This is a position-close verification threshold, separate
+# did not actually close. Well under any real ticket (above the 0.10 SOL
+# minimum deploy). This is a position-close verification threshold, separate
 # from the wallet residual swap floor configured by --min-swap-sol.
 CLOSE_RESIDUAL_DUST_SOL = 0.005
 
@@ -1256,8 +1241,8 @@ def close_position(pos_addr, env_prefix="", wallet_address=None, is_dry_run=Fals
     The inverse — a reported SUCCESS the chain does not confirm — was trusted
     blind until 2026-09-01, and that is how STACY-SOL booked -20.51%: the 17:55
     fast-out exit on 2026-08-31 printed "✅ Successfully closed", wrote its
-    journal row and dropped the Redis key while 0.2511 SOL of liquidity was
-    still in the position. Nothing managed it for 68 minutes; the orphan reclaim
+    journal row and dropped the Redis key while a large share of the ticket's
+    liquidity was still in the position. Nothing managed it for 68 minutes; the orphan reclaim
     found it again at -23.73%. The entry path has verified against the chain
     since the 2026-07-06 fabricated-deploy incident (dlmm_pipeline.py confirms
     the position exists before printing 🚀 DEPLOYED) — this is that guard's
@@ -2387,9 +2372,8 @@ def main():
         # stretch to 10m while a bid_ask position holds a full, decaying token
         # bag. That made the exit FAST on the harmless side (above range = 100%
         # SOL, PnL frozen, nothing decays) and SLOW on the side that actually
-        # loses money — the same asymmetry the reference bot found and fixed in
-        # its own rule 3 ("dumped far below range ... A gap this far past the
-        # lower edge is not drift — close it without waiting the clock").
+        # loses money. A gap this far past the lower edge is not drift — close
+        # it without waiting the clock.
         # At this distance price has crossed the WHOLE range plus
         # MAX_BINS_PUMPED_ABOVE bins, so there is no re-entry to wait for and
         # the token side decays every tick it is held. Same bin threshold as
@@ -2432,9 +2416,8 @@ def main():
                 minutes_oor = (now - oor_start) / 60.0
                 print(f"🔴 Position {pair} has been Out of Range for {minutes_oor:.1f} minutes.")
                 if minutes_oor >= oor_limit_minutes:
-                    # 4b. Downside recovery grace (deterministic port of the
-                    # reference bot's "OOR downside + volume recovering →
-                    # consider waiting"): if the 5m candle is green at fuse
+                    # 4b. Downside recovery grace ("OOR downside + volume
+                    # recovering → consider waiting"): if the 5m candle is green at fuse
                     # expiry, price is walking back toward the range — one
                     # 5-minute extension instead of closing into the bounce.
                     # One-shot per OOR episode (flag resets on range re-entry);
@@ -2457,8 +2440,8 @@ def main():
                                         f"{oor_limit_minutes}m) — position fully converted to token, selling before decay")
                     else:
                         close_reason = f"Out of Range for {minutes_oor:.1f}m (limit {oor_limit_minutes}m)"
-            # 4a. OOR-upside profit lock (ported from the reference bot's "OOR
-            # upside + profitable → close IMMEDIATELY"). Above range the
+            # 4a. OOR-upside profit lock ("OOR upside + profitable → close
+            # IMMEDIATELY"). Above range the
             # position has fully converted to SOL: PnL is frozen and fees have
             # stopped, so the fuse only buys a chance for price to fall back
             # INTO range — which, with a strong win banked, hands the profit
@@ -2570,7 +2553,7 @@ def main():
 
         # 5e. Fee-pace-death exit: fees are the product — when the stream stops,
         # the position is pure token risk earning nothing (26 of the 30d
-        # ground truth's 40 churn closes earned < 0.01 SOL in fees). Snapshot
+        # ground truth's 40 churn closes earned almost nothing in fees). Snapshot
         # unclaimed fees in meta; if growth across the window is below
         # FEE_STALL_MIN_PCT of position value (~1%/day pace), rotate the
         # capital out. Requires live position fee data (fail-open),
@@ -3104,8 +3087,8 @@ def main():
                     cd_label = f"{cooldown_secs // 60}m" if cooldown_secs < 3600 else f"{cooldown_secs // 3600}h"
                     print(f"🚫 Re-entry cooldown set for {base_symbol_cd}: {cd_label} (reason: {'profitable exit' if cooldown_secs == 900 else ('dump/momentum' if is_dump_close else 'normal exit')})")
 
-                # Low-yield exits also cool the POOL itself for 4h (ported from
-                # the reference bot's low-yield pool cooldown): the symbol cooldown above
+                # Low-yield exits also cool the POOL itself for 4h (a low-yield
+                # pool cooldown): the symbol cooldown above
                 # expires in 1h, but a pool whose fee flow already decayed won't
                 # recover that fast — without this we re-enter the same fee-dead
                 # pool on the next signal and churn.

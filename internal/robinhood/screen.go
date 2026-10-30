@@ -168,7 +168,7 @@ var Mature = ModeParams{
 // the times it did.
 //
 // The diagnosis is NOT that one-sided does not work. The on-chain fee meter
-// shows the rung NEAREST spot earning (GME rung 0: 0.002039 USDG/214m) while
+// shows the rung NEAREST spot earning (GME rung 0) while
 // the outer rungs of the same wall read exactly zero — two thirds of a ladder's
 // capital sat where the market never came. This mode concentrates the commit in
 // the one rung that earns and keeps it there; the re-center loop in

@@ -1,7 +1,8 @@
+# Optional. install.sh renders __PROFILE__ into <profile>/systemd/; copy from there.
 [Unit]
 Description=Azimuth Solana transaction accounting (read-only RPC)
 
 [Service]
 Type=oneshot
-ExecStart=/usr/bin/node %h/.hermes/profiles/solanza/skills/solana-dlmm/scripts/dlmm_executor.js accounting
+ExecStart=/usr/bin/node __PROFILE__/skills/solana-dlmm/scripts/dlmm_executor.js accounting
 TimeoutStartSec=180

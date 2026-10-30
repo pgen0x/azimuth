@@ -25,7 +25,7 @@ type Runner struct {
 }
 
 // New builds a Runner. execCmd is a whitespace-split command line, e.g.
-// "node /home/ubuntu/.hermes/profiles/solanza/skills/solana-dlmm/scripts/uni_executor.js"
+// "node <profile>/skills/solana-dlmm/scripts/uni_executor.js"
 // ("" disables direct deploy; paths with spaces are not supported).
 func New(execCmd string, timeout time.Duration) *Runner {
 	return &Runner{execCmd: strings.Fields(execCmd), timeout: timeout}
@@ -231,7 +231,7 @@ type SizeParams struct {
 // whole point: each open position shrinks the base for the next one, so total
 // exposure tapers as positions stack instead of marching linearly to a zero
 // balance — and it scales up as the wallet grows, with no config edit. A fixed
-// 0.003 WETH size was deploying only ~17% of a 0.0174 WETH wallet.
+// WETH size deployed only a small, shrinking fraction of the wallet.
 //
 // Returns 0 to mean SKIP THIS DEPLOY — callers must treat it as a skip, never
 // as "deploy nothing". A sub-floor position isn't worth its gas and swap costs,
@@ -288,8 +288,8 @@ func (t Tenure) FillPct() float64 {
 // Monotonic in both directions, and it is the same fact twice: a pool that
 // survives many re-centers is genuinely oscillating, which is the whole thesis,
 // while a pool that fills on its first or second cycle was in a downtrend and
-// we were its exit liquidity. The two long-tenured pools carried +0.0239 WETH;
-// every other pool together lost -0.028.
+// we were its exit liquidity. The two long-tenured pools carried a gain that
+// every other pool together more than gave back.
 //
 // The cost of that was allocation, not selection: the 18 pools in the two
 // losing buckets absorbed 54% of the spend at full size, because a pool nobody
