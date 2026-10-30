@@ -237,8 +237,9 @@ def observed_fee_yield(data):
 
 # The young in-range stop-loss grace needs the 24h fee rate. Native-first valuation skips the
 # per-position indexed read that used to supply it, so the SL branch fetches it on its own, bounded,
-# and only for that non-emergency decision. A failed or unknown read grants no grace.
-SL_GRACE_FEE_TIMEOUT_SECS = 10
+# and only for that non-emergency decision. A failed or unknown read grants no grace. The bound is the
+# base read's own 30 s (run_command_json's default): a shorter one would close where the base deferred.
+SL_GRACE_FEE_TIMEOUT_SECS = 30
 
 
 def sl_grace_fee_context(data):

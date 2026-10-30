@@ -99,6 +99,11 @@ class StopLossGraceDifferential(unittest.TestCase):
                 self.assertFalse(scope['emergency_close'])
                 self.assertEqual(scope['pnl_pct'], pct)  # native mark still decides the P&L
                 self.assertEqual(len(reads), 1); self.assertEqual(timeouts, [monitor.SL_GRACE_FEE_TIMEOUT_SECS])
+                # Strict parity: the base waited for this read with run_command_json's default timeout.
+                import inspect
+                self.assertEqual(monitor.SL_GRACE_FEE_TIMEOUT_SECS,
+                                 inspect.signature(monitor.run_command_json).parameters['timeout'].default)
+                self.assertEqual(monitor.SL_GRACE_FEE_TIMEOUT_SECS, 30)
                 self.assertTrue(scope['fee_yield_available']); self.assertEqual(scope['fee_per_tvl_24h'], 10.0)
 
     def test_unknown_or_low_fee_is_never_treated_as_healthy(self):
