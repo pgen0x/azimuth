@@ -409,9 +409,11 @@ async function reconcilePendingSwap(connection, pendingPath, label = "Swap") {
   const status = (await connection.getSignatureStatuses(
     [pending.signature], { searchTransactionHistory: true }
   )).value[0];
-  if (status?.err) {
-    if (["confirmed", "finalized"].includes(status.confirmationStatus))
-      require("./dlmm_route_retry").recordFailure(pendingPath, pending.routeContext, status.err);
+  // An error is a verdict only once confirmed: a "processed" failure can be dropped
+  // with its block and the same signed bytes can still land before expiry, so it
+  // stays pending (below) and no new swap is signed against the same inventory.
+  if (status?.err && ["confirmed", "finalized"].includes(status.confirmationStatus)) {
+    require("./dlmm_route_retry").recordFailure(pendingPath, pending.routeContext, status.err);
     fs.rmSync(pendingPath, { force: true });
     return null;
   }

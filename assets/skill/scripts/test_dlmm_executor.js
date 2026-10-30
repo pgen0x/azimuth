@@ -848,6 +848,21 @@ vm.runInNewContext("const productionExitTransport=confirmExitTransaction;confirm
   assert.equal(await reconcilePendingSwap(new Connection(), swapMarker), null);
   assert.equal(require('./dlmm_route_retry').excluded(swapMarker, 'test-route'), 'Hadron');
   fs.rmSync(swapMarker+'.route');
+  // A failure seen only at "processed" is not a verdict: the block can be dropped
+  // and the same signed bytes still land before expiry. Keep the marker and report
+  // pending so no new swap is signed, and record no route exclusion from it.
+  fs.writeFileSync(swapMarker, JSON.stringify({signature:'processed-failure', lastValidBlockHeight:150,
+    routeContext:{position:'test-route',dex:'Hadron',jupiter_instruction:2}}));
+  signatureStatus = {confirmationStatus:'processed',err:{InstructionError:[2,{Custom:6001}]}};
+  const processedFailure = await reconcilePendingSwap(new Connection(), swapMarker);
+  assert.equal(processedFailure?.pending, true); assert.equal(processedFailure.txHash, 'processed-failure');
+  assert.ok(fs.existsSync(swapMarker));
+  assert.ok(!fs.existsSync(swapMarker+'.route'));
+  // Once the failure is confirmed, the marker clears and the retry may proceed.
+  signatureStatus = {confirmationStatus:'confirmed',err:{InstructionError:[2,{Custom:6001}]}};
+  assert.equal(await reconcilePendingSwap(new Connection(), swapMarker), null);
+  assert.ok(!fs.existsSync(swapMarker));
+  fs.rmSync(swapMarker+'.route', {force:true});
   fs.writeFileSync(swapMarker, JSON.stringify({ signature: "expired", lastValidBlockHeight: 150 }));
   signatureStatus = null; height = 151;
   assert.equal(await reconcilePendingSwap(new Connection(), swapMarker), null);
