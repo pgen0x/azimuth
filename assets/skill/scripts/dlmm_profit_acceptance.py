@@ -59,7 +59,9 @@ def position_profit_acceptance(accounting, entries, start, end):
             upper = cash_sign_upper_bound(sign_proofs[root][0], chain, end)
             if upper is not None:
                 row.update(cash_upper_lamports=upper, outcome='nonpositive',
-                           reason='proved_no_retained_wallet_funding; upper_only; final_cleanup_cost_unknown')
+                           reason=('proved_maximum_retained_rent_credit; upper_only; final_cleanup_cost_unknown'
+                                   if sign_proofs[root][0].get('max_future_rent_credit_lamports') else
+                                   'proved_no_retained_wallet_funding; upper_only; final_cleanup_cost_unknown'))
                 continue
         if len(groups[root]) != 1:
             row['reason'] = 'owned_rent_proof_missing_or_ambiguous'

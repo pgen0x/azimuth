@@ -345,6 +345,11 @@ def report(profile, as_of=None):
     # Settlements can only consume inventory established by earlier finalized
     # transactions. Missing facts remain unresolved and cannot supply inventory.
     events = sorted(events, key=lambda e:(facts.get(e["signature"], {}).get("slot", float("inf")), e.get("ts", 0)))
+    # Retain every row (including duplicates) for the existing proof checks,
+    # but avoid rescanning the entire wallet journal for each position.
+    events_by_position = {}
+    for event in events:
+        events_by_position.setdefault(event.get("position"), []).append(event)
     seen = {}
     for event in events:
         signature = event["signature"]
@@ -402,7 +407,10 @@ def report(profile, as_of=None):
             c["reasons"].append("external_token_inflow_requires_attribution")
         if c["pending_signatures"]:
             c["reasons"].append("unresolved_transactions")
-        if any(p not in closes for p in c["positions"]):
+        recovered_closes = {p: proved_recorded_close(p, events_by_position.get(p, []), facts)
+                            for p in c["positions"] if p not in closes}
+        c["unjournaled_close_evidence"] = {p: signature for p, signature in recovered_closes.items() if signature}
+        if any(not signature for signature in recovered_closes.values()):
             c["reasons"].append("open_or_unjournaled_positions")
         if c["token_deltas_raw"]:
             c["reasons"].append("token_inventory_requires_valuation")
@@ -416,11 +424,12 @@ def report(profile, as_of=None):
                 or as_of - coverage.get("ts", 0) > 600):
             c["reasons"].append("wallet_wide_coverage_not_verified")
         for position in c["positions"]:
-            kinds = {e.get("kind") for e in events if e.get("position") == position and e.get("signature") in facts
+            position_events = events_by_position.get(position, [])
+            kinds = {e.get("kind") for e in position_events if e.get("signature") in facts
                      and facts[e["signature"]].get("landed") is not False and not facts[e["signature"]].get("failed")}
             if not {"deploy", "close"} <= kinds or not any(
-                    facts[e["signature"]].get("position_account_closed") for e in events
-                    if e.get("position") == position and e.get("signature") in facts):
+                    facts[e["signature"]].get("position_account_closed") for e in position_events
+                    if e.get("signature") in facts):
                 c["reasons"].append("entry_or_close_evidence_missing")
                 break
         if c["root_chain_id"] == "unattributed":
@@ -448,16 +457,47 @@ def report(profile, as_of=None):
         change = nav - first["nav_sol"] - external
     rent_groups = rent_refund_groups(list(chains.values()), facts,
                                    rows(memories / "dlmm_rent_history.jsonl"), as_of)
+    recovered_closes = []
+    for c in chains.values():
+        for position, signature in c["unjournaled_close_evidence"].items():
+            entry, fact = entries.get(position, {}), facts[signature]
+            stamp = fact.get("block_time")
+            if (not entry.get("pool") or type(stamp) not in (int, float)
+                    or not math.isfinite(stamp) or not 0 < stamp <= as_of):
+                continue
+            recovered_closes.append(dict(position=position, pool=entry["pool"],
+                root_chain_id=c["root_chain_id"], ts=stamp, pnl_sol=None,
+                source="finalized_close_evidence", signature=signature))
     return {"basis": "recorded_finalized_wallet_cash_flows", "nav_sol": nav,
             "nav_snapshot": latest, "flow_adjusted_wealth_change_sol": change,
             "unvalued_external_token_inflows": unvalued_inflows,
             "note": "Wallet delta already includes network fees and net account rent movements; do not subtract fees again. LP PnL uses Meteora valuations. Neither is portfolio NAV. Rent, inventory drift and swap attribution require further reconciliation.",
             "pooled_settlements": pooled_settlements(chains.values()),
             "rent_refund_groups": rent_groups,
+            "recovered_closes": recovered_closes,
             "nonpositive_cash_upper_bounds": nonpositive_cash_upper_bounds(
                 list(chains.values()), facts, rent_groups, as_of),
             "chains": sorted(chains.values(), key=lambda c: c["root_chain_id"])}
 
+
+
+def proved_recorded_close(position, events, facts):
+    """Finalized account deletion can prove closure despite a missing report."""
+    records = [(e, facts.get(e.get("signature"), {})) for e in events
+               if e.get("position") == position]
+    valid = [(e, f) for e, f in records
+             if isinstance(e.get("wallet"), str) and e["wallet"]
+             and f.get("wallet") == e["wallet"] and f.get("failed") is False
+             and f.get("landed") is not False
+             and type(f.get("slot")) is int and f["slot"] > 0]
+    deploys = [(e, f) for e, f in valid if e.get("kind") == "deploy"]
+    if not deploys or len({e.get("wallet") for e, _ in records}) != 1:
+        return None
+    latest_deploy = max(f["slot"] for _, f in deploys)
+    closed = [(e, f) for e, f in valid if e.get("kind") == "close"
+              and f.get("event_position") == position
+              and f.get("position_account_closed") is True and f["slot"] >= latest_deploy]
+    return max(closed, key=lambda pair: pair[1]["slot"])[0]["signature"] if closed else None
 
 
 def settlement_inventory(profile, position, mint, wallet):
@@ -470,7 +510,10 @@ def settlement_inventory(profile, position, mint, wallet):
     c = matches[0]
     if c["pending_signatures"]:
         return dict(refusal, pending_signatures=c["pending_signatures"])
-    if set(c["reasons"]) - {"token_inventory_requires_valuation", "wallet_wide_coverage_not_verified"}:
+    unjournaled = ("open_or_unjournaled_positions" in c["reasons"]
+                   or bool(c.get("unjournaled_close_evidence")))
+    if set(c["reasons"]) - {"token_inventory_requires_valuation", "wallet_wide_coverage_not_verified",
+                            "open_or_unjournaled_positions"}:
         return refusal
     memories = Path(profile) / "memories"
     entry = json.loads((memories / "dlmm_entries" / (position + ".json")).read_text())
@@ -484,6 +527,18 @@ def settlement_inventory(profile, position, mint, wallet):
     raw = int(c["token_deltas_raw"].get(mint, 0))
     if raw < 0:
         return refusal
+    if unjournaled:
+        # A crashed reporter must not strand a proved zero-token settlement.
+        # This exception never authorizes a sale or marks accounting complete.
+        if raw != 0 or not c["positions"] or not all(any(
+                e.get("kind") == "close" and e.get("position") == p
+                and (f := facts.get(e["signature"], {})).get("wallet") == wallet
+                and f.get("event_position") == p
+                and f.get("failed") is False and f.get("landed") is not False
+                and f.get("position_account_closed") is True
+                and type(f.get("slot")) is int and f["slot"] > 0
+                for e in events) for p in c["positions"]):
+            return refusal
     # Zero owned inventory completes settlement without touching legacy tokens.
     if raw == 0:
         return {"success": True, "amount_raw": "0"}
@@ -591,7 +646,9 @@ def pool_cash_history(closes, ledger, as_of):
     never an invented split. This does not change the mark-based risk floor.
     """
     by_pool = {}
-    for row in closes:
+    # Derived closure evidence supplies missing identities/times, never marks.
+    # A real journal row takes precedence for the same pool and position.
+    for row in [*ledger.get("recovered_closes", []), *closes]:
         if (row.get("dry_run") or not row.get("pool") or not row.get("position")
                 or not as_of - 30 * 86400 <= row.get("ts", 0) <= as_of):
             continue

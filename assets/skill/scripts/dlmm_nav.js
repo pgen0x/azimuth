@@ -2,6 +2,7 @@
 const fs = require('fs');
 const path = require('path');
 const {cashSignEvidence,cashSignRefresh} = require('./dlmm_cash_sign.js');
+const {retainedRentEvidence} = require('./dlmm_retained_rent.js');
 const SOL = 'So11111111111111111111111111111111111111112';
 const QUOTE_CACHE_MAX_SLOT_LAG = 2500;
 const TOKEN_PROGRAMS = ['TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA', 'TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb'];
@@ -411,6 +412,7 @@ function transactionFact(tx, wallet, signature, event) {
     rent_maintenance: maintenance,
     token_rent_evidence: tokenRentEvidence(tx,wallet),
     cash_sign_evidence: cashSignEvidence(tx,wallet,event?.position),
+    retained_rent_evidence: retainedRentEvidence(tx,wallet,event?.position),
     position_account_closed: !meta.err && !!event?.position && keys.includes(event.position) && meta.preBalances[keys.indexOf(event.position)]>0 && meta.postBalances[keys.indexOf(event.position)]===0,
     classification: event ? 'recorded_bot' : simpleTransfer ? 'external_transfer' : passiveNFT ? 'passive_nft_outside_scope' : passiveToken ? 'external_token_inflow' : maintenance ? 'rent_maintenance' : meta.err ? 'failed' : 'unclassified',
     refundable_rent_locked_lamports: rentLocked, nonrefundable_account_cost_lamports: permanentRent,
@@ -571,12 +573,16 @@ async function collect({dir, wallet, PublicKey, rpc, historyOnly=false, includeR
   const quoteMarksPath=path.join(dir,'dlmm_quote_marks.json');
   let quoteMarks={};
   try { quoteMarks=JSON.parse(fs.readFileSync(quoteMarksPath,'utf8')); } catch { /* first run */ }
+  // A cache skipped during selection must survive the remaining quote work.
+  // Otherwise it expires mid-loop, after its opportunity to be refreshed.
+  const quoteCacheRequiredAt=Math.max(now(),started+90);
   const freshQuote=info=>{
     const q=quoteMarks[info.mint];
     return q && q.schema_version===2 && q.in_amount===info.tokenAmount.amount
       && typeof q.out_lamports==='string' && /^[0-9]+$/.test(q.out_lamports)
       && Number.isFinite(Number(q.out_lamports)) && Number(q.out_lamports)>0
-      && Number.isSafeInteger(q.observed_at) && q.observed_at<=now() && now()-q.observed_at<=600
+      && Number.isSafeInteger(q.observed_at) && q.observed_at<=now()
+      && Math.max(now(),quoteCacheRequiredAt)-q.observed_at<=600
       && Number.isSafeInteger(q.slot) && q.slot>0 && Math.abs(slot-q.slot)<=QUOTE_CACHE_MAX_SLOT_LAG;
   };
   const missingAccounts=allAccounts.filter(a=>{

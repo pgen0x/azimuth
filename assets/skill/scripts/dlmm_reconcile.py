@@ -2,8 +2,8 @@
 """Reconcile the local DLMM close journal against the Meteora portfolio API.
 
 The journal (memories/dlmm_closes.jsonl) is self-reported by dlmm_monitor.py and
-historically missed ~95% of closes; the Meteora datapi portfolio endpoint is the
-ground truth. This script diffs the two and prints:
+can miss closes (it is self-reported); the Meteora datapi portfolio endpoint supplies an independent LP view.
+Neither this API nor its calendar measures wallet cash profit after settlement. This script diffs the two and prints:
 
   * overall wallet PnL from the API (SOL-denominated),
   * pools the API says closed in the window but have no journal entry,
@@ -23,10 +23,9 @@ import time
 import urllib.request
 
 PORTFOLIO_API = "https://dlmm.datapi.meteora.ag/portfolio"
-# Daily-aggregate ground truth: pnl = withdrawn + fees - deposit, straight from
-# on-chain flows. The bot's own Redis book (sol:dlmm:pnl:daily:*) is written from
-# Portfolio-API snapshots at close time and can drift (see the -100% suspect-read
-# guard in dlmm_monitor.py); this endpoint is what actually happened.
+# Daily LP aggregates: withdrawn value + fees - deposited value. These are
+# not wallet cash returns after swaps, network costs and account reserves.
+# The Redis book uses portfolio snapshots at close time and can also drift.
 CALENDAR_API = "https://portfolio.datapi.meteora.ag/chart/calendar"
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -60,7 +59,12 @@ def fetch_portfolio(wallet, days):
 def fetch_calendar(wallet, days):
     """Return [(utc_date, pnl_sol)] for the last `days` days from the calendar API."""
     today = datetime.datetime.now(datetime.timezone.utc).date()
-    months = {today.strftime("%Y-%m"), (today - datetime.timedelta(days=days)).strftime("%Y-%m")}
+    cutoff = today - datetime.timedelta(days=days)
+    month = cutoff.replace(day=1)
+    months = []
+    while month <= today:
+        months.append(month.strftime("%Y-%m"))
+        month = (month.replace(day=28) + datetime.timedelta(days=4)).replace(day=1)
     points = []
     for month in sorted(months):
         url = f"{CALENDAR_API}/{wallet}?month={month}"
@@ -68,7 +72,6 @@ def fetch_calendar(wallet, days):
         with urllib.request.urlopen(req, timeout=20) as resp:
             data = json.loads(resp.read())
         points += data.get("data_points") or []
-    cutoff = today - datetime.timedelta(days=days)
     out = []
     for p in points:
         d = datetime.date.fromisoformat(str(p.get("date_time", ""))[:10])
@@ -152,9 +155,9 @@ def main():
     tot_pnl = sum(f(p.get("pnlSol")) for p in pools)
     tot_fee = sum(f(p.get("totalFeeSol")) for p in pools)
     tot_dep = sum(f(p.get("totalDepositSol")) for p in pools)
-    print(f"=== Meteora API ground truth (last {cli.days}d, {len(pools)} pools) ===")
-    print(f"Net PnL: {tot_pnl:+.4f} SOL on {tot_dep:.2f} SOL deployed | fees earned {tot_fee:+.4f} SOL "
-          f"| price/IL component {tot_pnl - tot_fee:+.4f} SOL")
+    print(f"=== Meteora API LP valuation (last {cli.days}d, {len(pools)} pools) ===")
+    print(f"LP PnL: {tot_pnl:+.4f} SOL on {tot_dep:.2f} SOL deployed | fees earned {tot_fee:+.4f} SOL "
+          f"| non-fee LP component {tot_pnl - tot_fee:+.4f} SOL")
 
     by_pool = {p["poolAddress"]: p for p in pools}
     by_symbol = {}
@@ -199,10 +202,10 @@ def main():
     else:
         print("No PnL divergences beyond tolerance.")
 
-    # Internal book vs on-chain truth. Redis days are keyed in server-local time,
+    # Internal book vs API LP calendar. Redis days are keyed in server-local time,
     # calendar days in UTC, so individual days can legitimately differ at the
     # boundary — the window SUM is the signal.
-    print(f"\n=== Redis book vs calendar truth (last {cli.days}d) ===")
+    print(f"\n=== Redis book vs LP calendar (last {cli.days}d) ===")
     try:
         calendar = fetch_calendar(wallet, cli.days)
     except Exception as e:
@@ -211,7 +214,7 @@ def main():
     if calendar:
         cal_dates = [d for d, _ in calendar]
         book = redis_daily_book(cal_dates)
-        print(f"{'date (UTC)':<12} {'truth SOL':>10} {'book SOL':>10}")
+        print(f"{'date (UTC)':<12} {'LP SOL':>10} {'book SOL':>10}")
         for d, truth in calendar:
             b = book.get(d)
             print(f"{d:<12} {truth:>+10.4f} {(f'{b:+.4f}' if b is not None else '—'):>10}")
@@ -220,10 +223,10 @@ def main():
         delta = book_sum - truth_sum
         print(f"{'SUM':<12} {truth_sum:>+10.4f} {book_sum:>+10.4f}")
         if abs(delta) > 0.02:
-            print(f"⚠️ BOOK DRIFT: internal book differs from on-chain truth by {delta:+.4f} SOL "
-                  f"over {cli.days}d — phantom bookings or missed closes. Trust the truth column.")
+            print(f"⚠️ BOOK DRIFT: internal book differs from LP calendar by {delta:+.4f} SOL "
+                  f"over {cli.days}d — investigate booking or coverage differences.")
         else:
-            print("Book matches on-chain truth ✅")
+            print("Book matches LP calendar; wallet cash profit is not established.")
 
 
 if __name__ == "__main__":

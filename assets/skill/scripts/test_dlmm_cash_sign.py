@@ -33,6 +33,31 @@ def proofs(chains, facts, groups=None, cutoff=200):
 
 
 class CashSignTests(unittest.TestCase):
+    def test_retained_rent_caps_loss_without_booking_a_refund(self):
+        from dlmm_cash_sign import RENT_FACT_BASIS
+        chains, facts = fixture(-25)
+        facts['fund']['cash_sign_evidence'] = None
+        facts['fund']['retained_rent_evidence'] = dict(version=1, position='p', basis=RENT_FACT_BASIS,
+            max_future_rent_credit_lamports=20, funded_accounts=[dict(account='ata',mint='mint',lamports=20)])
+        proof, = proofs(chains, facts)
+        self.assertEqual(cash_sign_upper_bound(proof, chains[0], 200), -5)
+        self.assertEqual(chains[0]['wallet_delta_lamports'], -25)
+        self.assertIsNone(proof['cash_lower_lamports'])
+        ledger=dict(chains=chains,rent_refund_groups=[],nonpositive_cash_upper_bounds=[proof])
+        result=position_profit_acceptance(ledger,[dict(position='p',deployed_at=100)],100,200)
+        self.assertEqual(result['positions'][0]['cash_upper_lamports'], -5)
+        self.assertEqual(result['nonpositive_positions'], 1)
+        for mutate in [lambda p:p.update(max_future_rent_credit_lamports=19),
+                       lambda p:p.update(max_future_rent_credit_lamports=True),
+                       lambda p:p['funded_accounts'].append(dict(p['funded_accounts'][0])),
+                       lambda p:p['funded_accounts'][0].update(account='wallet'),
+                       lambda p:p['funded_accounts'][0].update(lamports=-20)]:
+            invalid=deepcopy(facts);mutate(invalid['fund']['retained_rent_evidence'])
+            self.assertEqual(proofs(chains,invalid),[])
+        chains[0]['wallet_delta_lamports']=-15
+        facts['close']['wallet_delta_lamports']+=10
+        self.assertEqual(proofs(chains,facts),[])  # Possible refund could make it positive.
+
     def test_only_an_upper_bound_no_exact_cash_or_rent_group(self):
         chains, facts = fixture()
         proof, = proofs(chains, facts)

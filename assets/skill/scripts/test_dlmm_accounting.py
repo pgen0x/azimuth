@@ -229,6 +229,17 @@ ledger = {"chains":[dict(root_chain_id=r,positions=[r],accounting_status="settle
 summary = pool_cash_history(closes,ledger,120)["P"]
 assert summary["prior_mark_pnl_sol"] == .03 and summary["prior_net_pnl_sol"] == -.003
 assert summary["prior_cash_roots"] == 2 and summary["prior_closes"] == 2
+recovered = deepcopy(ledger)
+recovered["recovered_closes"] = [dict(closes[0], pnl_sol=None, source="finalized_close_evidence")]
+restored = pool_cash_history(closes[1:], recovered, 120)["P"]
+assert restored["prior_closes"] == 2 and restored["prior_net_pnl_sol"] == -.003
+assert restored["prior_mark_pnl_sol"] is None
+assert pool_cash_history(closes, recovered, 120)["P"] == summary
+assert pool_cash_history(closes[1:], recovered, 99) == {}
+assert pool_cash_history(closes[1:], recovered, 120+31*86400) == {}
+incomplete_recovery = deepcopy(recovered)
+incomplete_recovery["chains"][0]["accounting_status"] = "incomplete"
+assert pool_cash_history(closes[1:], incomplete_recovery, 120)["P"]["prior_net_pnl_sol"] is None
 split = deepcopy(closes);split[1]["pool"]="Q"
 assert all(r["prior_net_pnl_sol"] is None for r in pool_cash_history(split,ledger,120).values())
 partial = deepcopy(ledger);partial["chains"][0]["positions"].append("missing-root-leg")
@@ -328,6 +339,26 @@ with TemporaryDirectory() as root:
     write("dlmm_transaction_facts.jsonl", facts)
     proof = lambda: settlement_inventory(root,"p","TOKEN","wallet")
     assert proof() == {"success":True,"amount_raw":"0"}  # actual testicle pre-sale balances
+    # A missing close report may complete ONLY zero owned inventory, using
+    # finalized facts bound to the recorded position and wallet. Keep the
+    # accounting journal incomplete, and leave all legacy tokens untouched.
+    write("dlmm_closes.jsonl", [])
+    assert not proof()["success"]  # legacy facts lack explicit position binding
+    bound = deepcopy(facts)
+    bound[1]["event_position"] = "p"
+    write("dlmm_transaction_facts.jsonl", bound)
+    assert proof() == {"success":True,"amount_raw":"0"}
+    assert report(root)["chains"][0]["accounting_status"] == "incomplete"
+    for change in [{"event_position":"other"}, {"wallet":"other"},
+                   {"failed":True}, {"landed":False}, {"slot":0},
+                   {"slot":True}, {"position_account_closed":False},
+                   {"token_deltas_raw":{"TOKEN":"1"}, "token_post_balances_raw":{"TOKEN":"5434"}}]:
+        invalid = deepcopy(bound)
+        invalid[1].update(change)
+        write("dlmm_transaction_facts.jsonl", invalid)
+        assert not proof()["success"], change
+    write("dlmm_transaction_facts.jsonl", facts)
+    write("dlmm_closes.jsonl", [dict(position="p", ts=200, deployed_at=100, base_mint="TOKEN")])
     # A filled position adds exactly 100 raw units to 5433 old units.
     facts[1]["token_deltas_raw"]={"TOKEN":"100"}
     facts[1]["token_post_balances_raw"]={"TOKEN":"5533"}

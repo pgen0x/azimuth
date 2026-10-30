@@ -91,21 +91,33 @@ function cashSignEvidence(tx, wallet, position) {
 // Optional metadata follows missing cash facts, never invalidates coverage, and
 // gets at most four reads per collection. Persist null attempts too: no hot loop.
 function cashSignRefresh(events, cache, closes, wallet, stamp) {
-  const closed=new Set(closes.filter(c=>!c.dry_run && typeof c.position==='string'
-    && Number.isFinite(c.ts) && c.ts<=stamp && c.ts>=stamp-2*86400).map(c=>c.position));
+  const closed=new Map();
+  for (const c of closes) if (!c.dry_run && typeof c.position==='string'
+      && Number.isFinite(c.ts) && c.ts<=stamp && c.ts>=stamp-2*86400) {
+    closed.set(c.position,Math.max(closed.get(c.position)??-Infinity,c.ts));
+  }
   const byPosition=new Map();
   for (const e of events.values()) if (closed.has(e.position) && e.wallet===wallet) {
     if (!byPosition.has(e.position)) byPosition.set(e.position,[]);
     byPosition.get(e.position).push(e.signature);
   }
   const pending=[];
-  for (const signatures of byPosition.values()) {
+  // Fresh losses must not wait behind historical metadata upgrades. Equal
+  // close times preserve journal order; attempted null proofs remain terminal.
+  const ordered=[...byPosition.entries()].sort((a,b)=>closed.get(b[0])-closed.get(a[0]));
+  for (const [,signatures] of ordered) {
     const facts=signatures.map(s=>cache.get(s));
     if (facts.some(f=>!f || f.wallet!==wallet || f.landed===false
         || !Number.isSafeInteger(f.wallet_delta_lamports)
-        || !Array.isArray(f.token_rent_evidence?.funded) || f.token_rent_evidence.funded.length)
+        || !Array.isArray(f.token_rent_evidence?.funded)
+        || f.token_rent_evidence.funded.some(r=>typeof r.account!=='string' || !r.account
+          || typeof r.mint!=='string' || !r.mint || !Number.isSafeInteger(r.lamports) || r.lamports<=0))
         || facts.reduce((sum,f)=>sum+f.wallet_delta_lamports,0)>0) continue;
-    pending.push(...signatures.filter(s=>!Object.hasOwn(cache.get(s),'cash_sign_evidence')));
+    pending.push(...signatures.filter(s=>{
+      const f=cache.get(s);
+      return !Object.hasOwn(f,'cash_sign_evidence') || (f.token_rent_evidence.funded.length>0
+        && !Object.hasOwn(f,'retained_rent_evidence'));
+    }));
   }
   return new Set(pending.slice(0,4));
 }

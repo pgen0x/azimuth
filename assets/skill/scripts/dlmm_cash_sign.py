@@ -6,10 +6,40 @@ FACT_BASIS = 'parsed_system_debits_and_unchanged_retained_token_accounts'
 UPPER_BASIS = 'settled_cash_without_retained_wallet_funding; upper_only; not_NAV'
 
 
-def nonpositive_cash_upper_bounds(chains, facts, rent_groups, as_of):
-    """No future owned reserve credit; later shared cleanup costs can only hurt.
+RENT_FACT_BASIS = 'parsed_empty_token_rent_with_no_other_retained_wallet_funding'
+RENT_UPPER_BASIS = 'settled_cash_with_maximum_retained_rent_credit; upper_only; not_NAV'
 
-    Restrict to single-position roots with unchanged wallet token accounts and
+
+def retained_credit(fact, position):
+    proof = fact.get('cash_sign_evidence')
+    if (isinstance(proof, dict) and proof.get('version') == 1
+            and proof.get('position') == position and proof.get('basis') == FACT_BASIS
+            and proof.get('no_retained_wallet_funding_outside_position') is True):
+        return 0
+    proof = fact.get('retained_rent_evidence')
+    if (not isinstance(proof, dict) or proof.get('version') != 1
+            or proof.get('position') != position or proof.get('basis') != RENT_FACT_BASIS):
+        return None
+    accounts, cap = proof.get('funded_accounts'), proof.get('max_future_rent_credit_lamports')
+    if (not isinstance(accounts, list) or not accounts or type(cap) is not int
+            or not 0 < cap <= 2**53-1):
+        return None
+    seen, total = set(), 0
+    for row in accounts:
+        if (not isinstance(row, dict) or not isinstance(row.get('account'), str)
+                or not row['account'] or row['account'] in (position, fact.get('wallet'))
+                or row['account'] in seen or not isinstance(row.get('mint'), str)
+                or not row['mint'] or type(row.get('lamports')) is not int or row['lamports'] <= 0):
+            return None
+        seen.add(row['account'])
+        total += row['lamports']
+    return cap if total == cap else None
+
+
+def nonpositive_cash_upper_bounds(chains, facts, rent_groups, as_of):
+    """Credit only a proved maximum retained reserve; later cleanup costs can only hurt.
+
+    Restrict to single-position roots with unchanged inventory, bounded reserve and
     collector proof for every successful transaction. No legacy cache inference.
     """
     owners = collections.defaultdict(set)
@@ -33,6 +63,7 @@ def nonpositive_cash_upper_bounds(chains, facts, rent_groups, as_of):
         records = [facts.get(s, {}) for s in signatures]
         wallet = records[0].get('wallet')
         valid = isinstance(wallet, str) and bool(wallet)
+        rent_credit = 0
         for signature, fact in zip(signatures, records):
             if (fact.get('signature') != signature or fact.get('wallet') != wallet
                     or fact.get('event_position') != positions[0]
@@ -54,15 +85,13 @@ def nonpositive_cash_upper_bounds(chains, facts, rent_groups, as_of):
                     valid = False
                     break
                 continue  # Finalized failure persists only its network fee.
-            proof = fact.get('cash_sign_evidence')
-            if (not isinstance(proof, dict) or proof.get('version') != 1
-                    or proof.get('position') != positions[0] or proof.get('basis') != FACT_BASIS
-                    or proof.get('no_retained_wallet_funding_outside_position') is not True
-                    or not isinstance(fact.get('token_deltas_raw'), dict)
+            credit = retained_credit(fact, positions[0])
+            if (credit is None or not isinstance(fact.get('token_deltas_raw'), dict)
                     or any(v != '0' for v in fact['token_deltas_raw'].values())):
                 valid = False
                 break
-        if not valid:
+            rent_credit += credit  # Repeated funding overcredits conservatively; never undercredits.
+        if not valid or cash + rent_credit > 0:
             continue
         successful = [f for f in records if f.get('failed') is False]
         latest = max((f.get('slot', 0) for f in successful), default=0)
@@ -76,9 +105,10 @@ def nonpositive_cash_upper_bounds(chains, facts, rent_groups, as_of):
         if not math.isfinite(observed) or observed > as_of:
             continue
         result.append(dict(root_chain_id=root, position=positions[0],
-                           cash_lower_lamports=None, cash_upper_lamports=cash,
+                           cash_lower_lamports=None, cash_upper_lamports=cash+rent_credit,
                            recorded_signatures=signatures, observed_at=observed,
-                           basis=UPPER_BASIS))
+                           basis=RENT_UPPER_BASIS if rent_credit else UPPER_BASIS,
+                           **({'max_future_rent_credit_lamports': rent_credit} if rent_credit else {})))
     return result
 
 
@@ -86,14 +116,21 @@ def cash_sign_upper_bound(proof, chain, as_of):
     """Validate an in-process report result against its current whole root."""
     upper = proof.get('cash_upper_lamports')
     observed = proof.get('observed_at')
-    if (proof.get('basis') != UPPER_BASIS or proof.get('root_chain_id') != chain['root_chain_id']
+    credit = proof.get('max_future_rent_credit_lamports', 0)
+    if (type(credit) is not int or credit < 0
+            or (proof.get('basis') == UPPER_BASIS and credit != 0)
+            or (proof.get('basis') == RENT_UPPER_BASIS and credit <= 0)):
+        return None
+    if (proof.get('basis') not in (UPPER_BASIS, RENT_UPPER_BASIS) or proof.get('root_chain_id') != chain['root_chain_id']
             or chain.get('positions') != [proof.get('position')]
             or chain.get('accounting_status') != 'settled_cash'
             or chain.get('pending_signatures') or chain.get('expired_unlanded_signatures')
             or chain.get('token_deltas_raw')
             or proof.get('recorded_signatures') != chain.get('recorded_signatures')
             or not proof.get('recorded_signatures') or proof.get('cash_lower_lamports') is not None
-            or type(upper) is not int or upper > 0 or upper != chain.get('wallet_delta_lamports')
+            or type(upper) is not int or upper > 0
+            or type(chain.get('wallet_delta_lamports')) is not int
+            or upper != chain['wallet_delta_lamports'] + credit
             or type(observed) not in (int, float) or not math.isfinite(observed) or observed > as_of
             or observed < chain.get('last_activity', float('inf'))):
         return None

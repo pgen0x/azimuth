@@ -85,10 +85,14 @@ executor alive until the monitor timeout and delaying SOL settlement.
 
 Marked NAV = native SOL + current SPL marks/quotes + Meteora open LP balance and
 unclaimed fees + recoverable token/position account reserves. SPL marks use batched
-Jupiter prices bounded by observed timestamp and price slot; at most ten missing
+Jupiter prices bounded by observed timestamp and price slot; at most forty missing
 marks per pass fall back to full-balance quotes. Rotation processes the selected
 accounts in cursor order and advances only for attempts made, so a rate limit
-does not skip unattempted accounts. Quote marks must match the requested input
+does not skip unattempted accounts. Cached quotes must remain within the existing
+600-second freshness limit through the remaining 90-second collection window;
+near-expiry quotes enter the same bounded refresh rotation. Failed refreshes do
+not fall back to the expiring price. This does not increase the request budget
+or guarantee every asset can be valued in one pass. Quote marks must match the requested input
 mint, full raw balance, SOL output mint and ExactIn mode, have a positive integer
 output amount, and carry a valid provider context slot within 1,500 slots of the
 finalized balance observation. Slots may lead finalized RPC when the provider
@@ -1026,3 +1030,30 @@ and wallet-PDA initialization. PDA funding must bind the same payer, base wallet
 owner, pool and planned bin range before its SOL transfer can establish the
 principal denominator. Unsupported or mismatched initialization remains
 unmeasured; PDA fee savings must not disable independent native valuation.
+
+
+### Zero inventory after an unjournaled close
+
+Settlement may complete zero root-owned token inventory when a local close
+report is missing, only with reconciled close facts explicitly bound to every
+root position and the wallet, a positive integer slot, successful landed status,
+and proof that the position account closed. Other accounting refusal reasons
+remain enforced. This exception never authorizes selling nonzero inventory,
+touches legacy wallet tokens, creates a close report or marks cash accounting
+complete by itself. It lets the normal settlement worker clear a stale pending marker
+after an independently proved close without inventing profit or a refund.
+
+Accounting separately records `unjournaled_close_evidence` when a successful
+recorded close has wallet/position-bound finalized deletion evidence and its
+slot is at least the latest successful deployment slot. This can establish
+closure without a monitor report; pending transactions, residual inventory,
+coverage gaps and all other accounting checks still prevent settled cash.
+It does not backfill a journal, guess an exit reason or invent an LP mark.
+Nonzero settlement inventory with a missing close journal remains refused.
+
+The report also exposes derived `recovered_closes` with the recorded pool,
+position, root, finalized block time and signature. Pool cash history includes
+these identities within its existing 30-day/last-ten-close window, preferring
+actual journal rows if present. Recovered rows carry no LP PnL mark. Root
+completeness, refund ownership and cash-sign proof requirements remain in force;
+recovering an identity cannot turn unvalued inventory into a profit or loss.
