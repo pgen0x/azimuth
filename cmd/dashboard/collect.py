@@ -7,14 +7,26 @@ from zoneinfo import ZoneInfo
 
 SECRET = re.compile(r"(password|secret|credential|authorization|api.?key|private.?key|access.?token|bot.?token|system_prompt|model_config|origin_json)", re.I)
 # Owner policy: the dashboard reports this bot only, never a comparison with another bot.
-# The other bot's name is written as a character class so this directory stays free of it
-# (the policy check is a plain `git grep -i` over cmd/dashboard).
-OTHER_BOT = re.compile(r"m[e]ridian|comparison|reference_bot", re.I)
-def own_only(value):
+# Keys are dropped on generic markers; an operator adds names through DASHBOARD_HIDE_KEYS
+# (comma-separated, case-insensitive substrings), so no name has to live in this repository.
+HIDE_MARKERS = ('comparison', 'reference_bot', 'other_bot', 'lp_comparison')
+def hide_pattern(extra=None):
+    raw = os.environ.get('DASHBOARD_HIDE_KEYS', '') if extra is None else extra
+    words = [*HIDE_MARKERS, *(w.strip() for w in raw.split(',') if w.strip())]
+    return re.compile('|'.join(re.escape(w) for w in words), re.I)
+def own_only(value, pattern=None):
     """Drop, recursively, every key that names another bot or a comparison with one."""
-    if isinstance(value, dict): return {k: own_only(v) for k, v in value.items() if not OTHER_BOT.search(str(k))}
-    if isinstance(value, list): return [own_only(v) for v in value]
+    pattern = pattern or hide_pattern()
+    if isinstance(value, dict): return {k: own_only(v, pattern) for k, v in value.items() if not pattern.search(str(k))}
+    if isinstance(value, list): return [own_only(v, pattern) for v in value]
     return value
+# Units this repository ships plus the Hermes gateway; DASHBOARD_EXTRA_UNITS adds an operator's own.
+UNITS = ('azimuth.service','hermes-gateway.service','azimuth-sol-monitor.service','azimuth-sol-accounting.service','azimuth-sol-accounting.timer','azimuth-sol-rent.service','azimuth-sol-rent.timer')
+UNIT_NAME = re.compile(r'^[A-Za-z0-9@_.-]{1,96}\.(service|timer)$')
+def unit_list(extra=None):
+    raw = os.environ.get('DASHBOARD_EXTRA_UNITS', '') if extra is None else extra
+    more = [u.strip() for u in raw.split(',') if UNIT_NAME.match(u.strip()) and u.strip() not in UNITS]
+    return [*UNITS, *dict.fromkeys(more)][:len(UNITS) + 16]
 URL = re.compile(r"https?://[^\s\"<>]+")
 
 def clean(value):
@@ -681,7 +693,7 @@ def collect(profile, state, since=None, zones=('UTC',)):
                     if len(matches)==1: evidence['session_id']=matches[0]['id']
                     events.append({'stage':'AI / fallback','time':event['time'],'source':str(profile/'state.db'),'evidence':evidence})
     except sqlite3.Error: hermes['sessions_status']='unavailable'
-    units=['azimuth.service','hermes-gateway.service','azimuth-sol-monitor.service','azimuth-sol-accounting.service','azimuth-sol-accounting.timer','azimuth-sol-rent.service','azimuth-sol-rent.timer','azimuth-solana-review-daily.service','azimuth-solana-review-daily.timer']
+    units=unit_list()
     services=[]
     try:
         result=subprocess.run(['systemctl','--user','show',*units,'--property=Id,LoadState,ActiveState,SubState,Result,ExecMainStatus,ActiveEnterTimestamp,InactiveEnterTimestamp,NextElapseUSecRealtime'],capture_output=True,text=True,timeout=4)

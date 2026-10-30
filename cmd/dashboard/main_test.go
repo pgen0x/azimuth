@@ -68,14 +68,14 @@ with tempfile.TemporaryDirectory() as tmp:
     assert event_time({'ts':None,'observed_at':456}) == 456
     rows,meta=tail(Path(tmp)/'absent')
     assert rows==[] and meta['status']=='missing'
-    profile=Path(tmp)/'solanza'; state=Path(tmp)/'state'; memory=profile/'memories'
+    profile=Path(tmp)/'testprofile'; state=Path(tmp)/'state'; memory=profile/'memories'
     memory.mkdir(parents=True); state.mkdir()
     (memory/'dlmm_wallet_transactions.jsonl').write_text(json.dumps({'signature':'proof','failed':False,'slot':123,'fee_lamports':5000,'block_time':100,'observed_at':200})+'\n')
     (memory/'dlmm_transactions.jsonl').write_text(json.dumps({'signature':'proof','kind':'deploy','ts':90})+'\n')
     (memory/'dlmm_realized.jsonl').write_text(json.dumps({'position':'p','closed_at':150,'fetched_at':250})+'\n')
     (memory/'dlmm_closes.jsonl').write_text(json.dumps({'position':'old','pnl_sol':0.5,'closed_at':160})+'\n'+json.dumps({'position':'new','pnl_sol':-0.1,'pnl_basis':'pre_swap_mark','closed_at':170})+'\n')
     (state/'solana_deliveries.jsonl').write_text(json.dumps({'delivery_id':'delivery','stage':'prepared','ts':80})+'\n')
-    identity=json.dumps(['solanza','dlmm-signal','delivery'],separators=(',',':')).encode()
+    identity=json.dumps(['testprofile','dlmm-signal','delivery'],separators=(',',':')).encode()
     with sqlite3.connect(profile/'state.db') as db:
         db.execute('CREATE TABLE sessions (id, source, model, started_at, ended_at, end_reason, message_count, tool_call_count, chat_id)')
         db.execute('INSERT INTO sessions VALUES (?,?,?,?,?,?,?,?,?)',('session','webhook','markt',81,None,None,1,1,'webhook:v2:'+base64.urlsafe_b64encode(identity).decode().rstrip('=')))

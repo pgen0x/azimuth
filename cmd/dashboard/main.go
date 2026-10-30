@@ -60,7 +60,7 @@ type server struct {
 var identifier = regexp.MustCompile(`^[A-Za-z0-9_.:-]{1,150}$`)
 
 // collectDeadline bounds one collector run. 20s left the dashboard without data on a cold page
-// cache and on a loaded host (runs were killed repeatedly at load average > 40); time.Tick drops
+// cache and under heavy host load (runs were killed repeatedly); time.Tick drops
 // ticks while a run is slow, so a longer deadline never overlaps runs, it only stretches the period.
 const collectDeadline = 60 * time.Second
 
@@ -365,7 +365,7 @@ func redisSettings(path string) map[string]string {
 func main() {
 	home, _ := os.UserHomeDir()
 	addr := flag.String("listen", "127.0.0.1:8787", "loopback address")
-	profile := flag.String("profile", filepath.Join(home, ".hermes/profiles/solanza"), "profile directory")
+	profile := flag.String("profile", filepath.Join(home, ".hermes/profiles/dlmm"), "Hermes profile directory")
 	state := flag.String("state", filepath.Join(home, ".local/state/azimuth"), "persisted state directory")
 	redisAddr := flag.String("redis", "", "Redis address override; use disabled to disable")
 	envFile := flag.String("env-file", ".env", "read only REDIS_ADDR, REDISCLI_AUTH and REDIS_SEEN_KEY")
@@ -383,6 +383,10 @@ func main() {
 			}
 		}
 		log.Fatal("hash-password: ", err)
+	}
+	// A missing profile would serve an empty dashboard that looks healthy; stop instead.
+	if info, err := os.Stat(*profile); err != nil || !info.IsDir() {
+		log.Fatalf("profile directory %s not found; pass -profile <dir>", *profile)
 	}
 	host, _, err := net.SplitHostPort(*addr)
 	if err != nil || net.ParseIP(host) == nil || !net.ParseIP(host).IsLoopback() {

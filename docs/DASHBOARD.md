@@ -16,7 +16,7 @@ rtk proxy /tmp/azimuth-dashboard
 rtk go test ./cmd/dashboard
 ```
 
-Flags: `-listen`, `-profile`, `-state`, `-env-file`, `-redis`, `-dedup-prefix`, `-since` (live-change cutover, unix seconds; 0 = the last 7 days). Defaults use `~/.hermes/profiles/solanza`, `~/.local/state/azimuth`, and repository `.env`. Only `REDIS_ADDR`, `REDISCLI_AUTH`, and `REDIS_SEEN_KEY` are read from that file; matching environment variables override file settings. `-redis disabled` skips Redis. Missing Redis configuration disables its panel. No credential is returned or logged. Config metadata is field-allowlisted; prompts, session messages, private keys and bot credentials are excluded.
+Flags: `-listen`, `-profile`, `-state`, `-env-file`, `-redis`, `-dedup-prefix`, `-since` (live-change cutover, unix seconds; 0 = the last 7 days). Defaults use `~/.hermes/profiles/dlmm`, `~/.local/state/azimuth`, and repository `.env`; pass `-profile` when your Hermes profile has another name. The dashboard exits at startup if the profile directory does not exist, rather than serve empty panels. Only `REDIS_ADDR`, `REDISCLI_AUTH`, and `REDIS_SEEN_KEY` are read from that file; matching environment variables override file settings. `-redis disabled` skips Redis. Missing Redis configuration disables its panel. No credential is returned or logged. Config metadata is field-allowlisted; prompts, session messages, private keys and bot credentials are excluded.
 
 For a persistent user service, build the binary and install the included unit:
 
@@ -27,7 +27,7 @@ rtk proxy systemctl --user daemon-reload
 rtk proxy systemctl --user enable --now azimuth-dashboard.service
 ```
 
-The unit reads only the three Redis settings through the command, rather than importing the full trading environment. The installation example is for a first install. For updates, use the [SHA-pinned deployment and rollback runbook](DASHBOARD_DEPLOY.md); do not build over the running binary or reuse a fixed backup name.
+The unit reads only the three Redis settings through the command, rather than importing the full trading environment. The unit passes no `-profile`, so it uses `~/.hermes/profiles/dlmm`; for another profile, add a drop-in such as `~/.config/systemd/user/azimuth-dashboard.service.d/profile.conf` that clears and restates the command (`ExecStart=` on one line, then `ExecStart=%h/.local/bin/azimuth-dashboard -env-file <repo>/.env -profile %h/.hermes/profiles/<name>`), then `systemctl --user daemon-reload`. The installation example is for a first install. For updates, use the [SHA-pinned deployment and rollback runbook](DASHBOARD_DEPLOY.md); do not build over the running binary or reuse a fixed backup name.
 
 ## Sign-in
 
@@ -91,9 +91,9 @@ Refreshes serve an immutable in-memory snapshot. A background collector updates 
 - Entry metadata: latest 100 `memories/dlmm_entries/*.json`; metadata is not proof of a landed deployment.
 - Routing: last 100 `entry_route=` markers from the actual `azimuth.service` journal within 48 hours. Only mode, route, reason and timestamp are extracted. No free-form service logs or Hermes tool messages are exposed.
 - Session correlations: exact legacy or v2 webhook identity for deliveries, against the latest 40 session metadata rows in read-only SQLite. No time/pool heuristic invents a trade link; incomplete coverage remains uncorrelated. An HTTP 202, route/probe result or open session is not execution proof.
-- This bot only: the dashboard has no evaluation or comparison view. As a guard, the collector also drops, recursively, any key in the snapshot that names another bot or a comparison with one, so no other bot's data can reach a page or the JSON API.
+- This bot only: the dashboard has no evaluation or comparison view. As a guard, the collector also drops, recursively, any snapshot key containing `comparison`, `reference_bot`, `other_bot` or `lp_comparison` (case-insensitive), so such data reaches neither a page nor the JSON API. To hide more key names, set `DASHBOARD_HIDE_KEYS` in the dashboard's environment to a comma-separated list of case-insensitive substrings, for example `DASHBOARD_HIDE_KEYS=somebot,peer_wallet`. The pages render what the collector returns and apply no filter of their own.
 - Hermes: selected `config.yaml` fields, installed profile skill names and read-only `state.db` metadata. Provider and bot delivery availability remain Unknown without a probe. Gateway state comes from systemd.
-- Services: fixed scanner, gateway, SOL monitor, accounting, rent and daily-review services/timers using selected systemd properties. Inactive oneshots can be healthy; a failed run can be a busy-wallet deferral rather than an infrastructure failure.
+- Services: the scanner, gateway, SOL monitor, accounting and rent services/timers this repository ships, using selected systemd properties. `DASHBOARD_EXTRA_UNITS` adds your own user units (comma-separated `name.service` / `name.timer`, at most 16; other names are ignored). Inactive oneshots can be healthy; a failed run can be a busy-wallet deferral rather than an infrastructure failure.
 - Redis: `SCARD`, one bounded `SSCAN` of `sol:dlmm:active_positions`, and pipelined `TTL`/bounded `GETRANGE` for at most 400 derived keys. At most 100 recent candidate records and 100 active members inform the sample. Position fields are allowlisted; arbitrary stored error strings are not exposed. No KEYS, writes, arbitrary-key or command endpoint. TTL -2 means missing, -1 means no expiry, null means read failure. All TTLs are observations at the displayed timestamp.
 
 Native SOL increases include recovered principal/rent and transfers; they do not establish profit. The existing 0.20 SOL reserve + 0.05 allowance + 0.10 minimum position rule is displayed as a 0.35 SOL floor; this dashboard never authorizes or changes entry behavior.
@@ -137,7 +137,7 @@ unrelated panels. These are resource and evidence limits, not profit claims.
 
 ## Verified deployment reports
 
-The Solanza `dlmm-report-guard` Hermes plugin uses official pre/post tool hooks and
+The `dlmm-report-guard` Hermes plugin uses official pre/post tool hooks and
 `transform_llm_output`. For the `dlmm-signal` webhook it injects a fresh nonce into
 a direct terminal pipeline call, accepts a receipt only from that call's successful
 completed result, and replaces AI deployment text with the pipeline's exact values.
@@ -148,8 +148,8 @@ not profit. Rejections without deployment claims keep their AI narrative.
 
 Install into the target profile's `plugins/dlmm-report-guard/` by copying
 `assets/hermes/plugins/dlmm-report-guard/{plugin.yaml,__init__.py}`; then run
-`hermes -p solanza plugins enable dlmm-report-guard --no-allow-tool-override` and
-`hermes -p solanza plugins doctor dlmm-report-guard --ci`. Set
+`hermes -p <profile> plugins enable dlmm-report-guard --no-allow-tool-override` and
+`hermes -p <profile> plugins doctor dlmm-report-guard --ci`. Set
 `display.platforms.webhook.streaming: false` so provisional model text cannot
 precede the final guard. Restart the gateway after checking no deployment is in
 flight. The plugin needs no dependencies and does not change model order or risk.

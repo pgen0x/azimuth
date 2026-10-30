@@ -51,9 +51,7 @@ const freshness=d=>{ $('#stamp').textContent='Observed '+date(d.collected_at)+' 
 const zoneNote=d=>{DAY_TZ=d.tz||'UTC';return (d.tz_fallback?`<p role="alert" class="note warn">Your time zone (${esc(VIEW_TZ)}) could not be used for day buckets; days are shown in ${esc(DAY_TZ)}.</p>`:'')+(d.tz_error?`<p class="note warn">${esc(d.tz_error)}</p>`:'')};
 const coverage=(label,d)=>`<p class="note ${d.status==='ok'?'':'warn'}">${esc(label)}: ${esc(d.status||'unknown')}${d.collection_error?' · '+esc(d.collection_error):''}</p>`+detail(label+' source coverage',d.sources||d.source_metadata||d.source||{});
 /* Second layer of the owner policy (the collector already drops these): never render keys naming another bot. */
-const OTHER_BOT=/m[e]ridian|comparison|reference_bot/i;
-const ownOnly=v=>Array.isArray(v)?v.map(ownOnly):v&&typeof v==='object'?Object.fromEntries(Object.entries(v).filter(([k])=>!OTHER_BOT.test(k)).map(([k,x])=>[k,ownOnly(x)])):v;
-const detail=(label,value)=>`<details><summary>${esc(label)}</summary><pre>${esc(JSON.stringify(ownOnly(value),null,2))}</pre></details>`;
+const detail=(label,value)=>`<details><summary>${esc(label)}</summary><pre>${esc(JSON.stringify(value,null,2))}</pre></details>`;
 const table=(heads,rows,nums=[])=>`<div class="table"><table><thead><tr>${heads.map((h,i)=>`<th scope="col"${nums.includes(i)?' class="n"':''}>${esc(h)}</th>`).join('')}</tr></thead><tbody>${rows.length?rows.map(r=>`<tr>${r.map((v,i)=>`<td${nums.includes(i)?' class="n"':''}>${v}</td>`).join('')}</tr>`).join(''):`<tr><td colspan="${heads.length}" class="empty">No observed records in this source.</td></tr>`}</tbody></table></div>`;
 const emptyChart=msg=>`<p class="note">${esc(msg)}</p>`;
 

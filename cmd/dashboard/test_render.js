@@ -1,6 +1,6 @@
 'use strict';
 // DOM stub, synthetic evidence; no browser/network/service access.
-const fs = require('node:fs'), vm = require('node:vm'), assert = require('node:assert/strict');
+const fs = require('node:fs'), vm = require('node:vm'), assert = require('node:assert/strict'), {execFileSync} = require('node:child_process');
 const script = fs.readFileSync(__dirname + '/index.html', 'utf8').match(/<script>([\s\S]*?)<\/script>/)[1];
 async function render(tab, payload, fail=false) {
   const content = {innerHTML: ''}, stamp = {textContent: ''}, intervals = [], calls = [];
@@ -74,9 +74,14 @@ async function render(tab, payload, fail=false) {
   const failing = await render('capital', null, true);
   assert(failing.html.includes('Could not load this section') && failing.html.includes('Retry loading'), 'error state');
   assert(!/\u2014/.test(charted.html + live.html + h), 'no em dash in UI text');
-  // Owner policy: no other bot in any rendered evidence, even if a raw source still carries one.
-  const other = 'meri' + 'dian';
-  const ov = await render('overview', {nav: {native_sol: 1, tokens: [{[other + '_mark']: 1, own: 2}]}, services: [], sources: []});
+  // Owner policy: no other bot in rendered evidence. The page relies on the collector filter, so the
+  // fixture goes through collect.own_only with a made-up name in the operator deny-list first.
+  const other = 'otherbot';
+  const filtered = JSON.parse(execFileSync('python3', ['-c',
+    'import json,sys; sys.path.insert(0, sys.argv[1]); import collect; print(json.dumps(collect.own_only(json.load(sys.stdin))))', __dirname],
+    {input: JSON.stringify({nav: {native_sol: 1, tokens: [{[other + '_mark']: 1, own: 2}]}, services: [], sources: []}),
+     env: {...process.env, DASHBOARD_HIDE_KEYS: other}}));
+  const ov = await render('overview', filtered);
   assert(!ov.html.toLowerCase().includes(other) && ov.html.includes('&quot;own&quot;: 2'), 'no other-bot keys in raw evidence');
   assert(!/evaluation/i.test(ov.html), 'no evaluation section');
   console.log('dashboard render: 23 synthetic cases passed');
