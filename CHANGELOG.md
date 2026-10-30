@@ -5,6 +5,67 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.13.0](https://github.com/pgen0x/azimuth/compare/v2.12.0...v2.13.0) (2026-10-30)
+
+
+### Features
+
+* **dashboard:** redesign with charts, password gate and viewer time zones ([64ea6f6](https://github.com/pgen0x/azimuth/commit/64ea6f6b36df1012c545b9c253ef07601d4ba671))
+* **dashboard:** robinhood collector and API route ([959981d](https://github.com/pgen0x/azimuth/commit/959981d3c0afc1d479f3c4048c962992cc46838a))
+* **dashboard:** robinhood section in the sidebar ([98faae6](https://github.com/pgen0x/azimuth/commit/98faae668b6b6bc2758be97306e4f4ed836677ff))
+* **dashboard:** Robinhood section, shared log sensor and deterministic NAV fixtures ([f098ba6](https://github.com/pgen0x/azimuth/commit/f098ba6ce13edf922ab4376b0bfe9ad6465d746a))
+* **dashboard:** sidebar layout, monospace terminal panels, this-bot-only views ([fa736e8](https://github.com/pgen0x/azimuth/commit/fa736e8ad8a073d30649338e7e74ac096bfd05dc))
+* **dashboard:** sidebar redesign with charts, password gate and viewer time zones ([77af7cb](https://github.com/pgen0x/azimuth/commit/77af7cbb9252a02c798225fa902c272300ba831b))
+* **observe:** rollout gate, idle check and operator runbook ([453643b](https://github.com/pgen0x/azimuth/commit/453643b8c2be3f3d8a6b5811e0fbcc08609efe59))
+* **research:** opt-in observe bundle for rejected candidates and shadow exits ([4b286d7](https://github.com/pgen0x/azimuth/commit/4b286d71416bbf7170716cbfbf15088b1431ef5e))
+* **research:** opt-in reject identity and bracket reads for rejected candidates ([43a9418](https://github.com/pgen0x/azimuth/commit/43a94182496f18bae51c07b01fd17b90e648cfa1))
+* **research:** opt-in shadow exit evaluator with deferred observer writes ([e7af540](https://github.com/pgen0x/azimuth/commit/e7af540f10bae1b24e25c915afb652dfa858120e))
+
+
+### Bug Fixes
+
+* **accounting:** port production cash-proof and recovered-close accounting ([7176a73](https://github.com/pgen0x/azimuth/commit/7176a73d48121af64292a82fb7340ea273545e70))
+* **dashboard:** generic other-bot filter and operator-neutral defaults ([db51c6d](https://github.com/pgen0x/azimuth/commit/db51c6d4ef43690e37b2fdf24738b576f394ba31))
+* **dashboard:** keep NAV bridge component ids readable under the shared sensor ([1018079](https://github.com/pgen0x/azimuth/commit/10180791f91291ce9648450a4632d48804d368ee))
+* **dashboard:** mask prose wallet phrases without trusting the mask marker ([41ac2b9](https://github.com/pgen0x/azimuth/commit/41ac2b9329fc347b80beae3318921d70c7a635fa))
+* **dashboard:** redact credentials across all log panels ([631fa20](https://github.com/pgen0x/azimuth/commit/631fa2004ebaf3e6edbd34748a3370e25d6b7eb2))
+* **dashboard:** robinhood review findings ([9c9fa75](https://github.com/pgen0x/azimuth/commit/9c9fa75258b703ed54f9cf820abff99d9aa86135))
+* **dlmm:** assess native risk for indexer-omitted positions ([f2b2ae4](https://github.com/pgen0x/azimuth/commit/f2b2ae4e32f5c00f52fae870b51b0cce072d5d55))
+* **dlmm:** avoid repeated Hadron routes after confirmed slippage failures ([a5aafcf](https://github.com/pgen0x/azimuth/commit/a5aafcf009e6b5f4947a594cac1745224809151e))
+* **dlmm:** back off unusable settlement threshold quotes ([2e36689](https://github.com/pgen0x/azimuth/commit/2e3668990ac786396a61a61b35478c5b535495f6))
+* **dlmm:** bind recovery simulation evidence to selected message ([7c08db6](https://github.com/pgen0x/azimuth/commit/7c08db630884e7ce9188afa4a025ddde6faea814))
+* **dlmm:** bound discovery waits before tracked risk checks ([e44b3f4](https://github.com/pgen0x/azimuth/commit/e44b3f435066836d9df5360fa0c612f9398c7b5b))
+* **dlmm:** bound impact by absolute value for one-lamport recovery ([24eaa19](https://github.com/pgen0x/azimuth/commit/24eaa19d427c4e852698154912130871e85a79a1))
+* **dlmm:** carry proved loss bounds into pool entry history ([3047484](https://github.com/pgen0x/azimuth/commit/30474841fda45277f5f7c2fd4457303b329aabcd))
+* **dlmm:** deduplicate RPC account reads within one bank context ([9a7a605](https://github.com/pgen0x/azimuth/commit/9a7a605569876dae3b8d7f46d30533f848aab4f8))
+* **dlmm:** keep a processed-only failed swap pending until confirmed ([0b34788](https://github.com/pgen0x/azimuth/commit/0b347886f54a9a9d6041e7632f7630e8b26784b0))
+* **dlmm:** keep missing exit liquidity unknown ([471bcea](https://github.com/pgen0x/azimuth/commit/471bcea8c1b44d918a04ef7b3154a6b2dc171cd9))
+* **dlmm:** keep the young in-range stop-loss grace under native-first valuation ([4459577](https://github.com/pgen0x/azimuth/commit/4459577868abe2be54d524c1938b9ee93b828fe4))
+* **dlmm:** keep unavailable fee yield out of low-yield exits ([0a09523](https://github.com/pgen0x/azimuth/commit/0a095237787ae0adb980dd2314891f4e9a5ceede))
+* **dlmm:** keep weight refresh off the risk scan path ([bc64c1c](https://github.com/pgen0x/azimuth/commit/bc64c1c8f4711c203abd2818961d35f304d42676))
+* **dlmm:** monitor risk-path bundle from production (PR-C) ([0801584](https://github.com/pgen0x/azimuth/commit/0801584c3897e0ef03cfe05e4bbc06b17e782e15))
+* **dlmm:** port production executor close and settlement hardening ([71cc362](https://github.com/pgen0x/azimuth/commit/71cc3626e8452305ab569f944caf7c7ff6b5bdce))
+* **dlmm:** preserve cooldowns and loss history for unproven LP gains ([c838d9c](https://github.com/pgen0x/azimuth/commit/c838d9cf89099937be86d920f5b7b00d982e683c))
+* **dlmm:** preserve lamport precision in position mark records ([0a3e929](https://github.com/pgen0x/azimuth/commit/0a3e9295c85a1830532e6cd742861fea9fbec120))
+* **dlmm:** prioritize native risk valuation over indexed fallback ([44a62a6](https://github.com/pgen0x/azimuth/commit/44a62a6f459ea94d4cc10b7cc7ed738cde7fe1ae))
+* **dlmm:** recover one-lamport settlements with strict zero-slippage quotes ([87c3cfd](https://github.com/pgen0x/azimuth/commit/87c3cfd2d18811b22cf48ba155bc2f2bd55bc083))
+* **dlmm:** reject unmeasured swap price impact ([b14e58b](https://github.com/pgen0x/azimuth/commit/b14e58b6195c4a82996cc314513a1b5ca92177a1))
+* **dlmm:** retain close preparation phase timings ([c7fa5af](https://github.com/pgen0x/azimuth/commit/c7fa5af0d8dd797b27cd8f71881e8f65de6f40eb))
+* **dlmm:** retain native risk checks during indexer outages ([6b5e98d](https://github.com/pgen0x/azimuth/commit/6b5e98d19180b19eb9129e57a61fda43ec75662d))
+* **dlmm:** retain selected swap net recovery evidence ([ea95be9](https://github.com/pgen0x/azimuth/commit/ea95be9125036ecbb6eb6116c8d37f499d57c62f))
+* **dlmm:** skip optional market fetch on emergency stop loss ([91d4a60](https://github.com/pgen0x/azimuth/commit/91d4a602e94eb9346f646b7eb23961b894eee4e3))
+* **dlmm:** target verified position lookup before close ([700f9c9](https://github.com/pgen0x/azimuth/commit/700f9c9e7b0f51218f49658efd616fac8473065e))
+* **dlmm:** wait the base's 30 s for the stop-loss grace fee read ([96e3327](https://github.com/pgen0x/azimuth/commit/96e332726f65d7a9a1ec35d36c3f2bb4de00e316))
+* **hermes:** keep unknown fee yield out of the exit-review wake gate ([f77105d](https://github.com/pgen0x/azimuth/commit/f77105df168e66725fa4d9ee085214cdd2b8b737))
+* **monitor:** deliver event alerts outside the settlement path ([a6c3dd8](https://github.com/pgen0x/azimuth/commit/a6c3dd890b17bf40ac356cf849c026124a0ebcd0))
+* **observe:** configurable gateway unit and neutral runbook wording ([df7f050](https://github.com/pgen0x/azimuth/commit/df7f0509a85536b3a418b445b60e77e6e1a9487c))
+* **scanner:** cache AI health probe per poll interval ([c8f249c](https://github.com/pgen0x/azimuth/commit/c8f249cfd262fc81e0f71da2a5afbca7656a3967))
+* **scanner:** consume cash history with recovered closes ([43aeb1b](https://github.com/pgen0x/azimuth/commit/43aeb1be5d67814b84a36dfe427aea1dfaaee75d))
+* **scanner:** port probe cache and proved pool-memory bounds ([6cefda8](https://github.com/pgen0x/azimuth/commit/6cefda869fb9ff7739dc824b368f15fefec816d4))
+* **settlement:** prioritize pending exits over deferred inventory ([33aafd1](https://github.com/pgen0x/azimuth/commit/33aafd15954f66f74a9d4bc2ca312dabbac57fdd))
+* **time:** make zone handling configurable instead of hard-coded WIB ([4762d02](https://github.com/pgen0x/azimuth/commit/4762d0211057b4c90f96ff4590d725d382138c19))
+* **time:** make zone handling configurable instead of hard-coded WIB ([c4052fd](https://github.com/pgen0x/azimuth/commit/c4052fd023f2e5b4bb8f71adbaa6292307d4c8d2))
+
 ## [2.12.0](https://github.com/pgen0x/azimuth/compare/v2.11.0...v2.12.0) (2026-10-29)
 
 
