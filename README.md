@@ -492,7 +492,7 @@ Candidates screened: 5
 Chose: world-SOL over 4 others — highest organic score, healthiest fee/TVL
 Strategy: custom_ratio_spot — meme-pool volatility, symmetric range fits
 
-`CQEYFv3KGnJ6xxRyrUNWbXjPHGnbyCbjuZDTGocV92ug`
+`<POOL>`
 
 | Metric | Value |
 |---|---|

@@ -22,12 +22,12 @@ line of the cycle that fired the exit carries every field this needs:
 Then, e.g.:
 
     python3 dlmm_backfill_close.py \
-      --position <POSITION> --pool AeUfFU6L... --pair CHANCE-SOL \
-      --base-mint JCKwsT8U... --mode turnover \
-      --pnl-pct 0.4723 --pnl-sol -0.000204 \
-      --fee-per-tvl 1.27 --age-min 41.1 \
-      --closed-at 2026-07-29T19:15:47Z \
-      --reason "Trailing Take-Profit hit (Peak: 1.24%, Current: 0.47%)"
+      --position <POSITION> --pool <POOL> --pair FOO-SOL \
+      --base-mint <MINT> --mode turnover \
+      --pnl-pct 0.50 --pnl-sol 0.001 \
+      --fee-per-tvl 1.00 --age-min 30 \
+      --closed-at 2024-01-01T12:00:00Z \
+      --reason "Trailing Take-Profit hit (Peak: 1.50%, Current: 0.50%)"
 
 `--check-chain` refuses to write while the Meteora portfolio API still lists the
 position. Re-running is safe: the position address is the idempotency key.
