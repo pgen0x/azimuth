@@ -485,6 +485,67 @@ vm.runInNewContext("const productionExitTransport=confirmExitTransaction;confirm
   settlementFanoutMode='failed';
   assert.equal((await recover(1)).success,false);assert.equal(fs.existsSync(pendingSwap),false);
   settlementFanoutMode='single';Connection.prototype.getSignatureStatuses=statusBeforeOwned;sandbox.fetch=fetchBeforeOwned;
+  // Route exclusion end to end. A single-Hadron quote whose confirmed Jupiter
+  // instruction fails with 6001 records a five-minute exclusion and the next owned
+  // quote requests excludeDexes=Hadron. Other errors and timeouts record nothing,
+  // and a failed sidecar write keeps the signed marker so nothing is re-signed.
+  {
+    const JUP='JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4';
+    const routeFile=pendingSwap+'.route';
+    const deserializeBefore=SwapTransaction.deserialize, probeBefore=sandbox.settlementFanoutProbe;
+    const fetchBefore=sandbox.fetch, writeBefore=fs.writeFileSync;
+    SwapTransaction.deserialize=()=>{const t=deserializeBefore();
+      t.message.staticAccountKeys=[wallet.publicKey,JUP];t.message.compiledInstructions=[{programIdIndex:1}];return t;};
+    const quoteUrls=[];
+    sandbox.fetch=async url=>{
+      if(url.includes('/quote?')){quoteUrls.push(new URL(url));return{ok:true,json:async()=>({inputMint:'TOKEN',
+        outputMint:'So11111111111111111111111111111111111111112',inAmount:'100000000',outAmount:'5000',
+        otherAmountThreshold:'4500',priceImpactPct:'0',routePlan:[{swapInfo:{label:'Hadron'}}]})};}
+      return{ok:true,json:async()=>({swapTransaction:'AA=='})};
+    };
+    let failWith=null,seenContext=null,probes=0;
+    sandbox.settlementFanoutProbe=async()=>{
+      probes++;seenContext=JSON.parse(fs.readFileSync(pendingSwap)).routeContext;
+      if(failWith==='timeout')throw new Error('bounded transport deadline');
+      const e=new Error('confirmed chain failure');e.transactionFailed=true;e.chainError=failWith;throw e;
+    };
+    fs.rmSync(routeFile,{force:true});
+    // Confirmed 6001 at the bound Jupiter instruction: exclusion recorded.
+    failWith={InstructionError:[0,{Custom:6001}]};
+    assert.equal((await recover(1)).success,false);
+    assert.deepEqual(seenContext,{position:settlementPosition,jupiter_instruction:0,dex:'Hadron'});
+    assert.equal(fs.existsSync(routeFile),true);assert.equal(fs.existsSync(pendingSwap),false);
+    assert.equal(quoteUrls.at(-1).searchParams.get('excludeDexes'),null);
+    // The next quote excludes Hadron; a provider that still routes via Hadron aborts unsigned.
+    const probesBeforeExcluded=probes, signsBeforeExcluded=swapSigns;
+    assert.equal((await recover(1)).reason,'swap_route_exclusion_unverified');
+    assert.equal(quoteUrls.at(-1).searchParams.get('excludeDexes'),'Hadron');
+    assert.equal(quoteUrls.at(-1).searchParams.get('slippageBps'),'100');
+    assert.equal(probes,probesBeforeExcluded);assert.equal(swapSigns,signsBeforeExcluded);
+    fs.rmSync(routeFile,{force:true});
+    // A different confirmed program error and a timeout record no exclusion.
+    failWith={InstructionError:[0,{Custom:6008}]};
+    assert.equal((await recover(1)).success,false);assert.equal(fs.existsSync(routeFile),false);
+    failWith='timeout';
+    assert.equal((await recover(1)).pending,true);assert.equal(fs.existsSync(routeFile),false);
+    assert.equal(fs.existsSync(pendingSwap),true);fs.rmSync(pendingSwap);
+    // A sidecar write failure must not clear the signed marker or allow another signature.
+    failWith={InstructionError:[0,{Custom:6001}]};
+    fs.writeFileSync=(file,...rest)=>{if(String(file).includes('.route.'))throw new Error('disk full');return writeBefore(file,...rest);};
+    const probesBeforeStorage=probes;
+    let storageResult;
+    try{storageResult=await recover(1);}catch(error){storageResult={success:false,error:error.message};}
+    fs.writeFileSync=writeBefore;
+    assert.notEqual(storageResult.success,true);assert.equal(probes,probesBeforeStorage+1);
+    assert.equal(fs.existsSync(pendingSwap),true);assert.equal(fs.existsSync(routeFile),false);
+    const quotesBeforeRetry=quoteUrls.length, signsBeforeRetry=swapSigns;
+    signatureStatus={confirmationStatus:'processed',err:null};
+    assert.equal((await recover(1)).pending,true);
+    assert.equal(quoteUrls.length,quotesBeforeRetry);assert.equal(probes,probesBeforeStorage+1);
+    assert.equal(swapSigns,signsBeforeRetry);
+    signatureStatus=null;fs.rmSync(pendingSwap,{force:true});fs.rmSync(routeFile,{force:true});
+    SwapTransaction.deserialize=deserializeBefore;sandbox.settlementFanoutProbe=probeBefore;sandbox.fetch=fetchBefore;
+  }
   // Ordinary full-owned settlements may close an ATA too, within a separate
   // abortable budget. Cash from rent cannot hide a worse simulated sale.
   const savedOrdinaryFetch=sandbox.fetch, savedOrdinarySim=Connection.prototype.simulateTransaction;
