@@ -37,6 +37,7 @@ const pool = {
 };
 let reservePost = 300000000, reserveError = null, reserveChanged = false, reserveReads = 0;
 class Connection {
+  async getMultipleAccountsInfoAndContext() { throw new Error("unexpected account batch read"); }
   constructor(endpoint = "fake-rpc-1", options = {}) { this.rpcEndpoint = endpoint; this.rpcOptions = options; }
   async getBalanceAndContext() { return {context:{slot:10},value:300000000+(++reserveReads%2===0 && reserveChanged ? 1 : 0)}; }
   async simulateTransaction() { return {context:{slot:10},value:{err:reserveError,accounts:[{lamports:reservePost}]}}; }
@@ -74,10 +75,14 @@ class RentTransaction {
   add(instruction) { rentInstructions.push(instruction); return this; }
   compileMessage() { return {}; }
 }
+let swapSigns = 0; // swap transactions signed, so refused paths can prove 'not signed'
+let lastSignedMessageHash = null; // sha256 of the message actually signed
 class SwapTransaction {
   constructor(message) { this.message = message; this.signatures = [Buffer.from([1])]; }
-  static deserialize() { return new SwapTransaction({ header: { numRequiredSignatures: 1 }, staticAccountKeys: [wallet.publicKey], addressTableLookups: [], instructions: [] }); }
-  sign() {}
+  static deserialize() { return new SwapTransaction({ header: { numRequiredSignatures: 1 }, staticAccountKeys: [wallet.publicKey], addressTableLookups: [], instructions: [],
+    serialize() { return Buffer.from(JSON.stringify({blockhash:this.recentBlockhash,instructions:this.instructions})); } }); }
+  sign() { swapSigns++; lastSignedMessageHash = this.message?.serialize
+    ? require('crypto').createHash('sha256').update(this.message.serialize()).digest('hex') : null; }
   serialize() { return Buffer.from(this.message.recentBlockhash || "unsigned"); }
 }
 const deps = {
@@ -328,6 +333,7 @@ vm.runInNewContext("const productionExitTransport=confirmExitTransaction;confirm
   assert.equal(quoteEvent.swap_quote.input_mint,"So11111111111111111111111111111111111111112");
   assert.equal(quoteEvent.swap_quote.output_mint,"TOKEN");
   assert.equal(quoteEvent.swap_quote.unrelatedDebug,undefined);
+  assert.equal(quoteEvent.swap_quote.net_recovery,undefined);
   // Residual recovery must cover costs and the full slippage allowance before
   // sending. Existing pending-send tests above still exercise the normal path.
   const defaultBalance = Connection.prototype.getBalanceAndContext;
@@ -488,6 +494,67 @@ vm.runInNewContext("const productionExitTransport=confirmExitTransaction;confirm
   settlementFanoutMode='failed';
   assert.equal((await recover(1)).success,false);assert.equal(fs.existsSync(pendingSwap),false);
   settlementFanoutMode='single';Connection.prototype.getSignatureStatuses=statusBeforeOwned;sandbox.fetch=fetchBeforeOwned;
+  // Route exclusion end to end. A single-Hadron quote whose confirmed Jupiter
+  // instruction fails with 6001 records a five-minute exclusion and the next owned
+  // quote requests excludeDexes=Hadron. Other errors and timeouts record nothing,
+  // and a failed sidecar write keeps the signed marker so nothing is re-signed.
+  {
+    const JUP='JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4';
+    const routeFile=pendingSwap+'.route';
+    const deserializeBefore=SwapTransaction.deserialize, probeBefore=sandbox.settlementFanoutProbe;
+    const fetchBefore=sandbox.fetch, writeBefore=fs.writeFileSync;
+    SwapTransaction.deserialize=()=>{const t=deserializeBefore();
+      t.message.staticAccountKeys=[wallet.publicKey,JUP];t.message.compiledInstructions=[{programIdIndex:1}];return t;};
+    const quoteUrls=[];
+    sandbox.fetch=async url=>{
+      if(url.includes('/quote?')){quoteUrls.push(new URL(url));return{ok:true,json:async()=>({inputMint:'TOKEN',
+        outputMint:'So11111111111111111111111111111111111111112',inAmount:'100000000',outAmount:'5000',
+        otherAmountThreshold:'4500',priceImpactPct:'0',routePlan:[{swapInfo:{label:'Hadron'}}]})};}
+      return{ok:true,json:async()=>({swapTransaction:'AA=='})};
+    };
+    let failWith=null,seenContext=null,probes=0;
+    sandbox.settlementFanoutProbe=async()=>{
+      probes++;seenContext=JSON.parse(fs.readFileSync(pendingSwap)).routeContext;
+      if(failWith==='timeout')throw new Error('bounded transport deadline');
+      const e=new Error('confirmed chain failure');e.transactionFailed=true;e.chainError=failWith;throw e;
+    };
+    fs.rmSync(routeFile,{force:true});
+    // Confirmed 6001 at the bound Jupiter instruction: exclusion recorded.
+    failWith={InstructionError:[0,{Custom:6001}]};
+    assert.equal((await recover(1)).success,false);
+    assert.deepEqual(seenContext,{position:settlementPosition,jupiter_instruction:0,dex:'Hadron'});
+    assert.equal(fs.existsSync(routeFile),true);assert.equal(fs.existsSync(pendingSwap),false);
+    assert.equal(quoteUrls.at(-1).searchParams.get('excludeDexes'),null);
+    // The next quote excludes Hadron; a provider that still routes via Hadron aborts unsigned.
+    const probesBeforeExcluded=probes, signsBeforeExcluded=swapSigns;
+    assert.equal((await recover(1)).reason,'swap_route_exclusion_unverified');
+    assert.equal(quoteUrls.at(-1).searchParams.get('excludeDexes'),'Hadron');
+    assert.equal(quoteUrls.at(-1).searchParams.get('slippageBps'),'100');
+    assert.equal(probes,probesBeforeExcluded);assert.equal(swapSigns,signsBeforeExcluded);
+    fs.rmSync(routeFile,{force:true});
+    // A different confirmed program error and a timeout record no exclusion.
+    failWith={InstructionError:[0,{Custom:6008}]};
+    assert.equal((await recover(1)).success,false);assert.equal(fs.existsSync(routeFile),false);
+    failWith='timeout';
+    assert.equal((await recover(1)).pending,true);assert.equal(fs.existsSync(routeFile),false);
+    assert.equal(fs.existsSync(pendingSwap),true);fs.rmSync(pendingSwap);
+    // A sidecar write failure must not clear the signed marker or allow another signature.
+    failWith={InstructionError:[0,{Custom:6001}]};
+    fs.writeFileSync=(file,...rest)=>{if(String(file).includes('.route.'))throw new Error('disk full');return writeBefore(file,...rest);};
+    const probesBeforeStorage=probes;
+    let storageResult;
+    try{storageResult=await recover(1);}catch(error){storageResult={success:false,error:error.message};}
+    fs.writeFileSync=writeBefore;
+    assert.notEqual(storageResult.success,true);assert.equal(probes,probesBeforeStorage+1);
+    assert.equal(fs.existsSync(pendingSwap),true);assert.equal(fs.existsSync(routeFile),false);
+    const quotesBeforeRetry=quoteUrls.length, signsBeforeRetry=swapSigns;
+    signatureStatus={confirmationStatus:'processed',err:null};
+    assert.equal((await recover(1)).pending,true);
+    assert.equal(quoteUrls.length,quotesBeforeRetry);assert.equal(probes,probesBeforeStorage+1);
+    assert.equal(swapSigns,signsBeforeRetry);
+    signatureStatus=null;fs.rmSync(pendingSwap,{force:true});fs.rmSync(routeFile,{force:true});
+    SwapTransaction.deserialize=deserializeBefore;sandbox.settlementFanoutProbe=probeBefore;sandbox.fetch=fetchBefore;
+  }
   // Ordinary full-owned settlements may close an ATA too, within a separate
   // abortable budget. Cash from rent cannot hide a worse simulated sale.
   const savedOrdinaryFetch=sandbox.fetch, savedOrdinarySim=Connection.prototype.simulateTransaction;
@@ -509,6 +576,28 @@ vm.runInNewContext("const productionExitTransport=confirmExitTransaction;confirm
   assert.deepEqual(ordinarySimulations,[false,true]);
   assert.equal(accountReads-beforeOrdinaryReads,1); // Reuse the already checked balance/closed-position evidence.
   assert.equal(lastOrdinary().ordinary_token_rent_close,true);
+  assert.equal(lastOrdinary().net_recovery.conservative_wallet_delta_lamports,2478440);
+  assert.equal(lastOrdinary().net_recovery.required_minimum_lamports,1);
+  assert.equal(lastOrdinary().net_recovery.reserved_quote_slippage_lamports,10000);
+  assert.equal(lastOrdinary().net_recovery.token_rent_close_included,true);
+  assert.equal(lastOrdinary().net_recovery.simulated_wallet_delta_lamports,2488440);
+  assert.equal(lastOrdinary().net_recovery.simulation_slot,10);
+  assert.equal(lastOrdinary().net_recovery.wallet_read_before_slot,10);
+  assert.equal(lastOrdinary().net_recovery.wallet_read_after_slot,10);
+  assert.match(lastOrdinary().net_recovery.message_sha256,/^[a-f0-9]{64}$/);
+  // The journaled measurement belongs to the exact message that was signed and sent.
+  assert.equal(lastOrdinary().net_recovery.message_sha256,lastSignedMessageHash);
+  const selectedRecoveryHash=lastOrdinary().net_recovery.message_sha256;
+  const ordinarySimulation=Connection.prototype.simulateTransaction;
+  const sendsBeforeMutation=sends;
+  Connection.prototype.simulateTransaction=async function(candidate,options) {
+    const result=await ordinarySimulation.call(this,candidate,options);
+    candidate.message.recentBlockhash="mutated-after-simulation";
+    return result;
+  };
+  assert.equal((await ordinary()).reason,"net_recovery_unmeasured");
+  assert.equal(sends,sendsBeforeMutation);
+  Connection.prototype.simulateTransaction=ordinarySimulation;
   assert.equal(lastOrdinary().minimum_out_amount,"990000");assert.equal(lastOrdinary().authorized_slippage_bps,100);
   for(const failure of ['simulation','worse-sale','emergency','unknown-emergency','legacy','extension']){
     ordinarySimulations=[];ordinaryCombinedError=failure==='simulation';ordinaryWorseSale=failure==='worse-sale';
@@ -527,6 +616,10 @@ vm.runInNewContext("const productionExitTransport=confirmExitTransaction;confirm
     const before=sends;assert.equal((await ordinary()).success,true);assert.equal(sends,before+1);
     assert.equal(lastOrdinary().ordinary_token_rent_close,false);
     assert.equal(lastOrdinary().token_rent_close_included,false);
+    assert.equal(lastOrdinary().net_recovery.conservative_wallet_delta_lamports,990000);
+    assert.equal(lastOrdinary().net_recovery.token_rent_close_included,false);
+    assert.notEqual(lastOrdinary().net_recovery.message_sha256,selectedRecoveryHash);
+    assert.equal(lastOrdinary().net_recovery.simulated_wallet_delta_lamports,1000000);
     assert.deepEqual(ordinarySimulations,failure==='simulation'||failure==='worse-sale'?[false,true]:[false]);
   }
   accounts=[eligible()];inventoryProof={success:true,amount_raw:"100000000",wallet_balance_raw:"100000000",slot:10};
@@ -548,13 +641,13 @@ vm.runInNewContext("const productionExitTransport=confirmExitTransaction;confirm
   const atomicFetch = sandbox.fetch, atomicSimulation = Connection.prototype.simulateTransaction;
   const originalTimer = sandbox.setTimeout;
   const quoteCalls = [], quoteDelays = [], swapRequests = [];
-  let quotedOutputs = ["250000", "250000"], quoteAlter = null, quoteFailure = null;
+  let quotedOutputs = ["250000", "250000"], quoteAlter = null, quoteFailure = null, quoteErrorCode = "NO_ROUTES_FOUND", quoteFailureIndex = 1;
   sandbox.setTimeout = (callback, delay) => { quoteDelays.push(delay); return setTimeout(callback, 0); };
   sandbox.fetch = async (url, options) => {
     if (url.includes("/quote?")) {
       const bps = Number(new URL(url).searchParams.get("slippageBps"));
       const i = quoteCalls.length; quoteCalls.push(bps);
-      if (quoteFailure && i === 1) return {ok:false,status:quoteFailure,text:async()=>JSON.stringify({errorCode:"NO_ROUTES_FOUND"})};
+      if (quoteFailure && (quoteFailureIndex instanceof Set ? quoteFailureIndex.has(i) : i === quoteFailureIndex)) return {ok:false,status:quoteFailure,text:async()=>JSON.stringify({errorCode:quoteErrorCode})};
       const out = quotedOutputs[Math.min(i, quotedOutputs.length-1)];
       const q = {inputMint:"TOKEN",outputMint:"So11111111111111111111111111111111111111112",
         inAmount:"100000000",outAmount:out,swapMode:"ExactIn",slippageBps:bps,
@@ -569,7 +662,7 @@ vm.runInNewContext("const productionExitTransport=confirmExitTransaction;confirm
   const settlementSol = "So11111111111111111111111111111111111111112";
   const smallRecovery = () => swapToken("TOKEN",settlementSol,"raw:100000000",15,100,1,true);
   const resetSmall = (outputs=["250000","250000"]) => {
-    quotedOutputs=outputs;quoteCalls.length=0;quoteDelays.length=0;swapRequests.length=0;quoteAlter=null;quoteFailure=null;
+    quotedOutputs=outputs;quoteCalls.length=0;quoteDelays.length=0;swapRequests.length=0;quoteAlter=null;quoteFailure=null;quoteErrorCode="NO_ROUTES_FOUND";quoteFailureIndex=1;
   };
   let smallResult = await smallRecovery();
   assert.equal(smallResult.success,true);assert.deepEqual(quoteCalls,[100,300]);assert.deepEqual(quoteDelays,[2100]);
@@ -583,6 +676,29 @@ vm.runInNewContext("const productionExitTransport=confirmExitTransaction;confirm
   assert.equal(swapRequests[0].quoteResponse.slippageBps,100);
   resetSmall(["249999","249000"]);
   assert.equal((await smallRecovery()).success,true);assert.equal(swapRequests[0].quoteResponse.outAmount,"249000");
+  resetSmall();quoteAlter=q=>q.priceImpactPct="0.15";
+  assert.equal((await smallRecovery()).success,true); // Exact 15% ceiling.
+  resetSmall();quoteAlter=q=>q.priceImpactPct="1.5e-1";
+  assert.equal((await smallRecovery()).success,true); // Same fraction in exponent notation.
+  resetSmall(["250000","250000","1"]);quoteFailure=400;quoteErrorCode="CANNOT_COMPUTE_OTHER_AMOUNT_THRESHOLD";
+  assert.equal((await smallRecovery()).success,true);
+  assert.deepEqual(quoteCalls,[100,300,0]);
+  assert.equal(swapRequests[0].quoteResponse.otherAmountThreshold,"1");
+  assert.equal(swapRequests[0].quoteResponse.slippageBps,0);
+  resetSmall(["1"]);quoteFailure=400;quoteFailureIndex=0;quoteErrorCode="CANNOT_COMPUTE_OTHER_AMOUNT_THRESHOLD";
+  assert.equal((await swapToken("TOKEN",settlementSol,"raw:100000000",15,300,1)).success,true);
+  assert.deepEqual(quoteCalls,[300,0]);
+  assert.equal(swapRequests[0].quoteResponse.slippageBps,0);
+  resetSmall(["1"]);quoteFailure=400;quoteFailureIndex=0;quoteErrorCode="CANNOT_COMPUTE_OTHER_AMOUNT_THRESHOLD";
+  quoteAlter=q=>q.priceImpactPct="0.262";
+  assert.equal((await swapToken("TOKEN",settlementSol,"raw:100000000",15,300,1)).success,true);
+  for (const impact of ["0.5","0.9",null,"invalid"]) {
+    resetSmall(["1"]);quoteFailure=400;quoteFailureIndex=0;quoteErrorCode="CANNOT_COMPUTE_OTHER_AMOUNT_THRESHOLD";
+    quoteAlter=q=>q.priceImpactPct=impact;
+    const previous=sends;
+    assert.equal((await swapToken("TOKEN",settlementSol,"raw:100000000",15,300,1)).success,false);
+    assert.equal(sends,previous);assert.equal(swapRequests.length,0);
+  }
   const smallSends = sends;
   resetSmall(["250000","250001"]);
   assert.equal((await smallRecovery()).reason,"small_settlement_value_changed");assert.equal(swapRequests.length,0);
@@ -602,6 +718,26 @@ vm.runInNewContext("const productionExitTransport=confirmExitTransaction;confirm
   assert.equal((await smallRecovery()).reason,"swap_no_route");assert.equal(swapRequests.length,0);
   resetSmall();quoteFailure=429;
   await assert.rejects(smallRecovery(),/429/);assert.equal(swapRequests.length,0);
+  resetSmall();quoteFailure=400;quoteErrorCode="CANNOT_COMPUTE_OTHER_AMOUNT_THRESHOLD";
+  assert.equal((await smallRecovery()).reason,"swap_quote_threshold_unavailable");
+  assert.equal(swapRequests.length,0);
+  assert.deepEqual(quoteCalls,[100,300,0]);
+  resetSmall(["250000","250000","1"]);quoteFailure=400;quoteErrorCode="CANNOT_COMPUTE_OTHER_AMOUNT_THRESHOLD";
+  const beforeDustSend=sends;
+  assert.equal((await swapToken("TOKEN",settlementSol,"raw:100000000",15,100,1000000000,true)).reason,"net_recovery_below_floor");
+  assert.equal(sends,beforeDustSend);
+  resetSmall(["250000","250000","1"]);quoteFailure=400;quoteErrorCode="CANNOT_COMPUTE_OTHER_AMOUNT_THRESHOLD";
+  quoteAlter=(q,i)=>{if(i===2)q.otherAmountThreshold="0";};
+  assert.equal((await smallRecovery()).reason,"swap_quote_threshold_unavailable");assert.equal(swapRequests.length,0);
+  resetSmall();quoteFailure=429;quoteErrorCode="CANNOT_COMPUTE_OTHER_AMOUNT_THRESHOLD";
+  await assert.rejects(smallRecovery(),/429/);assert.equal(swapRequests.length,0);
+  for (const impact of [undefined,null,false,""," ","NaN","Infinity","0.01junk","-0.1","1.01",{},[]]) {
+    resetSmall();quoteAlter=q=>q.priceImpactPct=impact;
+    const beforeImpactSends=sends, beforeImpactSigns=swapSigns;
+    assert.equal((await smallRecovery()).reason,"price_impact_unmeasured");
+    assert.equal(swapRequests.length,0);
+    assert.equal(sends,beforeImpactSends);assert.equal(swapSigns,beforeImpactSigns);
+  }
   resetSmall();quoteAlter=q=>q.priceImpactPct="0.16";
   assert.equal((await smallRecovery()).reason,"price_impact_exceeded");assert.equal(swapRequests.length,0);
   resetSmall();accountExists=true;
@@ -619,6 +755,36 @@ vm.runInNewContext("const productionExitTransport=confirmExitTransaction;confirm
   signatureStatus={confirmationStatus:"processed",err:null};
   assert.equal((await smallRecovery()).pending,true);assert.deepEqual(quoteCalls,[]);assert.equal(sends,smallSends);
   fs.rmSync(pendingSmall);signatureStatus=null;
+  // Strict one-lamport fallback: eligibility predicates and exact zero-step binding.
+  // Every refusal here must build no /swap request, sign nothing and send nothing.
+  const thresholdAt=indexes=>{quoteFailure=400;quoteFailureIndex=indexes;quoteErrorCode="CANNOT_COMPUTE_OTHER_AMOUNT_THRESHOLD";};
+  const refusedUnsigned=async(call,reason,calls)=>{
+    const s=sends,g=swapSigns;const r=await call();
+    assert.equal(r.success,false);if(reason)assert.equal(r.reason,reason);if(calls)assert.deepEqual(quoteCalls,calls);
+    assert.equal(swapRequests.length,0);assert.equal(sends,s);assert.equal(swapSigns,g);
+  };
+  // (a) Without a net-recovery floor there is no zero-slippage requote.
+  resetSmall(["1"]);thresholdAt(0);
+  await refusedUnsigned(()=>swapToken("TOKEN",settlementSol,"raw:100000000",15,300,null),"swap_quote_threshold_unavailable",[300]);
+  // (b) Without owned settlement inventory there is no zero-slippage requote.
+  delete env.DLMM_SETTLEMENT_POSITION;
+  resetSmall(["1"]);thresholdAt(0);
+  await refusedUnsigned(()=>swapToken("TOKEN",settlementSol,0.1,15,300,1),"swap_quote_threshold_unavailable",[300]);
+  env.DLMM_SETTLEMENT_POSITION=settlementPosition;
+  // (c) A one-lamport quote at ordinary slippage keeps the ordinary impact ceiling.
+  resetSmall(["1"]);quoteAlter=q=>q.priceImpactPct="0.262";
+  await refusedUnsigned(()=>swapToken("TOKEN",settlementSol,"raw:100000000",15,100,1),"price_impact_exceeded",[100]);
+  // (d) The zero-slippage quote must stay exact: mode, echo, amounts and mints.
+  for (const alter of [q=>q.swapMode="ExactOut",q=>q.slippageBps=50,q=>q.inAmount="100000001",
+      q=>q.inputMint="OTHER",q=>q.outputMint="OTHER",q=>q.outAmount="2",q=>q.otherAmountThreshold="2"]) {
+    resetSmall(["250000","250000","1"]);thresholdAt(1);quoteAlter=(q,i)=>{if(i===2)alter(q);};
+    await refusedUnsigned(smallRecovery,null,[100,300,0]);
+  }
+  // (e) A second threshold failure at zero slippage ends the ladder: no fourth quote.
+  resetSmall(["250000","250000","1"]);thresholdAt(new Set([1,2]));
+  await refusedUnsigned(smallRecovery,"swap_quote_threshold_unavailable",[100,300,0]);
+  assert.deepEqual(quoteDelays,[2100,2100]);
+  resetSmall();
   await assert.rejects(swapToken("TOKEN","SOL","raw:100000000",15,300,1,true),/Small-settlement allowance/);
   await assert.rejects(swapToken("TOKEN","SOL","raw:100000000",15,100,null,true),/Small-settlement allowance/);
   delete env.DLMM_SETTLEMENT_POSITION;
@@ -693,6 +859,41 @@ vm.runInNewContext("const productionExitTransport=confirmExitTransaction;confirm
   };
   assert.equal((await closePosition("deadline-position")).success, true);
   assert.equal(confirmationAttempts, 2);
+  const preparationPath = path.join(root, "memories/dlmm_close_preparations.jsonl");
+  const preparation = fs.readFileSync(preparationPath, "utf8").trim().split("\n").map(JSON.parse)
+    .filter(row => row.position === "deadline-position");
+  assert.deepEqual(preparation.map(row => row.stage), ["started", "lock_acquired", "lookup_started",
+    "lookup_completed", "withdrawal_build_started", "withdrawal_build_completed", "blockhash_started",
+    "blockhash_completed", "signed_and_persisted", "confirmation_completed", "completed"]);
+  assert.equal(new Set(preparation.map(row => row.attempt)).size, 1);
+  assert.ok(preparation.every((row, i) => row.since_previous_ms >= 0 &&
+    (!i || row.elapsed_ms >= preparation[i-1].elapsed_ms)));
+  assert.equal(preparation.find(row => row.stage === "signed_and_persisted").signature, "signature");
+  assert.ok(!JSON.stringify(preparation).includes("fake-rpc"));
+  // Optional telemetry failure cannot interrupt withdrawal or confirmation.
+  fs.renameSync(preparationPath, preparationPath + ".saved");
+  fs.mkdirSync(preparationPath);
+  try {
+    assert.equal((await closePosition("unwritable-journal-position")).success, true);
+  } finally {
+    fs.rmdirSync(preparationPath);
+    fs.renameSync(preparationPath + ".saved", preparationPath);
+  }
+  // The close lock is released exactly once after use, and never when it was not acquired.
+  {
+    let acquires=0,releases=0,lockFails=false;
+    sandbox.lockProbe={acquire:()=>acquires++,release:()=>releases++,fail:()=>lockFails};
+    vm.runInNewContext('const lockBeforeCloseTest = acquireSwapLock; acquireSwapLock = async (...a) => { lockProbe.acquire(); if (lockProbe.fail()) throw new Error("lock busy"); const r = await lockBeforeCloseTest(...a); return async () => { lockProbe.release(); return r(); }; };', sandbox);
+    assert.equal((await closePosition("lock-success-position")).success,true);
+    assert.equal(acquires,1);assert.equal(releases,1);
+    lockFails=true;const signsBeforeLock=signCalls,sendsBeforeLock=sends;
+    await assert.rejects(closePosition("lock-busy-position"),/lock busy/);
+    assert.equal(acquires,2);assert.equal(releases,1);assert.equal(signCalls,signsBeforeLock);assert.equal(sends,sendsBeforeLock);
+    const busyStages=fs.readFileSync(preparationPath,'utf8').trim().split('\n').map(JSON.parse)
+      .filter(row=>row.position==='lock-busy-position').map(row=>row.stage);
+    assert.deepEqual(busyStages,['started','failed']);
+    lockFails=false;vm.runInNewContext('acquireSwapLock = lockBeforeCloseTest;', sandbox);
+  }
   // Null/processed responses are pending, even when they have err:null. Poll
   // the original signature until confirmed, without another broadcast.
   const observedStatuses = [null,{confirmationStatus:"processed",err:null},{confirmationStatus:"confirmed",err:null}];
@@ -739,6 +940,8 @@ vm.runInNewContext("const productionExitTransport=confirmExitTransaction;confirm
   }
   fs.writeFileSync(path.join(settlementDir, "position.json"), JSON.stringify({state:"deferred",reason:"unknown"}));
   await assert.rejects(deploy(), /awaiting verified SOL settlement/);
+  fs.writeFileSync(path.join(settlementDir, "position.json"), JSON.stringify({state:"deferred",reason:"swap_quote_threshold_unavailable"}));
+  await assert.rejects(deploy(), /awaiting verified SOL settlement/);
   fs.rmSync(settlementDir, { recursive: true });
   assert.equal(sends, 0);
   assert.equal(slippageBpsToPercent(1000), 10);
@@ -757,6 +960,27 @@ vm.runInNewContext("const productionExitTransport=confirmExitTransaction;confirm
   const reconciled = await reconcilePendingSwap(new Connection(), swapMarker);
   assert.equal(reconciled.success, true); assert.equal(reconciled.txHash, "swap-sig");
   assert.ok(!fs.existsSync(swapMarker));
+  fs.writeFileSync(swapMarker, JSON.stringify({signature:'route-failure', lastValidBlockHeight:150,
+    routeContext:{position:'test-route',dex:'Hadron',jupiter_instruction:2}}));
+  signatureStatus = {confirmationStatus:'confirmed',err:{InstructionError:[2,{Custom:6001}]}};
+  assert.equal(await reconcilePendingSwap(new Connection(), swapMarker), null);
+  assert.equal(require('./dlmm_route_retry').excluded(swapMarker, 'test-route'), 'Hadron');
+  fs.rmSync(swapMarker+'.route');
+  // A failure seen only at "processed" is not a verdict: the block can be dropped
+  // and the same signed bytes still land before expiry. Keep the marker and report
+  // pending so no new swap is signed, and record no route exclusion from it.
+  fs.writeFileSync(swapMarker, JSON.stringify({signature:'processed-failure', lastValidBlockHeight:150,
+    routeContext:{position:'test-route',dex:'Hadron',jupiter_instruction:2}}));
+  signatureStatus = {confirmationStatus:'processed',err:{InstructionError:[2,{Custom:6001}]}};
+  const processedFailure = await reconcilePendingSwap(new Connection(), swapMarker);
+  assert.equal(processedFailure?.pending, true); assert.equal(processedFailure.txHash, 'processed-failure');
+  assert.ok(fs.existsSync(swapMarker));
+  assert.ok(!fs.existsSync(swapMarker+'.route'));
+  // Once the failure is confirmed, the marker clears and the retry may proceed.
+  signatureStatus = {confirmationStatus:'confirmed',err:{InstructionError:[2,{Custom:6001}]}};
+  assert.equal(await reconcilePendingSwap(new Connection(), swapMarker), null);
+  assert.ok(!fs.existsSync(swapMarker));
+  fs.rmSync(swapMarker+'.route', {force:true});
   fs.writeFileSync(swapMarker, JSON.stringify({ signature: "expired", lastValidBlockHeight: 150 }));
   signatureStatus = null; height = 151;
   assert.equal(await reconcilePendingSwap(new Connection(), swapMarker), null);
@@ -1251,6 +1475,42 @@ vm.runInNewContext("const productionExitTransport=confirmExitTransaction;confirm
     fs.rmSync(settleDir,{recursive:true,force:true});
     sandbox.fetch=originalFetch;Connection.prototype.simulateTransaction=originalSim;
   }
+  // A route-specific confirmed failure changes only the next owned quote.
+  const routeRetry = require('./dlmm_route_retry');
+  const routePending = path.join(root, 'memories/dlmm_pending_swaps', `${wallet.publicKey}-TOKEN-So11111111111111111111111111111111111111112.json`);
+  fs.rmSync(routePending, {force: true});
+  fs.mkdirSync(path.dirname(routePending), {recursive: true});
+  env.DLMM_SETTLEMENT_POSITION = 'route-position';
+  sandbox.routeInventory = async () => ({success:true, amount_raw:'100000000', wallet_balance_raw:'100000000'});
+  vm.runInNewContext('const inventoryBeforeRouteTest = settlementInventory; settlementInventory = routeInventory;', sandbox);
+  routeRetry.recordFailure(routePending, {position:'route-position', dex:'Hadron', jupiter_instruction:2}, {InstructionError:[2,{Custom:6001}]});
+  const fetchBeforeRoute = sandbox.fetch;
+  const sendsBeforeRoute = sends;
+  sandbox.fetch = async url => {
+    const u = new URL(url);
+    assert.equal(u.searchParams.get('excludeDexes'), 'Hadron');
+    assert.equal(u.searchParams.get('slippageBps'), '100');
+    return {ok:false, status:400, text:async()=>JSON.stringify({errorCode:'NO_ROUTES_FOUND'})};
+  };
+  assert.equal((await recover(1)).reason, 'swap_route_cooldown_no_route');
+  sandbox.fetch = async () => ({ok:true,json:async()=>({routePlan:[{swapInfo:{label:'Hadron'}}]})});
+  assert.equal((await recover(1)).reason, 'swap_route_exclusion_unverified');
+  sandbox.fetch = async url => {
+    assert.equal(new URL(url).searchParams.get('excludeDexes'), 'Hadron');
+    return {ok:true,json:async()=>({inputMint:'TOKEN',
+      outputMint:'So11111111111111111111111111111111111111112', inAmount:'100000000',
+      outAmount:'5000',otherAmountThreshold:'4950',priceImpactPct:'0.06',
+      routePlan:[{swapInfo:{label:'Pump.fun Amm'}}]})};
+  };
+  const unsafeAlternative = await recover(1);
+  assert.equal(unsafeAlternative.reason, 'price_impact_exceeded');
+  assert.equal(unsafeAlternative.priceImpactPct, 6);
+  assert.equal(unsafeAlternative.maxPriceImpactPct, 5);
+  assert.equal(sends, sendsBeforeRoute);
+  fs.rmSync(routePending+'.route', {force:true});
+  delete env.DLMM_SETTLEMENT_POSITION;
+  sandbox.fetch = fetchBeforeRoute;
+  vm.runInNewContext('settlementInventory = inventoryBeforeRouteTest;', sandbox);
   // Exercise the real CLI parser, not a copy of its option handling.
   let cliSwapArgs;
   sandbox.captureCLISwap = async (...args) => {cliSwapArgs=args;return {success:true};};

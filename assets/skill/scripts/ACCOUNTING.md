@@ -247,7 +247,23 @@ timeout cannot authorize another transaction or a new blockhash. Restart retries
 reuse the same pending close bytes. Empty-only cleanup retains its existing path.
 
 This changes transport only: the transaction, preflight options, fees and close
-instructions are unchanged. Optional `dlmm_close_transports.jsonl` records the
+instructions are unchanged. Close preparation first uses the saved entry's pool
+as a hint, verifying the native position program, discriminator, pool and wallet
+owner before a targeted SDK position read. The returned owner and position must
+also match. Missing or mismatched hints retain wallet-wide discovery; RPC errors
+retain ordinary failover. Local metadata alone never authorizes withdrawal.
+This avoids enumerating unrelated positions for a verified known position;
+it is not proof of improved live latency or exit price.
+Optional `dlmm_close_preparations.jsonl` records each invocation's ID and position,
+lock acquisition, lookup, transaction construction, blockhash acquisition, persisted
+signature and confirmation boundaries. Monotonic elapsed times separate preparation
+from broadcast latency; wall-clock timestamps link to monitor decisions. A final
+failed/pending/refused/completed stage describes the executor result, not finalized
+cash settlement. Reconciliation and RPC retries remain inside the same invocation.
+No endpoint URLs, error bodies, private keys or signed bytes are recorded, and a
+journal failure cannot prevent withdrawal. A killed process may leave an incomplete
+sequence; this alone does not prove the process remains live or identify a root cause.
+Optional `dlmm_close_transports.jsonl` records the
 signature, bytes hash, configured endpoint count, client elapsed time and outcome.
 It stores no RPC URLs or raw transaction. Journal failure cannot block a close.
 These timings are client observations, not finalized block times, saved SOL or
@@ -576,6 +592,30 @@ Only the observed, fully reconciled subset can train, so these lifts may have
 coverage and selection bias and do not prove improved prospective returns.
 
 ### Swap quote evidence
+
+The executor interprets Jupiter Metis `priceImpactPct` as a decimal fraction
+and multiplies it by 100 for the configured percentage ceiling. It requires a
+complete finite numeric string in [0, 1]; absent, malformed, negative and
+out-of-range values return `price_impact_unmeasured` before swap construction.
+Scientific notation remains accepted. The DLMM SDK's quote impact is already
+in percentage units and must not reuse this conversion when routes are compared.
+See [Jupiter's Metis guide](https://developers.jup.ag/docs/guides/how-to-build-a-custom-swap-with-metis).
+
+For swaps using the minimum-recovery gate, `swap_quote.net_recovery` records
+the selected unsigned transaction's simulated wallet delta after reserving the
+quoted slippage allowance, the required minimum, and whether an inline token
+rent close was included. Accepted rent-close variants retain their own measured
+value; rejected variants do not replace the original simulation's value.
+This includes simulated account funding and refunds, but is neither executed
+proceeds nor whole-position profit. Swaps without that gate omit this evidence.
+Recording it introduces no additional simulation or RPC request.
+New evidence also includes the SHA-256 of the selected serialized message,
+simulation slot, before/after wallet-read slots, and simulated wallet delta
+before reserving quote slippage. A message change during the measurement
+invalidates that result before signing. Accepted rent-close variants retain their
+own hash and readings; rejected optional variants cannot replace the selected
+message evidence. Slot numbers and equal wallet balances do not prove an atomic
+cross-route bank snapshot or unchanged market liquidity.
 
 New swap submission rows include `swap_quote`: quote receipt time, input/output
 mints, raw input/output amounts, minimum output, authorized slippage, provider
@@ -1057,3 +1097,32 @@ these identities within its existing 30-day/last-ten-close window, preferring
 actual journal rows if present. Recovered rows carry no LP PnL mark. Root
 completeness, refund ownership and cash-sign proof requirements remain in force;
 recovering an identity cannot turn unvalued inventory into a profit or loss.
+
+Jupiter HTTP 400 `CANNOT_COMPUTE_OTHER_AMOUNT_THRESHOLD` triggers one paced
+zero-slippage requote only for proved owned settlement inventory with an explicit
+net recovery floor. The fallback must quote exactly one lamport in ExactIn mode,
+with a one-lamport minimum and zero slippage. For this fallback alone, a known
+price impact below 50% may exceed the ordinary percentage ceiling: the inferred
+absolute impact on a one-lamport output is less than one lamport. Unknown impact
+and impact at or above 50% still refuse; ordinary swaps retain their limits. The executor still checks inventory,
+price impact and exact unsigned simulation, including an eligible atomic token
+account close, before any send. Rent recovery is not trading profit. A changed or
+invalid fallback remains `swap_quote_threshold_unavailable`: inventory stays
+explicit, retries back off 900 seconds, and entry remains blocked. Only verified
+zero owned inventory completes settlement.
+
+### Confirmed Hadron slippage retry
+
+For an owned token-to-SOL settlement whose quote uses only Hadron, the signed
+transaction marker records the Jupiter instruction index and position. A
+confirmed or finalized Jupiter `6001` failure at that index temporarily excludes
+Hadron from quotes for the same wallet, token pair and position for five minutes.
+Timeouts, other program errors, mixed routes and other positions do not activate
+this exclusion. The quote journal records route labels and requested exclusions.
+
+Alternative quotes retain the caller's slippage, price-impact, ownership and
+net-recovery checks. An absent alternative or an ignored exclusion returns a
+retryable result without signing. The exclusion expires automatically; it does
+not permanently blacklist a venue or prove that another route would have been
+profitable. Failed instruction transfers revert, but their network fees
+remain paid, which is why a repeated failing route is worth excluding.
