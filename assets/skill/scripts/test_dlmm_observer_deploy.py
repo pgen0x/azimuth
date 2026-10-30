@@ -29,7 +29,7 @@ elif name=='systemctl':
 elif name=='python3':
     if Path(args[0]).name=='dlmm_observer_idle.py':
         unit=args[args.index('--unit')+1]
-        if case=='busy' or (case=='hermes_busy' and unit=='hermes-gateway'): sys.exit(1)
+        if case=='busy' or (case=='hermes_busy' and unit.startswith('hermes-gateway')): sys.exit(1)
         count=sum(1 for line in (root/'commands.jsonl').read_text().splitlines()
                   if 'dlmm_observer_idle.py' in line and '"'+unit+'"' in line)
         if case=='busy_late' and count>1: sys.exit(1)
@@ -122,7 +122,7 @@ class DeployDocumentTests(unittest.TestCase):
 
     def assert_guarded_restarts(self, commands):
         for i, cmd in enumerate(commands):
-            if cmd[:3] == ['systemctl', '--user', 'restart'] and cmd[-1] in ('azimuth', 'hermes-gateway'):
+            if cmd[:3] == ['systemctl', '--user', 'restart'] and (cmd[-1] == 'azimuth' or cmd[-1].startswith('hermes-gateway')):
                 previous = commands[i-1]
                 self.assertEqual(previous[0], 'python3')
                 self.assertTrue(previous[1].endswith('dlmm_observer_idle.py'))
@@ -167,7 +167,7 @@ class DeployDocumentTests(unittest.TestCase):
                     recent = [x for x in self.commands()[len(commands):]
                               if x[0]=='python3' and '--component' in x and x[x.index('--component')+1]=='pipeline']
                     for cmd in recent[-(4 if hermes == '1' else 2):]:
-                        stamp = 'hermes-since' if cmd[cmd.index('--unit')+1]=='hermes-gateway' else 'pipeline-since'
+                        stamp = 'hermes-since' if cmd[cmd.index('--unit')+1].startswith('hermes-gateway') else 'pipeline-since'
                         self.assertEqual(cmd[cmd.index('--since')+1], saved[stamp])
                     self.verify_protected()
                     commands = self.commands()
@@ -183,6 +183,37 @@ class DeployDocumentTests(unittest.TestCase):
                 self.assertEqual(self.mutations(), [])
                 self.assertFalse(list((self.root / 'units').glob('*/observe-bundle.conf')))
                 self.verify_protected()
+
+    def test_named_gateway_unit_is_used_everywhere_and_recorded(self):
+        unit = 'hermes-gateway-dlmm'
+        result = self.run_block(HERMES='1', HERMES_UNIT=unit)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        run = Path(result.stdout.splitlines()[0])
+        self.assertEqual((run / 'hermes-unit').read_text().strip(), unit)
+        self.assertTrue((self.root / 'units' / (unit + '.service.d') / 'observe-bundle.conf').is_file())
+        self.assertFalse((self.root / 'units/hermes-gateway.service.d/observe-bundle.conf').exists())
+        self.assertIn(['systemctl', '--user', 'restart', unit], self.mutations())
+        self.assertNotIn(['systemctl', '--user', 'restart', 'hermes-gateway'], self.mutations())
+        self.assert_guarded_restarts(self.commands())
+        verified = self.run_block('verification', RUN=str(run), MODE='activation', HERMES_UNIT='ignored')
+        self.assertEqual(verified.returncode, 0, verified.stderr)
+        gated = [c for c in self.commands() if c[0] == 'python3' and '--component' in c and c[c.index('--component')+1] == 'pipeline']
+        self.assertIn(unit, [c[c.index('--unit')+1] for c in gated])  # the recorded unit, not the env
+        result = self.run_block('rollback', RUN=str(run), MODE='rollback')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse((self.root / 'units' / (unit + '.service.d') / 'observe-bundle.conf').exists())
+        self.assertEqual(self.mutations().count(['systemctl', '--user', 'restart', unit]), 2)
+        self.assert_guarded_restarts(self.commands())
+        self.verify_protected()
+
+    def test_invalid_gateway_unit_is_refused_before_any_change(self):
+        for unit in ('sshd', 'hermes-gateway-', 'hermes-gateway;x', 'hermes-gateway/../x', 'azimuth'):
+            with self.subTest(unit=unit):
+                result = self.run_block(HERMES='1', HERMES_UNIT=unit)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse((self.root / 'runs').exists())
+                self.assertFalse((self.root / 'commands.jsonl').exists() and self.mutations())
+                self.assertFalse(list((self.root / 'units').glob('*/observe-bundle.conf')))
 
     def test_inflight_blocks_rollback_before_removals_or_any_restart(self):
         result = self.run_block(HERMES='1')

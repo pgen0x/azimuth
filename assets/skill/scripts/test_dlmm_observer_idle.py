@@ -95,6 +95,13 @@ class IdleTests(unittest.TestCase):
         (self.unit / 'cgroup.procs').write_bytes(b'10\n' * 30000)
         with self.assertRaisesRegex(RuntimeError, 'read cap'): self.wait()
 
+    def test_unit_names_default_and_per_profile_gateway_only(self):
+        for good in ('azimuth', 'hermes-gateway', 'hermes-gateway-dlmm', 'hermes-gateway-my_profile.2'):
+            self.assertEqual(idle.unit_name(good), good)
+        for bad in ('sshd', 'hermes-gateway-', 'hermes-gateway;x', 'hermes-gateway/../x', 'azimuth-sol-monitor', '-hermes-gateway', ''):
+            with self.subTest(bad=bad), self.assertRaises(idle.argparse.ArgumentTypeError):
+                idle.unit_name(bad)
+
     def test_systemctl_failure_cannot_pass(self):
         with patch.object(idle.subprocess, 'run', side_effect=subprocess.CalledProcessError(1, 'fixture')):
             with self.assertRaises(subprocess.CalledProcessError):

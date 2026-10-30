@@ -1,13 +1,13 @@
 # Observe bundle: gated activation and rollback
 
-This supersedes DEPLOY in the earlier observe reports. These are operator steps
+Gated activation and rollback steps for the observe bundle. These are operator steps
 for a reviewed integration tip, after user approval for a canary. Nothing in the
 offline review executes them. Set `EXPECTED_PRE` to the full SHA of the production
 commit you reviewed as the base. Create the integration tip from that exact base in a
 separate worktree, merge the reviewed observe branch there, and pass suites with
 observe OFF/ON and with every feature flag your production runs at both values.
 If production HEAD has moved, stop and review a new integration base.
-Do not integrate parked leftovers work. Do not replace the production binary.
+Do not replace the production binary.
 
 Set `P` to the production checkout, `U` to its user-systemd config directory,
 `RUN_PARENT` to a private evidence directory, `TIP` to the full approved integration
@@ -15,7 +15,10 @@ SHA, `EXPECTED_PRE` to the reviewed production base SHA, `PROTECTED_DROPINS` to 
 existing drop-ins that must survive (below), and `REVIEWED_STATUS` to the
 exact `git status --porcelain` output reviewed for this deploy (including existing
 user edits). `HERMES=0` by default; `HERMES=1` needs explicit approval to restart
-the gateway. Both activation and rollback check its cgroup for work in flight,
+the gateway. `HERMES_UNIT` names that unit: `hermes-gateway` by default, or the
+name your install uses (for example `hermes-gateway-<profile>`); it must match
+`hermes-gateway` or `hermes-gateway-<name>`, and activation records it for the later
+blocks. Both activation and rollback check its cgroup for work in flight,
 as they do for azimuth. Run each block in a fresh bash.
 
 The activation block aborts on any failure. It creates a unique evidence directory
@@ -44,13 +47,15 @@ for rel in "${protected[@]}"; do
 done
 HERMES=${HERMES:-0}
 [[ "$HERMES" == 0 || "$HERMES" == 1 ]]
+HERMES_UNIT=${HERMES_UNIT:-hermes-gateway}
+[[ "$HERMES_UNIT" =~ ^hermes-gateway(-[A-Za-z0-9_.-]+)?$ ]]
 [[ "$TIP" =~ ^[0-9a-f]{40}$ && "$EXPECTED_PRE" =~ ^[0-9a-f]{40}$ ]]
 [[ "$(git -C "$P" rev-parse HEAD)" == "$EXPECTED_PRE" ]]
 [[ "$(git -C "$P" status --porcelain)" == "$REVIEWED_STATUS" ]]
 git -C "$P" merge-base --is-ancestor "$EXPECTED_PRE" "$TIP"
 units=(azimuth-sol-monitor azimuth azimuth-sol-shadow)
 flags=(DLMM_SHADOW_EXITS DLMM_REJECT_IDENTITY DLMM_BRACKET_REJECTS)
-if [[ "$HERMES" == 1 ]]; then units+=(hermes-gateway); flags+=(DLMM_REJECT_IDENTITY); fi
+if [[ "$HERMES" == 1 ]]; then units+=("$HERMES_UNIT"); flags+=(DLMM_REJECT_IDENTITY); fi
 for unit in "${units[@]}"; do
   file="$U/$unit.service.d/observe-bundle.conf"
   [[ ! -e "$file" && ! -L "$file" ]]
@@ -61,6 +66,7 @@ RUN=$(mktemp -d "$RUN_PARENT/observe.XXXXXXXX")
 printf '%s\n' "$RUN"
 printf '%s\n' "$EXPECTED_PRE" > "$RUN/pre"
 printf '%s\n' "$HERMES" > "$RUN/hermes"
+printf '%s\n' "$HERMES_UNIT" > "$RUN/hermes-unit"
 printf '%s\n' activating > "$RUN/phase"
 for rel in "${protected[@]}"; do sha256sum "$U/$rel"; done > "$RUN/protected-dropins.sha256"
 git -C "$P" diff --binary > "$RUN/before.patch"
@@ -73,7 +79,7 @@ idle="$P/assets/skill/scripts/dlmm_observer_idle.py"
 # Catch an occupied unit before changing any drop-in. Recheck just before restart.
 python3 "$idle" --unit azimuth --timeout 120 > "$RUN/azimuth-idle-preflight.json"
 if [[ "$HERMES" == 1 ]]; then
-  python3 "$idle" --unit hermes-gateway --timeout 120 > "$RUN/hermes-idle-preflight.json"
+  python3 "$idle" --unit "$HERMES_UNIT" --timeout 120 > "$RUN/hermes-idle-preflight.json"
 fi
 for i in "${!units[@]}"; do
   unit=${units[$i]}; file="$U/$unit.service.d/observe-bundle.conf"
@@ -94,9 +100,9 @@ python3 "$idle" --unit azimuth --timeout 120 > "$RUN/azimuth-idle-restart.json"
 T1=$(date +%s.%N); printf '%s\n' "$T1" > "$RUN/pipeline-since"
 systemctl --user restart azimuth
 if [[ "$HERMES" == 1 ]]; then
-  python3 "$idle" --unit hermes-gateway --timeout 120 > "$RUN/hermes-idle-restart.json"
+  python3 "$idle" --unit "$HERMES_UNIT" --timeout 120 > "$RUN/hermes-idle-restart.json"
   T3=$(date +%s.%N); printf '%s\n' "$T3" > "$RUN/hermes-since"
-  systemctl --user restart hermes-gateway
+  systemctl --user restart "$HERMES_UNIT"
 fi
 [[ ! -s "$RUN/protected-dropins.sha256" ]] || sha256sum -c "$RUN/protected-dropins.sha256"
 printf '%s\n' activated > "$RUN/phase"
@@ -154,8 +160,10 @@ case "$phase" in
 esac
 HERMES=$(cat "$RUN/hermes")
 [[ "$HERMES" == 0 || "$HERMES" == 1 ]]
+HERMES_UNIT=$(cat "$RUN/hermes-unit")
+[[ "$HERMES_UNIT" =~ ^hermes-gateway(-[A-Za-z0-9_.-]+)?$ ]]
 units=(azimuth); stamps=(pipeline-since)
-if [[ "$HERMES" == 1 ]]; then units+=(hermes-gateway); stamps+=(hermes-since); fi
+if [[ "$HERMES" == 1 ]]; then units+=("$HERMES_UNIT"); stamps+=(hermes-since); fi
 attempt=$(mktemp -d "$RUN/verify-${prefix}XXXXXXXX")
 gate="$P/assets/skill/scripts/dlmm_observer_gate.py"
 pending=0
@@ -192,8 +200,10 @@ set -euo pipefail
 : "${P:?}" "${U:?}" "${RUN:?}"
 HERMES=$(cat "$RUN/hermes")
 [[ "$HERMES" == 0 || "$HERMES" == 1 ]]
+HERMES_UNIT=$(cat "$RUN/hermes-unit")
+[[ "$HERMES_UNIT" =~ ^hermes-gateway(-[A-Za-z0-9_.-]+)?$ ]]
 units=(azimuth-sol-monitor azimuth azimuth-sol-shadow)
-if [[ "$HERMES" == 1 ]]; then units+=(hermes-gateway); fi
+if [[ "$HERMES" == 1 ]]; then units+=("$HERMES_UNIT"); fi
 for unit in "${units[@]}"; do
   file="$U/$unit.service.d/observe-bundle.conf"
   [[ -f "$file" && ! -L "$file" ]]
@@ -203,7 +213,7 @@ done
 idle="$P/assets/skill/scripts/dlmm_observer_idle.py"
 python3 "$idle" --unit azimuth --timeout 120 > "$RUN/rollback-azimuth-idle-preflight.json"
 if [[ "$HERMES" == 1 ]]; then
-  python3 "$idle" --unit hermes-gateway --timeout 120 > "$RUN/rollback-hermes-idle-preflight.json"
+  python3 "$idle" --unit "$HERMES_UNIT" --timeout 120 > "$RUN/rollback-hermes-idle-preflight.json"
 fi
 printf '%s\n' rolling-back > "$RUN/phase"
 for unit in "${units[@]}"; do rm -- "$U/$unit.service.d/observe-bundle.conf"; done
@@ -220,9 +230,9 @@ python3 "$idle" --unit azimuth --timeout 120 > "$RUN/rollback-azimuth-idle-resta
 T1=$(date +%s.%N); printf '%s\n' "$T1" > "$RUN/rollback-pipeline-since"
 systemctl --user restart azimuth
 if [[ "$HERMES" == 1 ]]; then
-  python3 "$idle" --unit hermes-gateway --timeout 120 > "$RUN/rollback-hermes-idle-restart.json"
+  python3 "$idle" --unit "$HERMES_UNIT" --timeout 120 > "$RUN/rollback-hermes-idle-restart.json"
   T3=$(date +%s.%N); printf '%s\n' "$T3" > "$RUN/rollback-hermes-since"
-  systemctl --user restart hermes-gateway
+  systemctl --user restart "$HERMES_UNIT"
 fi
 [[ ! -s "$RUN/protected-dropins.sha256" ]] || sha256sum -c "$RUN/protected-dropins.sha256"
 printf '%s\n' rolled-back > "$RUN/phase"

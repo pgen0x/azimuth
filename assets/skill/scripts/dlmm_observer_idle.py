@@ -3,6 +3,7 @@
 import argparse
 import json
 import os
+import re
 from pathlib import Path
 import subprocess
 import time
@@ -83,9 +84,19 @@ def wait_idle(unit, timeout, proc=Path('/proc'), cgroups=Path('/sys/fs/cgroup'),
     raise RuntimeError('unit did not become idle before deadline; do not restart')
 
 
+# The scanner, or the Hermes gateway under its default or per-profile name (hermes-gateway-<profile>).
+UNIT = re.compile(r'^(azimuth|hermes-gateway(-[A-Za-z0-9_.-]+)?)$')
+
+
+def unit_name(value):
+    if not UNIT.match(value):
+        raise argparse.ArgumentTypeError('unit must be azimuth, hermes-gateway or hermes-gateway-<name>')
+    return value
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--unit', choices=('azimuth', 'hermes-gateway'), required=True)
+    parser.add_argument('--unit', type=unit_name, required=True)
     parser.add_argument('--timeout', type=float, default=120)
     args = parser.parse_args()
     if not 0 < args.timeout <= 900:
