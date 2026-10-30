@@ -112,6 +112,14 @@ tbody tr:hover{background:#171a1d}
 .loading{opacity:.55;transition:opacity .15s}
 .filters{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 4px}
 .filters input{flex:1;min-width:200px}
+.chips{display:flex;gap:6px;flex-wrap:wrap;margin:6px 0 0}
+.chip{min-height:40px;padding:6px 12px;font-size:12.5px;color:var(--ink-2)}
+.chip[aria-pressed="true"]{border-color:var(--accent);color:var(--ink);box-shadow:inset 0 -2px 0 var(--accent)}
+.log{list-style:none;margin:6px 0 0;padding:0;max-height:560px;overflow:auto;border:1px solid var(--line);background:var(--bg);font-size:12px;line-height:1.5}
+.log li{display:grid;grid-template-columns:max-content max-content minmax(0,1fr);gap:12px;padding:3px 10px;border-bottom:1px solid var(--grat)}
+.log li.empty{display:block;color:var(--muted);padding:10px}
+.log time{color:var(--muted);white-space:nowrap} .log .u{color:var(--ink-2)} .log .m{white-space:pre-wrap;overflow-wrap:anywhere}
+@media (max-width:700px){.log li{grid-template-columns:minmax(0,1fr);gap:0}}
 .pager{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-top:10px;flex-wrap:wrap}
 
 /* Charts */

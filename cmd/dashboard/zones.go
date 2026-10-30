@@ -125,3 +125,33 @@ func zonePanels(data object, tz string) object {
 	panels, _ := byTZ[tz].(map[string]any)
 	return panels
 }
+
+// logLines reads the Robinhood log length: default 200, at most 1000 (the collector keeps 1000).
+func logLines(query string) (int, bool) {
+	if query == "" {
+		return 200, true
+	}
+	n, err := strconv.Atoi(query)
+	return n, err == nil && n >= 1 && n <= 1000
+}
+
+// robinhoodView copies the cached snapshot section (never mutating it), trims the log to n lines
+// and adds the closes bucketed in the viewer's zone.
+func robinhoodView(data, panels object, n int) object {
+	view := object{"closes": panels["robinhood"]}
+	if section, ok := data["robinhood"].(map[string]any); ok {
+		for k, v := range section {
+			view[k] = v
+		}
+		if logs, ok := section["logs"].([]any); ok {
+			total := len(logs)
+			if n < total {
+				logs = logs[:n]
+			}
+			view["logs"] = logs
+			view["logs_retained"] = total
+		}
+	}
+	view["log_limit"] = n
+	return view
+}
