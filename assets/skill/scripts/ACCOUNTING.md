@@ -1,5 +1,17 @@
 # Solana accounting and review
 
+## Scope
+
+This repository runs the collectors: `dlmm_accounting.py`, `dlmm_shadow.py`,
+`dlmm_realized.py`, `dlmm_fee_forecast.py` and the monitor/executor journals.
+The replay and acceptance functions described below are library functions with
+tests: `bin_replay`, `native_allocation_replay`, `bin_width_replay`,
+`bin_width_holding_replay`, `width_study_summary` and `pre_entry_bin_coverage`
+in `dlmm_shadow.py`, and `position_profit_acceptance` in
+`dlmm_profit_acceptance.py`. No script here calls them on a schedule or builds a
+periodic review report from them. The caller chooses the window and the cutoff
+(`end_ts`); the sections below state what each function requires and returns.
+
 ### Native allocation execution evidence
 
 Native risk marking can attach `bin_observation.initial_funding` using the
@@ -11,11 +23,11 @@ protocol fees as a subset of composition fees. Unsupported or incomplete
 execution evidence leaves this field absent and does not disable native risk
 marking. No additional RPC or signer is used.
 
-The existing pre-close journal carries this evidence into `native_bin_replay`
-(`dlmm_shadow`). Funding and account-deletion facts must be finalized
-and observed by the report cutoff. The native observation must precede the
-earliest proved close block by no more than 30 seconds; its recording time must
-also be within the report. Historical rows without execution evidence remain
+The existing pre-close journal carries this evidence. `native_allocation_replay`
+(`dlmm_shadow`) consumes it: funding and account-deletion facts must be finalized
+and observed by the caller's cutoff (`end_ts`). The native observation must precede
+the earliest proved close block by no more than 30 seconds; its recording time must
+also be at or before that cutoff. Historical rows without execution evidence remain
 unmeasured.
 
 This comparison scales actual bin principal and earned fees under three fixed
@@ -113,8 +125,8 @@ remain available. This is a conservative cost guard, not a promise of future fee
 
 `dlmm_root_decisions.jsonl` persists the evidence, cost, strikes and reason.
 `dlmm_recenter_decisions.jsonl` preserves the earlier eligibility decision and market
-inputs. Replay filters on observation time, not merely transaction block time;
-future-fetched facts cannot justify historical decisions. Unknown historical cases
+inputs. Any replay of these journals must filter on observation time, not merely
+transaction block time; future-fetched facts cannot justify historical decisions. Unknown historical cases
 remain unknown; no counterfactual profit is invented for paths not executed.
 
 ## Shadow study
@@ -122,9 +134,10 @@ remain unknown; no counterfactual profit is invented for paths not executed.
 Scanner cooldown, momentum, audit and bundler/insider rejects preserve full candidate,
 pool and gate evidence under stable five-minute cohort IDs. Repeated IDs count once.
 Forward horizons are pulse 30 minutes, turnover 1 hour, casual 4 hours, multiday 24
-hours. Outcomes collected more than ten minutes late are censored. The reported
-false-rejection *proxy* is a pool-price gain above a fixed 1% hurdle, with measured,
-pending, unmeasured and censored denominators. It is not simulated LP profit.
+hours. Outcomes collected more than ten minutes late are censored. Each row in
+`dlmm_reject_outcomes.jsonl` carries a false-rejection *proxy*: a pool-price gain
+above a fixed 1% hurdle, with status measured, unmeasured or censored (not-yet-due
+rejects stay pending). A summary must keep all four denominators. It is not simulated LP profit.
 
 Collection uses a monotonic 240-second budget inside the five-minute service
 timeout. Rejected-candidate HTTP reads have a 45-second phase budget; bin
@@ -163,16 +176,17 @@ read fails, the original snapshot is attempted without a width study. The existi
 shadow timer follows the union of the two ranges in its normal bounded collection.
 
 `bin_width_replay` compares far-active allocations at the same capital and sampled
-mode horizon. The daily report separates modes and totals only complete pairs.
+mode horizon. `width_study_summary` separates modes and totals only complete pairs.
 Extra empty, missing or reset bins make the comparison unmeasured; historical
 entries without a pre-entry wider snapshot are not backfilled with today's bins.
 The comparison is gross: additional rent, market impact, slippage and the live
 exit policy are unknown, so a modeled fee or IL advantage is not deployable profit.
 
-`bin_width_holding_replay` requires a recorded close plus account-deletion
-evidence observed by the report cutoff, then compares both allocations at the last bin observation at or before the finalized
-transaction's block time. A delayed close journal cannot extend the holding
-period; repeated proof uses the earliest valid finalized close time.
+`bin_width_holding_replay` takes the proved close time from its caller, which
+must come from a recorded close plus account-deletion evidence observed by the
+caller's cutoff. It then compares both allocations at the last bin observation at or before the finalized
+transaction's block time. The caller must pass the earliest valid finalized close
+time, so a delayed close journal cannot extend the holding period.
 The observation must be no more than 600 seconds old; post-close samples and the
 normal fixed-horizon terminal grace cannot enter this view. Missing close proof
 or a missing/stale pre-close observation remains unmeasured. Both diagnostics use
@@ -259,10 +273,11 @@ keeps inventory unproven. This avoids leaving withdrawn tokens exposed solely wh
 waiting for the periodic accounting timer. Slippage, fees, inventory ownership,
 pending-transaction reconciliation and the separate risk-monitor loop are unchanged.
 
-## September 26 evaluation corrections
+## September 26 accounting corrections
 
-- Executor authorization replay uses its persisted post-refresh evidence; the earlier
-  pre-settlement eligibility replay is reported separately. Historical facts are not backdated.
+- `dlmm_root_decisions.jsonl` persists the executor's post-refresh authorization
+  evidence; `dlmm_recenter_decisions.jsonl` keeps the earlier pre-settlement
+  eligibility decision. They are separate records. Historical facts are not backdated.
 - Root fee pace starts observing at the first fresh position sample, independently
   of exit triggers, and still requires a full 30-minute window. When this tick's
   native risk mark is verified, fee growth and fee-stall checks use its fees,
@@ -383,7 +398,7 @@ wrappers, extra instructions or unexplained balance changes remain unclassified.
 Facts expose recovered rent and the wrapper service fee separately. External flow
 is zero: reserves became spendable SOL, while fees reduced wealth. No trading root
 gets credited with this maintenance cash. Schema 9 refreshes previously unknown
-transactions with a new observation timestamp; historical evaluations retain the
+transactions with a new observation timestamp; earlier reads retain the
 evidence available at their cutoff.
 
 ### Pump cashback and accumulator maintenance
@@ -524,7 +539,7 @@ per collection, after missing cash facts and within the existing 60-fetch cap.
 Null proof attempts are cached; missing optional evidence does not affect coverage.
 
 `nonpositive_cash_upper_bounds` has a null lower bound. It can establish a
-non-win for the learner and the every-position acceptance report, but cannot
+non-win for the learner and for `position_profit_acceptance`, but cannot
 establish positive profit, enter cash subtotals or create a rent-refund group.
 Future shared-account cleanup costs may make the result worse. Existing matched
 refund groups take precedence. Each proof retains its real observation cutoff;
@@ -570,12 +585,13 @@ rent/fee movements. A wallet native delta alone is not gross swap output. Old
 transactions lacking a saved quote remain unmeasured for quote-to-fill slippage;
 do not reconstruct their historical quotes from current market prices.
 
-Quote-to-fill comparisons group signed attempts by authorized slippage. SOL output is
-measured as finalized native delta plus network fees plus funded token rent minus
-refunded token rent. Failed transaction fees, pending facts and unmeasured rows
-remain explicit. Negative shortfall means the fill improved on the quote. These
-groups are execution evidence, not trading profit or causal savings; failures
-before a signed submission are outside their attempt counts.
+No public script computes quote-to-fill slippage; these journals are the inputs
+for it. A comparison should group signed attempts by authorized slippage and
+measure SOL output as finalized native delta plus network fees plus funded token
+rent minus refunded token rent. Failed transaction fees, pending facts and
+unmeasured rows must stay explicit. Negative shortfall means the fill improved on
+the quote. Such groups are execution evidence, not trading profit or causal
+savings; failures before a signed submission are outside their attempt counts.
 
 Automatic settlement quotes ordinary exits at 100 bps and retries at 300 bps.
 On a first ordinary attempt, the monitor also passes `--small-settlement`:
@@ -623,7 +639,7 @@ terminal observation also stops further collection for that entry.
 Replay uses the first observation at/after the target within that grace window;
 it cannot select a more favorable later outcome. `horizon_complete` distinguishes
 full horizons from partial models, and `observed_until_ts` states the actual end.
-Reports summarize these counts. Past snapshots remain available, but new
+`bin_replay` returns these fields per entry; a caller can count them. Past snapshots remain available, but new
 extended holding-period bin studies beyond these horizons would require explicit
 collection changes. Trading monitors and actual position exits are independent.
 
@@ -719,8 +735,8 @@ and rotate oldest observations first. Existing mode horizons bound collection.
 Initial support covers SOL as token Y, recorded mint decimals, and positions
 with no previous withdrawals, fee claims or outstanding rewards. Inventory
 older than 180 seconds, missing fields, invalid quantities or mismatched quotes
-remain unmeasured. Zero token inventory needs no quote. The report preserves
-observation times and includes only samples observed within its time window.
+remain unmeasured. Zero token inventory needs no quote. Each row keeps its
+observation time, so a reader can include only samples observed within its window.
 
 `quoted_assets_change_before_network_fees_sol` replaces the token inventory mark
 with quoted SOL proceeds, including the provider's route costs. It excludes
@@ -746,7 +762,7 @@ remain incomplete in accounting. Ambiguous inventory requires investigation.
 ### Every-position profit acceptance
 
 `position_profit_acceptance` includes every recorded entry deployed in the
-evaluation window, including positions with incomplete cash evidence. A position
+caller's window, including positions with incomplete cash evidence. A position
 passes only when its settled cash lower bound is strictly positive after costs
 and proved owned rent. Zero and negative upper bounds fail. An interval spanning
 zero, missing evidence or a multiple-position root remains unresolved/unmeasured;
@@ -758,8 +774,8 @@ the refund proof must exist by its cutoff.
 One proved nonpositive position makes the criterion `failed`. Any unresolved or
 unmeasured position makes it `not_verified` when there is no proved failure.
 An empty cohort cannot pass. `observed_all_positive` describes that entry cohort
-only, never a guarantee of future profit or complete portfolio NAV. This report
-does not change ranking, execution, risk exits or learning.
+only, never a guarantee of future profit or complete portfolio NAV. The function
+is read-only and does not change ranking, execution, risk exits or learning.
 
 ### Signal learning by entry mode
 
