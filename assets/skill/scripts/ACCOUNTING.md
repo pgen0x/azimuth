@@ -787,8 +787,12 @@ including discovered upgradeable program data and the position pool's oracle
 for direct-pool swap replay even when Jupiter routes through another pool.
 Missing accounts remain explicit
 nulls. A changed program, closed position, budget overrun or more than 100
-accounts leaves the observation unmeasured. Capture stops after eight archived
-positions and never replaces an existing archive. Summary outcomes go to
+accounts leaves the observation unmeasured. Capture is limited to eight distinct positions, three banks per position,
+and 512 MiB total JSON storage. Later banks are at least ten minutes apart,
+regardless of quote profitability. A 32 MiB per-bank ceiling is reserved before
+network reads. The first bank retains `<position>.json`; later banks use
+`<position>.2.json` and `<position>.3.json`. Existing banks are never replaced.
+These sparse observations do not constitute complete exit-path coverage. Summary outcomes go to
 `dlmm_exit_bank_observations.jsonl`; collection failure preserves the ordinary
 quote. Replay still must recompute inventory/geometry at the bank slot, check
 remaining CPI dependencies and account for all costs. This is research input,
@@ -906,8 +910,8 @@ truncated, deleted or backfilled by this read path.
 
 The existing shadow timer also observes up to three recent candidate pools per
 cycle with `candidate-bin-snapshot`. Sources are SOL-as-Y pools in reject records
-and live pipeline batch receipts from the past 30 minutes, indexed by pool
-using only the latest 64 identities across both sources.
+pipeline batch receipts and scanner observations before routing from the past
+30 minutes, indexed by pool using only the latest 64 identities across all sources.
 The phase has a ten-second ceiling, a three-second process timeout per pool and
 a four-minute retry interval. It preserves the existing 20-second liquidation
 reserve, streams its history and rotates pools by oldest attempt first.
@@ -919,6 +923,13 @@ SOL orientation, decimals, contiguous bounds and native counters are checked
 before writing `memories/dlmm_candidate_bin_samples.jsonl`. Failures remain
 unmeasured without invented counters. `request_started_at` and `collected_at`
 surround the read, and the source watch/reject ID and timestamp remain attached.
+
+Before AI health probing or dispatch, the scanner writes at most 64 unique
+public SOL-as-Y pool/mint identities to `solana_candidate_watch.jsonl` beside
+its reject journal (`SOLANA_CANDIDATE_WATCH_PATH` overrides this in both
+scanner and collector). These `scanner_before_routing` observations survive
+model failures before the pipeline is invoked. They do not establish admission,
+execution or profitability. Writes use a nonblocking lock and do not add RPCs.
 
 Before capacity/ranking checks, live `--from-batch` and `--from-signal`
 invocations append at most 64 unique public SOL-as-Y pool/mint identities to
@@ -963,6 +974,25 @@ phase and liquidation reserve still bound collection; missing, empty, oversized
 or unsupported inputs stay unmeasured. At most 16 recent samples per indexed
 pool are retained for this optional calculation; overflow remains unmeasured.
 
+During a frozen forecast's terminal window, its pool remains eligible for a
+read even if the ordinary 30-minute candidate watch has expired. Due terminal
+observations receive priority within the same 64-pool, three-request and
+10-second phase limits; the 240-second per-pool pacing and trading deferral
+remain in force. A terminal-only observation does not create another forecast.
+When the pool also has a fresh discovery/watch input, the same terminal read may
+supply a new baseline without another RPC. The forecast validator still requires
+complete current planned bins and prior history; a changed anchor may leave it
+unmeasured. This prevents terminal scoring from silently suppressing fresh
+candidate forecasts while preventing expired watches from renewing themselves.
+Already observed terminal windows are skipped. This reduces dependence on
+continued candidate selection, but does not guarantee coverage under the
+shared request budget or recover missing historical observations.
+Terminal reads use the earliest due forecast's original allocation anchor,
+keeping the same bounded 69-below/16-above snapshot while separately observing
+the current active bin and price. They do not freeze new forecasts from this
+historical geometry. Different overlapping forecasts can still require bins
+outside that single snapshot; missing coverage remains unmeasured.
+
 `python3 scripts/dlmm_fee_forecast.py --profile <profile> [--as-of <timestamp>]`
 reads and scores these recorded forecasts locally. It uses the first native
 terminal observation within the mode horizon's 600-second grace and never
@@ -975,8 +1005,14 @@ forecast for that entry requires separate support, identity and timing checks.
 
 These are correlated observations of unfunded candidates, not realized position
 returns. They cannot predict bin occupancy, the actual exit time, added-liquidity
-impact or net cash profit; composition cost, principal changes, rent and execution
-costs are excluded. They do not enter position profit acceptance or change entry
+impact or net cash profit. The scorer also reports a separate `principal_sensitivity`:
+fixed inferred shares valued against terminal reserves, principal change against
+allocated capital, and principal plus fees before costs. Unallocated rounding dust
+stays in cash. A separate initial-inventory holding comparison distinguishes token
+price revaluation from relative LP inventory change. Neither comparison is executed
+profit or pure IL, especially when the inferred starting inventory contains tokens.
+Entry composition charges, added-liquidity effects, rent and execution costs remain
+excluded. They do not enter position profit acceptance or change entry
 and exit rules. This replaces the fragile manual forecast capture used in the
 earlier calibration study, whose overnight window produced no saved predictions.
 
@@ -1203,6 +1239,31 @@ slippage, and positive-recovery checks are unchanged.
 This stops a deferred no-route retry from running between attempts of a pending
 exit. It does not prove a particular saving or eliminate simulation, RPC, or
 market delays.
+
+### Entry-bound forecast references
+
+Immediately before signing the first deployment transaction, the executor saves
+`fee_forecast_reference` with entry provenance. This reads at most the final
+256 KiB of the local candidate forecast journal, with no RPC or model call.
+Only committed v2 records already recorded at that time qualify. Pool, token,
+mode, bin step, exact contiguous bin range, 0.1 SOL capital and mode horizon must
+match; the baseline may be at most 600 seconds old. Unsupported entries, missing
+journals, partial records and missing matches remain explicitly unmeasured.
+
+A `matched_reference` stores the forecast ID and SHA-256 of the exact journal
+line. It is not a validated forecast or an entry approval: downstream evaluation
+must independently rebuild the bound forecast and compare against settled cash.
+The observation does not change entry eligibility, sizing, stops or reserve
+policy. A bounded-tail miss is not evidence that no older matching record exists.
+
+Run `python3 dlmm_entry_forecast_evaluation.py --profile PROFILE --start UNIX_TS`
+for a read-only join of these references with per-position cash acceptance. The
+evaluator checks the exact journal-line hash, independently rebuilds the forecast
+from its hashed input snapshots, and checks entry time, capital and exact range.
+Missing or invalid references do not remove positions from cash acceptance. The
+report keeps modeled fee and settled cash separate: their ratio is not forecast
+accuracy, and a verified reference is not evidence of profit. Existing entries
+without a saved reference remain unmeasured; this command never backfills them.
 
 ### SOL BidAsk coverage under the bin limit
 

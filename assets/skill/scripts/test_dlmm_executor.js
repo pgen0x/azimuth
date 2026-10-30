@@ -54,6 +54,12 @@ class Connection {
   async getLatestBlockhash() { return { blockhash: "exact-blockhash", lastValidBlockHeight: 150 }; }
   async sendRawTransaction(raw, options) {
     const event=JSON.parse(fs.readFileSync(path.join(root,"memories/dlmm_transactions.jsonl"),"utf8").trim().split("\n").at(-1));
+    if (event.kind === "deploy") {
+      const entry = JSON.parse(fs.readFileSync(path.join(root, "memories/dlmm_entries", `${event.position}.json`)));
+      assert.equal(entry.fee_forecast_reference.net_cash_profit_proved, false);
+      assert.ok(entry.fee_forecast_reference.recorded_at <= sandbox.Date.now() / 1000);
+      assert.ok(["unmeasured", "matched_reference"].includes(entry.fee_forecast_reference.status));
+    }
     if (event.kind === "swap") {
       const pending=JSON.parse(fs.readFileSync(path.join(root,'memories/dlmm_pending_swaps',
         `${event.wallet}-${event.swap_quote.input_mint}-${event.swap_quote.output_mint}.json`)));
@@ -209,6 +215,15 @@ vm.runInNewContext("const productionExitTransport=confirmExitTransaction;confirm
     assert.equal(observed.bins.length, 86); assert.equal(binReads, 1); assert.equal(activeReads, 1);
     assert.equal(observed.bin_step, 100); assert.equal(candidateCanonicalReads, 1);
     assert.equal(observed.canonical_liquidity.reason, "canonical_pool_absent");
+    // A terminal read follows the original allocation even after active moves.
+    const anchored = await snapshot("pool", 69, 16, -200);
+    assert.equal(anchored.anchor_bin, -200);
+    assert.equal(anchored.lower_bin, -269); assert.equal(anchored.upper_bin, -184);
+    assert.equal(anchored.bins.length, 86);
+    assert.equal(anchored.active_bin, observed.active_bin);
+    for (const anchor of [NaN, Infinity, 0.5, 100001]) {
+      await assert.rejects(snapshot("pool", 69, 16, anchor), /anchor/);
+    }
     candidateCanonicalError = true;
     assert.equal((await snapshot("pool")).status, "observed");
     candidateCanonicalError = false;
@@ -216,14 +231,29 @@ vm.runInNewContext("const productionExitTransport=confirmExitTransaction;confirm
     for (const [below, above] of [[70, 0], [-1, 0], [1.5, 0], [0, 17], [0, NaN]]) {
       await assert.rejects(snapshot("pool", below, above), /bounds/);
     }
-    assert.equal(candidateCreates, 2);
     // Bracket terminal reads pass a frozen anchor; invalid anchors fail before any read.
     const fixed = await snapshot("pool", 69, 16, 5);
     assert.equal(fixed.anchor_bin, 5); assert.equal(fixed.lower_bin, -64); assert.equal(fixed.upper_bin, 21);
     for (const bad of [1.5, NaN, 100001]) {
       await assert.rejects(snapshot("pool", 69, 16, bad), /anchor/);
     }
-    assert.equal(candidateCreates, 3);
+    assert.equal(candidateCreates, 4);  // observed, anchored, canonical error, fixed
+    deps["@meteora-ag/dlmm"].getBinArrayIndexesCoverage = (lo, hi) =>
+      Array.from({length: Math.floor(Number(hi.value)/70)-Math.floor(Number(lo.value)/70)+1}, (_, i) => Math.floor(Number(lo.value)/70)+i);
+    pool.lbPair.activeId = -634;
+    const beforeReads = binReads;
+    const shifted = await snapshot("pool", 69, 16, -597);
+    assert.equal(shifted.anchor_bin, -597);
+    assert.equal(shifted.lower_bin, -682); assert.equal(shifted.upper_bin, -597);
+    assert.equal(shifted.range_shift, 16); assert.equal(shifted.bins.length, 86);
+    assert.equal(binReads, beforeReads+1);
+    assert.ok(shifted.bins.some(b => b.id === -678));
+    pool.lbPair.activeId = -37;
+    const boundary = await snapshot("pool", 69, 16, 0);
+    assert.equal(boundary.lower_bin, -70); assert.equal(boundary.range_shift, 1);
+    pool.lbPair.activeId = 0;
+    delete deps["@meteora-ag/dlmm"].getBinArrayIndexesCoverage;
+
     delete env.SOLANA_PUBLIC_KEY;
     await assert.rejects(snapshot("pool"), /SOLANA_PUBLIC_KEY/);
     env.SOLANA_PUBLIC_KEY = wallet.publicKey.toString();

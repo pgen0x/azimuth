@@ -21,12 +21,14 @@ def sample_hash(sample):
 
 
 def candidate_fee_forecast(sample, history, frozen_at, validate, *, history_limited=False,
-                           frozen_geometry=None, frozen_horizon=None):
+                           frozen_geometry=None, frozen_horizon=None, model_version=2):
     """Freeze the first complete prior, using only already collected observations."""
-    result = dict(version=1, pool=sample['pool'], base_mint=sample['base_mint'],
+    result = dict(version=model_version, pool=sample['pool'], base_mint=sample['base_mint'],
                   mode=sample['mode'], frozen_at=frozen_at, recorded_at=frozen_at, status='unmeasured', basis=BASIS,
                   funded_position=False, net_cash_profit_proved=False)
     try:
+        if type(model_version) is not int or model_version not in (1, 2):
+            return dict(result, reason='unsupported_version')
         validate(sample, sample['pool'], sample['base_mint'])
         horizon = HORIZONS[sample['mode']] if frozen_horizon is None else frozen_horizon
         if type(horizon) is not int or horizon <= 0:
@@ -74,6 +76,7 @@ def candidate_fee_forecast(sample, history, frozen_at, validate, *, history_limi
         old = {b['id']: b for b in previous['bins']}
         budget, weights = 100000000, (below+1)*(below+2)//2
         allocations, fx, fy, ratios = [], 0, 0, []
+        fee_bins = []
         decimals = Fraction(10**sample['decimals_y'], 10**sample['decimals_x'])
         for i in ids:
             b = current[i]
@@ -85,8 +88,12 @@ def candidate_fee_forecast(sample, history, frozen_at, validate, *, history_limi
             paid = budget*(anchor-i+1)//weights
             share = int(paid*int(b['supply'])/reserve)
             ratios.append(Fraction(share, int(b['supply'])))
-            fx += ((share >> 64)*(int(b['fee_x'])-int(old[i]['fee_x']))) >> 64
-            fy += ((share >> 64)*(int(b['fee_y'])-int(old[i]['fee_y']))) >> 64
+            bin_fx = ((share >> 64)*(int(b['fee_x'])-int(old[i]['fee_x']))) >> 64
+            bin_fy = ((share >> 64)*(int(b['fee_y'])-int(old[i]['fee_y']))) >> 64
+            fx += bin_fx
+            fy += bin_fy
+            fee_bins.append(dict(id=i, historical_fee_x_raw=str(bin_fx),
+                                 historical_fee_y_raw=str(bin_fy)))
             allocations.append(dict(id=i, paid_lamports=paid, estimated_share_raw=str(share),
                                     initial_fee_x=b['fee_x'], initial_fee_y=b['fee_y']))
         span = sample['ts']-previous['ts']
@@ -100,8 +107,17 @@ def candidate_fee_forecast(sample, history, frozen_at, validate, *, history_limi
         baseline_hash, prior_hash = sample_hash(sample), sample_hash(previous)
         recipe = json.dumps(dict(mode=sample['mode'], bins_below=below, horizon_seconds=horizon,
                                  capital_lamports=budget, frozen_at=frozen_at), sort_keys=True, separators=(',', ':'))
-        ident = hashlib.sha256(('candidate-fee-v1:'+baseline_hash+':'+prior_hash+':'+recipe).encode()).hexdigest()
-        return dict(result, status='frozen_prediction', id=ident,
+        ident = hashlib.sha256(('candidate-fee-v'+str(model_version)+':'+baseline_hash+':'+prior_hash+':'+recipe).encode()).hexdigest()
+        attribution = {}
+        if model_version == 2:
+            total = fx*price+fy
+            active = fee_bins[-1]
+            active_fee = int(active['historical_fee_x_raw'])*price+int(active['historical_fee_y_raw'])
+            attribution['fee_attribution'] = dict(
+                basis='historical_fee_by_planned_bin; not_future_bin_occupancy',
+                active_bin=anchor, bins=fee_bins,
+                active_bin_fraction=float(active_fee/total) if total else None)
+        return dict(result, status='frozen_prediction', id=ident, **attribution,
                     baseline_sha256=baseline_hash, prior_sha256=prior_hash,
                     baseline_ts=sample['ts'], baseline_collected_at=sample['collected_at'],
                     prior_ts=previous['ts'], prior_collected_at=previous['collected_at'],
@@ -132,11 +148,12 @@ def score_forecasts(forecasts, samples, cutoff, validate):
                    mode=f.get('mode'), frozen_at=f.get('frozen_at'), status='unmeasured', basis=BASIS)
         results.append(row)
         try:
-            if type(f.get('version')) is not int or f['version'] != 1:
+            if type(f.get('version')) is not int or f['version'] not in (1, 2):
                 raise ValueError('unsupported version')
             base, prior = by_hash[f['baseline_sha256']], by_hash[f['prior_sha256']]
             rebuilt = candidate_fee_forecast(base, [prior], f['frozen_at'], validate,
-                                             frozen_geometry=f['bins_below'], frozen_horizon=f['horizon_seconds'])
+                                             frozen_geometry=f['bins_below'], frozen_horizon=f['horizon_seconds'],
+                                             model_version=f['version'])
             if not f['frozen_at'] <= f['recorded_at'] <= cutoff or not f['recorded_at'] < f['horizon_target_ts']:
                 raise ValueError('forecast recorded after cutoff or horizon')
             rebuilt['recorded_at'] = f['recorded_at']
@@ -162,6 +179,7 @@ def score_forecasts(forecasts, samples, cutoff, validate):
             bins = {b['id']: b for b in terminal['bins']}
             initial_bins = {b['id']: b for b in base['bins']}
             fx, fy = 0, 0
+            principal_x = principal_y = initial_x = initial_y = Fraction(0)
             for b in f['allocations']:
                 observed = bins[b['id']]
                 if (int(observed['supply']) <= int(b['estimated_share_raw'])
@@ -170,12 +188,35 @@ def score_forecasts(forecasts, samples, cutoff, validate):
                 dx, dy = int(observed['fee_x'])-int(b['initial_fee_x']), int(observed['fee_y'])-int(b['initial_fee_y'])
                 if dx < 0 or dy < 0:
                     raise ValueError('counter reset')
-                share = int(b['estimated_share_raw']) >> 64
+                raw_share = int(b['estimated_share_raw'])
+                initial = initial_bins[b['id']]
+                principal_x += Fraction(raw_share * int(observed['x']), int(observed['supply']))
+                principal_y += Fraction(raw_share * int(observed['y']), int(observed['supply']))
+                initial_x += Fraction(raw_share * int(initial['x']), int(initial['supply']))
+                initial_y += Fraction(raw_share * int(initial['y']), int(initial['supply']))
+                share = raw_share >> 64
                 fx += share*dx >> 64
                 fy += share*dy >> 64
             price = Fraction(int(f['raw_token_price_numerator']), int(f['raw_token_price_denominator']))
             at_baseline = fx*price+fy
             terminal_price = Fraction(str(terminal['price']))*Fraction(10**terminal['decimals_y'], 10**terminal['decimals_x'])
+            # Fixed inferred shares, not a funded alternative position. Keep
+            # principal and initial-inventory revaluation separate from fees.
+            # Unallocated rounding dust stays in cash, so subtract only paid bins.
+            spent = sum(b['paid_lamports'] for b in f['allocations'])
+            principal = principal_x*terminal_price + principal_y
+            held = initial_x*terminal_price + initial_y
+            principal_change = principal - spent
+            gross_change = principal_change + fx*terminal_price + fy
+            row['principal_sensitivity'] = dict(
+                modeled_principal_change_lamports=float(principal_change),
+                modeled_gross_change_before_costs_lamports=float(gross_change),
+                modeled_initial_inventory_change_lamports=float(held-spent),
+                modeled_principal_vs_initial_inventory_lamports=float(principal-held),
+                initial_inventory_includes_token_x=initial_x > 0,
+                basis='fixed_inferred_shares_at_terminal_reserves; unallocated_dust_stays_cash',
+                limitation='Not executed profit or pure IL. Excludes added-liquidity effects, '
+                           'entry composition charges, network costs, rent and exit execution.')
             elapsed = terminal['ts']-f['baseline_ts']
             expected = Fraction(f['historical_fee_x_raw'])*price+int(f['historical_fee_y_raw'])
             expected = expected*elapsed/f['history_span_seconds']

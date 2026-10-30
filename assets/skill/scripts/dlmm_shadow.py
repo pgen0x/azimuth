@@ -18,7 +18,7 @@ from dlmm_accounting import rows
 from dlmm_monitor import verified_risk_mark
 from dlmm_candidate_watch import WATCH_FILENAME
 from dlmm_canonical_liquidity import retain_canonical_snapshot
-from dlmm_fee_forecast import HORIZONS
+from dlmm_fee_forecast import HORIZONS, FORECAST_FILE
 
 getcontext().prec = 60
 COLLECTION_BUDGET_SECONDS = 240
@@ -64,6 +64,48 @@ def index_candidate(candidates, row, now):
         del candidates[min(candidates, key=lambda key: (candidates[key]['source_ts'], key))]
 
 
+def index_due_forecast(candidates, row, now):
+    """Retain terminal observations independently of renewed market selection."""
+    target, recorded = row.get('horizon_target_ts'), row.get('recorded_at')
+    pool, mint = row.get('pool'), row.get('base_mint')
+    if (row.get('status') != 'frozen_prediction'
+            or type(row.get('version')) is not int or row['version'] not in (1, 2)
+            or row.get('mode') not in HORIZONS
+            or not isinstance(pool, str) or not ADDRESS.fullmatch(pool)
+            or not isinstance(mint, str) or not ADDRESS.fullmatch(mint) or mint == SOL_MINT
+            or not isinstance(row.get('id'), str)
+            or not all(finite_number(row.get(k)) for k in
+                       ('baseline_ts', 'frozen_at', 'recorded_at', 'horizon_target_ts'))
+            or row.get('horizon_seconds') != HORIZONS[row['mode']]
+            or target != row['baseline_ts'] + row['horizon_seconds']
+            or not row['baseline_ts'] <= row['frozen_at'] <= recorded < target
+            or not target <= now <= target + 600):
+        return
+    existing = candidates.get(pool)
+    if existing and existing['base_mint'] != mint:
+        return
+    allocations = row.get('allocations')
+    below = row.get('bins_below')
+    if (type(below) is not int or not 0 <= below <= 69
+            or not isinstance(allocations, list) or len(allocations) != below+1
+            or any(not isinstance(b, dict) or type(b.get('id')) is not int for b in allocations)):
+        return
+    anchor = allocations[-1]['id']
+    if abs(anchor) > 100000 or [b['id'] for b in allocations] != list(range(anchor-below, anchor+1)):
+        return
+    candidate = dict(existing) if existing else dict(
+        pool=pool, base_mint=mint, mode=row['mode'], source_id=row['id'],
+        source_ts=recorded, terminal_only=True)
+    if target < candidate.get('terminal_target_ts', float('inf')):
+        candidate.update(terminal_target_ts=target, terminal_anchor_bin=anchor)
+    candidates[pool] = candidate
+    if len(candidates) > CANDIDATE_MAX_POOLS:
+        # Earliest terminal deadlines precede ordinary rolling watch inputs.
+        keep = sorted(candidates, key=lambda p: (
+            candidates[p].get('terminal_target_ts', float('inf')), -candidates[p]['source_ts'], p))
+        del candidates[keep[-1]]
+
+
 def validate_candidate_snapshot(sample, pool, mint):
     """Validate native counters, identity and bounded contiguous read coverage."""
     if (sample.get('status') != 'observed' or sample.get('pool') != pool
@@ -74,8 +116,14 @@ def validate_candidate_snapshot(sample, pool, mint):
             or type(sample.get('decimals_y')) is not int or sample['decimals_y'] != 9):
         raise ValueError('invalid_candidate_identity_or_mark')
     lower, upper, anchor = (sample.get(k) for k in ('lower_bin', 'upper_bin', 'anchor_bin'))
+    shift = sample.get('range_shift', 0)
+    if type(shift) is not int or not 0 <= shift <= 16:
+        raise ValueError('invalid_candidate_shift')
+    if shift and (any(type(v) is not int for v in (lower, upper, anchor))
+                  or lower != anchor-69-shift or upper != anchor+16-shift):
+        raise ValueError('invalid_candidate_shifted_range')
     if (any(type(v) is not int or not -(2**31) <= v < 2**31 for v in (lower, upper, anchor, sample.get('active_bin')))
-            or not 0 <= anchor - lower <= 69 or not 0 <= upper - anchor <= 16):
+            or not 0 <= anchor - lower <= 69+shift or not 0 <= upper - anchor <= 16):
         raise ValueError('invalid_candidate_range')
     bins = sample.get('bins')
     if not isinstance(bins, list) or len(bins) != upper - lower + 1:
@@ -261,11 +309,16 @@ def collect_candidate_bins(profile, candidates, deadline):
                   candidate_fee_forecasts_frozen=0, candidate_fee_forecasts_unmeasured=0)
     phase_end = min(deadline - LIQUIDATION_BUDGET_SECONDS,
                     time.monotonic() + CANDIDATE_BUDGET_SECONDS)
-    if os.environ.get('DLMM_BRACKET_REJECTS') == '1':
+    if time.monotonic() >= phase_end:
+        result['candidate_bin_budget_exhausted'] = True
+        return result
+    candidates = {pool: dict(value) for pool, value in candidates.items()}
+    for forecast in iter_rows(profile/'memories'/FORECAST_FILE):
         if time.monotonic() >= phase_end:
             result['candidate_bin_budget_exhausted'] = True
             return result
-        candidates = {pool: dict(value) for pool, value in candidates.items()}
+        index_due_forecast(candidates, forecast, time.time())
+    if os.environ.get('DLMM_BRACKET_REJECTS') == '1':
         # Isolated: research-journal trouble is reported, never raised into collect().
         report = {}
         try:
@@ -291,22 +344,24 @@ def collect_candidate_bins(profile, candidates, deadline):
             return result
         stamp = row.get('collected_at')
         if row.get('pool') in candidates and finite_number(stamp):
-            # Only a bracket terminal carries terminal_target_ts on this branch.
+            # Bracket terminals and due forecasts both carry terminal_target_ts. Either
+            # may reuse history only if the row is a valid snapshot of this pool and mint.
             target = candidates[row['pool']].get('terminal_target_ts')
             bracket = candidates[row['pool']].get('bracket_phase') == 'terminal'
-            if bracket:
+            if target is not None:
                 try:
                     validate_candidate_snapshot(row, row['pool'], candidates[row['pool']]['base_mint'])
                 except (ValueError, TypeError, KeyError):
-                    result['reject_brackets_invalid_rows'] = result.get('reject_brackets_invalid_rows', 0) + 1
+                    key = 'reject_brackets_invalid_rows' if bracket else 'terminal_invalid_rows'
+                    result[key] = result.get(key, 0) + 1
                     continue  # invalid history is neither completion nor a recent-read throttle
             latest[row['pool']] = max(latest.get(row['pool'], 0), stamp)
             if (target is not None and row.get('status') == 'observed'
                     and finite_number(row.get('ts')) and target <= row['ts'] <= target+600
                     and row['ts'] <= stamp <= history_now
-                    and (not bracket or bracket_covers(row, candidates[row['pool']].get('terminal_anchor_bin')))):
-                # A bracket terminal reuses history only on its own anchor with full
-                # baseline coverage; the reuse is recorded below as its completion.
+                    and bracket_covers(row, candidates[row['pool']].get('terminal_anchor_bin'))):
+                # Any terminal reuses history only on its own anchor with full baseline
+                # coverage; only a bracket reuse is journaled below as its completion.
                 terminal_done.add(row['pool'])
                 if bracket:
                     bracket_reused[row['pool']] = row
@@ -330,17 +385,23 @@ def collect_candidate_bins(profile, candidates, deadline):
         except OSError as error:
             result.setdefault('reject_brackets_errors', []).append('append:' + type(error).__name__)
     executor = profile/'skills/solana-dlmm/scripts/dlmm_executor.js'
-    order = sorted(candidates, key=lambda p: (
-        0 if candidates[p].get('bracket_priority') else 1,
-        candidates[p].get('terminal_target_ts', float('inf')) if p not in terminal_done else float('inf'),
-        latest.get(p, 0), -candidates[p]['source_ts'], p))
-    for pool in order:
+    pending = [(pool, False) for pool in sorted(candidates, key=lambda p: (
+            0 if candidates[p].get('bracket_priority') else 1,
+            candidates[p].get('terminal_target_ts', float('inf')) if p not in terminal_done else float('inf'),
+            latest.get(p, 0), -candidates[p]['source_ts'], p))]
+    for task_index, (pool, refresh_baseline) in enumerate(pending):
         if time.monotonic() >= phase_end:
             result['candidate_bin_budget_exhausted'] = True
             break
         if result['candidate_bin_snapshots_attempted'] >= 3:
             break
-        candidate = candidates[pool]
+        candidate = dict(candidates[pool])
+        if refresh_baseline:
+            candidate.pop('terminal_target_ts', None)
+            candidate.pop('terminal_anchor_bin', None)
+            for key in ('bracket_id', 'bracket_gate', 'bracket_phase', 'bracket_priority'):
+                candidate.pop(key, None)  # a fresh baseline is not another bracket completion
+            candidate['baseline_refresh_after_terminal'] = True
         terminal_due = (pool not in terminal_done and 'terminal_target_ts' in candidate
                         and candidate['terminal_target_ts'] <= time.time() <= candidate['terminal_target_ts']+600)
         if (time.time() - latest.get(pool, 0) < 240
@@ -368,6 +429,8 @@ def collect_candidate_bins(profile, candidates, deadline):
             fields = ('ts', 'active_bin', 'anchor_bin', 'lower_bin', 'upper_bin', 'price',
                       'decimals_x', 'decimals_y', 'sol_is_x', 'token_x_mint', 'token_y_mint', 'bins')
             record.update({k: sample[k] for k in fields})
+            if 'range_shift' in sample:
+                record['range_shift'] = sample['range_shift']
             if type(sample.get('bin_step')) is int and 0 < sample['bin_step'] <= 10000:
                 record['bin_step'] = sample['bin_step']
             record['canonical_liquidity'] = retain_canonical_snapshot(
@@ -389,11 +452,35 @@ def collect_candidate_bins(profile, candidates, deadline):
                     result.setdefault('reject_brackets_errors', []).append('append:refused')
             except OSError as error:
                 result.setdefault('reject_brackets_errors', []).append('append:' + type(error).__name__)
-        # A terminal-only bracket watch is not a discovery candidate and never forecasts.
+        if (terminal_due and record['status'] == 'observed'
+                and not candidate.get('terminal_only')
+                and 0 <= record['collected_at'] - candidate['source_ts'] <= CANDIDATE_MAX_AGE_SECONDS
+                and type(record.get('bin_step')) is int):
+            from dlmm_pipeline import sol_bidask_bins
+            try:
+                below = sol_bidask_bins(record['bin_step'])
+            except ValueError:
+                below = -1
+            planned = set(range(record['active_bin']-below, record['active_bin']+1))
+            if 0 <= below < 70 and not planned <= {b['id'] for b in record['bins']}:
+                # Preserve due terminal observations first. Refresh the live
+                # baseline ahead of ordinary reads, within the same 3-read/time
+                # budget; a full terminal queue can still exhaust that budget.
+                insert_at = task_index + 1
+                while insert_at < len(pending):
+                    other, refresh = pending[insert_at]
+                    target = candidates[other].get('terminal_target_ts')
+                    if (refresh or other in terminal_done or target is None
+                            or not target <= time.time() <= target+600):
+                        break
+                    insert_at += 1
+                pending.insert(insert_at, (pool, True))
+        # A due terminal read can also supply a new baseline for a still-live
+        # discovery candidate. Old terminal-only watches must never self-renew.
         if (record['status'] == 'observed' and not candidate.get('terminal_only')
                 and 0 <= record['collected_at'] - candidate['source_ts'] <= CANDIDATE_MAX_AGE_SECONDS):
             try:
-                from dlmm_fee_forecast import candidate_fee_forecast, FORECAST_FILE, BASIS
+                from dlmm_fee_forecast import candidate_fee_forecast, BASIS
                 if time.monotonic() >= phase_end:
                     forecast = dict(version=1, pool=pool, base_mint=candidate['base_mint'], mode=candidate['mode'],
                                     frozen_at=time.time(), status='unmeasured', reason='forecast_budget_exhausted',
@@ -1006,8 +1093,12 @@ def collect(profile, reject_file):
         index_candidate(candidates,row,source_now)
     # Batch receipts are watch inputs, never rejected-candidate outcome IDs.
     # The same 30m/64-pool index and later three-read budget cover both sources.
-    for row in iter_rows(memory/WATCH_FILENAME):
-        index_candidate(candidates,row,source_now)
+    watch_files = [memory/WATCH_FILENAME,
+                   Path(os.environ.get('SOLANA_CANDIDATE_WATCH_PATH') or
+                        str(Path(reject_file).with_name('solana_candidate_watch.jsonl'))) ]
+    for watch_file in watch_files:
+        for row in iter_rows(watch_file):
+            index_candidate(candidates,row,source_now)
     # Read completions after indexing the reject journal, as before. A second
     # streaming pass processes only the unfinished first-seen IDs.
     done={r['id'] for r in iter_rows(memory/'dlmm_reject_outcomes.jsonl')}
