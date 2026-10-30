@@ -234,6 +234,8 @@ recovered["recovered_closes"] = [dict(closes[0], pnl_sol=None, source="finalized
 restored = pool_cash_history(closes[1:], recovered, 120)["P"]
 assert restored["prior_closes"] == 2 and restored["prior_net_pnl_sol"] == -.003
 assert restored["prior_mark_pnl_sol"] is None
+assert restored["journal_closes"] == 1 and restored["journal_last_close_ts"] == 110
+assert summary["journal_closes"] == 2
 assert pool_cash_history(closes, recovered, 120)["P"] == summary
 assert pool_cash_history(closes[1:], recovered, 99) == {}
 assert pool_cash_history(closes[1:], recovered, 120+31*86400) == {}

@@ -253,6 +253,10 @@ def main():
     # the existing conservative ranking penalty without being called cash.
     with patch.object(pipeline, "load_signal_weights", return_value={}):
         for fields, expected in [
+            ({"prior_pnl_basis":"nonpositive_cash_upper_bound", "prior_cash_upper_sol":-.00001, "prior_mark_pnl_sol":.01}, "prior_bounded_cash_loss-20"),
+            ({"prior_pnl_basis":"nonpositive_cash_upper_bound", "prior_cash_upper_sol":.01, "prior_mark_pnl_sol":.01}, None),
+            ({"prior_pnl_basis":"nonpositive_cash_upper_bound", "prior_cash_upper_sol":float("nan"), "prior_mark_pnl_sol":.01}, None),
+            ({"prior_pnl_basis":"nonpositive_cash_upper_bound", "prior_cash_upper_sol":-.01, "prior_cash_lower_sol":-.02, "prior_mark_pnl_sol":.01}, None),
             ({"prior_pnl_basis":"matched_refund_cash", "prior_net_pnl_sol":-.02, "prior_mark_pnl_sol":.01}, "prior_cash_loss-20"),
             ({"prior_pnl_basis":"pre_swap_mark_only", "prior_mark_pnl_sol":-.01}, "prior_mark_loss-20"),
             ({"prior_net_pnl_sol":-.01}, "prior_mark_loss-20"),

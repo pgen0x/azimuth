@@ -14,7 +14,7 @@ import subprocess
 import time
 
 from dlmm_realized import load_realized
-from dlmm_cash_sign import nonpositive_cash_upper_bounds
+from dlmm_cash_sign import nonpositive_cash_upper_bounds, cash_sign_upper_bound
 
 SCRIPT_DIR = Path(os.path.abspath(__file__)).parent
 PROFILE_DIR = SCRIPT_DIR.parent.parent.parent
@@ -645,6 +645,11 @@ def pool_cash_history(closes, ledger, as_of):
     Keep marks separate. Cross-pool cleanup fees produce a conservative range,
     never an invented split. This does not change the mark-based risk floor.
     """
+    journal_by_pool = {}
+    for row in closes:
+        if (not row.get("dry_run") and row.get("pool") and row.get("position")
+                and as_of - 30 * 86400 <= row.get("ts", 0) <= as_of):
+            journal_by_pool.setdefault(row["pool"], {})[row["position"]] = row
     by_pool = {}
     # Derived closure evidence supplies missing identities/times, never marks.
     # A real journal row takes precedence for the same pool and position.
@@ -680,18 +685,39 @@ def pool_cash_history(closes, ledger, as_of):
                 lo, hi = (v / 1e9 for v in bounds)
             covered.update(chosen)
             lower += lo; upper += hi
+        upper_only = False
+        proofs = {}
+        for proof in ledger.get("nonpositive_cash_upper_bounds", []):
+            proofs.setdefault(proof.get("root_chain_id"), []).append(proof)
+        for root in roots - covered:
+            chain = chains.get(root)
+            candidates = proofs.get(root, [])
+            if chain is None or len(candidates) != 1 or not set(chain["positions"]) <= positions:
+                continue
+            bound = cash_sign_upper_bound(candidates[0], chain, as_of)
+            if bound is None:
+                continue
+            covered.add(root)
+            upper += bound / 1e9
+            upper_only = True
         complete = covered == roots
-        exact = complete and round(lower, 9) == round(upper, 9)
+        # Unknown lower bounds cannot become exact cash. A positive upper sum
+        # cannot establish the pool's loss sign either.
+        usable_upper = complete and upper_only and upper <= 0
+        exact = complete and not upper_only and round(lower, 9) == round(upper, 9)
         marks = [r.get("pnl_sol") for r in selected]
         valid_marks = all(not isinstance(v, bool) and isinstance(v, (int, float)) and math.isfinite(v) for v in marks)
+        journal = sorted(journal_by_pool.get(pool, {}).values(), key=lambda r: r["ts"], reverse=True)[:10]
         result[pool] = {
+            "journal_closes": len(journal),
+            "journal_last_close_ts": journal[0]["ts"] if journal else 0,
             "prior_closes": len(selected), "last_close_ts": selected[0]["ts"],
             "prior_mark_pnl_sol": sum(marks) if valid_marks else None,
             "prior_net_pnl_sol": round(lower, 9) if exact else None,
-            "prior_cash_lower_sol": round(lower, 9) if complete else None,
-            "prior_cash_upper_sol": round(upper, 9) if complete else None,
+            "prior_cash_lower_sol": round(lower, 9) if complete and not upper_only else None,
+            "prior_cash_upper_sol": round(upper, 9) if complete and (not upper_only or usable_upper) else None,
             "prior_cash_roots": len(covered), "prior_roots": len(roots),
-            "prior_pnl_basis": "matched_refund_cash" if exact else "matched_refund_cash_bounds" if complete else "pre_swap_mark_only",
+            "prior_pnl_basis": "nonpositive_cash_upper_bound" if usable_upper else "matched_refund_cash" if exact else "matched_refund_cash_bounds" if complete and not upper_only else "pre_swap_mark_only",
             "observed_at": as_of,
         }
     return result
