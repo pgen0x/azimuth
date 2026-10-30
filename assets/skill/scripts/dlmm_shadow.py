@@ -338,22 +338,24 @@ def collect_candidate_bins(profile, candidates, deadline):
             return result
         stamp = row.get('collected_at')
         if row.get('pool') in candidates and finite_number(stamp):
-            # Only a bracket terminal carries terminal_target_ts on this branch.
+            # Bracket terminals and due forecasts both carry terminal_target_ts. Either
+            # may reuse history only if the row is a valid snapshot of this pool and mint.
             target = candidates[row['pool']].get('terminal_target_ts')
             bracket = candidates[row['pool']].get('bracket_phase') == 'terminal'
-            if bracket:
+            if target is not None:
                 try:
                     validate_candidate_snapshot(row, row['pool'], candidates[row['pool']]['base_mint'])
                 except (ValueError, TypeError, KeyError):
-                    result['reject_brackets_invalid_rows'] = result.get('reject_brackets_invalid_rows', 0) + 1
+                    key = 'reject_brackets_invalid_rows' if bracket else 'terminal_invalid_rows'
+                    result[key] = result.get(key, 0) + 1
                     continue  # invalid history is neither completion nor a recent-read throttle
             latest[row['pool']] = max(latest.get(row['pool'], 0), stamp)
             if (target is not None and row.get('status') == 'observed'
                     and finite_number(row.get('ts')) and target <= row['ts'] <= target+600
                     and row['ts'] <= stamp <= history_now
-                    and (not bracket or bracket_covers(row, candidates[row['pool']].get('terminal_anchor_bin')))):
-                # A bracket terminal reuses history only on its own anchor with full
-                # baseline coverage; the reuse is recorded below as its completion.
+                    and bracket_covers(row, candidates[row['pool']].get('terminal_anchor_bin'))):
+                # Any terminal reuses history only on its own anchor with full baseline
+                # coverage; only a bracket reuse is journaled below as its completion.
                 terminal_done.add(row['pool'])
                 if bracket:
                     bracket_reused[row['pool']] = row

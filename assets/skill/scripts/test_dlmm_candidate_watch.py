@@ -68,6 +68,33 @@ class CandidateWatchTests(unittest.TestCase):
                     shadow.collect_candidate_bins(self.profile, {}, 40)
                     read.assert_not_called()  # Already observed within terminal window.
 
+    def test_forecast_terminal_reuses_only_valid_covering_history(self):
+        """A due forecast (no bracket) must not be suppressed by history that does not prove its read."""
+        def shifted(anchor):
+            row = snapshot(); row.update(anchor_bin=anchor, active_bin=anchor, lower_bin=anchor-69, upper_bin=anchor+16)
+            row['bins'] = [dict(b, id=b['id']+anchor) for b in row['bins']]
+            return row
+        incomplete = snapshot(); incomplete.update(lower_bin=-10); incomplete['bins'] = [b for b in incomplete['bins'] if b['id'] >= -10]
+        other_mint = snapshot(); other_mint['token_x_mint'] = watch.SOL_MINT
+        malformed = snapshot(); del malformed['bins']
+        cases = dict(wrong_anchor=(shifted(5), True), incomplete_coverage=(incomplete, True),
+                     wrong_mint=(other_mint, True), malformed=(malformed, True), covering=(snapshot(), False))
+        for name, (row, must_read) in cases.items():
+            with self.subTest(case=name):
+                self.profile = Path(self.directory.name)/name
+                shadow.append(self.profile/'memories'/shadow.FORECAST_FILE, self.due_forecast())
+                shadow.append(self.profile/'memories/dlmm_candidate_bin_samples.jsonl', dict(row, collected_at=10000))
+                with patch.object(shadow.time, 'time', return_value=10300), \
+                     patch.object(shadow.time, 'monotonic', return_value=0), \
+                     patch.object(shadow.subprocess, 'check_output', return_value=json.dumps(dict(snapshot(), ts=10300)).encode()) as read:
+                    result = shadow.collect_candidate_bins(self.profile, {}, 40)
+                if must_read:
+                    self.assertEqual(read.call_count, 1)
+                    self.assertEqual(read.call_args.args[0][-1], '0')  # the forecast's own anchor
+                    self.assertEqual(result['candidate_bin_snapshots_observed'], 1)
+                else:
+                    read.assert_not_called()  # valid covering history completes the terminal
+
     def test_terminal_watch_rejects_late_future_expired_and_invalid_identity(self):
         for changes in (dict(version=0), dict(version=3), dict(version=True),
                         dict(version=2.0), dict(version='2'),
