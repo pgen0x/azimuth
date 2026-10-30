@@ -126,7 +126,8 @@ class CandidateWatchTests(unittest.TestCase):
         fresh = dict(terminal, anchor_bin=50, lower_bin=-19, upper_bin=66,
                      bins=[dict(b, id=b['id']+50) for b in snapshot()['bins']])
         candidates = {POOL: dict(pool=POOL, base_mint=MINT, mode='turnover',
-                                source_id='watch:new', source_ts=9900)}
+                                source_id='watch:new', source_ts=9900, bracket_id='test-bracket',
+                                bracket_phase='terminal', bracket_gate='momentum')}
         with patch.object(shadow.time, 'time', return_value=10000), \
              patch.object(shadow.time, 'monotonic', return_value=0), \
              patch.object(shadow.subprocess, 'check_output',
@@ -140,6 +141,10 @@ class CandidateWatchTests(unittest.TestCase):
         self.assertIn('terminal_target_ts', saved[0])
         self.assertNotIn('terminal_target_ts', saved[1])
         self.assertTrue(saved[1]['baseline_refresh_after_terminal'])
+        self.assertNotIn('bracket_id', saved[1])
+        completed = shadow.rows(self.profile/'memories'/shadow.BRACKET_FILENAME)
+        self.assertEqual(len(completed), 1)
+        self.assertEqual(completed[0]['anchor_bin'], 0)
         # No prior current geometry: the new sample is evidence for a future
         # forecast, never a fabricated immediately usable prediction.
         self.assertEqual(result['candidate_fee_forecasts_frozen'], 0)
