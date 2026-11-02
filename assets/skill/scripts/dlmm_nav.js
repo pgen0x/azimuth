@@ -700,9 +700,12 @@ async function collect({dir, wallet, PublicKey, rpc, historyOnly=false, includeR
   }
   fs.writeFileSync(cursorPath,JSON.stringify({offset:missingAccounts.length ? (cursor+quoteAttempts)%missingAccounts.length : 0}),{mode:0o600});
   fs.writeFileSync(quoteMarksPath,JSON.stringify(quoteMarks),{mode:0o600});
-  const scheduleTemp=schedulePath+'.'+process.pid+'.tmp';
-  fs.writeFileSync(scheduleTemp,JSON.stringify(schedule),{mode:0o600,flag:'wx'});
-  fs.renameSync(scheduleTemp,schedulePath);
+  const scheduleTempDir=fs.mkdtempSync(schedulePath+'.');
+  try {
+    const scheduleTemp=path.join(scheduleTempDir,'state.json');
+    fs.writeFileSync(scheduleTemp,JSON.stringify(schedule),{mode:0o600,flag:'wx'});
+    fs.renameSync(scheduleTemp,schedulePath);
+  } finally { fs.rmSync(scheduleTempDir,{recursive:true,force:true}); }
   let apiPositions=0;
   for (let page=1; page<=100; page++) {
     const data=await json(`https://dlmm.datapi.meteora.ag/portfolio/open?user=${wallet}&page=${page}&pageSize=50`);

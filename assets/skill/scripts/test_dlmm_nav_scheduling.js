@@ -20,7 +20,7 @@ function harness(count, latency, rateLimit = false) {
   const context = {
     require: name => name === 'fs' ? mockedFs : requireFromSource(name),
     module: {exports: {}}, Date: {now: () => clock.time, parse: Date.parse},
-    AbortSignal, BigInt, console, process: {env: {DLMM_HELIUS_WALLET_PRICES: 'false'}},
+    AbortSignal, BigInt, console, process: {env: {DLMM_HELIUS_WALLET_PRICES: 'false'}, pid: process.pid},
     setTimeout(callback, delay) {clock.time += delay; callback();},
     async fetch(url) {
       if (url.includes('/quote?')) {
@@ -113,6 +113,14 @@ function harness(count, latency, rateLimit = false) {
     const before = retained.requests.length; await retained.collect();
     assert.equal(retained.requests[before], retained.mints[0], 'Cache hits and amount changes preserve account service age');
   } finally {retained.clean();}
+  const leftover = harness(5, 0);
+  try {
+    const oldTemporary = path.join(leftover.dir, 'dlmm_quote_schedule.json.' + process.pid + '.tmp');
+    fs.writeFileSync(oldTemporary, 'orphan from a previous process with this PID');
+    await leftover.collect();
+    assert.equal(leftover.requests.length, 5, 'A stale PID temporary file cannot abort collection');
+    assert.equal(fs.readFileSync(oldTemporary, 'utf8'), 'orphan from a previous process with this PID');
+  } finally {leftover.clean();}
   for (const invalid of ['broken JSON', JSON.stringify({schema_version: 1, counter: -1, orders: {}}),
     JSON.stringify({schema_version: 1, counter: 1, orders: {'fake-account': 2}}),
     JSON.stringify({schema_version: 1, counter: Number.MAX_SAFE_INTEGER, orders: {}})]) {
