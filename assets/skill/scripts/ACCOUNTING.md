@@ -1510,3 +1510,14 @@ unrequested account in the rotation. The cap, pacing and 90-second deadline stay
 unchanged. Accounts outside the selection cap retain `quote_budget_deferred` even
 when a selected account hits rate limiting or trading priority. No-route inventory
 remains unmeasured and continues to prevent complete NAV.
+
+NAV quote fairness uses persistent per-account service order. Existing never-served
+accounts retain their first-seen FIFO position; new arrivals cannot jump ahead of
+that backlog. Requests (including HTTP failures and timeouts) advance service order
+only immediately before HTTP. A balance change keeps an account's age, and fresh
+quote/spot-mark eligibility does not erase its history. History is pruned only when
+an account is no longer held. Synthetic callers without a public-key identity use
+a documented mint/amount fallback. Missing, malformed or overflowed history seeds
+the existing rotated cursor order; the legacy cursor is still written for rollback.
+The quote cap, deadline, pacing, trade priority and price freshness remain unchanged.
+This schedules attempts fairly; it neither guarantees routes nor completes NAV.
