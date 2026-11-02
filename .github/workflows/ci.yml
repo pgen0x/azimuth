@@ -71,6 +71,7 @@ jobs:
           python3 assets/skill/scripts/test_dlmm_recent_pool_losses.py
           python3 assets/skill/scripts/test_solana_policy.py
           python3 assets/skill/scripts/test_dlmm_accounting.py
+          python3 assets/skill/scripts/test_dlmm_accounting_asof.py
           python3 assets/skill/scripts/test_dlmm_recovered_close.py
           python3 assets/skill/scripts/test_dlmm_reconcile.py
           python3 assets/skill/scripts/test_dlmm_profit_acceptance.py

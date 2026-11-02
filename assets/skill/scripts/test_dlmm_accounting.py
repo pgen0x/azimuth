@@ -41,7 +41,10 @@ with TemporaryDirectory() as root:
     assert c["token_deltas_raw"]["TOKEN"] == "9007199254740993"
     assert c["net_pnl_sol"] is None
     assert c["accounting_status"] == "incomplete"
-    write("dlmm_wallet_transactions.jsonl", [dict(signature="pending",wallet="wallet",landed=False,classification="expired_unlanded")])
+    write("dlmm_wallet_transactions.jsonl", [dict(signature="pending",wallet="wallet",landed=False,classification="expired_unlanded",
+        basis="finalized_wallet_history_and_expiry", observed_at=1,
+        last_valid_block_height=10, finalized_block_height=11,
+        wallet_delta_lamports=0, fee_lamports=0)])
     assert report(root)["chains"][0]["pending_signatures"] == []
     assert report(root)["chains"][0]["wallet_delta_lamports"] == -10007000
     assert report(root)["chains"][0]["expired_unlanded_signatures"] == ["pending"]
@@ -134,7 +137,7 @@ print("Exact cleanup settlement attribution preserves cash/fees and rejects ambi
 # jointly, but allocating it to the latest root would invent per-position PnL.
 from copy import deepcopy
 from dlmm_accounting import pooled_settlements, root_decision
-base = dict(first_activity=100, last_activity=200, network_fee_lamports=5,
+base = dict(first_activity=100, last_activity=200, network_fee_lamports=5, wallets=["wallet"],
             reasons=["token_inventory_requires_valuation"], accounting_status="incomplete")
 a = dict(base, root_chain_id="old", token_deltas_raw={"TOKEN":"9007199254740993"}, wallet_delta_lamports=-200)
 b = dict(base, root_chain_id="new", token_deltas_raw={"TOKEN":"-9007199254740993"}, wallet_delta_lamports=180)
