@@ -36,10 +36,10 @@ class AccountingEvidenceTests(unittest.TestCase):
         result = root_decision(self.chain(), .01)
         return result['allow'], result['reason']
     def test_future_facts_and_coverage_do_not_change_decision(self):
-        self.write('dlmm_nav.jsonl', [dict(ts=190, nav_sol=1)])
+        self.write('dlmm_nav.jsonl', [dict(ts=190, nav_sol=1, end_slot=25)])
         before = self.chain()
         decision = self.decision()
-        self.write('dlmm_nav.jsonl', [dict(ts=190, nav_sol=1), dict(ts=201, nav_sol=999)])
+        self.write('dlmm_nav.jsonl', [dict(ts=190, nav_sol=1, end_slot=25), dict(ts=201, nav_sol=999, end_slot=31)])
         future = dict(self.facts[1], observed_at=201, wallet_delta_lamports=999999999)
         self.write('dlmm_wallet_transactions.jsonl', self.facts + [future])
         self.write('dlmm_wallet_coverage.jsonl', [self.coverage, dict(self.coverage, ts=201, wallet_history_complete=False)])
