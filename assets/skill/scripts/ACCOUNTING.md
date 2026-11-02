@@ -1496,3 +1496,10 @@ provider's explicit no-route or rounded-threshold refusal. Provider response
 bodies and arbitrary error codes are not retained. No-route is not proof of zero
 asset value; stale prices, failed quotes and unknown inventory never become zero
 or complete NAV. Native cash and recovered rent remain distinct from profit.
+
+
+A pending forecast terminal owns its pool's frozen-anchor read. Rejection bracket
+selection skips that pool for a new baseline and can choose another eligible pool
+within the same existing baseline/read budget. This prevents relabelling a due
+forecast observation as a fresh rejection entry. Historical mismatched anchors
+remain unmeasured; no prior observation is rewritten or promoted.
