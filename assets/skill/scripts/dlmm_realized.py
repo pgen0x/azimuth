@@ -81,7 +81,7 @@ def _f(value, default=0.0):
         return default
 
 
-def load_realized(path=REALIZED_PATH):
+def load_realized(path=REALIZED_PATH, *, as_of=None):
     """{position_address: record} — the join key every consumer uses."""
     out = {}
     if not os.path.exists(path):
@@ -95,6 +95,10 @@ def load_realized(path=REALIZED_PATH):
                 rec = json.loads(line)
             except json.JSONDecodeError:
                 continue
+            if as_of is not None:
+                stamp = rec.get("fetched_at")
+                if type(stamp) not in (int, float) or not math.isfinite(stamp) or stamp > as_of:
+                    continue
             pos = rec.get("position")
             if pos:
                 out[pos] = rec  # a later line supersedes an earlier one

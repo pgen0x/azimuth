@@ -74,6 +74,37 @@ def cleanup_owner(event, fact, chains, closes, coverage, inflows, unresolved_sin
     return c["root_chain_id"]
 
 
+def proved_expired_unlanded(fact, wallet, as_of):
+    """A null status alone cannot erase a potentially landed fee/cash flow."""
+    return (fact.get("wallet") == wallet and isinstance(wallet, str) and bool(wallet)
+            and fact.get("landed") is False
+            and fact.get("classification") == "expired_unlanded"
+            and fact.get("basis") == "finalized_wallet_history_and_expiry"
+            and type(fact.get("observed_at")) in (int, float)
+            and math.isfinite(fact["observed_at"]) and fact["observed_at"] <= as_of
+            and all(type(fact.get(k)) is int and fact[k] >= 0
+                    for k in ("last_valid_block_height", "finalized_block_height"))
+            and fact["finalized_block_height"] > fact["last_valid_block_height"]
+            and all(type(fact.get(k, 0)) is int and fact.get(k, 0) == 0
+                    for k in ("wallet_delta_lamports", "fee_lamports")))
+
+
+def usable_cash_fact(fact):
+    """Native cash is integral; malformed evidence stays unresolved, never zero."""
+    deltas = fact.get("token_deltas_raw")
+    return (fact.get("landed") is not False
+            and type(fact.get("wallet_delta_lamports")) is int
+            and type(fact.get("fee_lamports")) is int and fact["fee_lamports"] >= 0
+            and type(fact.get("failed")) is bool
+            and type(fact.get("nonrefundable_account_cost_lamports", 0)) is int
+            and fact.get("nonrefundable_account_cost_lamports", 0) >= 0
+            and isinstance(deltas, dict)
+            and all(isinstance(m, str) and bool(m) and isinstance(v, str)
+                    and bool(v.lstrip("-")) and v.lstrip("-").isascii()
+                    and v.lstrip("-").isdigit() and v.count("-") <= 1
+                    and ("-" not in v or v.startswith("-")) for m, v in deltas.items()))
+
+
 def pooled_settlements(chains):
     """Measure closed groups with cancelling inventory, never allocate root PnL."""
     pending = {c["root_chain_id"]: c for c in chains if c["token_deltas_raw"]}
@@ -92,7 +123,10 @@ def pooled_settlements(chains):
                 c = pending.pop(key)
                 members.append(c)
                 mints.update(c["token_deltas_raw"])
-        if len(members) < 2 or any(set(c["reasons"]) != {"token_inventory_requires_valuation"} for c in members):
+        if (len(members) < 2
+                or any(len(c.get("wallets", [])) != 1 or not c["wallets"][0] for c in members)
+                or any(c["wallets"] != first["wallets"] for c in members)
+                or any(set(c["reasons"]) != {"token_inventory_requires_valuation"} for c in members)):
             continue
         if any(sum(int(c["token_deltas_raw"].get(mint, 0)) for c in members) for mint in mints):
             continue
@@ -139,15 +173,7 @@ def inline_rent_group(chain, facts, owners, histories, as_of):
         fact = facts.get(signature, {})
         # The collector proves absence using finalized wallet history, expiry
         # and a history-enabled null status. Never skip a landed failure's fee.
-        if (fact.get("wallet") != records[0]["wallet"] or fact.get("landed") is not False
-                or fact.get("classification") != "expired_unlanded"
-                or fact.get("basis") != "finalized_wallet_history_and_expiry"
-                or type(fact.get("observed_at")) not in (int, float)
-                or not math.isfinite(fact["observed_at"]) or fact["observed_at"] > as_of
-                or any(type(fact.get(k)) is not int or fact[k] < 0
-                       for k in ("last_valid_block_height", "finalized_block_height"))
-                or fact["finalized_block_height"] <= fact["last_valid_block_height"]
-                or fact.get("wallet_delta_lamports", 0) != 0 or fact.get("fee_lamports", 0) != 0):
+        if not proved_expired_unlanded(fact, records[0]["wallet"], as_of):
             return None
     funded, closed = {}, {}
     for signature, fact in zip(signatures, records):
@@ -318,12 +344,12 @@ def report(profile, as_of=None):
         entry = json.loads(file.read_text())
         if entry.get("deployed_at", 0) <= as_of:
             entries[entry["position"]] = entry
-    realized = {p:r for p,r in load_realized(str(memories / "dlmm_realized.jsonl")).items()
+    realized = {p:r for p,r in load_realized(str(memories / "dlmm_realized.jsonl"), as_of=as_of if replay else None).items()
                 if r.get("fetched_at", float("inf") if replay else 0) <= as_of}
     chains = {}
 
     def chain(root):
-        return chains.setdefault(root, {"root_chain_id": root, "positions": set(),
+        return chains.setdefault(root, {"root_chain_id": root, "positions": set(), "wallets": set(),
             "recorded_signatures": set(), "pending_signatures": [], "expired_unlanded_signatures": [], "cleanup_settlements": [], "wallet_delta_lamports": 0,
             "network_fee_lamports": 0, "reconciled_transactions": 0, "failed_transactions": 0, "token_deltas_raw": {}, "touched_mints": set(),
             "first_activity": float("inf"), "swap_delta_lamports": 0, "nonrefundable_account_cost_lamports": 0, "last_activity": 0, "lp_pnl_sol": 0.0, "lp_unmeasured_positions": [], "reasons": []})
@@ -368,6 +394,7 @@ def report(profile, as_of=None):
         c = chain(root)
         if owner:
             c["cleanup_settlements"].append(dict(signature=signature, basis="unique_closed_inventory_exact_full_balance_sale", observed_at=fact["observed_at"]))
+        c["wallets"].add(event.get("wallet") or "")
         c["recorded_signatures"].add(signature)
         c["last_activity"] = max(c["last_activity"], event.get("ts") or 0)
         c["first_activity"] = min(c["first_activity"], event.get("ts") or 0)
@@ -376,8 +403,11 @@ def report(profile, as_of=None):
         if fact is None or fact.get("wallet") != event.get("wallet"):
             c["pending_signatures"].append(signature)
             continue
-        if fact.get("landed") is False and fact.get("classification") == "expired_unlanded":
+        if proved_expired_unlanded(fact, event.get("wallet"), as_of):
             c["expired_unlanded_signatures"].append(signature)
+            continue
+        if not usable_cash_fact(fact):
+            c["pending_signatures"].append(signature)
             continue
         c["reconciled_transactions"] += 1
         c["wallet_delta_lamports"] += fact["wallet_delta_lamports"]
@@ -397,6 +427,9 @@ def report(profile, as_of=None):
                 c["lp_pnl_sol"] += lp["realized_sol"]
             else:
                 c["lp_unmeasured_positions"].append(position)
+        c["wallets"] = sorted(c["wallets"])
+        if len(c["wallets"]) != 1 or not c["wallets"][0]:
+            c["reasons"].append("wallet_identity_unverified")
         c["positions"] = sorted(c["positions"])
         c["recorded_signatures"] = sorted(c["recorded_signatures"])
         c["touched_mints"] = sorted(c["touched_mints"])
@@ -768,6 +801,13 @@ def root_decision(chain, opportunity_sol, floor_sol=-0.015, strike_cap=3):
     result = dict(allow=False, reason="incomplete_chain", chain=chain, opportunity_sol=opportunity_sol,
                   floor_sol=floor_sol, strike_cap=strike_cap)
     if not chain or chain.get("accounting_status") != "settled_cash":
+        return result
+    net = chain.get("settled_cash_pnl_sol")
+    if (type(net) not in (int, float) or not math.isfinite(net)
+            or type(chain.get("network_fee_lamports")) is not int or chain["network_fee_lamports"] < 0
+            or type(chain.get("nonrefundable_account_cost_lamports", 0)) is not int
+            or chain.get("nonrefundable_account_cost_lamports", 0) < 0):
+        result["reason"] = "invalid_cash_evidence"
         return result
     legs = len(chain["positions"])
     strikes = max(0, legs-1)
