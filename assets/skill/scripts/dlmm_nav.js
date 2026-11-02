@@ -621,10 +621,35 @@ async function collect({dir, wallet, PublicKey, rpc, historyOnly=false, includeR
     const i=a.account.data.parsed.info;
     return BigInt(i.tokenAmount.amount)>0n && i.mint!==SOL && !spotPriced(i) && !heliusMark(i) && !freshQuote(i);
   });
-  const selected=new Set();
-  // Up to 75 balances currently need quotes: two rotations must fit inside cache freshness.
-  // The request helper still enforces pacing and the 90s deadline, even below this cap.
-  for(let i=0;i<Math.min(40,missingAccounts.length);i++) selected.add(missingAccounts[(cursor+i)%missingAccounts.length]);
+  // Service order survives cache hits, account reordering and amount changes.
+  // A never-requested account keeps its first-seen FIFO position; new arrivals
+  // cannot repeatedly jump ahead of an existing backlog.
+  const schedulePath=path.join(dir,'dlmm_quote_schedule.json');
+  const accountKey=account=>{
+    const address=account.pubkey?.toBase58?.() ?? account.pubkey?.toString?.();
+    const info=account.account.data.parsed.info;
+    return JSON.stringify(address ? ['account',address] : ['mint',info.mint,info.tokenAmount.amount]);
+  };
+  let schedule={schema_version:1,counter:0,orders:{}};
+  try {
+    if (fs.statSync(schedulePath).size>1024*1024) throw new Error('Oversize schedule');
+    const saved=JSON.parse(fs.readFileSync(schedulePath,'utf8'));
+    if (!saved || saved.schema_version!==1 || !Number.isSafeInteger(saved.counter) || saved.counter<0
+        || saved.counter>Number.MAX_SAFE_INTEGER-allAccounts.length-40
+        || !saved.orders || typeof saved.orders!=='object' || Array.isArray(saved.orders)
+        || !Object.values(saved.orders).every(order=>Number.isSafeInteger(order) && order>0 && order<=saved.counter))
+      throw new Error('Invalid schedule');
+    schedule=saved;
+  } catch { /* Missing/corrupt state falls back to the legacy rotated first run. */ }
+  const heldKeys=new Set(allAccounts.map(accountKey));
+  schedule.orders=Object.fromEntries(Object.entries(schedule.orders).filter(([key])=>heldKeys.has(key)));
+  const rotated=missingAccounts.map((_,i)=>missingAccounts[(cursor+i)%missingAccounts.length]);
+  for (const account of [...rotated,...allAccounts]) {
+    const key=accountKey(account);
+    if (!Object.hasOwn(schedule.orders,key)) schedule.orders[key]=++schedule.counter;
+  }
+  rotated.sort((a,b)=>schedule.orders[accountKey(a)]-schedule.orders[accountKey(b)]);
+  const selected=new Set(rotated.slice(0,40));
   let quoteDeferredReason=null, quoteAttempts=0;
   // Process the selected rotation in order, including across the list boundary.
   for (const account of [...selected,...allAccounts.filter(a=>!selected.has(a))]) {
@@ -653,7 +678,7 @@ async function collect({dir, wallet, PublicKey, rpc, historyOnly=false, includeR
           if (!selected.has(account)) throw new Error('quote_budget_deferred');
           if (quoteDeferredReason) throw new Error(quoteDeferredReason);
           const q=await json(`https://api.jup.ag/swap/v1/quote?inputMint=${mint}&outputMint=${SOL}&amount=${raw}&slippageBps=100`,1,2500,(started+90)*1000,
-            ()=>!walletTradeActive(wallet),()=>{quoteAttempts++;});
+            ()=>!walletTradeActive(wallet),()=>{quoteAttempts++;schedule.orders[accountKey(account)]=++schedule.counter;});
           const mark=navQuoteMark(q,mint,raw,slot);
           value=Number(mark.out_lamports)/1e9; basis="full_balance_quote"; freshness="quote_context_slot_checked";
           priceObservedAt=mark.observed_at; priceContextSlot=mark.slot;
@@ -675,6 +700,9 @@ async function collect({dir, wallet, PublicKey, rpc, historyOnly=false, includeR
   }
   fs.writeFileSync(cursorPath,JSON.stringify({offset:missingAccounts.length ? (cursor+quoteAttempts)%missingAccounts.length : 0}),{mode:0o600});
   fs.writeFileSync(quoteMarksPath,JSON.stringify(quoteMarks),{mode:0o600});
+  const scheduleTemp=schedulePath+'.'+process.pid+'.tmp';
+  fs.writeFileSync(scheduleTemp,JSON.stringify(schedule),{mode:0o600,flag:'wx'});
+  fs.renameSync(scheduleTemp,schedulePath);
   let apiPositions=0;
   for (let page=1; page<=100; page++) {
     const data=await json(`https://dlmm.datapi.meteora.ag/portfolio/open?user=${wallet}&page=${page}&pageSize=50`);
