@@ -5,6 +5,21 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.14.1](https://github.com/pgen0x/azimuth/compare/v2.14.0...v2.14.1) (2026-11-02)
+
+
+### Bug Fixes
+
+* **accounting:** isolate temporary quote schedule writes ([9986783](https://github.com/pgen0x/azimuth/commit/9986783a49c5a98b8cc89ecbe6a48de6c6950b4b))
+* **accounting:** order NAV quote work by persistent service history ([a6b6eff](https://github.com/pgen0x/azimuth/commit/a6b6eff79e98e351170687114947155c872be3f8))
+* **accounting:** preserve fair NAV quote scheduling across account churn ([f66a665](https://github.com/pgen0x/azimuth/commit/f66a665e6b71bbd767c627ef064d0c0942386ef8))
+* **accounting:** preserve unrequested accounts in NAV quote rotation ([b4745b9](https://github.com/pgen0x/azimuth/commit/b4745b9cea53f74b50013bdb8c218166d3f73ec9))
+* **accounting:** preserve unrequested NAV quote rotation ([4159406](https://github.com/pgen0x/azimuth/commit/41594066777c43b76aca557afe448b219cf91237))
+* **accounting:** validate NAV price evidence and distinguish missing marks ([32374df](https://github.com/pgen0x/azimuth/commit/32374df7c2623d34ce02e06a17488ccf5012a218))
+* **accounting:** validate spot mark provenance and explain unmeasured NAV ([60fd87d](https://github.com/pgen0x/azimuth/commit/60fd87dbcedcc124354cc35fb151ce474fa693a3))
+* **shadow:** keep forecast terminals out of fresh rejection baselines ([922c676](https://github.com/pgen0x/azimuth/commit/922c676a3effa370ce23b2b0878417963bddeb03))
+* **shadow:** preserve forecast terminal ownership during bracket selection ([1227357](https://github.com/pgen0x/azimuth/commit/12273578e878953f13162b28d4648e6467f84b0a))
+
 ## [2.14.0](https://github.com/pgen0x/azimuth/compare/v2.13.0...v2.14.0) (2026-10-30)
 
 
