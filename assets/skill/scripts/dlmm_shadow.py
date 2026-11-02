@@ -289,6 +289,11 @@ def index_reject_brackets(profile, candidates, now, phase_end, report):
         existing = candidates.get(pool)
         if pool in picked or (existing and existing.get('bracket_phase')):
             continue
+        # A due forecast already owns this pool's frozen-anchor read. Labelling
+        # it as a new rejection baseline would record old geometry as current.
+        if existing and 'terminal_target_ts' in existing:
+            report['reject_brackets_baseline_conflicts'] = report.get('reject_brackets_baseline_conflicts', 0) + 1
+            continue
         candidate = dict(existing) if existing else dict(
             pool=pool, base_mint=row['candidate']['base_mint'], mode='pulse', source_id=row['id'],
             source_ts=row['ts'])

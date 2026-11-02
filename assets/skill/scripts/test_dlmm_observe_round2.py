@@ -35,6 +35,30 @@ class Round2Tests(unittest.TestCase):
     def observe(self, position=POSITION):
         return monitor.shadow_exit_observe(position, 'pulse', -1, -.001, 1, False, {'bot_holders_pct': 25})
 
+    def test_fresh_bracket_never_relabels_a_due_forecast_terminal(self):
+        import copy
+        before = dict(pool=POOL, base_mint=MINT, mode='pulse', source_id='watch:live',
+                      source_ts=9990, terminal_target_ts=10000, terminal_anchor_bin=-200)
+        other = '1' * 32
+        def reject(ident, pool):
+            return dict(id=ident, pool=pool, mode='pulse', ts=9999, gate='momentum',
+                        candidate=dict(base_mint=MINT, sol_is_x=False))
+        file = self.memory / shadow.PIPELINE_REJECT_FILENAME
+        for include_other in (False, True):
+            with self.subTest(include_other=include_other):
+                items = [reject('a-conflict', POOL)]
+                if include_other: items.append(reject('b-free', other))
+                file.write_text(''.join(json.dumps(r) + '\n' for r in items))
+                candidates = {POOL: copy.deepcopy(before)}
+                report = {}
+                with patch.object(shadow.time, 'monotonic', return_value=0):
+                    count = shadow.index_reject_brackets(self.profile, candidates, 10000, 10, report)
+                self.assertEqual(candidates[POOL], before)
+                self.assertEqual(count, int(include_other))
+                if include_other:
+                    self.assertEqual(candidates[other]['bracket_phase'], 'baseline')
+                    self.assertEqual(candidates[other]['bracket_id'], 'b-free')
+
     def test_no_scan_and_no_age_eviction(self):
         directory = self.memory / 'dlmm_shadow_exits.d'
         directory.mkdir()
