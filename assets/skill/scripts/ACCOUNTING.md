@@ -1503,3 +1503,10 @@ selection skips that pool for a new baseline and can choose another eligible poo
 within the same existing baseline/read budget. This prevents relabelling a due
 forecast observation as a fresh rejection entry. Historical mismatched anchors
 remain unmeasured; no prior observation is rewritten or promoted.
+
+NAV quote rotation counts attempts only when HTTP starts, after pacing and both
+trading-priority checks. A deadline/trading deferral before HTTP leaves the next
+unrequested account in the rotation. The cap, pacing and 90-second deadline stay
+unchanged. Accounts outside the selection cap retain `quote_budget_deferred` even
+when a selected account hits rate limiting or trading priority. No-route inventory
+remains unmeasured and continues to prevent complete NAV.

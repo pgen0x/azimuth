@@ -25,7 +25,7 @@ function walletTradeActive(wallet) {
   } catch { return false; } // Keep existing collection behavior without procfs.
 }
 
-async function json(url, attempts=3, timeout=12000, deadline=Infinity, quoteAllowed=()=>true) {
+async function json(url, attempts=3, timeout=12000, deadline=Infinity, quoteAllowed=()=>true, onQuoteRequest=()=>{}) {
   for (let attempt=0; attempt<attempts; attempt++) {
     const quote = url.includes("/quote?");
     if (quote) {
@@ -37,6 +37,8 @@ async function json(url, attempts=3, timeout=12000, deadline=Infinity, quoteAllo
       // A trade can start during pacing; check again immediately before HTTP.
       if (!quoteAllowed()) throw new Error('quote_trading_deferred');
     }
+    // Only actual HTTP starts advance the rotation; pacing can defer without a request.
+    if (quote) onQuoteRequest();
     const response = await fetch(url, {headers: {'User-Agent': 'curl/8.5.0'}, signal: AbortSignal.timeout(timeout)});
     if (quote) {
       const remaining = response.headers?.get('x-ratelimit-remaining');
@@ -648,11 +650,10 @@ async function collect({dir, wallet, PublicKey, rpc, historyOnly=false, includeR
           value=Number(mark.out_lamports)/1e9;
           basis='cached_quote'; freshness='quote_cached'; priceObservedAt=mark.observed_at; priceContextSlot=mark.slot;
         } else {
-          if (quoteDeferredReason) throw new Error(quoteDeferredReason);
           if (!selected.has(account)) throw new Error('quote_budget_deferred');
-          quoteAttempts++;
+          if (quoteDeferredReason) throw new Error(quoteDeferredReason);
           const q=await json(`https://api.jup.ag/swap/v1/quote?inputMint=${mint}&outputMint=${SOL}&amount=${raw}&slippageBps=100`,1,2500,(started+90)*1000,
-            ()=>!walletTradeActive(wallet));
+            ()=>!walletTradeActive(wallet),()=>{quoteAttempts++;});
           const mark=navQuoteMark(q,mint,raw,slot);
           value=Number(mark.out_lamports)/1e9; basis="full_balance_quote"; freshness="quote_context_slot_checked";
           priceObservedAt=mark.observed_at; priceContextSlot=mark.slot;
