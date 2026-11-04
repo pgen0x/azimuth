@@ -425,7 +425,14 @@ Each candidate gets a fresh
 full-balance Jupiter quote to SOL. Only a successful quote that echoes the same
 input mint, SOL output and exact raw amount can admit a burn; every other answer
 is unknown and keeps the tokens, including a no-route answer, which bounds
-nothing about the balance's size. At most 16 quotes run per invocation. Mints
+nothing about the balance's size. At most 8 quotes run per invocation, paced
+2.1s apart for the keyless quote tier; a 429 ends that run's quoting. Accounts
+come back in the same RPC order every run, so an executing run records each
+non-dust answer in `memories/dlmm_dust_quote_cache.json` (keyed by account,
+holding mint + raw balance; 6h for a priced or no-route answer, 45m for an
+error or rate limit) and later runs skip that unchanged balance, letting the
+budget reach the rest of the list. Only skips are cached: an admitted burn
+always rests on a fresh quote, and a preview neither reads nor writes it. Mints
 with an open position or a `dlmm_settlements` marker are skipped, nonzero
 Token-2022 accounts are admitted only with `immutableOwner` alone, and an
 unreadable marker refuses the run. The batch burns the exact raw balance
