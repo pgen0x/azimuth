@@ -722,6 +722,32 @@ async function assertNativeReserve(connection, wallet, transaction) {
   if (post < nativeCashPolicy().native_reserve_lamports) throw new Error("ENTRY REFUSED: rent/fees would breach 0.2 SOL native reserve");
 }
 
+// A few bins of drift between DLMM.create and the first fresh read is pool
+// state moving under a stale cache. A larger jump is a fast mover, which is a
+// risk signal rather than a cache artifact, so it still refuses.
+const ENTRY_MAX_BIN_DRIFT = 3;
+
+// getActiveBin fetches fresh state, while the SDK liquidity builder uses
+// lbPair.activeId cached at pool creation. Never combine a range from one
+// anchor with liquidity amounts/slippage from another. On a small mismatch,
+// refresh the SDK cache ONCE and require both anchors to agree on the new bin;
+// the caller then derives the range from it and runs every guard as usual.
+async function resolveEntryActiveBin(pool, maxDrift = ENTRY_MAX_BIN_DRIFT) {
+  const refuse = (why) => new Error(`ENTRY REFUSED: active bin changed during entry preparation (${why})`);
+  const cached = pool.lbPair.activeId;
+  const first = await pool.getActiveBin();
+  if (!Number.isSafeInteger(first?.binId) || !Number.isSafeInteger(cached)) throw refuse("unreadable");
+  if (first.binId === cached) return { activeBin: first, reanchor: null };
+  const drift = first.binId - cached;
+  if (Math.abs(drift) > maxDrift) throw refuse(`drift ${drift} bins exceeds ${maxDrift}`);
+  await pool.refetchStates();
+  const fresh = await pool.getActiveBin();
+  if (!Number.isSafeInteger(fresh?.binId) || fresh.binId !== first.binId
+      || pool.lbPair.activeId !== fresh.binId) throw refuse("moved again after refresh");
+  console.warn(`[ENTRY] ${JSON.stringify({ stage: "active_bin_reanchor", cached_bin: cached, active_bin: fresh.binId, drift })}`);
+  return { activeBin: fresh, reanchor: { cached_bin: cached, active_bin: fresh.binId, drift } };
+}
+
 async function deployPosition(poolAddressStr, amountX, amountY, binsBelow, binsAbove, strategyTypeStr = "spot", slippageBps = 1000) {
   if (![amountX, amountY].every((n) => Number.isFinite(n) && n >= 0)
       || amountX + amountY <= 0
@@ -768,14 +794,7 @@ async function deployPosition(poolAddressStr, amountX, amountY, binsBelow, binsA
         }
         const pool = await DLMM.create(connection, new PublicKey(poolAddressStr));
         if (!dry) await assertNoTokenExposure(pool, wallet);
-        const activeBin = await pool.getActiveBin();
-        // getActiveBin fetches fresh state, while the SDK liquidity builder
-        // uses lbPair.activeId cached at pool creation. Never combine a range
-        // from one anchor with liquidity amounts/slippage from another.
-        if (!Number.isSafeInteger(activeBin.binId)
-            || activeBin.binId !== pool.lbPair.activeId) {
-          throw new Error("ENTRY REFUSED: active bin changed during entry preparation");
-        }
+        const { activeBin, reanchor } = await resolveEntryActiveBin(pool);
         const minBinId = activeBin.binId - binsBelow;
         const maxBinId = activeBin.binId + binsAbove;
         const tokenXDecimals = await getTokenDecimals(connection, pool.lbPair.tokenXMint);
@@ -826,7 +845,7 @@ async function deployPosition(poolAddressStr, amountX, amountY, binsBelow, binsA
             bins_below: binsBelow, bins_above: binsAbove, bin_step: Number(pool.lbPair.binStep),
             amount_x: amountX, amount_y: amountY, position_creation: positionCreation,
             position_pda_history_outcome: pdaHistory?.reason || "not_started_or_unavailable",
-            pre_sign_bin_check: preSignBinCheck,
+            pre_sign_bin_check: preSignBinCheck, ...(reanchor ? { active_bin_reanchor: reanchor } : {}),
             deployed_at: Math.floor(recordedAt), fee_forecast_reference: feeForecast,
           }), { mode: 0o600, flag: positionCreation.kind === "wallet_pda" ? "wx" : "w" });
         };
@@ -2266,5 +2285,5 @@ async function main() {
 }
 
 if (require.main === module) main();
-module.exports = { settlementInventory, swapAmountRaw, reclaimEmptyAccounts, assertRootBudget, reconcileAccounting, recordSubmission, closePosition, swapToken, confirmSignedTransaction, deployPosition, acquireDeployLock, acquireSwapLock, reconcilePendingSwap,
+module.exports = { resolveEntryActiveBin, settlementInventory, swapAmountRaw, reclaimEmptyAccounts, assertRootBudget, reconcileAccounting, recordSubmission, closePosition, swapToken, confirmSignedTransaction, deployPosition, acquireDeployLock, acquireSwapLock, reconcilePendingSwap,
   assertNoTokenExposure, positionIsEmpty, positionAccountExists, slippageBpsToPercent, settlementRentClose, ordinarySettlementRentClose, tokenAccountCanClose, getPositionRiskMark, candidateBinSnapshot };
