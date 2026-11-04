@@ -209,3 +209,4 @@ h3.sub{margin:16px 0 0;color:var(--ink-2);font-weight:600;font-size:12.5px}
 }
 @media (prefers-reduced-motion:reduce){*{transition:none!important}}
 @media (forced-colors:active){.cell,.wf .seg{border:1px solid CanvasText}}
+.alerts{list-style:none;margin:0 0 8px;padding:0;display:flex;flex-direction:column;gap:6px} .alerts li{overflow-wrap:anywhere}

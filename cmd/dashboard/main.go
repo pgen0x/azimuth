@@ -55,6 +55,8 @@ type server struct {
 	auth           *auth      // nil = locked: no data is served
 	zones          []string   // recently requested non-UTC zones, least recent first
 	zoneMu         sync.Mutex // serializes first-use day-bucket computations
+	briefs         briefCache
+	runBrief       func(ctx context.Context, profile, state string, hours, n int, tz string) (object, error) // nil = runBrief; tests stub it
 }
 
 var identifier = regexp.MustCompile(`^[A-Za-z0-9_.:-]{1,150}$`)
@@ -248,6 +250,10 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.Write(page)
 		return
 	}
+	if r.URL.Path == "/api/agent/brief" {
+		s.serveBrief(w, r)
+		return
+	}
 	s.mu.RLock()
 	data := s.data
 	failure := s.failure
@@ -370,6 +376,9 @@ func redisSettings(path string) map[string]string {
 }
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "brief" {
+		os.Exit(briefMain(os.Args[2:], os.Stdout, os.Stderr))
+	}
 	home, _ := os.UserHomeDir()
 	addr := flag.String("listen", "127.0.0.1:8787", "loopback address")
 	profile := flag.String("profile", filepath.Join(home, ".hermes/profiles/dlmm"), "Hermes profile directory")

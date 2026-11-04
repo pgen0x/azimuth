@@ -958,9 +958,180 @@ def collect(profile, state, since=None, zones=('UTC',)):
     events.sort(key=lambda e:e.get('time') or 0,reverse=True)
     return clean(own_only({'collected_at':now,**daily(profile,since,zones,now),'nav_bridge':panel(nav_bridge,memory,now),'live':{'dust':panel(dust_ledger,memory,since)},'robinhood':panel(robinhood,memory,now),'nav':nav[-1] if nav else {},'journal':events,'sources':sources,'hermes':hermes,'services':services}))
 
+# Agent brief: one compact, read-only status read for an orchestrating agent (CLI `brief` and /api/agent/brief).
+# Every figure keeps its basis; marks are labeled as marks and a missing source is reported, never zero.
+CORE_UNITS=('azimuth.service','azimuth-sol-monitor.service','hermes-gateway.service','azimuth-dashboard.service')
+BRIEF_DISK_MIN_PCT=15
+BRIEF_MEM_MIN_MB=1200
+BRIEF_DEPLOY_GAP_S=12*3600
+BRIEF_TICK_STALE_S=120
+FUNNEL_GREP=r'SIGNAL batch sent|entry_route=|rejected on audit|re-entry cooldown|lone candidate|direct deploy done'
+
+def _journal(run, unit, extra, cap=2*1024*1024, timeout=5):
+    """MESSAGE lines of one user unit, newest last; status says whether the read was complete."""
+    argv=['journalctl','--user','-u',unit,*extra,'-o','json','--output-fields=MESSAGE','--no-pager']
+    try: out=run(argv,timeout=timeout,cap=cap)
+    except OSError: return [],'unavailable'
+    status=getattr(out,'capture_status','ok')
+    # journalctl exits 1 when --grep matches nothing; that is an empty, complete read.
+    if status=='ok' and out.returncode not in (0,1): status='unavailable'
+    # Observed newest-first with --grep; never trust output order, sort on the journal's own timestamp.
+    return sorted(rh_messages(out.stdout),key=lambda m:m[0] or 0),status
+
+def brief_wallet(memory, now, tz):
+    ns=north_star(memory,now,14,tz)
+    days=[{k:d.get(k) for k in ('day','status','native_sol','cash_sol','known_sol','refundable_rent_sol','d_cash_sol','d_known_sol','d_external_sol')} for d in ns['days']]
+    latest=next((d for d in reversed(ns['days']) if number(d.get('native_sol'))),{})
+    measured=[d['d_known_sol'] for d in days if number(d.get('d_known_sol'))]
+    return {'tz':tz,'status':ns['status'],'as_of':latest.get('ts'),
+            'native_sol':latest.get('native_sol'),'cash_sol':latest.get('cash_sol'),'known_sol':latest.get('known_sol'),
+            'refundable_rent_sol':latest.get('refundable_rent_sol'),'wallet_history_complete':latest.get('wallet_history_complete'),
+            'd_known_measured_sum_sol':sum(measured) if measured else None,'d_known_measured_days':len(measured),'days':days,
+            'basis':'dlmm_nav.jsonl, last snapshot per day in '+tz+' (same rows as the capital north star). known = native + SPL mark + LP mark + rent; cash omits SPL marks. External flows are not netted out.'}
+
+def brief_positions(run, now):
+    """Open positions from the exit monitor's own latest MONITOR_REPORT. A newer
+    "0 position(s) found on-chain" line means the report is stale and nothing is open."""
+    msgs,status=_journal(run,'azimuth-sol-monitor.service',['--since','@%d'%int(now-900),'--grep',r'^MONITOR_REPORT:|position\(s\) found on-chain','-n','400'])
+    report=count=None
+    for t,m in msgs:
+        if m.startswith('MONITOR_REPORT:'): report=(t,m)
+        else:
+            found=re.search(r'(\d+) position\(s\) found on-chain',m)
+            if found: count=(t,int(found[1]))
+    out={'status':status,'report_at':report[0] if report else None,'onchain_count':count[1] if count else None,'positions':[],
+         'basis':'Exit-monitor MONITOR_REPORT (last 15 min). pnl is a Meteora portfolio MARK, never realized money.'}
+    if count and count[1]==0 and (not report or (report[0] or 0)<=(count[0] or 0)):
+        return out
+    if not report:
+        if status=='ok': out['status']='no_report'
+        return out
+    try: rows=json.loads(report[1][len('MONITOR_REPORT:'):]).get('positions') or []
+    except (ValueError,AttributeError): out['status']='invalid_report'; return out
+    for p in rows:
+        if not isinstance(p,dict): continue
+        out['positions'].append({k:p.get(k) for k in ('position','pair','mode','age_minutes','pnl_pct','pnl_sol','in_range','oor_minutes','size_sol','unclaimed_fees_sol','triggered_rules')})
+    return out
+
+def brief_closes(memory, now, hours, n):
+    closes,cmeta=read_jsonl(memory/'dlmm_closes.jsonl')
+    real,rmeta=read_jsonl(memory/'dlmm_realized.jsonl')
+    realized=keyed(real,'position',rmeta)
+    last={}
+    for r in closes:
+        if r.get('event') not in (None,'exit') or not identifier(r.get('position')) or not number(r.get('ts')): continue
+        last[r['position']]=r
+    rows=sorted(last.values(),key=lambda r:r['ts'],reverse=True)
+    def item(r):
+        z=realized.get(r['position'])
+        rz=z.get('realized_sol') if z else None
+        return {'ts':r['ts'],'pair':r.get('pair'),'mode':r.get('mode'),'reason':redact_text(str(r.get('reason') or ''))[:90],
+                'hold_min':r.get('age_min'),'realized_sol':rz if number(rz) else None,
+                # Not the close journal's pnl_basis: that one labels a mark. This one says whether money was measured.
+                'pnl_basis':'realized' if number(rz) else 'unmeasured' if z else 'not_reconciled','position':r['position']}
+    window=[item(r) for r in rows if r['ts']>=now-hours*3600]
+    measured=[c['realized_sol'] for c in window if number(c['realized_sol'])]
+    return {'status':'partial' if incomplete(cmeta) or incomplete(rmeta) else 'ok','recent':[item(r) for r in rows[:n]],
+            'window_closes':len(window),'window_measured':len(measured),'window_realized_sol':sum(measured) if measured else None,
+            'basis':'Last close row per position in dlmm_closes.jsonl joined to dlmm_realized.jsonl on position. realized_sol is the arbiter; pnl_sol (a mark) is never shown as money. not_reconciled = no realized row yet.'}
+
+def _shape(text):
+    return re.sub(r'\s+',' ',re.sub(r'\d+(?:\.\d+)?','N',text)).strip()[:80]
+
+def brief_funnel(memory, run, now, hours):
+    cut=now-hours*3600
+    msgs,status=_journal(run,'azimuth.service',['--since','@%d'%int(cut),'--grep',FUNNEL_GREP,'-n','20000'],cap=8*1024*1024,timeout=8)
+    f={'hours':hours,'status':status,'batches':0,'batch_pools':0,'routes':{},'daemon_rejects':{},'direct_deploy':{'deployed':0,'not_deployed':0},
+       'pipeline_rejects':{},'deploys':0,'last_deploy_ts':None}
+    def add(d,k): d[k]=d.get(k,0)+1
+    for _,m in msgs:
+        if (b:=re.search(r'SIGNAL batch sent (\d+) pools',m)): f['batches']+=1; f['batch_pools']+=int(b[1])
+        elif (r:=re.search(r'entry_route=([a-z_]+)(?: reason=([a-z_]+))?',m)): add(f['routes'],r[1]+(':'+r[2] if r[2] else ''))
+        elif (a:=re.search(r'rejected on audit: (.*)$',m)): add(f['daemon_rejects'],'audit: '+_shape(a[1]))
+        elif 're-entry cooldown' in m: add(f['daemon_rejects'],'re-entry cooldown')
+        elif 'lone candidate' in m: add(f['daemon_rejects'],'lone candidate held back')
+        elif (d:=re.search(r'direct deploy done \(deployed=(true|false)\)',m)): f['direct_deploy']['deployed' if d[1]=='true' else 'not_deployed']+=1
+    rej,rmeta=tail(memory/'dlmm_pipeline_rejects.jsonl',limit=20000,budget=4*1024*1024)
+    for r in rej:
+        if number(r.get('ts')) and r['ts']>=cut: add(f['pipeline_rejects'],str(r.get('gate') or 'unknown')[:60])
+    txs,tmeta=tail(memory/'dlmm_transactions.jsonl',limit=100000,budget=4*1024*1024)
+    for r in txs:
+        if r.get('kind')!='deploy' or not number(r.get('ts')): continue
+        if r['ts']>=cut: f['deploys']+=1
+        if f['last_deploy_ts'] is None or r['ts']>f['last_deploy_ts']: f['last_deploy_ts']=r['ts']
+    f['sources']={'pipeline_rejects':rmeta.get('status'),'transactions':tmeta.get('status')}
+    f['basis']=('Batches/routes/daemon rejects: azimuth.service journal markers. Pipeline rejects: dlmm_pipeline_rejects.jsonl gate. '
+                'Deploys: submitted deploy transactions in dlmm_transactions.jsonl (recorded before broadcast, not chain-confirmed).')
+    return f
+
+def brief_health(profile, run, now, statvfs=os.statvfs, meminfo='/proc/meminfo'):
+    h={'units':[],'failed_units':[],'disk_free_pct':None,'mem_available_mb':None,'monitor_tick_age_s':None}
+    try:
+        out=run(['systemctl','--user','show',*CORE_UNITS,'--property=Id,ActiveState,SubState,UnitFileState'],timeout=4)
+        for block in out.stdout.strip().split('\n\n'):
+            u=dict(l.split('=',1) for l in block.splitlines() if '=' in l)
+            if u.get('Id'): h['units'].append({'unit':u['Id'],'active':u.get('ActiveState'),'sub':u.get('SubState'),'enabled':u.get('UnitFileState')})
+    except OSError: h['units_status']='unavailable'
+    try:
+        out=run(['systemctl','--user','list-units','--state=failed','--no-legend','--plain','--no-pager'],timeout=4)
+        h['failed_units']=[l.split()[0] for l in out.stdout.splitlines() if l.strip() and UNIT_NAME.match(l.split()[0])][:40]
+    except OSError: h['failed_units_status']='unavailable'
+    try:
+        v=statvfs(str(profile)); h['disk_free_pct']=round(100*v.f_bavail/v.f_blocks,1) if v.f_blocks else None
+    except OSError: pass
+    try:
+        with open(meminfo) as f:
+            for line in f:
+                if line.startswith('MemAvailable:'): h['mem_available_mb']=int(line.split()[1])//1024
+    except (OSError,ValueError,IndexError): pass
+    ticks,_=_journal(run,'azimuth-sol-monitor.service',['-n','1','--grep','^OBSERVER_TICK'])
+    if not ticks: ticks,_=_journal(run,'azimuth-sol-monitor.service',['-n','1'])
+    if ticks and number(ticks[-1][0]): h['monitor_tick_age_s']=round(now-ticks[-1][0])
+    return h
+
+def brief_alerts(health, funnel, now):
+    a=[]
+    def flag(code,msg): a.append({'code':code,'message':msg})
+    if health.get('disk_free_pct') is not None and health['disk_free_pct']<BRIEF_DISK_MIN_PCT: flag('disk_low','disk free %.1f%% < %d%%'%(health['disk_free_pct'],BRIEF_DISK_MIN_PCT))
+    if health.get('mem_available_mb') is not None and health['mem_available_mb']<BRIEF_MEM_MIN_MB: flag('mem_low','MemAvailable %d MB < %d MB'%(health['mem_available_mb'],BRIEF_MEM_MIN_MB))
+    seen={u['unit'] for u in health.get('units',[])}
+    for u in health.get('units',[]):
+        if u.get('active')!='active': flag('core_unit_down','%s is %s'%(u['unit'],u.get('active')))
+        elif u.get('enabled') not in ('enabled','static','linked','alias'): flag('core_unit_not_enabled','%s active but %s: will not return after reboot'%(u['unit'],u.get('enabled')))
+    for u in CORE_UNITS:
+        if u not in seen and 'units_status' not in health: flag('core_unit_missing',u+' not reported by systemctl')
+    if 'units_status' in health: flag('units_unknown','systemctl unit state unavailable')
+    failed_core=[u for u in health.get('failed_units',[]) if u in CORE_UNITS]
+    if failed_core: flag('failed_core_unit','failed: '+', '.join(failed_core))
+    other=[u for u in health.get('failed_units',[]) if u not in CORE_UNITS]
+    if other: flag('failed_units','%d failed user unit(s): %s'%(len(other),', '.join(other[:5])))
+    last=funnel.get('last_deploy_ts')
+    if last is None or now-last>BRIEF_DEPLOY_GAP_S:
+        flag('no_deploy_12h','no deploy submitted in 12h'+('' if last is None else ' (last %.1fh ago)'%((now-last)/3600)))
+    age=health.get('monitor_tick_age_s')
+    if age is None: flag('monitor_tick_unknown','no monitor tick found in its journal')
+    elif age>BRIEF_TICK_STALE_S: flag('monitor_tick_stale','monitor last tick %ds ago > %ds'%(age,BRIEF_TICK_STALE_S))
+    return a
+
+def brief(profile, now=None, hours=12, n=10, tz='UTC', run=None, statvfs=os.statvfs, meminfo='/proc/meminfo'):
+    now=now or time.time(); run=run or bounded_run; memory=profile/'memories'
+    hours=max(1,min(168,int(hours))); n=max(1,min(50,int(n)))
+    out={'collected_at':now,'hours':hours,'n':n}
+    out['wallet']=panel(brief_wallet,memory,now,tz)
+    out['positions']=panel(brief_positions,run,now)
+    out['closes']=panel(brief_closes,memory,now,hours,n)
+    out['funnel']=panel(brief_funnel,memory,run,now,hours)
+    out['health']=panel(brief_health,profile,run,now,statvfs,meminfo)
+    out['alerts']=brief_alerts(out['health'],out['funnel'],now)
+    for k in ('wallet','positions','closes','funnel','health'):
+        if out[k].get('collection_error'): out['alerts'].append({'code':'section_unavailable','message':k+': '+out[k]['collection_error']})
+    return out
+
 if __name__=='__main__':
-    # argv: profile state since [zones,comma,separated] [daily]; `daily` refreshes only the day-bucketed panels.
+    # argv: profile state since [zones,comma,separated] [daily | brief hours n]; `daily` refreshes only the day-bucketed panels.
     zones=tuple(sys.argv[4].split(',')) if len(sys.argv)>4 and sys.argv[4] else ('UTC',)
-    if len(sys.argv)>5 and sys.argv[5]=='daily': out=clean(daily(Path(sys.argv[1]),sys.argv[3],zones))
+    if len(sys.argv)>5 and sys.argv[5]=='brief':
+        out=clean(own_only(brief(Path(sys.argv[1]),hours=int(sys.argv[6]),n=int(sys.argv[7]),tz=zones[0])))
+    elif len(sys.argv)>5 and sys.argv[5]=='daily': out=clean(daily(Path(sys.argv[1]),sys.argv[3],zones))
     else: out=collect(Path(sys.argv[1]),Path(sys.argv[2]),sys.argv[3] if len(sys.argv)>3 else None,zones)
     print(json.dumps(out,allow_nan=False))

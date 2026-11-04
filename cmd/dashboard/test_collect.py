@@ -590,4 +590,108 @@ class RobinhoodReviewTests(unittest.TestCase):
         finally:
             signal.alarm(0);signal.signal(signal.SIGALRM,old)
 
+def jlines(msgs): return '\n'.join(json.dumps({'MESSAGE':m,'__REALTIME_TIMESTAMP':str(int(t*1e6))}) for t,m in msgs)+'\n'
+
+def brief_run(monitor=(), scanner=(), ticks=(), units=None, failed=''):
+    """Fake bounded_run: answers each fixed argv from synthetic journals; no live service is read."""
+    units=units if units is not None else '\n\n'.join(f'Id={u}\nActiveState=active\nSubState=running\nUnitFileState=enabled' for u in c.CORE_UNITS)
+    calls=[]
+    def run(argv,**kw):
+        calls.append(argv); out=''
+        if argv[:3]==['systemctl','--user','show']: out=units
+        elif 'list-units' in argv: out=failed
+        elif 'azimuth.service' in argv: out=jlines(scanner)
+        elif '^OBSERVER_TICK' in argv: out=jlines(ticks)
+        elif 'azimuth-sol-monitor.service' in argv and '--grep' in argv: out=jlines(monitor)
+        elif 'azimuth-sol-monitor.service' in argv: out=jlines(ticks)
+        return SimpleNamespace(stdout=out,stderr='',returncode=0,capture_status='ok')
+    run.calls=calls
+    return run
+
+REPORT='MONITOR_REPORT:'+json.dumps({'positions':[{'position':'pos-1','pair':'AAA-SOL','mode':'pulse','age_minutes':5,'pnl_pct':-1.5,'pnl_sol':-.0015,'in_range':False,'oor_minutes':3,'size_sol':.1}]})
+
+class BriefTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp=tempfile.TemporaryDirectory();self.p=Path(self.tmp.name);self.m=self.p/'memories';self.m.mkdir()
+        self.net=patch.object(socket.socket,'connect',side_effect=AssertionError('offline only'));self.net.start()
+    def tearDown(self): self.net.stop();self.tmp.cleanup()
+
+    def test_positions_from_latest_report(self):
+        out=c.brief_positions(brief_run(monitor=[(T-30,'Meteora Portfolio API: 1 position(s) found on-chain'),(T-29,REPORT)]),T)
+        self.assertEqual(out['status'],'ok');self.assertEqual(len(out['positions']),1)
+        p=out['positions'][0];self.assertEqual((p['pair'],p['in_range'],p['pnl_sol']),('AAA-SOL',False,-.0015))
+        self.assertIn('MARK',out['basis'])
+    def test_positions_newer_zero_count_wins_and_order_is_not_trusted(self):
+        # Delivered newest-first, as journalctl --grep was observed to do.
+        msgs=[(T-10,'Meteora Portfolio API: 0 position(s) found on-chain'),(T-60,REPORT)]
+        out=c.brief_positions(brief_run(monitor=msgs),T)
+        self.assertEqual((out['positions'],out['onchain_count']),([],0))
+    def test_positions_without_report(self):
+        self.assertEqual(c.brief_positions(brief_run(),T)['status'],'no_report')
+        bad=c.brief_positions(brief_run(monitor=[(T-5,'MONITOR_REPORT:{broken')]),T)
+        self.assertEqual((bad['status'],bad['positions']),('invalid_report',[]))
+
+    def test_closes_join_realized_never_mark(self):
+        rows(self.m/'dlmm_closes.jsonl',[
+            dict(ts=T-100,position='a',pair='A-SOL',mode='pulse',reason='first try',pnl_sol=9.0,event='exit'),
+            dict(ts=T-50,position='a',pair='A-SOL',mode='pulse',reason='Low yield',age_min=30,pnl_sol=9.0,event='exit'),
+            dict(ts=T-40,position='b',pair='B-SOL',mode='turnover',reason='SL',pnl_sol=-9.0),
+            dict(ts=T-30,position='c',pair='C-SOL',mode='pulse',reason='OOR',pnl_sol=1.0),
+            dict(ts=T-20,position='a',event='compound',pnl_sol=5.0),
+            dict(ts=T-5*DAY,position='old',pair='O-SOL',mode='pulse',reason='x')])
+        rows(self.m/'dlmm_realized.jsonl',[dict(position='a',realized_sol=.002),dict(position='b',realized_sol=None)])
+        out=c.brief_closes(self.m,T,12,10)
+        got={r['position']:(r['realized_sol'],r['pnl_basis'],r['reason']) for r in out['recent']}
+        self.assertEqual(got['a'],(.002,'realized','Low yield'))
+        self.assertEqual(got['b'],(None,'unmeasured','SL'))
+        self.assertEqual(got['c'],(None,'not_reconciled','OOR'))
+        self.assertEqual([r['position'] for r in out['recent']],['c','b','a','old'])
+        self.assertEqual((out['window_closes'],out['window_measured'],out['window_realized_sol']),(3,1,.002))
+        self.assertNotIn('pnl_sol',json.dumps(out['recent']))
+        self.assertEqual(len(c.brief_closes(self.m,T,12,2)['recent']),2)
+
+    def test_funnel_counts(self):
+        scanner=[(T-60,'scanner[pulse]: SIGNAL batch sent 2 pools: A(80), B(70)'),(T-50,'scanner[pulse]: SIGNAL batch sent 1 pools: C(60)'),
+                 (T-49,'scanner[pulse]: entry_route=hermes_ai probe_cached=false; AI probe passed'),
+                 (T-48,'scanner[pulse]: entry_route=deterministic_fallback reason=timeout probe_cached=false; batch not sent'),
+                 (T-47,'scanner[pulse]: X (abc) rejected on audit: bot holders 40.1% > 25%'),
+                 (T-46,'scanner[pulse]: Y (abd) rejected on audit: bot holders 31% > 25%'),
+                 (T-45,'scanner[pulse]: CHOO (9JZ) in re-entry cooldown (3m2s left)'),
+                 (T-44,'scanner[pulse]: direct deploy done (deployed=false) for A(80)')]
+        rows(self.m/'dlmm_pipeline_rejects.jsonl',[dict(ts=T-30,gate='downtrend_h6'),dict(ts=T-20,gate='downtrend_h6'),dict(ts=T-13*3600,gate='old')])
+        rows(self.m/'dlmm_transactions.jsonl',[dict(ts=T-40,kind='deploy'),dict(ts=T-35,kind='swap'),dict(ts=T-20*3600,kind='deploy')])
+        run=brief_run(scanner=scanner)
+        f=c.brief_funnel(self.m,run,T,12)
+        self.assertEqual((f['batches'],f['batch_pools'],f['deploys'],f['last_deploy_ts']),(2,3,1,T-40))
+        self.assertEqual(f['routes'],{'hermes_ai':1,'deterministic_fallback:timeout':1})
+        self.assertEqual(f['daemon_rejects'],{'audit: bot holders N% > N%':2,'re-entry cooldown':1})
+        self.assertEqual(f['pipeline_rejects'],{'downtrend_h6':2})
+        self.assertEqual(f['direct_deploy'],{'deployed':0,'not_deployed':1})
+        argv=next(a for a in run.calls if 'azimuth.service' in a)
+        self.assertEqual(argv[argv.index('--since')+1],'@%d'%(T-12*3600))
+
+    def test_alerts(self):
+        healthy={'units':[{'unit':u,'active':'active','enabled':'enabled'} for u in c.CORE_UNITS],'failed_units':[],'disk_free_pct':50,'mem_available_mb':4000,'monitor_tick_age_s':10}
+        self.assertEqual(c.brief_alerts(healthy,{'last_deploy_ts':T-3600},T),[])
+        bad=dict(healthy,disk_free_pct=9.5,mem_available_mb=800,monitor_tick_age_s=500,failed_units=['azimuth-sol-monitor.service','x.timer'],
+                 units=[dict(healthy['units'][0],active='failed'),dict(healthy['units'][1],enabled='disabled')]+healthy['units'][2:])
+        codes={a['code'] for a in c.brief_alerts(bad,{'last_deploy_ts':T-13*3600},T)}
+        self.assertEqual(codes,{'disk_low','mem_low','core_unit_down','core_unit_not_enabled','failed_core_unit','failed_units','no_deploy_12h','monitor_tick_stale'})
+        codes={a['code'] for a in c.brief_alerts(dict(healthy,monitor_tick_age_s=None,units=[]),{},T)}
+        self.assertEqual(codes,{'monitor_tick_unknown','no_deploy_12h','core_unit_missing'})
+
+    def test_brief_end_to_end_offline(self):
+        rows(self.m/'dlmm_nav.jsonl',[snap(T-DAY-60,1,native=1.0),snap(T-60,2,native=1.5)])
+        rows(self.m/'dlmm_transactions.jsonl',[dict(ts=T-60,kind='deploy')])
+        vfs=SimpleNamespace(f_bavail=10,f_blocks=100)
+        mem=self.p/'meminfo';mem.write_text('MemTotal: 8000000 kB\nMemAvailable:    2048000 kB\n')
+        out=c.brief(self.p,now=T,hours=12,n=5,run=brief_run(ticks=[(T-15,'OBSERVER_TICK {}')],failed='a.service loaded failed failed A\n'),statvfs=lambda _:vfs,meminfo=str(mem))
+        self.assertEqual(out['wallet']['native_sol'],1.5)
+        self.assertEqual((out['health']['disk_free_pct'],out['health']['mem_available_mb'],out['health']['monitor_tick_age_s']),(10.0,2000,15))
+        self.assertEqual(out['health']['failed_units'],['a.service'])
+        self.assertEqual({a['code'] for a in out['alerts']},{'disk_low','failed_units'})
+        json.dumps(c.clean(out),allow_nan=False)
+        broken=c.brief(self.p,now=T,run=lambda *a,**k:1/0,statvfs=lambda _:vfs,meminfo=str(mem))
+        self.assertIn('section_unavailable',{a['code'] for a in broken['alerts']})
+
 if __name__=='__main__': unittest.main()
