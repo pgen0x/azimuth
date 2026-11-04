@@ -668,6 +668,59 @@ async function reclaimEmptyAccounts(execute = false, batch = false, dust = false
   }
 }
 
+// Operator command (no timer): sell pre-settlement-queue bags that quote above
+// half their ATA rent, through the ordinary swap path. Selection and stop rules
+// live in dlmm_legacy_bags.js. A dry run uses the public key when configured,
+// takes no lock and writes nothing; --execute holds the entry lock (so no
+// deploy or rent maintenance runs) and swapToken takes its own swap lock.
+async function liquidateLegacyBags(execute = false, max = undefined) {
+  const bags = require("./dlmm_legacy_bags");
+  const { TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID, getAssociatedTokenAddressSync } = require("@solana/spl-token");
+  if (execute && process.env.DLMM_SETTLEMENT_POSITION) {
+    throw new Error("Legacy bag sale refused: DLMM_SETTLEMENT_POSITION is set");
+  }
+  const publicKey = !execute && process.env.SOLANA_PUBLIC_KEY
+    ? new PublicKey(process.env.SOLANA_PUBLIC_KEY) : getWallet().publicKey;
+  const owner = publicKey.toString(), memories = path.join(PROFILE_DIR, "memories");
+  const readState = () => runWithFailover(async connection => {
+    const finalizedHeight = await connection.getBlockHeight("finalized");
+    const { blocked, settlementMints } = bags.readMarkers(memories, finalizedHeight, fs, path);
+    const positionMints = new Set();
+    for (const [address, data] of await DLMM.getAllLbPairPositionsByUser(connection, publicKey)) {
+      if (!data.lbPairPositionsData.length) continue;
+      const pool = await DLMM.create(connection, new PublicKey(address));
+      positionMints.add(pool.lbPair.tokenXMint.toString());
+      positionMints.add(pool.lbPair.tokenYMint.toString());
+    }
+    const accounts = [];
+    for (const programId of [TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID]) {
+      const response = await connection.getParsedTokenAccountsByOwner(publicKey, { programId }, "confirmed");
+      accounts.push(...response.value.filter(a => a.account.owner.toString() === programId.toString())
+        .map(a => ({ pubkey: a.pubkey.toString(), account: a.account })));
+    }
+    return { blocked, positionMints, settlementMints, accounts };
+  });
+  // Read-only ordering hint: accounts the dust timer last judged worth keeping.
+  let hint = new Set();
+  try {
+    const cache = JSON.parse(fs.readFileSync(path.join(memories, "dlmm_dust_quote_cache.json"), "utf8"));
+    hint = new Set(Object.entries(cache).filter(([, e]) => e?.verdict === "keep").map(([k]) => k));
+  } catch { /* No hint: plain RPC order. */ }
+  return bags.liquidateLegacyBags({ execute, max, dryRunEnv: process.env.DRY_RUN === "true", hint }, {
+    owner, readState, canClose: tokenAccountCanClose,
+    ataOf: (mint, program) => {
+      if (![TOKEN_PROGRAM_ID.toString(), TOKEN_2022_PROGRAM_ID.toString()].includes(program)) return null;
+      return getAssociatedTokenAddressSync(new PublicKey(mint), publicKey, false, new PublicKey(program)).toString();
+    },
+    quote: dustQuoteLamports,
+    sleep: ms => new Promise(resolve => setTimeout(resolve, ms)),
+    lock: () => acquireDeployLock(owner),
+    // Exact raw full balance; simulated net cash after fees must be positive.
+    swap: item => swapToken(item.mint, bags.SOL_MINT, `${item.raw}e-${item.decimals}`,
+      bags.MAX_IMPACT_PCT, 100, 1, false, item.raw),
+  });
+}
+
 async function assertNoTokenExposure(pool, wallet) {
   // Read position accounts, not cached portfolio values or bin arrays. Empty
   // NFTs also block until the monitor reconciles them. Includes sibling pools
@@ -1587,7 +1640,10 @@ async function settlementInventory(position, mint, wallet) {
   return proof;
 }
 
-async function swapToken(inputMintStr, outputMintStr, amountFloat, maxPriceImpactPct = 5, slippageBps = 100, minNetLamports = null, smallSettlement = false) {
+// expectedInputRaw (optional) binds an ordinary swap to one exact raw input:
+// the scaled amount and every quote's echoed mints, amount and ExactIn mode must
+// match it, as the settlement path already requires of owned inventory.
+async function swapToken(inputMintStr, outputMintStr, amountFloat, maxPriceImpactPct = 5, slippageBps = 100, minNetLamports = null, smallSettlement = false, expectedInputRaw = null) {
   const input_mint = normalizeMint(inputMintStr);
   const output_mint = normalizeMint(outputMintStr);
   if (minNetLamports !== null && (!Number.isSafeInteger(minNetLamports) || minNetLamports < 1
@@ -1644,6 +1700,9 @@ async function swapToken(inputMintStr, outputMintStr, amountFloat, maxPriceImpac
     if (inventory && amountFloat !== `raw:${amountRaw}`) {
       return { success: false, aborted: true, reason: "settlement_amount_mismatch" };
     }
+    if (expectedInputRaw !== null && amountRaw !== expectedInputRaw) {
+      return { success: false, aborted: true, reason: "swap_input_amount_mismatch" };
+    }
     inputRaw = amountRaw;
     excludedDex = require("./dlmm_route_retry").excluded(pendingPath, process.env.DLMM_SETTLEMENT_POSITION);
 
@@ -1685,6 +1744,10 @@ async function swapToken(inputMintStr, outputMintStr, amountFloat, maxPriceImpac
         }
         if (inventory && (q?.inputMint !== input_mint || q?.outputMint !== output_mint || q?.inAmount !== amountRaw)) {
           return { success: false, aborted: true, reason: "settlement_quote_mismatch" };
+        }
+        if (expectedInputRaw !== null && (q?.inputMint !== input_mint || q?.outputMint !== output_mint
+            || q?.inAmount !== amountRaw || q?.swapMode !== "ExactIn")) {
+          return { success: false, aborted: true, reason: "swap_quote_mismatch" };
         }
         if (bps === 0 && slippageBps !== 0 && (q?.outAmount !== "1" || q?.otherAmountThreshold !== "1"
             || q?.swapMode !== "ExactIn" || q?.slippageBps !== 0)) {
@@ -2108,6 +2171,11 @@ async function main() {
     if (command === "reclaim-empty-accounts") {
       if (args.slice(1).some(arg => !["--execute", "--batch", "--dust"].includes(arg))) throw new Error("Usage: reclaim-empty-accounts [--execute] [--batch] [--dust]");
       console.log(JSON.stringify(await reclaimEmptyAccounts(args.includes("--execute"), args.includes("--batch"), args.includes("--dust"))));
+    } else if (command === "liquidate-legacy-bags") {
+      const { execute, max } = require("./dlmm_legacy_bags").parseArgs(args.slice(1));
+      const res = await liquidateLegacyBags(execute, max);
+      console.log(JSON.stringify(res));
+      if (!res.success) process.exitCode = 1;
     } else if (command === "accounting") {
       const recorded = await reconcileAccounting();
       const { collect } = require("./dlmm_nav.js");
@@ -2288,5 +2356,5 @@ async function main() {
 }
 
 if (require.main === module) main();
-module.exports = { resolveEntryActiveBin, settlementInventory, swapAmountRaw, reclaimEmptyAccounts, assertRootBudget, reconcileAccounting, recordSubmission, closePosition, swapToken, confirmSignedTransaction, deployPosition, acquireDeployLock, acquireSwapLock, reconcilePendingSwap,
+module.exports = { resolveEntryActiveBin, settlementInventory, swapAmountRaw, reclaimEmptyAccounts, liquidateLegacyBags, assertRootBudget, reconcileAccounting, recordSubmission, closePosition, swapToken, confirmSignedTransaction, deployPosition, acquireDeployLock, acquireSwapLock, reconcilePendingSwap,
   assertNoTokenExposure, positionIsEmpty, positionAccountExists, slippageBpsToPercent, settlementRentClose, ordinarySettlementRentClose, tokenAccountCanClose, getPositionRiskMark, candidateBinSnapshot };
