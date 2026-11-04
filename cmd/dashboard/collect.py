@@ -1,5 +1,5 @@
 """Local evidence only: no network clients, trading imports or write operations."""
-import base64, json, math, os, re, selectors, signal, sqlite3, stat, subprocess, sys, time
+import base64, functools, json, math, os, re, selectors, signal, sqlite3, stat, subprocess, sys, time
 from pathlib import Path
 from types import SimpleNamespace
 from datetime import datetime, timedelta, time as clock
@@ -15,7 +15,12 @@ ENV_SECRET = re.compile(r'KEY|TOKEN|AUTH|SECRET|PASS|MNEMONIC|SEED|PRIVATE|BEARE
 
 
 def secret_name(name):
-    name = str(name)
+    return _secret_name(str(name))
+
+@functools.lru_cache(maxsize=65536)
+def _secret_name(name):
+    # Pure function of the name; the collector asks it once per dict key, so the same few
+    # hundred keys repeat hundreds of thousands of times per refresh.
     if name.lower() in PUBLIC_FIELDS:
         return False
     return (name.lower() in SECRET_NAMES or bool(SECRET.search(name))
@@ -61,7 +66,21 @@ def _mask_phrase(match):
     return match[1] + separator + MASKED
 
 
+# Every masking rule needs one of these in the text: ':' or '=' (assignments, URLs), 'bearer' or
+# 'sk-' (inline credentials), 'mnemonic' / 'phrase' / 'words' (wallet phrases). Under re.I a few
+# non-ASCII letters fold onto ASCII ones (U+212A KELVIN SIGN matches 'k'), so only ASCII text may
+# skip the rules; anything else takes the full path.
+REDACT_TRIGGER = re.compile(r'[:=]|bearer|sk-|mnemonic|phrase|words', re.I)
+
+def needs_redaction(value):
+    return not value.isascii() or REDACT_TRIGGER.search(value) is not None
+
 def redact_text(value):
+    # Fast path: most strings are identifiers, symbols and numbers that no rule can touch.
+    if not needs_redaction(value): return value
+    return _redact_text(value)
+
+def _redact_text(value):
     lines = []
     for line in value.splitlines(keepends=True):
         ending = line[len(line.rstrip('\r\n')):]
@@ -85,6 +104,23 @@ def clean(value):
         return redact_text(value)
     if isinstance(value,float) and not math.isfinite(value): return None
     return value
+
+def scrub(value, pattern=None):
+    """clean(own_only(value)) in one traversal: the collector's output is ~600k nodes, so the
+    second walk was a third of a refresh. Same key filter, same masking, same output."""
+    pattern = pattern or hide_pattern()
+    keep = pattern.search
+    def walk(v):
+        t = type(v)
+        if t is str: return redact_text(v)
+        if t is dict:
+            return {redact_text(str(k)): '[masked]' if secret_name(k) else walk(x)
+                    for k, x in v.items() if not keep(str(k))}
+        if t is list: return [walk(x) for x in v]
+        if t is int or t is bool or v is None: return v
+        if t is float: return v if math.isfinite(v) else None
+        return clean(own_only(v, pattern))  # subclasses and rare types: the reference path
+    return walk(value)
 
 def number(v):
     return type(v) in (int, float) and math.isfinite(v)
@@ -873,6 +909,20 @@ def daily(profile, since, zones, now=None):
     now=now or time.time(); memory=profile/'memories'; since=cutover(since,now)
     return {'collected_at':now,'by_tz':{tz:{'north_star':panel(north_star,memory,now,CALENDAR_DAYS,tz),'realized':panel(realized_by_mode,memory,since,tz),'robinhood':panel(rh_closes,memory,tz)} for tz in zones}}
 
+def recent_entries(folder, limit=100):
+    """Newest `limit` *.json entry files by mtime. scandir reuses the directory read for the stat,
+    where glob + Path.stat paid a lookup per file (~1.4k files) every refresh."""
+    found=[]
+    try:
+        with os.scandir(folder) as it:
+            for e in it:
+                if not e.name.endswith('.json'): continue
+                try: found.append((e.stat().st_mtime,Path(e.path)))
+                except OSError: pass  # vanished or dangling entry: skip it, keep the rest
+    except OSError: return []
+    found.sort(key=lambda x:x[0],reverse=True)
+    return [p for _,p in found[:limit]]
+
 def collect(profile, state, since=None, zones=('UTC',)):
     now=time.time();memory=profile/'memories';sources=[];events=[]
     since=cutover(since,now)
@@ -946,8 +996,7 @@ def collect(profile, state, since=None, zones=('UTC',)):
                 events.append({'stage':'AI / fallback','time':int(log.get('__REALTIME_TIMESTAMP',0))/1e6,'source':'journalctl --user -u azimuth.service; last 100 route markers / 48 hours', 'evidence':{'mode':match[1],'route':match[2],'fallback_reason':match[3], 'execution_verified':False},'note':'Route observation only; no candidate or execution correlation is implied.'})
     except (OSError,subprocess.TimeoutExpired): pass
     # Entry files supply explicit entry -> root -> position links; never infer links by time.
-    entries=sorted((memory/'dlmm_entries').glob('*.json'),key=lambda p:p.stat().st_mtime,reverse=True)[:100]
-    for path in entries:
+    for path in recent_entries(memory/'dlmm_entries'):
         try:
             row=read_json(path)
             evidence=select(row,'entry_id root_chain_id position pool signature ts created_at mode status base_mint base_symbol size_sol strategy')
@@ -956,7 +1005,7 @@ def collect(profile, state, since=None, zones=('UTC',)):
         except (OSError,ValueError): pass
     hermes['gateway'] = next((s for s in services if s.get('Id')=='hermes-gateway.service'), {'ActiveState':'unknown'})
     events.sort(key=lambda e:e.get('time') or 0,reverse=True)
-    return clean(own_only({'collected_at':now,**daily(profile,since,zones,now),'nav_bridge':panel(nav_bridge,memory,now),'live':{'dust':panel(dust_ledger,memory,since)},'robinhood':panel(robinhood,memory,now),'nav':nav[-1] if nav else {},'journal':events,'sources':sources,'hermes':hermes,'services':services}))
+    return scrub({'collected_at':now,**daily(profile,since,zones,now),'nav_bridge':panel(nav_bridge,memory,now),'live':{'dust':panel(dust_ledger,memory,since)},'robinhood':panel(robinhood,memory,now),'nav':nav[-1] if nav else {},'journal':events,'sources':sources,'hermes':hermes,'services':services})
 
 # Agent brief: one compact, read-only status read for an orchestrating agent (CLI `brief` and /api/agent/brief).
 # Every figure keeps its basis; marks are labeled as marks and a missing source is reported, never zero.
@@ -1131,7 +1180,7 @@ if __name__=='__main__':
     # argv: profile state since [zones,comma,separated] [daily | brief hours n]; `daily` refreshes only the day-bucketed panels.
     zones=tuple(sys.argv[4].split(',')) if len(sys.argv)>4 and sys.argv[4] else ('UTC',)
     if len(sys.argv)>5 and sys.argv[5]=='brief':
-        out=clean(own_only(brief(Path(sys.argv[1]),hours=int(sys.argv[6]),n=int(sys.argv[7]),tz=zones[0])))
+        out=scrub(brief(Path(sys.argv[1]),hours=int(sys.argv[6]),n=int(sys.argv[7]),tz=zones[0]))
     elif len(sys.argv)>5 and sys.argv[5]=='daily': out=clean(daily(Path(sys.argv[1]),sys.argv[3],zones))
     else: out=collect(Path(sys.argv[1]),Path(sys.argv[2]),sys.argv[3] if len(sys.argv)>3 else None,zones)
     print(json.dumps(out,allow_nan=False))
