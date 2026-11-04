@@ -1603,7 +1603,13 @@ vm.runInNewContext("const productionExitTransport=confirmExitTransaction;confirm
     vm.runInNewContext("const bagSwap = swapToken; swapToken = captureBagSwap;", sandbox);
     const bagTimer=sandbox.setTimeout;sandbox.setTimeout=(fn)=>bagTimer(fn,0);
     let bagSale;
-    try { bagSale=await sandbox.module.exports.liquidateLegacyBags(true,1); }
+    try {
+      env.DRY_RUN="true"; // DRY_RUN wins over --execute: plan only, no swap
+      const forcedDry=await sandbox.module.exports.liquidateLegacyBags(true,1);
+      delete env.DRY_RUN;
+      assert.equal(forcedDry.dry_run,true);assert.equal(forcedDry.plan.length,1);assert.equal(bagSwapArgs.length,0);
+      bagSale=await sandbox.module.exports.liquidateLegacyBags(true,1);
+    }
     finally { vm.runInNewContext("swapToken = bagSwap;", sandbox); sandbox.setTimeout=bagTimer; }
     assert.equal(bagSale.success,true,JSON.stringify(bagSale));assert.equal(bagSale.dry_run,false);
     assert.deepEqual(bagSwapArgs.map(a=>Array.from(a)),[["bag-mint",SOL_MINT,"5e-6",15,100,1,false,"5"]]);
