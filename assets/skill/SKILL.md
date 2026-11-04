@@ -23,7 +23,7 @@ Screen Pools (Fee/TVL, TVL, Volatility, Base Token Safety Gates) → Deploy Sing
 
 ## Tools & Commands
 
-Automated signals (`--from-signal` and `--from-batch`) use `sol_bidask` in every
+Automated signals (`--from-pool`, `--from-signal` and `--from-batch`) use `sol_bidask` in every
 mode, including turnover and pulse. The pipeline enforces this even when a stale
 prompt supplies another `--strategy`. It targets roughly 35% downside coverage,
 subject to bin-step and rent limits; filled bins still acquire token exposure.
@@ -57,8 +57,20 @@ positions and learned weights in one read-only command. No RPC, screening or dep
 Missing position metadata leaves the mode count null. This is ranking context;
 the pipeline rechecks live holding, cooldown, sizing and risk gates before entry.
 The DLMM webhook advertises Hermes's `terminal` toolset (terminal plus process
-management), covering context, token audit and pipeline commands. Other sessions
+management), covering the context and pipeline commands. Other sessions
 use their configured toolsets; webhook reports still pass through the receipt guard.
+
+**AI pick (`--from-pool <pool address> --audit --mode <mode>`)**: the webhook
+agent's one deploy command. The pipeline reads the pick's record verbatim from
+the scanner's delivery journal (newest `prepared` row carrying that pool in that
+mode, at most 30 minutes old; `SOLANA_DELIVERY_PATH` overrides the default
+`~/.local/state/azimuth/solana_deliveries.jsonl`) and then takes the
+`--from-signal` path unchanged. Hand-copied JSON was the dominant way an AI turn
+broke (copy slips, shell quoting, and silently retyped `base_mint`/`dev`
+values). `--audit` runs `audit_token.py` on the base mint first: FAIL prints
+`❌ REJECT audit_token: <reason>` and stops before any live gate; UNKNOWN is
+unavailable evidence and continues. `--from-signal '<record JSON>'` remains the
+fallback when no delivered record is found.
 
 **Batch mode (`--from-batch '<payload array>' --mode <mode>`)**: consumes the
 azimuth daemon's whole signal batch and replaces the LLM agent's pick step —

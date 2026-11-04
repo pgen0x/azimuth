@@ -797,6 +797,10 @@ its delivery ID. The scanner persists the signal before sending, then records
 acceptance/rejection/uncertainty in
 `~/.local/state/azimuth/solana_deliveries.jsonl` (override `SOLANA_DELIVERY_PATH`).
 No webhook URL, credential, or response body is stored. Receipt IDs must match.
+The `prepared` row's `signal.payload` is also where `dlmm_pipeline.py
+--from-pool` reads the AI's pick (newest matching row, at most 30 minutes old,
+never a row written after the call), so the agent never re-types the record.
+That is a read of the exact sent signal, not a replay.
 
 HTTP acceptance and Hermes session end are lifecycle evidence only; neither proves a completed AI pick or finalized trade. Missing
 or ambiguous evidence remains explicit. This journal does not replay requests
