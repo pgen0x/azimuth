@@ -13,7 +13,13 @@
 
 const SOL_MINT = "So11111111111111111111111111111111111111112";
 const QUOTE_GAP_MS = 2100;        // keyless Jupiter pacing, same as the swap and dust paths
-const MAX_QUOTES = 16;            // bounds one run's quote time to ~35s
+const MAX_QUOTES = 16;            // hard ceiling; a run quotes only what --max needs
+const QUOTES_PER_SALE = 2;        // buffer for no-route / dust answers among the quoted
+// The keyless Jupiter tier is a small shared budget: the selection quotes spend
+// it, and each sale's own quote + swap build must not land in the same window
+// (2026-11-04: 16 selection quotes, then every sale request came back 429).
+const DEFAULT_SALE_COOLDOWN_MS = 20000; // before the first sale; LEGACY_BAG_COOLDOWN_MS overrides
+const SALE_GAP_MS = 5000;               // between sales
 const DEFAULT_MAX_SALES = 4;
 const EST_FEE_LAMPORTS = 10000;   // selection-time estimate: base fee plus priority headroom
 const MAX_IMPACT_PCT = 15;        // the monitor's settlement-swap cap
@@ -102,16 +108,27 @@ async function quoteCandidates(eligible, { quote, sleep }, hint = new Set(), max
   return { sellable, skipped, quotes, stopped };
 }
 
+function cooldownMs(value) {
+  return /^\d+$/.test(String(value ?? "")) && Number(value) <= 600000 ? Number(value) : DEFAULT_SALE_COOLDOWN_MS;
+}
+
+// A refusal caused by the quote/swap API's rate limit, not by the bag.
+function rateLimited(res) {
+  return [res?.reason, res?.error].some(t => typeof t === "string"
+    && /(^|\D)429(\D|$)|rate[ _-]?limit|too many requests/i.test(t));
+}
+
 // deps: readState() -> { blocked, positionMints, settlementMints, accounts },
 // owner, ataOf, canClose, quote, sleep, lock() -> release, swap(item) -> result.
-async function liquidateLegacyBags({ execute = false, max = DEFAULT_MAX_SALES, dryRunEnv = false, hint } = {}, deps) {
+async function liquidateLegacyBags({ execute = false, max = DEFAULT_MAX_SALES, dryRunEnv = false, hint,
+  saleCooldownMs = DEFAULT_SALE_COOLDOWN_MS } = {}, deps) {
   if (!Number.isSafeInteger(max) || max < 1) throw new Error("--max must be a positive integer");
   const live = execute && !dryRunEnv;
   const select = state => selectCandidates(state.accounts, { owner: deps.owner, positionMints: state.positionMints,
     settlementMints: state.settlementMints, ataOf: deps.ataOf, canClose: deps.canClose });
   const state = await deps.readState();
   const selected = select(state);
-  const quoted = await quoteCandidates(selected.eligible, deps, hint);
+  const quoted = await quoteCandidates(selected.eligible, deps, hint, Math.min(MAX_QUOTES, max * QUOTES_PER_SALE));
   const plan = quoted.sellable.slice(0, max);
   const result = {
     success: true, dry_run: !live, blocked: state.blocked, quotes: quoted.quotes, quote_stopped: quoted.stopped,
@@ -128,7 +145,7 @@ async function liquidateLegacyBags({ execute = false, max = DEFAULT_MAX_SALES, d
   if (!plan.length) return result;
   const release = await deps.lock();
   try {
-    for (const item of plan) {
+    for (const [index, item] of plan.entries()) {
       // Re-read under the lock: a settlement, deploy or rent burn that started
       // after selection owns this inventory now.
       const now = await deps.readState();
@@ -139,14 +156,19 @@ async function liquidateLegacyBags({ execute = false, max = DEFAULT_MAX_SALES, d
         result.sales.push({ account: item.account, mint: item.mint, success: false, reason: "inventory_changed" });
         break;
       }
-      await deps.sleep(QUOTE_GAP_MS);
+      await deps.sleep(index ? SALE_GAP_MS : saleCooldownMs);
       let res;
       try { res = await deps.swap(item); }
       catch (err) { res = { success: false, error: err.message }; }
       result.sales.push({ account: item.account, mint: item.mint, raw: item.raw, success: res?.success === true && !res.dryRun,
         ...["txHash", "inputAmount", "outputAmount", "reason", "error", "pending", "aborted"]
           .reduce((o, k) => (res?.[k] === undefined ? o : { ...o, [k]: res[k] }), {}) });
-      if (res?.success !== true || res.dryRun) { result.success = false; result.stopped = "sale_failed"; break; }
+      if (res?.success !== true || res.dryRun) {
+        result.success = false;
+        result.stopped = rateLimited(res) ? "rate_limited" : "sale_failed";
+        if (result.stopped === "rate_limited") result.sales.at(-1).rate_limited = true;
+        break;
+      }
     }
   } finally {
     await release();
@@ -164,5 +186,5 @@ function parseArgs(args) {
   return { execute, max };
 }
 
-module.exports = { liquidateLegacyBags, selectCandidates, quoteCandidates, readMarkers, parseArgs,
-  SOL_MINT, QUOTE_GAP_MS, MAX_QUOTES, DEFAULT_MAX_SALES, EST_FEE_LAMPORTS, MAX_IMPACT_PCT };
+module.exports = { liquidateLegacyBags, selectCandidates, quoteCandidates, readMarkers, parseArgs, cooldownMs, rateLimited,
+  SOL_MINT, QUOTE_GAP_MS, MAX_QUOTES, QUOTES_PER_SALE, DEFAULT_SALE_COOLDOWN_MS, SALE_GAP_MS, DEFAULT_MAX_SALES, EST_FEE_LAMPORTS, MAX_IMPACT_PCT };

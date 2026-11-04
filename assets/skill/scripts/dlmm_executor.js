@@ -81,7 +81,7 @@ async function runWithFailover(fn) {
       deduplicateAccountReads(connection);
       return await fn(connection);
     } catch (err) {
-      if (err.riskMarkUnavailable || err.message?.startsWith("ENTRY REFUSED:") || err.message?.startsWith("Rent reclaim refused:")) throw err;
+      if (err.riskMarkUnavailable || err.jupiterRateLimited || err.message?.startsWith("ENTRY REFUSED:") || err.message?.startsWith("Rent reclaim refused:")) throw err;
       console.warn(`[RPC WARN] Failed execution on RPC #${currentRpcIndex}: ${err.message}`);
       currentRpcIndex = (currentRpcIndex + 1) % RPC_URLS.length;
       attempts++;
@@ -706,7 +706,8 @@ async function liquidateLegacyBags(execute = false, max = undefined) {
     const cache = JSON.parse(fs.readFileSync(path.join(memories, "dlmm_dust_quote_cache.json"), "utf8"));
     hint = new Set(Object.entries(cache).filter(([, e]) => e?.verdict === "keep").map(([k]) => k));
   } catch { /* No hint: plain RPC order. */ }
-  return bags.liquidateLegacyBags({ execute, max, dryRunEnv: process.env.DRY_RUN === "true", hint }, {
+  return bags.liquidateLegacyBags({ execute, max, dryRunEnv: process.env.DRY_RUN === "true", hint,
+    saleCooldownMs: bags.cooldownMs(process.env.LEGACY_BAG_COOLDOWN_MS) }, {
     owner, readState, canClose: tokenAccountCanClose,
     ataOf: (mint, program) => {
       if (![TOKEN_PROGRAM_ID.toString(), TOKEN_2022_PROGRAM_ID.toString()].includes(program)) return null;
@@ -1865,7 +1866,11 @@ async function swapToken(inputMintStr, outputMintStr, amountFloat, maxPriceImpac
       })
     });
     if (!swapRes.ok) {
-      throw new Error(`Jupiter swap API error: ${swapRes.status} ${await swapRes.text()}`);
+      const err = new Error(`Jupiter swap API error: ${swapRes.status} ${await swapRes.text()}`);
+      // A provider rate limit is not an RPC fault: retrying it on every RPC only
+      // spends the same keyless budget again. Nothing is signed yet.
+      if (swapRes.status === 429) err.jupiterRateLimited = true;
+      throw err;
     }
     const { swapTransaction } = await swapRes.json();
     

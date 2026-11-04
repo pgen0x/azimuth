@@ -486,8 +486,9 @@ no file.
 A candidate is the wallet's only nonzero account for its mint, and it must be
 that mint's ATA. It must also pass the same closeability rule as rent reclaim.
 Wrapped SOL, mints of open positions and mints held by a `dlmm_settlements`
-marker are excluded. Each candidate gets a fresh full-balance quote: at most 16
-per run, 2.1s apart, and a 429 stops quoting. Accounts the dust cache last
+marker are excluded. Each candidate gets a fresh full-balance quote. A run makes
+at most `2 × --max` quotes (never more than 16), 2.1s apart, and a 429 stops
+quoting. Quoting only what `--max` needs leaves keyless Jupiter budget for the sales. Accounts the dust cache last
 called `keep` are quoted first. A bag is sellable when the quote exceeds half
 the rent and also exceeds a 10,000-lamport fee estimate. The highest quotes sell
 first, up to `--max` (default 4).
@@ -503,6 +504,14 @@ impact and 100 bps slippage. The simulated net cash after fees must be at
 least 1 lamport. The quote must echo the same input mint, SOL output, raw amount
 and `ExactIn`. The first sale that fails, stays pending or is refused ends the
 run with `success:false`.
+
+The first sale waits for a cooldown after the selection quotes: 20s by default,
+set by `LEGACY_BAG_COOLDOWN_MS` (whole milliseconds, up to 600000). Later sales
+wait 5s each. A sale refused by a 429 from the quote or swap API ends the run
+with `stopped: "rate_limited"`; no transaction was signed. A 429 from Jupiter's
+swap endpoint is not retried on every configured RPC, because those retries
+would only spend the same budget again. Every other swap-build error still fails
+over as before.
 
 The sale does not close the emptied account. The rent timer closes it on its
 next tick, as an ordinary empty-account refund. The proceeds are a one-time
