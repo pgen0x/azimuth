@@ -867,6 +867,23 @@ vm.runInNewContext("const productionExitTransport=confirmExitTransaction;confirm
   // Healthy swap-only recovery never spends account/lookup RPCs for optional rent.
   const readBefore=accountReads;Connection.prototype.simulateTransaction=async()=>({context:{slot:10},value:{err:null,accounts:[{lamports:14600}]}});
   assert.equal((await recover(4100)).success,true);assert.equal(accountReads,readBefore);
+  // expectedInputRaw binds an ordinary (legacy-bag) sale to one exact raw input:
+  // a quote echoing another mint, amount or mode never reaches signing.
+  const unboundFetch=sandbox.fetch, boundSends=sends, SOLM="So11111111111111111111111111111111111111112";
+  const boundQuote=alter=>{sandbox.fetch=async url=>({ok:true,json:async()=>url.includes("/quote?")
+    ? {inputMint:"TOKEN",outputMint:SOLM,inAmount:"100000000",outAmount:"5000",otherAmountThreshold:"4500",
+      priceImpactPct:"0",swapMode:"ExactIn",...alter}
+    : {swapTransaction:"AA=="}});};
+  const boundSale=(amount="100000000e-9")=>swapToken("TOKEN",SOLM,amount,15,100,1,false,"100000000");
+  for (const alter of [{inputMint:"OTHER"},{outputMint:"OTHER"},{inAmount:"99999999"},{swapMode:"ExactOut"},{swapMode:undefined}]) {
+    boundQuote(alter);assert.equal((await boundSale()).reason,"swap_quote_mismatch");
+  }
+  boundQuote({});assert.equal((await boundSale("1e-9")).reason,"swap_input_amount_mismatch");
+  assert.equal(sends,boundSends);
+  // Without the option the same off-echo quote is not checked (existing behavior).
+  boundQuote({inputMint:"OTHER"});assert.equal((await swapToken("TOKEN",SOLM,"100000000e-9",15,100,1)).success,true);
+  boundQuote({});assert.equal((await boundSale()).success,true);assert.equal(sends,boundSends+2);
+  sandbox.fetch=unboundFetch;
   delete deps["@solana/spl-token"];
   sandbox.fetch = async () => ({ok:false,status:400,text:async()=>JSON.stringify({errorCode:"COULD_NOT_FIND_ANY_ROUTE"})});
   assert.equal((await recover()).reason, "swap_no_route");
@@ -1560,6 +1577,25 @@ vm.runInNewContext("const productionExitTransport=confirmExitTransaction;confirm
     assert.deepEqual(Array.from(dry.accounts,a=>a.account),["eligible","dust"]); // no-route is unknown, never zero
     assert.deepEqual(quoted,["dust-mint","norout-mint","rich-mint","down-mint"]); // active + pending mints are never quoted
     assert.equal(dry.forfeited_quote_lamports,700000);assert.equal(dry.accounts[1].burn_raw,"5");assert.equal(sends,beforeEntryRent+2);
+    // liquidate-legacy-bags glue: a dry run quotes through the dust quoter, plans only
+    // above-half-rent ATAs, never quotes active/settling/non-ATA mints, takes no lock.
+    deps["@solana/spl-token"].getAssociatedTokenAddressSync=(mint,owner,offCurve,program)=>{
+      assert.equal(owner.toString(),wallet.publicKey.toString());assert.equal(offCurve,false);
+      return key(`ata-${mint}`);};
+    const rentFixture=tokenAccounts;
+    Object.assign(quotes,{"bag-mint":"900000","small-mint":"100","loose-mint":"900000"});quoted.length=0;
+    tokenAccounts=[dustAccount("ata-bag-mint","5","bag-mint"),dustAccount("ata-small-mint","5","small-mint"),
+      dustAccount("loose","5","loose-mint"),dustAccount("ata-TOKEN","4","TOKEN"),dustAccount("ata-pending-mint","2","pending-mint")];
+    const heldEntry=await sandbox.module.exports.acquireDeployLock(wallet.publicKey.toString());
+    let bagPlan;
+    try { bagPlan=await sandbox.module.exports.liquidateLegacyBags(false); } finally { await heldEntry(); }
+    assert.equal(bagPlan.dry_run,true);assert.deepEqual(Array.from(bagPlan.plan,p=>p.account),["ata-bag-mint"]);
+    assert.equal(bagPlan.plan[0].quote_lamports,900000);assert.equal(bagPlan.plan[0].raw,"5");
+    assert.deepEqual(quoted,["bag-mint","small-mint"]);
+    assert.deepEqual(Object.fromEntries(bagPlan.skipped.map(s=>[s.account,s.reason])),
+      {"ata-small-mint":"dust_for_rent_timer",loose:"not_ata","ata-TOKEN":"open_position","ata-pending-mint":"settlement"});
+    assert.equal(sends,beforeEntryRent+2);
+    tokenAccounts=rentFixture;quoted.length=0;quoted.push("dust-mint","norout-mint","rich-mint","down-mint");
     rentInstructions.length=0;simErr={InstructionError:[0,"Custom"]};
     await assert.rejects(reclaimEmptyAccounts(true,false,true),/simulation failed/);assert.equal(sends,beforeEntryRent+2);
     simErr=null;rentInstructions.length=0;
@@ -1716,6 +1752,17 @@ vm.runInNewContext("const productionExitTransport=confirmExitTransaction;confirm
   }
   cliRentArgs=null;sandbox.process.argv=originalArgv.concat(["reclaim-empty-accounts","--unknown"]);
   await assert.rejects(sandbox.module.exports.runCLI(),/exit 1/);assert.equal(cliRentArgs,null);
+  let cliBagArgs;
+  sandbox.captureCLIBags=async(...args)=>{cliBagArgs=args;return {success:true};};
+  vm.runInNewContext("liquidateLegacyBags = captureCLIBags;",sandbox);
+  for (const [options,expected] of [[[],[false,4]],[["--execute"],[true,4]],[["--max","2"],[false,2]],[["--max","7","--execute"],[true,7]]]) {
+    sandbox.process.argv=originalArgv.concat(["liquidate-legacy-bags",...options]);
+    await sandbox.module.exports.runCLI();assert.deepEqual(Array.from(cliBagArgs),expected);
+  }
+  for (const options of [["--max"],["--max","0"],["--max","1.5"],["--dust"],["--execute","extra"]]) {
+    cliBagArgs=null;sandbox.process.argv=originalArgv.concat(["liquidate-legacy-bags",...options]);
+    await assert.rejects(sandbox.module.exports.runCLI(),/exit 1/);assert.equal(cliBagArgs,null);
+  }
   sandbox.process.argv=originalArgv;
   console.log("Cross-process lock, concurrent mint, chain exposure, signed expiry and uncertain-send checks passed");
 })().catch((err) => { console.error(err); process.exitCode = 1; }).finally(() => { if (!worker) fs.rmSync(root, { recursive: true, force: true }); });
