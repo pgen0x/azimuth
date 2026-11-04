@@ -1412,7 +1412,9 @@ def queue_settlement(position, emergency_exit=False):
     try:
         os.makedirs(SETTLEMENT_DIR, exist_ok=True)
         path = os.path.join(SETTLEMENT_DIR, position + ".json")
-        item = {"position": position, "mint": mint, "last_attempt": 0}
+        # queued_at is the marker's age: every retry rewrites the file, so its
+        # mtime never ages, and a stale deferral must be measurable to retire.
+        item = {"position": position, "mint": mint, "last_attempt": 0, "queued_at": time.time()}
         if os.path.exists(path):
             if emergency_exit is not True:
                 return

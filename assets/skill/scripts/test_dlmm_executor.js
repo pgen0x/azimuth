@@ -920,8 +920,18 @@ vm.runInNewContext("const productionExitTransport=confirmExitTransaction;confirm
     if (++confirmationAttempts === 1) throw new Error("HTTP timeout");
     return { value: [{confirmationStatus:"confirmed",err:null}] };
   };
+  // A completed close resolves its own deploy reservation (kept past success,
+  // then never revisited), and never another position's.
+  const savedDeployMarker = fs.existsSync(marker) ? fs.readFileSync(marker) : null;
+  fs.mkdirSync(path.dirname(marker), { recursive: true });
+  fs.writeFileSync(marker, JSON.stringify({ position: "deadline-position", signature: "d", lastValidBlockHeight: 1 }));
   assert.equal((await closePosition("deadline-position")).success, true);
+  assert.equal(fs.existsSync(marker), false);
   assert.equal(confirmationAttempts, 2);
+  fs.writeFileSync(marker, JSON.stringify({ position: "another-position", signature: "d", lastValidBlockHeight: 1 }));
+  assert.equal((await closePosition("reservation-other-position")).success, true);
+  assert.equal(JSON.parse(fs.readFileSync(marker, "utf8")).position, "another-position");
+  if (savedDeployMarker) fs.writeFileSync(marker, savedDeployMarker); else fs.rmSync(marker);
   const preparationPath = path.join(root, "memories/dlmm_close_preparations.jsonl");
   const preparation = fs.readFileSync(preparationPath, "utf8").trim().split("\n").map(JSON.parse)
     .filter(row => row.position === "deadline-position");

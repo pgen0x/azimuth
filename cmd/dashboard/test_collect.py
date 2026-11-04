@@ -718,6 +718,10 @@ class BriefTests(unittest.TestCase):
         self.assertEqual([a['code'] for a in msg],['marker_stale'])
         self.assertIn('dlmm_pending_swaps 1 (oldest 3.0d)',msg[0]['message'])
         self.assertEqual(c.brief_markers(self.m/'absent',T)['stale'],{})
+        # A settlement that records queued_at needs no close journal row.
+        Q='Q'*40; f=self.m/'dlmm_settlements'/(Q+'.json')
+        f.write_text(json.dumps({'queued_at':T-2*DAY})); os.utime(f,(T-30,T-30))
+        self.assertEqual(c.brief_markers(self.m,T)['stale']['dlmm_settlements'],{'count':2,'oldest_s':5*DAY})
 
     def test_alerts_mode_offline(self):
         rows(self.m/'dlmm_transactions.jsonl',[dict(ts=T-60,kind='deploy'),dict(ts=T-30,kind='swap')])
