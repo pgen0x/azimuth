@@ -554,6 +554,12 @@ changed since it was classified is left alone. Without `--execute` (or with
 lock. A completed close now also removes its own deploy reservation, so the
 deploy marker no longer outlives the position.
 
+The optional `assets/systemd/azimuth-sol-markers.{service,timer}` user units run
+`--execute` every 6 hours (`00/6:23:00`, `Persistent=true`). `install.sh` renders
+them into `<profile>/systemd/` like the rent units. Copy them into
+`~/.config/systemd/user/`, run `daemon-reload`, then
+`systemctl --user enable --now azimuth-sol-markers.timer`.
+
 ### Externally initiated rent maintenance
 
 The observed CLEANAL wrapper is classified as `rent_maintenance` only when every
