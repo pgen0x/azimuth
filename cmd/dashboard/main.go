@@ -435,6 +435,9 @@ func main() {
 	if len(os.Args) > 1 && os.Args[1] == "brief" {
 		os.Exit(briefMain(os.Args[2:], os.Stdout, os.Stderr))
 	}
+	if len(os.Args) > 1 && os.Args[1] == "trace" {
+		os.Exit(traceMain(os.Args[2:], os.Stdout, os.Stderr))
+	}
 	home, _ := os.UserHomeDir()
 	addr := flag.String("listen", "127.0.0.1:8787", "loopback address")
 	profile := flag.String("profile", filepath.Join(home, ".hermes/profiles/dlmm"), "Hermes profile directory")

@@ -113,8 +113,30 @@ normal sign-in, cached for 20 seconds per parameter set, with one collector run 
 | funnel | `azimuth.service` journal markers (`SIGNAL batch sent`, `entry_route=... reason=...`, audit/cooldown/lone rejects, direct deploy runs), `dlmm_pipeline_rejects.jsonl` gates and submitted deploy transactions in `dlmm_transactions.jsonl` (recorded before broadcast, not chain-confirmed). |
 | health | `azimuth`, `azimuth-sol-monitor`, `hermes-gateway`, `azimuth-dashboard` active + enabled; failed user units; disk free % of the profile volume; MemAvailable; age of the monitor's last `OBSERVER_TICK`. |
 | alerts | disk free < 15%, MemAvailable < 1200 MB, core unit not active / not enabled / failed, any failed user unit, no deploy submitted in 12 h, monitor tick older than 2 min, a section that could not be read. |
+| today | Today's native SOL (latest `dlmm_nav.jsonl` snapshot, day in `tz`) minus yesterday's last; the rent reclaimed since local midnight from the `azimuth-sol-rent` unit journal, verified against wallet transaction facts (the same rules as the live dust ledger), and the delta net of that rent. Any unverified rent receipt makes the rent total null; a labeled verified subtotal is shown beside it. |
+| realized_7d | `dlmm_realized.jsonl` rows closed in the last 7 days: n, measured, sum and mean `realized_sol` by mode (from the close journal) and by entry route (the entry file's `risk_sizing.source`: `from_batch` = `deterministic`, `from_signal` = `ai`; older entries `unknown`, missing file `no_entry_file`). Unmeasured rows count in n, never as 0. |
 
 The dashboard's **ops** section shows the funnel, health and alerts of this brief.
+
+## Trace
+
+One position's lifecycle, or every position and pipeline reject of a pool or symbol, for debugging without
+grepping journals. Same collector (its `trace` mode), read only, CLI only (not served over HTTP):
+
+```bash
+azimuth-dashboard trace <position> --profile ~/.hermes/profiles/<profile>   # chronological timeline
+azimuth-dashboard trace <pool|SYMBOL> --days 7 --profile ... --json          # positions + rejects in the window
+```
+
+A position timeline joins on exact identifiers: the newest webhook delivery before the deploy whose payload
+carries the pool (`solana_deliveries.jsonl`, with its HTTP acceptance), the scanner's batch / `entry_route=` /
+`direct deploy done` lines naming the symbol, the Hermes decision (first 300 characters of the last assistant
+message in that delivery's webhook session, `state.db` opened read-only, redacted), pipeline rejects of the pool in
+the 2 h before deploy, the entry file (including `active_bin_reanchor`), the monitor's `MONITOR_REPORT` lines for the
+position (count, MARK pnl min/max, out-of-range ticks), every close-journal row (marks labeled), the settlement
+file, the `dlmm_realized.jsonl` row (the arbiter) and the cooldowns the monitor printed at close plus the daemon's
+later `in re-entry cooldown` skips for the pool. Redis is not read; cooldowns come from the unit journals.
+Exit status 3 means nothing was found.
 
 ## Source traceability and scope
 

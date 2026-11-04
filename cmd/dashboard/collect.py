@@ -1224,17 +1224,293 @@ def brief(profile, now=None, hours=12, n=10, tz='UTC', run=None, statvfs=os.stat
     out['funnel']=panel(brief_funnel,memory,run,now,hours)
     out['health']=panel(brief_health,profile,run,now,statvfs,meminfo)
     out['alerts']=brief_alerts(out['health'],out['funnel'],now)
-    for k in ('wallet','positions','closes','funnel','health'):
+    out['today']=panel(brief_today,out['wallet'],memory,now,tz,run)
+    out['realized_7d']=panel(brief_realized,memory,now)
+    for k in ('wallet','positions','closes','funnel','health','today','realized_7d'):
         if out[k].get('collection_error'): out['alerts'].append({'code':'section_unavailable','message':k+': '+out[k]['collection_error']})
     return out
 
+# Entry files are named <position>.json; only a base58 address may become a path or a journal pattern.
+BASE58=re.compile(r'[1-9A-HJ-NP-Za-km-z]{32,44}')
+ENTRY_ROUTES={'from_batch':'deterministic','from_signal':'ai'}
+
+def read_entry(memory, position):
+    if not isinstance(position,str) or not BASE58.fullmatch(position): return None
+    try: row=read_json(memory/'dlmm_entries'/(position+'.json'))
+    except (OSError,ValueError): return None
+    return row if isinstance(row,dict) else None
+
+def entry_route(entry):
+    """dlmm_pipeline stamps risk_sizing.source: from_batch is the daemon's deterministic --from-batch run,
+    from_signal is a single-pool run (the Hermes agent's pick, or a manual one). Older entries carry neither."""
+    rs=entry.get('risk_sizing') if isinstance(entry,dict) else None
+    return ENTRY_ROUTES.get(rs.get('source'),'unknown') if isinstance(rs,dict) else 'unknown'
+
+def brief_realized(memory, now, days=7):
+    """Realized SOL (the arbiter) by mode and by entry route for closes in the last `days`."""
+    cut=now-days*86400
+    real,rmeta=read_jsonl(memory/'dlmm_realized.jsonl')
+    closes,cmeta=read_jsonl(memory/'dlmm_closes.jsonl')
+    mode={r['position']:r['mode'] for r in closes if identifier(r.get('position')) and identifier(r.get('mode'))}
+    by_mode={}; by_route={}
+    def add(d,k,v):
+        cell=d.setdefault(k,{'n':0,'measured':0,'sum_sol':None,'mean_sol':None})
+        cell['n']+=1
+        if number(v): cell['measured']+=1; cell['sum_sol']=(cell['sum_sol'] or 0)+v
+    for r in keyed(real,'position',rmeta).values():
+        t=r.get('closed_at')
+        if not number(t) or t<cut or t>now: continue
+        p=r['position']; v=r.get('realized_sol'); e=read_entry(memory,p)
+        add(by_mode,mode.get(p,'unknown'),v)
+        add(by_route,entry_route(e) if e else 'no_entry_file',v)
+    for d in (by_mode,by_route):
+        for cell in d.values(): cell['mean_sol']=cell['sum_sol']/cell['measured'] if cell['measured'] else None
+    return {'days':days,'status':'partial' if incomplete(rmeta) or incomplete(cmeta) else 'ok','by_mode':by_mode,'by_route':by_route,
+            'basis':'dlmm_realized.jsonl rows by closed_at. Mode from dlmm_closes.jsonl; route from the entry file risk_sizing.source '
+                    '(from_batch = deterministic, from_signal = ai). n counts closes; sum/mean cover measured rows only; null = unmeasured, never 0.'}
+
+def brief_today(wallet, memory, now, tz, run):
+    """Today's native SOL delta against yesterday's last snapshot, and the part of today that was rent reclaim."""
+    days=wallet.get('days') or []
+    today=days[-1] if days else {}; prev=days[-2] if len(days)>1 else {}
+    native=today.get('native_sol'); base=prev.get('native_sol')
+    z=zone(tz); start=day_start(local_day(now,z),z)
+    rent=dust_ledger(memory,start,run)
+    delta=native-base if number(native) and number(base) else None
+    reclaimed=rent['rent_recovered_lamports']/1e9 if lamports(rent.get('rent_recovered_lamports')) else None
+    gain=rent.get('liquid_native_gain_sol')
+    return {'day':today.get('day'),'tz':tz,'native_sol':native,'native_as_of':wallet.get('as_of') if today.get('status')=='partial_day' else None,
+            'prev_day_native_sol':base,'rent_source':(rent.get('source_metadata') or {}).get('journal'),
+            'native_delta_sol':delta,'rent_reclaimed_sol':reclaimed,'rent_native_gain_sol':gain,
+            'native_delta_ex_rent_sol':delta-gain if delta is not None and number(gain) else None,
+            'rent_tx':rent.get('executed_tx'),'rent_status':rent.get('status'),'d_external_sol':today.get('d_external_sol'),
+            # Labeled partial: the total above goes null when any receipt is not yet verified (e.g. not ingested).
+            'rent_verified_subtotal_sol':(rent.get('verified_subtotal') or {}).get('rent_recovered_lamports',0)/1e9 if rent.get('verified_subtotal') else None,
+            'rent_verified_tx':(rent.get('verified_subtotal') or {}).get('transactions'),
+            'basis':'native_delta = today\'s latest dlmm_nav native_sol minus yesterday\'s last ('+tz+' days). Rent: azimuth-sol-rent '
+                    'receipts since local midnight verified against wallet transaction facts (null = unverified). rent_native_gain is the '
+                    'rent wallet delta net of fees; a rent run after the latest NAV snapshot is counted here but not yet in native_sol.'}
+
+# Trace: one position's lifecycle (or every position and reject of a pool/symbol) for an orchestrating agent.
+TRACE_BATCH_LOOKBACK=2*3600
+TRACE_COOLDOWN_SET=r'Re-entry cooldown set for|Pool cooldown set|Turnover pool cooled|REPEAT LOSS'
+TRACE_HOLD_CAP=3*86400
+
+def _ev(events, t, stage, source, **detail):
+    events.append({'time':t if number(t) else None,'stage':stage,'source':source,**detail})
+
+def hermes_decision(profile, delivery_id):
+    """Last non-empty assistant message of the webhook session for one delivery (read-only, first 300 chars)."""
+    identity=json.dumps([profile.name,'dlmm-signal',delivery_id],ensure_ascii=False,separators=(',',':')).encode()
+    names=['webhook:dlmm-signal:'+delivery_id,'webhook:v2:'+base64.urlsafe_b64encode(identity).decode().rstrip('=')]
+    try:
+        with sqlite3.connect('file:'+str(profile/'state.db')+'?mode=ro',uri=True,timeout=1) as db:
+            s=db.execute("SELECT id, started_at, ended_at, end_reason FROM sessions WHERE source='webhook' AND chat_id IN (?,?) ORDER BY started_at DESC LIMIT 2",names).fetchall()
+            if not s: return {'status':'no_session'}
+            m=db.execute("SELECT content, timestamp FROM messages WHERE session_id=? AND role='assistant' AND content IS NOT NULL AND content!='' ORDER BY id DESC LIMIT 1",(s[0][0],)).fetchone()
+    except sqlite3.Error: return {'status':'unavailable'}
+    out={'status':'ambiguous' if len(s)>1 else 'ok','session_id':s[0][0],'session_started_at':s[0][1],'session_ended_at':s[0][2],'end_reason':s[0][3]}
+    if m: out.update(time=m[1],text=redact_text(re.sub(r'\s+',' ',str(m[0])).strip())[:300])
+    else: out['status']='no_assistant_message'
+    return out
+
+def _monitor_marks(run, position, t0, t1):
+    msgs,status=_journal(run,'azimuth-sol-monitor.service',['--since','@%d'%int(t0-60),'--until','@%d'%int(t1+60),
+                         '--grep','^MONITOR_REPORT:.*'+position,'-n','20000'],cap=16*1024*1024,timeout=10)
+    ticks=[]
+    for t,m in msgs:
+        try: rows=json.loads(m[len('MONITOR_REPORT:'):]).get('positions') or []
+        except (ValueError,AttributeError): continue
+        p=next((r for r in rows if isinstance(r,dict) and r.get('position')==position),None)
+        if p: ticks.append((t,p))
+    out={'status':status,'ticks':len(ticks),'basis':'Exit-monitor MONITOR_REPORT lines naming this position. pnl is a Meteora portfolio MARK.'}
+    if ticks:
+        pct=[(p['pnl_pct'],t) for t,p in ticks if number(p.get('pnl_pct'))]
+        sol=[p['pnl_sol'] for _,p in ticks if number(p.get('pnl_sol'))]
+        lo=min(pct,key=lambda x:x[0]) if pct else (None,None); hi=max(pct,key=lambda x:x[0]) if pct else (None,None)
+        out.update(first=ticks[0][0],last=ticks[-1][0],oor_ticks=sum(1 for _,p in ticks if p.get('in_range') is False),
+                   pnl_pct_min=lo[0],pnl_pct_min_at=lo[1],pnl_pct_max=hi[0],pnl_pct_max_at=hi[1],
+                   pnl_sol_min=min(sol) if sol else None,pnl_sol_max=max(sol) if sol else None,
+                   last_triggered_rules=ticks[-1][1].get('triggered_rules'))
+    return out
+
+def _symbol(row):
+    s=row.get('base_symbol') or str(row.get('pair') or row.get('name') or '').split('-')[0]
+    return s if isinstance(s,str) and s else None
+
+def _basis(real):
+    return 'realized' if real and number(real.get('realized_sol')) else 'unmeasured' if real else 'not_reconciled'
+
+def trace_position(profile, state, position, now, run, closes, realized, rejects):
+    memory=profile/'memories'; events=[]; sources={}
+    entry=read_entry(memory,position) or {}
+    rows=[r for r in closes if r.get('position')==position]
+    exits=[r for r in rows if r.get('event') in (None,'exit') and number(r.get('ts'))]
+    last=exits[-1] if exits else (rows[-1] if rows else {})
+    real=realized.get(position)
+    pool=entry.get('pool') or last.get('pool') or (real or {}).get('pool')
+    sym=_symbol(entry) or _symbol(last) or (_symbol(real) if real else None)
+    mode=entry.get('mode') or last.get('mode')
+    t0=next((x for x in (entry.get('deployed_at'),(real or {}).get('created_at')) if number(x)),None)
+    if t0 is None and exits and number(exits[-1].get('age_min')): t0=exits[-1]['ts']-exits[-1]['age_min']*60
+    t1=exits[-1]['ts'] if exits else None
+    summary={'position':position,'pool':pool,'symbol':sym,'pair':entry.get('pair') or last.get('pair'),'mode':mode,
+             'route':entry_route(entry) if entry else 'no_entry_file','deployed_at':t0,'closed_at':t1,'state':'closed' if t1 else 'open_or_unknown',
+             'close_reason':redact_text(str(last.get('reason')))[:160] if last.get('reason') else None,
+             'realized_sol':real.get('realized_sol') if real and number(real.get('realized_sol')) else None,'pnl_basis':_basis(real)}
+    if not (entry or rows or real): return {'status':'not_found','summary':summary,'events':[],'trace_sources':sources}
+    # Batch + route + Hermes decision: the newest delivery before the deploy whose payload carries this pool.
+    if t0 and pool:
+        lo,hi=t0-TRACE_BATCH_LOOKBACK,t0+60
+        dels,dmeta=tail(state/'solana_deliveries.jsonl',limit=200000,budget=16*1024*1024); sources['deliveries']=dmeta.get('status')
+        pick=None; accepted={}
+        for r in dels:
+            t=r.get('observed_at')
+            if not number(t) or t<lo or t>hi: continue
+            if r.get('stage')=='accepted': accepted[r.get('delivery_id')]=r
+            sig=r.get('signal')
+            if r.get('stage')=='prepared' and isinstance(sig,dict) and any(isinstance(c,dict) and c.get('pool')==pool for c in sig.get('payload') or []):
+                pick=r
+        if pick:
+            cands=[c for c in pick['signal'].get('payload') or [] if isinstance(c,dict)]
+            _ev(events,pick['observed_at'],'batch_sent','solana_deliveries.jsonl',delivery_id=pick.get('delivery_id'),candidates=len(cands),
+                pools=[{'symbol':_symbol(c),'score':c.get('score'),'mode':c.get('mode'),'this':c.get('pool')==pool} for c in cands][:10])
+            a=accepted.get(pick.get('delivery_id'))
+            if a: _ev(events,a['observed_at'],'webhook_accepted','solana_deliveries.jsonl',http_status=a.get('http_status'))
+            if identifier(pick.get('delivery_id')):
+                d=hermes_decision(profile,pick['delivery_id'])
+                _ev(events,d.pop('time',None) or (a or pick)['observed_at'],'hermes_decision','state.db (read-only)',**d)
+        msgs,status=_journal(run,'azimuth.service',['--since','@%d'%int(lo),'--until','@%d'%int(hi+60),
+                             '--grep','SIGNAL batch sent|entry_route=|direct deploy done','-n','5000'],cap=4*1024*1024,timeout=8)
+        sources['scanner_journal']=status
+        # AI path: "SIGNAL batch sent ... SYM(score)" then its entry_route line. Deterministic path: the route
+        # line ("batch not sent to Hermes") then "direct deploy done ... for SYM(score)". Anchor on whichever names the symbol.
+        if sym:
+            named=r'(?:.*[\s,])?'+re.escape(sym)+r'\('
+            batch=direct=None
+            for t,m in msgs:
+                if not t: continue
+                if t<=hi and (b:=re.search(r'scanner\[([a-z]+)\]: SIGNAL batch sent (\d+) pools: '+named,m)): batch=(t,b[1],m)
+                if direct is None and (d:=re.search(r'scanner\[([a-z]+)\]: direct deploy done \(deployed=(true|false)\) for '+named,m)): direct=(t,d[1],d[2]=='true')
+            route=None
+            if batch:
+                _ev(events,batch[0],'batch_logged','azimuth.service',line=redact_text(batch[2][batch[2].find('SIGNAL'):])[:200])
+                route=next(((t,r) for t,m in msgs if t and batch[0]<=t<=batch[0]+30
+                            and (r:=re.search(r'scanner\['+batch[1]+r'\]: entry_route=([a-z_]+)(?: reason=([a-z_]+))?',m))),None)
+            elif direct:
+                route=([(t,r) for t,m in msgs if t and direct[0]-900<=t<=direct[0]
+                        and (r:=re.search(r'scanner\['+direct[1]+r'\]: entry_route=([a-z_]+)(?: reason=([a-z_]+))?',m))] or [None])[-1]
+            if route: _ev(events,route[0],'route','azimuth.service',route=route[1][1],fallback_reason=route[1][2])
+            if direct: _ev(events,direct[0],'direct_deploy','azimuth.service',deployed=direct[2])
+        for r in rejects:
+            if r.get('pool')==pool and number(r.get('ts')) and lo<=r['ts']<=hi:
+                _ev(events,r['ts'],'pipeline_reject','dlmm_pipeline_rejects.jsonl',gate=r.get('gate'),mode=r.get('mode'))
+    if entry:
+        rs=entry.get('risk_sizing') if isinstance(entry.get('risk_sizing'),dict) else {}
+        _ev(events,t0,'entry','dlmm_entries/'+position+'.json',entry_id=entry.get('entry_id'),mode=mode,strategy=entry.get('strategy'),
+            size_sol=entry.get('size_sol'),route=summary['route'],entry_bin=entry.get('entry_bin'),bins_below=entry.get('bins_below'),
+            bins_above=entry.get('bins_above'),score=rs.get('adjusted_score'),ticket_sol=rs.get('accepted_ticket_sol'),
+            root_chain_id=entry.get('root_chain_id'),note='Entry metadata alone does not prove a landed transaction.')
+        if isinstance(entry.get('active_bin_reanchor'),dict):
+            _ev(events,t0,'active_bin_reanchor','dlmm_entries/'+position+'.json',
+                **{k:v for k,v in entry['active_bin_reanchor'].items() if not isinstance(v,(dict,list)) and k not in ('time','stage','source')})
+    if t0:
+        m=_monitor_marks(run,position,t0,min(t1 or now,t0+TRACE_HOLD_CAP))
+        _ev(events,m.get('first') or t0,'monitor_ticks','azimuth-sol-monitor.service',**m)
+    for r in rows:
+        _ev(events,r.get('ts'),'close' if r.get('event') in (None,'exit') else str(r.get('event')),'dlmm_closes.jsonl',
+            reason=redact_text(str(r.get('reason') or ''))[:160],mark_pnl_pct=r.get('pnl_pct'),mark_pnl_sol=r.get('pnl_sol'),
+            mark_basis=r.get('pnl_basis') or 'mark_unlabeled',age_min=r.get('age_min'),ai_holds=r.get('ai_holds'),
+            peak_pnl=r.get('peak_pnl'),txs=len(r.get('txs') or []),dry_run=r.get('dry_run'))
+    try:
+        s=read_json(memory/'dlmm_settlements'/(position+'.json'))
+        if isinstance(s,dict): _ev(events,s.get('last_attempt'),'settlement','dlmm_settlements/'+position+'.json',**select(s,'state reason emergency_exit remaining_raw'))
+    except (OSError,ValueError): pass
+    if real:
+        _ev(events,real.get('fetched_at') or real.get('closed_at'),'realized','dlmm_realized.jsonl',pnl_basis=summary['pnl_basis'],
+            **select(real,'realized_sol realized_pct deposit_sol withdrawal_sol fee_sol closed_at'))
+    if t1:
+        msgs,status=_journal(run,'azimuth-sol-monitor.service',['--since','@%d'%int(t1-120),'--until','@%d'%int(t1+300),
+                             '--grep',TRACE_COOLDOWN_SET,'-n','500'])
+        sources['cooldown_set_journal']=status
+        for t,m in msgs:
+            if (sym and re.search(r'(?:for|escalating) '+re.escape(sym.upper())+r'(?=[\s:]|$)',m)) or (pool and pool in m):
+                _ev(events,t,'cooldown_set','azimuth-sol-monitor.service',line=redact_text(m)[:200])
+        if pool:
+            msgs,status=_journal(run,'azimuth.service',['--since','@%d'%int(t1),'--until','@%d'%int(min(now,t1+TRACE_HOLD_CAP)),
+                                 '--grep','re-entry cooldown','-n','20000'],cap=4*1024*1024,timeout=8)
+            sources['cooldown_hit_journal']=status
+            hits=[(t,m) for t,m in msgs if '('+pool[:8] in m]
+            if hits:
+                _ev(events,hits[0][0],'cooldown_blocked','azimuth.service',count=len(hits),last=hits[-1][0],
+                    first_line=redact_text(hits[0][1])[:160],last_line=redact_text(hits[-1][1])[:160])
+    events.sort(key=lambda e:(e['time'] is None,e['time'] or 0))
+    return {'status':'ok','summary':summary,'events':events,'trace_sources':sources}
+
+def trace(profile, state, query, days=7, now=None, run=None):
+    """`trace <position|pool|symbol>`: a position gets its full timeline; a pool or symbol lists its positions and rejects."""
+    now=now or time.time(); run=run or bounded_run; memory=profile/'memories'
+    days=max(1,min(30,int(days))); cut=now-days*86400; q=str(query).strip()
+    closes,cmeta=read_jsonl(memory/'dlmm_closes.jsonl')
+    real,rmeta=read_jsonl(memory/'dlmm_realized.jsonl'); realized=keyed(real,'position',rmeta)
+    rejects,jmeta=tail(memory/'dlmm_pipeline_rejects.jsonl',limit=100000,budget=8*1024*1024)
+    out={'collected_at':now,'query':q,'days':days,
+         'sources':{'closes':cmeta.get('status'),'realized':rmeta.get('status'),'pipeline_rejects':jmeta.get('status')}}
+    is_addr=bool(BASE58.fullmatch(q))
+    if is_addr and (read_entry(memory,q) is not None or q in realized or any(r.get('position')==q for r in closes)):
+        t=trace_position(profile,state,q,now,run,closes,realized,rejects)
+        out['sources'].update(t.pop('trace_sources'))
+        out.update(kind='position',**t)
+        return out
+    out['kind']='pool' if is_addr else 'symbol'
+    sym=q.upper()
+    def match(row):
+        if is_addr: return row.get('pool')==q
+        s=_symbol(row); return bool(s) and s.upper()==sym
+    found=set()
+    for r in closes:
+        if number(r.get('ts')) and r['ts']>=cut and identifier(r.get('position')) and match(r): found.add(r['position'])
+    for r in realized.values():
+        if number(r.get('closed_at')) and r['closed_at']>=cut and match(r): found.add(r['position'])
+    entries={}
+    try:
+        with os.scandir(memory/'dlmm_entries') as it:
+            recent=[e.name[:-5] for e in it if e.name.endswith('.json') and e.stat().st_mtime>=cut]
+    except OSError: recent=[]
+    for p in recent:
+        row=read_entry(memory,p)
+        if row and match(row): found.add(p); entries[p]=row
+    positions=[]
+    for p in found:
+        entry=entries.get(p) or read_entry(memory,p) or {}
+        rows=[r for r in closes if r.get('position')==p and r.get('event') in (None,'exit') and number(r.get('ts'))]
+        z=realized.get(p); last=rows[-1] if rows else {}
+        positions.append({'position':p,'pool':entry.get('pool') or last.get('pool') or (z or {}).get('pool'),'pair':entry.get('pair') or last.get('pair'),
+                          'mode':entry.get('mode') or last.get('mode'),'route':entry_route(entry) if entry else 'no_entry_file',
+                          'deployed_at':entry.get('deployed_at') or (z or {}).get('created_at'),'closed_at':last.get('ts'),
+                          'close_reason':redact_text(str(last.get('reason')))[:120] if last.get('reason') else None,'hold_min':last.get('age_min'),
+                          'realized_sol':z.get('realized_sol') if z and number(z.get('realized_sol')) else None,'pnl_basis':_basis(z)})
+    positions.sort(key=lambda r:r['deployed_at'] if number(r['deployed_at']) else r['closed_at'] if number(r['closed_at']) else 0)
+    rej=[{'ts':r['ts'],'gate':r.get('gate'),'mode':r.get('mode'),'pool':r.get('pool'),'name':r.get('name')}
+         for r in rejects if number(r.get('ts')) and r['ts']>=cut and match(r)]
+    gates={}
+    for r in rej: gates[str(r['gate'])]=gates.get(str(r['gate']),0)+1
+    measured=[p['realized_sol'] for p in positions if number(p['realized_sol'])]
+    out.update(status='ok' if positions or rej else 'not_found',positions=positions,rejects=rej[-100:],rejects_total=len(rej),reject_gates=gates,
+               realized_sum_sol=sum(measured) if measured else None,realized_measured=len(measured),
+               basis='Positions from dlmm_closes, dlmm_realized and entry files touched in the window; trace one by position for its full timeline. '
+                     'realized_sol is the arbiter; null = not measured.')
+    return out
+
 if __name__=='__main__':
-    # argv: profile state since [zones,comma,separated] [daily | fast | slow | brief hours n].
+    # argv: profile state since [zones,comma,separated] [daily | fast | slow | brief hours n | trace days query].
     # `daily` refreshes only the day-bucketed panels; `fast` and `slow` are the two halves of the
     # full snapshot (no argument) that the server refreshes on separate periods.
     zones=tuple(sys.argv[4].split(',')) if len(sys.argv)>4 and sys.argv[4] else ('UTC',)
     if len(sys.argv)>5 and sys.argv[5]=='brief':
         out=scrub(brief(Path(sys.argv[1]),hours=int(sys.argv[6]),n=int(sys.argv[7]),tz=zones[0]))
+    elif len(sys.argv)>7 and sys.argv[5]=='trace':
+        out=scrub(trace(Path(sys.argv[1]),Path(sys.argv[2]),sys.argv[7],days=int(sys.argv[6])))
     elif len(sys.argv)>5 and sys.argv[5]=='daily': out=clean(daily(Path(sys.argv[1]),sys.argv[3],zones))
     elif len(sys.argv)>5 and sys.argv[5]=='fast':
         now=time.time(); out=scrub({'collected_at':now,**fast_panels(Path(sys.argv[1]),Path(sys.argv[2]),sys.argv[3],now)})
