@@ -1587,14 +1587,30 @@ vm.runInNewContext("const productionExitTransport=confirmExitTransaction;confirm
     tokenAccounts=[dustAccount("ata-bag-mint","5","bag-mint"),dustAccount("ata-small-mint","5","small-mint"),
       dustAccount("loose","5","loose-mint"),dustAccount("ata-TOKEN","4","TOKEN"),dustAccount("ata-pending-mint","2","pending-mint")];
     const heldEntry=await sandbox.module.exports.acquireDeployLock(wallet.publicKey.toString());
+    vm.runInNewContext("const bagWallet = getWallet; getWallet = () => {throw new Error('Dry run must not decode wallet');};", sandbox);
     let bagPlan;
-    try { bagPlan=await sandbox.module.exports.liquidateLegacyBags(false); } finally { await heldEntry(); }
+    try { bagPlan=await sandbox.module.exports.liquidateLegacyBags(false); }
+    finally { await heldEntry(); vm.runInNewContext("getWallet = bagWallet;", sandbox); }
     assert.equal(bagPlan.dry_run,true);assert.deepEqual(Array.from(bagPlan.plan,p=>p.account),["ata-bag-mint"]);
     assert.equal(bagPlan.plan[0].quote_lamports,900000);assert.equal(bagPlan.plan[0].raw,"5");
     assert.deepEqual(quoted,["bag-mint","small-mint"]);
     assert.deepEqual(Object.fromEntries(bagPlan.skipped.map(s=>[s.account,s.reason])),
       {"ata-small-mint":"dust_for_rent_timer",loose:"not_ata","ata-TOKEN":"open_position","ata-pending-mint":"settlement"});
     assert.equal(sends,beforeEntryRent+2);
+    // --execute sells the exact raw balance through swapToken, bound to that raw input.
+    let bagSwapArgs=[];
+    sandbox.captureBagSwap=async(...args)=>{bagSwapArgs.push(args);return {success:true,txHash:"bag-sig",outputAmount:"899000"};};
+    vm.runInNewContext("const bagSwap = swapToken; swapToken = captureBagSwap;", sandbox);
+    const bagTimer=sandbox.setTimeout;sandbox.setTimeout=(fn)=>bagTimer(fn,0);
+    let bagSale;
+    try { bagSale=await sandbox.module.exports.liquidateLegacyBags(true,1); }
+    finally { vm.runInNewContext("swapToken = bagSwap;", sandbox); sandbox.setTimeout=bagTimer; }
+    assert.equal(bagSale.success,true,JSON.stringify(bagSale));assert.equal(bagSale.dry_run,false);
+    assert.deepEqual(bagSwapArgs.map(a=>Array.from(a)),[["bag-mint",SOL_MINT,"5e-6",15,100,1,false,"5"]]);
+    assert.equal(sandbox.module.exports.swapAmountRaw("5e-6",6),"5");
+    env.DLMM_SETTLEMENT_POSITION="pos";
+    await assert.rejects(sandbox.module.exports.liquidateLegacyBags(true),/DLMM_SETTLEMENT_POSITION/);
+    delete env.DLMM_SETTLEMENT_POSITION;
     tokenAccounts=rentFixture;quoted.length=0;quoted.push("dust-mint","norout-mint","rich-mint","down-mint");
     rentInstructions.length=0;simErr={InstructionError:[0,"Custom"]};
     await assert.rejects(reclaimEmptyAccounts(true,false,true),/simulation failed/);assert.equal(sends,beforeEntryRent+2);
