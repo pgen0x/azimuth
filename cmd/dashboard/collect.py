@@ -1464,6 +1464,10 @@ def trace(profile, state, query, days=7, now=None, run=None):
         return out
     out['kind']='pool' if is_addr else 'symbol'
     sym=q.upper()
+    # A pair name (NIO-SOL / SOL-NIO, any case) names the same token as its symbol.
+    parts=sym.split('-')
+    if not is_addr and len(parts)==2 and 'SOL' in parts and all(parts) and parts!=['SOL','SOL']:
+        sym=parts[0] if parts[1]=='SOL' else parts[1]
     def match(row):
         if is_addr: return row.get('pool')==q
         s=_symbol(row); return bool(s) and s.upper()==sym

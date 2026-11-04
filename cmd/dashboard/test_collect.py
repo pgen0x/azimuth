@@ -844,6 +844,12 @@ class TraceTests(unittest.TestCase):
         pool=c.trace(self.p,self.s,POOL,now=T,run=trace_run())
         self.assertEqual((pool['kind'],[p['position'] for p in pool['positions']],pool['reject_gates']),('pool',[POS],{'downtrend_h6':1,'old':1}))
         self.assertEqual(c.trace(self.p,self.s,'NOPE',now=T,run=trace_run())['status'],'not_found')
+        for q in ('NIO-SOL','nio-sol','SOL-NIO','sol-Nio'):
+            pair=c.trace(self.p,self.s,q,now=T,run=trace_run())
+            self.assertEqual((pair['kind'],pair['status'],pair['query']),('symbol','ok',q))
+            self.assertEqual({p['position'] for p in pair['positions']},{POS,'other'})
+        for q in ('NIO-USDC','SOL-SOL','-SOL'):
+            self.assertEqual(c.trace(self.p,self.s,q,now=T,run=trace_run())['status'],'not_found')
 
     def test_query_never_becomes_a_path_or_pattern(self):
         self.seed()
