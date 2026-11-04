@@ -437,6 +437,9 @@ func main() {
 	if len(os.Args) > 1 && os.Args[1] == "brief" {
 		os.Exit(briefMain(os.Args[2:], os.Stdout, os.Stderr))
 	}
+	if len(os.Args) > 1 && os.Args[1] == "alerts" {
+		os.Exit(alertsMain(os.Args[2:], os.Stdout, os.Stderr))
+	}
 	if len(os.Args) > 1 && os.Args[1] == "trace" {
 		os.Exit(traceMain(os.Args[2:], os.Stdout, os.Stderr))
 	}

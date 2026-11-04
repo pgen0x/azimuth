@@ -1,0 +1,18 @@
+# Optional. install.sh renders __PROFILE__ into <profile>/systemd/; copy from there.
+# Needs the dashboard binary at ~/.local/bin/azimuth-dashboard (docs/DASHBOARD_DEPLOY.md).
+# Delivery is off until a drop-in sets -send-cmd, e.g. (systemctl --user edit azimuth-alerts.service):
+#   [Service]
+#   ExecStart=
+#   ExecStart=%h/.local/bin/azimuth-dashboard alerts -profile __PROFILE__ -send-cmd "%h/.local/bin/hermes send -t telegram"
+# Without it each new or cleared alert is only printed to this unit's journal.
+[Unit]
+Description=Azimuth operator alerts (new or cleared red flags, at most one per alert per 6h)
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/azimuth-dashboard alerts -profile __PROFILE__
+# Send and collector failures exit 0 by design; read them with journalctl --user -u azimuth-alerts.
+TimeoutStartSec=120
+NoNewPrivileges=true
+UMask=0077
+MemoryHigh=256M
