@@ -12,7 +12,7 @@ import math
 import shlex
 from pathlib import Path
 from dlmm_pool_cash_gate import negative_pool_cash
-from dlmm_signal_record import parse_signal_record, SignalRecordError
+from dlmm_signal_record import parse_signal_record, SignalRecordError, load_delivered_record
 from local_indicators import check_local_indicators
 from tz_util import local_time_str
 from dlmm_monitor import position_live_onchain, load_soul_dlmm_params as load_exit_params
@@ -1226,6 +1226,43 @@ def select_batch_strategy(c, mode):
     return "sol_bidask"
 
 
+def _audit_script():
+    here = Path(__file__)
+    for candidate in (here.parent.parent.parent / "solana-web3" / "scripts" / "audit_token.py",
+                      here.resolve().parent.parent / "solana-web3-scripts" / "audit_token.py"):
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def run_entry_audit(base_mint, runner=subprocess.run, script=None):
+    """Run audit_token.py for an AI entry and return (verdict, reason).
+
+    Same rule the webhook prompt applied by hand: FAIL rejects the candidate,
+    PASS continues, anything else is UNKNOWN — unavailable evidence that never
+    counts as a pass and never blocks the live gates that follow.
+    """
+    script = script or _audit_script()
+    if script is None:
+        return "UNKNOWN", "audit_token.py not found"
+    try:
+        proc = runner([sys.executable, str(script), str(base_mint or "")],
+                      capture_output=True, text=True, timeout=45)
+        out = json.loads((proc.stdout or "").strip().splitlines()[-1])
+    except subprocess.TimeoutExpired:
+        return "UNKNOWN", "audit timed out"
+    except (OSError, ValueError, IndexError) as e:
+        return "UNKNOWN", f"audit output unreadable: {e}"
+    if not isinstance(out, dict):
+        return "UNKNOWN", "audit output unreadable"
+    verdict = out.get("verdict")
+    if verdict == "FAIL":
+        return "FAIL", str(out.get("reason") or "audit FAIL")
+    if verdict == "PASS":
+        return "PASS", f"risk_level={out.get('risk_level')} dev_pct={out.get('dev_pct')} top10_pct={out.get('top10_pct')}"
+    return "UNKNOWN", str(out.get("reason") or "no verdict")
+
+
 def defer_capacity_signals(cli, wallet=True):
     """Let Redis-backed signals retry within five minutes after a wallet-only skip."""
     if cli.mode not in ("casual", "multiday", "turnover", "pulse"):
@@ -1261,6 +1298,8 @@ def main():
     parser.add_argument("--strategy", type=str, default=None, help="Override SOUL.md strategy (sol_bidask, spot, custom_ratio_spot, balanced_tight, single_sided_reseed, fee_compounding, partial_harvest)")
     parser.add_argument("--pool", type=str, default=None, help="Deploy a specific pool address instead of auto-selecting winner")
     parser.add_argument("--from-signal", dest="from_signal", type=str, default=None, help="JSON of a pre-screened candidate record from the azimuth signal daemon. Skips discovery+screen and deploys this exact pool; live gates (holding/cooldown/momentum/rent) still run.")
+    parser.add_argument("--from-pool", dest="from_pool", type=str, default=None, help="Pool address of ONE record in a delivered webhook signal. The record is read verbatim from the scanner's delivery journal (newest prepared row, same --mode, <=30 min old) and then handled exactly like --from-signal. Copy-safe replacement for hand-copied JSON.")
+    parser.add_argument("--audit", action="store_true", help="With --from-pool/--from-signal: run audit_token.py on the record's base mint first. FAIL rejects this candidate; UNKNOWN is unavailable evidence and continues to the live gates.")
     parser.add_argument("--from-batch", dest="from_batch", type=str, default=None, help="JSON ARRAY of pre-screened candidate records (the full azimuth signal payload). Deterministically re-ranks the batch (GMGN/PVP/prior-PnL heuristics + darwinian signal weights), then deploys the strongest candidate that clears every live gate — falling back to the runner-up when a gate rejects the pick. Replaces the LLM agent's pick step.")
     parser.add_argument("--mode", type=str, default="multiday", choices=["casual", "multiday", "turnover", "pulse"], help="Pipeline mode: casual (30m, 2-6h plays), multiday (24h, 24h+ holds), turnover (30m, high-fee fee-capture plays) or pulse (5m trending)")
     cli = parser.parse_args()
@@ -1274,6 +1313,18 @@ def main():
             sys.exit(1)
         return
     print(f"🔍 Starting DLMM Ingestion Pipeline [{mode.upper()} mode]")
+    if getattr(cli, "from_pool", None):
+        if cli.from_signal or cli.from_batch:
+            print("Aborting: --from-pool cannot be combined with --from-signal or --from-batch")
+            sys.exit(1)
+        try:
+            delivered = load_delivered_record(cli.from_pool, mode)
+        except SignalRecordError as e:
+            print(f"Aborting: {e}")
+            sys.exit(1)
+        # From here on the record takes the --from-signal path unchanged.
+        cli.from_signal = json.dumps(delivered)
+        print(f"Resolved --from-pool {cli.from_pool} from the delivered {mode} signal")
 
     # Include live batch identities in the existing background bin watch even
     # when capacity or ranking later skips them. This performs no market read.
@@ -1402,6 +1453,15 @@ def main():
         if not candidates:
             print("Signalled candidate failed conviction gates.")
             sys.exit(0)
+        if getattr(cli, "audit", False):
+            verdict, reason = run_entry_audit(signal_record.get("base_mint"))
+            if verdict == "FAIL":
+                print(f"❌ REJECT audit_token: {reason}")
+                sys.exit(0)
+            if verdict == "PASS":
+                print(f"Audit PASS: {reason}")
+            else:
+                print(f"Audit UNKNOWN (unavailable evidence, not a pass): {reason}")
         pools = []
     else:
         pools = fetch_top_pools(timeframe)

@@ -339,6 +339,12 @@ def main():
     assert 'set `workdir` to `__PROFILE__`' in prompt
     assert '--pick-context --mode MODE' in prompt and 'signal_weights from STEP 1' in prompt
     assert 'redis-cli' not in prompt and '--from-signal' in prompt
+    # One copy-safe deploy command: the pipeline reads the record and runs the
+    # audit itself, so the agent never hand-copies JSON or calls audit_token.
+    assert '--from-pool POOL_ADDRESS --audit --mode MODE' in prompt
+    assert 'audit_token.py BASE_MINT' not in prompt
+    assert "--from-signal '<CHOSEN_RECORD_JSON>' --strategy" not in prompt
+    assert 'never route it through `tool_call`' in prompt
 
     # Missing/invalid API economics must be retried, while measured zero is valid.
     with tempfile.TemporaryDirectory() as directory:

@@ -20,6 +20,13 @@ shape is identical in both flows.
     Hermes `webhook_subscriptions.json` entry.
 - **Content-Type:** `application/json`
 
+The Solana scanner also appends the exact signal it is about to send to its
+delivery journal (a `stage: "prepared"` row, see `assets/skill/scripts/ACCOUNTING.md`).
+`dlmm_pipeline.py --from-pool <pool> --mode <mode>` reads the AI's pick back
+from that row, so the agent passes an address instead of hand-copying a payload
+element. Changing the envelope or the `payload` element shape therefore also
+changes what `dlmm_signal_record.load_delivered_record` must read.
+
 ## Envelope
 
 `payload` is an array. One signal carries the whole cycle's batch (1..N pools),
