@@ -25,6 +25,7 @@ Usage:
   python3 dlmm_realized.py --days 30
   python3 dlmm_realized.py --check         # report journal-vs-realized divergence
   python3 dlmm_realized.py --check --days 7
+  python3 dlmm_realized.py --days 2 --if-pending --quiet   # monitor loop cadence: no fetch when nothing is pending
 """
 import argparse
 import json
@@ -240,6 +241,13 @@ def load_closes(days):
     return rows
 
 
+def pending_closes(days):
+    """Journal closes in the window with no realized row yet. Local files only, no network:
+    the monitor loop asks this every 15 minutes, and an empty answer must cost nothing."""
+    realized = load_realized(REALIZED_PATH)
+    return [r for r in load_closes(days) if r.get("position") and r["position"] not in realized]
+
+
 def check(days):
     """What the journal claims vs what the chain paid, over the window."""
     realized = load_realized()
@@ -279,8 +287,14 @@ def main():
     ap.add_argument("--days", type=float, default=7.0)
     ap.add_argument("--check", action="store_true", help="report divergence, no fetch")
     ap.add_argument("--quiet", action="store_true")
+    ap.add_argument("--if-pending", action="store_true",
+                    help="skip the fetch when every close in the window is already reconciled")
     args = ap.parse_args()
 
+    if args.if_pending and not args.check and not pending_closes(args.days):
+        if not args.quiet:
+            print(f"realized: nothing pending in {args.days:g}d")
+        return 0
     if not args.check:
         wallet = get_wallet_address()
         if not wallet:

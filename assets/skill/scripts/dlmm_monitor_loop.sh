@@ -18,6 +18,10 @@ echo "Starting DLMM Position Monitor Loop (20s interval)..."
 
 cd "$SCRIPT_DIR" || exit 1
 STATS_STAMP="/tmp/dlmm_stats_last_sent"
+CLOSES_PATH="$PROFILE_DIR/memories/dlmm_closes.jsonl"
+# shellcheck source=dlmm_realized_cadence.sh
+source "$SCRIPT_DIR/dlmm_realized_cadence.sh"
+alive() { [ -n "${1:-}" ] && kill -0 "$1" 2>/dev/null; }
 while true; do
     # Re-source the profile .env EVERY tick, not once at startup. Sourcing it
     # outside the loop froze the process env at launch time, so a later edit to
@@ -48,6 +52,16 @@ while true; do
         "$PYTHON" "$SCRIPT_DIR/dlmm_alerts.py" &
         alert_pid=$!
     fi
+    # Realized-PnL reconciliation soon after a close (5 min after dlmm_closes.jsonl
+    # changes, then every 15 min while a close from the last 2d is unreconciled), so
+    # the arbiter is not a day behind the journal. Background, one worker, never
+    # concurrent with the daily report's own 7d run (both append the same file).
+    now_s=$(date +%s)
+    realized_schedule "$now_s" "$CLOSES_PATH"
+    if ! alive "${realized_pid:-}" && ! alive "${report_pid:-}" && realized_take "$now_s"; then
+        timeout 300 "$PYTHON" "$SCRIPT_DIR/dlmm_realized.py" --days 2 --if-pending --quiet >/dev/null 2>&1 &
+        realized_pid=$!
+    fi
     # Daily scoreboard — deterministic dlmm_stats.py card via `hermes send`
     # (zero LLM). Hour + timezone are operator-set (profile .env): DLMM_TZ
     # (IANA name, empty = UTC, same default as tz_util.py) and DLMM_STATS_HOUR
@@ -55,7 +69,7 @@ while true; do
     stats_tz="${DLMM_TZ:-UTC}"
     hour_local=$(TZ="$stats_tz" date +%H); today_local=$(TZ="$stats_tz" date +%F)
     if [ "$hour_local" = "${DLMM_STATS_HOUR:-09}" ] && [ "$(cat "$STATS_STAMP" 2>/dev/null)" != "$today_local" ] &&
-       { [ -z "${report_pid:-}" ] || ! kill -0 "$report_pid" 2>/dev/null; }; then
+       ! alive "${report_pid:-}" && ! alive "${realized_pid:-}"; then
         # Reconciliation and delivery can wait on remote APIs. Keep them out
         # of the risk-monitor path, with only one report worker at a time.
         (
