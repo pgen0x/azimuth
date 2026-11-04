@@ -137,7 +137,18 @@ const noSets = { positionMints: new Set(), settlementMints: new Set() };
   assert.deepEqual(w.swaps.map(s => [s.mint, s.raw, s.decimals]), [["b", "20", 6], ["c", "30", 6]]);
   assert.deepEqual(r.sales.map(s => [s.mint, s.success, s.txHash]), [["b", true, "sig"], ["c", true, "sig"]]);
   assert.deepEqual([w.locks, w.releases, w.reads], [1, 1, 3]); // one selection read + one re-read per sale
-  assert.deepEqual(w.sleeps, Array(3 + 2).fill(2100)); // 3 between 4 quotes, then one before each sale's own quote
+  // max 2 -> 4 quotes (3 gaps), a 20s cooldown before the first sale, 5s before the next.
+  assert.deepEqual(w.sleeps, [2100, 2100, 2100, 20000, 5000]);
+  // Quote only what --max needs: max 1 quotes 2 (hint first), never the whole wallet.
+  w = world(); r = await liquidateLegacyBags({ max: 1, hint: new Set(["ata-c"]) }, w.deps);
+  assert.equal(r.quotes, 2); assert.equal(r.quote_stopped, "quote_budget"); assert.deepEqual(r.plan.map(p => p.mint), ["c"]);
+  w = world({ accounts: Array.from({ length: 40 }, (_, i) => acct(`ata-z${i}`, `z${i}`, "5")) });
+  r = await liquidateLegacyBags({ max: 20 }, w.deps); assert.equal(r.quotes, bags.MAX_QUOTES);
+  // The cooldown is the caller's (env-tunable); the inter-sale gap is fixed.
+  w = world(); r = await liquidateLegacyBags({ execute: true, max: 2, saleCooldownMs: 0 }, w.deps);
+  assert.deepEqual(w.sleeps.slice(-2), [0, 5000]);
+  assert.equal(bags.cooldownMs(undefined), 20000); assert.equal(bags.cooldownMs("0"), 0); assert.equal(bags.cooldownMs("45000"), 45000);
+  for (const bad of ["", "-1", "1.5", "abc", "600001"]) assert.equal(bags.cooldownMs(bad), 20000);
 
   // Stop on the first failure of any kind; the lock is always released.
   for (const swapResult of [() => ({ success: false, aborted: true, reason: "price_impact_exceeded" }),
@@ -177,6 +188,21 @@ const noSets = { positionMints: new Set(), settlementMints: new Set() };
 
   await assert.rejects(liquidateLegacyBags({ max: 0 }, world().deps), /--max/);
   await assert.rejects(liquidateLegacyBags({ max: 1.5 }, world().deps), /--max/);
+
+  // A 429 during a sale stops with an explicit rate_limited status.
+  for (const res of [{ success: false, error: "Failed to fetch quote from Jupiter: Jupiter quote API error: 429 Too Many Requests" },
+    { success: false, error: "Jupiter swap API error: 429 {}" }, { success: false, aborted: true, reason: "rate_limited" }]) {
+    w = world({ swapResult: () => res }); r = await liquidateLegacyBags({ execute: true }, w.deps);
+    assert.equal(r.stopped, "rate_limited"); assert.equal(r.success, false); assert.equal(r.sales[0].rate_limited, true);
+    assert.equal(w.swaps.length, 1);
+  }
+  w = world({ swapResult: () => { throw new Error("Jupiter swap API error: 429 slow down"); } });
+  r = await liquidateLegacyBags({ execute: true }, w.deps); assert.equal(r.stopped, "rate_limited");
+  for (const res of [{ success: false, error: "All 8 RPC endpoints failed to execute the command." },
+    { success: false, aborted: true, reason: "price_impact_exceeded", error: "impact 14290%" }, { success: false, txHash: "x4290" }]) {
+    w = world({ swapResult: () => res }); r = await liquidateLegacyBags({ execute: true }, w.deps);
+    assert.equal(r.stopped, "sale_failed"); assert.equal(r.sales[0].rate_limited, undefined);
+  }
 
   // --- CLI parsing.
   assert.deepEqual(parseArgs([]), { execute: false, max: bags.DEFAULT_MAX_SALES });

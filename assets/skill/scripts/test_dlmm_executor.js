@@ -883,6 +883,19 @@ vm.runInNewContext("const productionExitTransport=confirmExitTransaction;confirm
   // Without the option the same off-echo quote is not checked (existing behavior).
   boundQuote({inputMint:"OTHER"});assert.equal((await swapToken("TOKEN",SOLM,"100000000e-9",15,100,1)).success,true);
   boundQuote({});assert.equal((await boundSale()).success,true);assert.equal(sends,boundSends+2);
+  // A Jupiter swap-API 429 is a provider limit, not an RPC fault: one request, no failover.
+  let swapPosts=0;
+  sandbox.fetch=async url=>url.includes("/quote?")
+    ? {ok:true,json:async()=>({inputMint:"TOKEN",outputMint:SOLM,inAmount:"100000000",outAmount:"5000",
+      otherAmountThreshold:"4500",priceImpactPct:"0",swapMode:"ExactIn"})}
+    : (swapPosts++,{ok:false,status:429,text:async()=>"Too Many Requests"});
+  await assert.rejects(boundSale(),/Jupiter swap API error: 429/);assert.equal(swapPosts,1);
+  sandbox.fetch=async url=>url.includes("/quote?")
+    ? {ok:true,json:async()=>({inputMint:"TOKEN",outputMint:SOLM,inAmount:"100000000",outAmount:"5000",
+      otherAmountThreshold:"4500",priceImpactPct:"0",swapMode:"ExactIn"})}
+    : (swapPosts++,{ok:false,status:500,text:async()=>"oops"});
+  swapPosts=0;await assert.rejects(boundSale(),/All 2 RPC endpoints failed/);assert.equal(swapPosts,2); // other errors still fail over
+  assert.equal(sends,boundSends+2);
   sandbox.fetch=unboundFetch;
   delete deps["@solana/spl-token"];
   sandbox.fetch = async () => ({ok:false,status:400,text:async()=>JSON.stringify({errorCode:"COULD_NOT_FIND_ANY_ROUTE"})});
@@ -1601,7 +1614,7 @@ vm.runInNewContext("const productionExitTransport=confirmExitTransaction;confirm
     let bagSwapArgs=[];
     sandbox.captureBagSwap=async(...args)=>{bagSwapArgs.push(args);return {success:true,txHash:"bag-sig",outputAmount:"899000"};};
     vm.runInNewContext("const bagSwap = swapToken; swapToken = captureBagSwap;", sandbox);
-    const bagTimer=sandbox.setTimeout;sandbox.setTimeout=(fn)=>bagTimer(fn,0);
+    const bagTimer=sandbox.setTimeout,bagDelays=[];sandbox.setTimeout=(fn,ms)=>{bagDelays.push(ms);return bagTimer(fn,0);};
     let bagSale;
     try {
       env.DRY_RUN="true"; // DRY_RUN wins over --execute: plan only, no swap
@@ -1609,6 +1622,10 @@ vm.runInNewContext("const productionExitTransport=confirmExitTransaction;confirm
       delete env.DRY_RUN;
       assert.equal(forcedDry.dry_run,true);assert.equal(forcedDry.plan.length,1);assert.equal(bagSwapArgs.length,0);
       bagSale=await sandbox.module.exports.liquidateLegacyBags(true,1);
+      assert.equal(bagDelays.at(-1),20000); // default cooldown before the first sale
+      env.LEGACY_BAG_COOLDOWN_MS="1234";
+      await sandbox.module.exports.liquidateLegacyBags(true,1);delete env.LEGACY_BAG_COOLDOWN_MS;
+      assert.equal(bagDelays.at(-1),1234);assert.equal(bagSwapArgs.length,2);bagSwapArgs.pop();
     }
     finally { vm.runInNewContext("swapToken = bagSwap;", sandbox); sandbox.setTimeout=bagTimer; }
     assert.equal(bagSale.success,true,JSON.stringify(bagSale));assert.equal(bagSale.dry_run,false);
