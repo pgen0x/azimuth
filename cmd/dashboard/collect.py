@@ -1189,6 +1189,14 @@ BRIEF_DISK_MIN_PCT=15
 BRIEF_MEM_MIN_MB=1200
 BRIEF_DEPLOY_GAP_S=12*3600
 BRIEF_TICK_STALE_S=120
+# The unattended `alerts` command pages a phone, so its memory floor is the OOM-risk line, not the
+# 1200 MB "wait before a heavy step" line the brief shows an agent.
+ALERT_MEM_MIN_MB=800
+RENT_UNIT='azimuth-sol-rent.service'
+# Executor markers: a signed submission (or a settlement) still waiting on reconciliation. They block
+# rent recovery and legacy-bag sales while live, so one that outlives 2h needs an operator.
+MARKER_DIRS=('dlmm_pending_swaps','dlmm_pending_deploys','dlmm_pending_rent','dlmm_pending_closes','dlmm_settlements')
+MARKER_STALE_S=2*3600
 FUNNEL_GREP=r'SIGNAL batch sent|entry_route=|rejected on audit|re-entry cooldown|lone candidate|direct deploy done'
 
 def _journal(run, unit, extra, cap=2*1024*1024, timeout=5):
@@ -1301,6 +1309,12 @@ def brief_health(profile, run, now, statvfs=os.statvfs, meminfo='/proc/meminfo')
         h['failed_units']=[l.split()[0] for l in out.stdout.splitlines() if l.strip() and UNIT_NAME.match(l.split()[0])][:40]
     except OSError: h['failed_units_status']='unavailable'
     try:
+        # Its own query: the rent timer is opt-in, and an absent unit must not hide the core ones.
+        out=run(['systemctl','--user','show',RENT_UNIT,'--property=Id,LoadState,ActiveState,Result,UnitFileState'],timeout=4)
+        u=dict(l.split('=',1) for l in out.stdout.splitlines() if '=' in l)
+        if u.get('Id')==RENT_UNIT: h['rent_unit']={'load':u.get('LoadState'),'active':u.get('ActiveState'),'result':u.get('Result')}
+    except OSError: pass
+    try:
         v=statvfs(str(profile)); h['disk_free_pct']=round(100*v.f_bavail/v.f_blocks,1) if v.f_blocks else None
     except OSError: pass
     try:
@@ -1313,21 +1327,53 @@ def brief_health(profile, run, now, statvfs=os.statvfs, meminfo='/proc/meminfo')
     if ticks and number(ticks[-1][0]): h['monitor_tick_age_s']=round(now-ticks[-1][0])
     return h
 
-def brief_alerts(health, funnel, now):
+def brief_markers(memory, now):
+    """Executor markers older than MARKER_STALE_S. Pending markers are written once per submission, so mtime is
+    their age. A settlement rewrites its file on every retry, so its age is the close that opened it when the
+    close journal has one; a stuck settlement would otherwise look fresh forever."""
+    closed={}
+    if (memory/'dlmm_settlements').is_dir() and any((memory/'dlmm_settlements').glob('*.json')):
+        rows,_=read_jsonl(memory/'dlmm_closes.jsonl')
+        for r in rows:
+            if identifier(r.get('position')) and number(r.get('ts')) and r['position'] not in closed: closed[r['position']]=r['ts']
+    stale={}; total=0
+    for name in MARKER_DIRS:
+        d=memory/name
+        if not d.is_dir(): continue
+        for f in d.glob('*.json'):
+            total+=1
+            try: born=f.stat().st_mtime
+            except OSError: continue
+            if name=='dlmm_settlements' and f.stem in closed: born=min(born,closed[f.stem])
+            age=now-born
+            if age>MARKER_STALE_S:
+                c=stale.setdefault(name,{'count':0,'oldest_s':0})
+                c['count']+=1; c['oldest_s']=max(c['oldest_s'],round(age))
+    return {'total':total,'stale':stale,'basis':'Marker files in memories/'+','.join(MARKER_DIRS)+'; age = file mtime (settlement: its close ts when older).'}
+
+def _span(s):
+    return '%.1fd'%(s/86400) if s>=86400 else '%.1fh'%(s/3600)
+
+def brief_alerts(health, funnel, now, markers=None, mem_min=BRIEF_MEM_MIN_MB):
+    """Each alert: code, message and id. id names one condition (per unit where several can fire), so a
+    caller that remembers alerts can tell a new one from one still standing; messages carry live numbers."""
     a=[]
-    def flag(code,msg): a.append({'code':code,'message':msg})
+    def flag(code,msg,subject=None): a.append({'code':code,'message':msg,'id':code+(':'+subject if subject else '')})
     if health.get('disk_free_pct') is not None and health['disk_free_pct']<BRIEF_DISK_MIN_PCT: flag('disk_low','disk free %.1f%% < %d%%'%(health['disk_free_pct'],BRIEF_DISK_MIN_PCT))
-    if health.get('mem_available_mb') is not None and health['mem_available_mb']<BRIEF_MEM_MIN_MB: flag('mem_low','MemAvailable %d MB < %d MB'%(health['mem_available_mb'],BRIEF_MEM_MIN_MB))
+    if health.get('mem_available_mb') is not None and health['mem_available_mb']<mem_min: flag('mem_low','MemAvailable %d MB < %d MB'%(health['mem_available_mb'],mem_min))
     seen={u['unit'] for u in health.get('units',[])}
     for u in health.get('units',[]):
-        if u.get('active')!='active': flag('core_unit_down','%s is %s'%(u['unit'],u.get('active')))
-        elif u.get('enabled') not in ('enabled','static','linked','alias'): flag('core_unit_not_enabled','%s active but %s: will not return after reboot'%(u['unit'],u.get('enabled')))
+        if u.get('active')!='active': flag('core_unit_down','%s is %s'%(u['unit'],u.get('active')),u['unit'])
+        elif u.get('enabled') not in ('enabled','static','linked','alias'): flag('core_unit_not_enabled','%s active but %s: will not return after reboot'%(u['unit'],u.get('enabled')),u['unit'])
     for u in CORE_UNITS:
-        if u not in seen and 'units_status' not in health: flag('core_unit_missing',u+' not reported by systemctl')
+        if u not in seen and 'units_status' not in health: flag('core_unit_missing',u+' not reported by systemctl',u)
     if 'units_status' in health: flag('units_unknown','systemctl unit state unavailable')
     failed_core=[u for u in health.get('failed_units',[]) if u in CORE_UNITS]
     if failed_core: flag('failed_core_unit','failed: '+', '.join(failed_core))
-    other=[u for u in health.get('failed_units',[]) if u not in CORE_UNITS]
+    rent=health.get('rent_unit') or {}
+    rent_bad=rent.get('load')=='loaded' and (rent.get('active')=='failed' or rent.get('result') not in (None,'','success'))
+    if rent_bad: flag('rent_failing','%s %s (result %s): rent recovery is not running'%(RENT_UNIT,rent.get('active'),rent.get('result')))
+    other=[u for u in health.get('failed_units',[]) if u not in CORE_UNITS and not (rent_bad and u==RENT_UNIT)]
     if other: flag('failed_units','%d failed user unit(s): %s'%(len(other),', '.join(other[:5])))
     last=funnel.get('last_deploy_ts')
     if last is None or now-last>BRIEF_DEPLOY_GAP_S:
@@ -1335,7 +1381,28 @@ def brief_alerts(health, funnel, now):
     age=health.get('monitor_tick_age_s')
     if age is None: flag('monitor_tick_unknown','no monitor tick found in its journal')
     elif age>BRIEF_TICK_STALE_S: flag('monitor_tick_stale','monitor last tick %ds ago > %ds'%(age,BRIEF_TICK_STALE_S))
+    stale=(markers or {}).get('stale') or {}
+    if stale:
+        parts=['%s %d (oldest %s)'%(k,v['count'],_span(v['oldest_s'])) for k,v in sorted(stale.items())]
+        flag('marker_stale','pending marker(s) older than %s: %s'%(_span(MARKER_STALE_S),', '.join(parts)))
     return a
+
+def last_deploy_ts(memory):
+    txs,_=tail(memory/'dlmm_transactions.jsonl',limit=100000,budget=4*1024*1024)
+    ts=[r['ts'] for r in txs if r.get('kind')=='deploy' and number(r.get('ts'))]
+    return max(ts) if ts else None
+
+def alerts(profile, now=None, run=None, statvfs=os.statvfs, meminfo='/proc/meminfo'):
+    """The unattended `alerts` command: only the panels its rules read, so a 10-minute timer stays cheap."""
+    now=now or time.time(); run=run or bounded_run; memory=profile/'memories'
+    out={'collected_at':now}
+    out['health']=panel(brief_health,profile,run,now,statvfs,meminfo)
+    out['funnel']=panel(lambda m:{'last_deploy_ts':last_deploy_ts(m)},memory)
+    out['markers']=panel(brief_markers,memory,now)
+    out['alerts']=brief_alerts(out['health'],out['funnel'],now,out['markers'],ALERT_MEM_MIN_MB)
+    for k in ('health','funnel','markers'):
+        if out[k].get('collection_error'): out['alerts'].append({'code':'section_unavailable','message':k+': '+out[k]['collection_error'],'id':'section_unavailable:'+k})
+    return out
 
 def brief(profile, now=None, hours=12, n=10, tz='UTC', run=None, statvfs=os.statvfs, meminfo='/proc/meminfo'):
     now=now or time.time(); run=run or bounded_run; memory=profile/'memories'
@@ -1348,11 +1415,12 @@ def brief(profile, now=None, hours=12, n=10, tz='UTC', run=None, statvfs=os.stat
     out['health']=panel(brief_health,profile,run,now,statvfs,meminfo)
     out['growth']=panel(growth_today,memory,now,tz,run)
     out['experiments']=panel(experiments,profile,cutover(None,now),now,run)
-    out['alerts']=brief_alerts(out['health'],out['funnel'],now)
+    out['markers']=panel(brief_markers,memory,now)
+    out['alerts']=brief_alerts(out['health'],out['funnel'],now,out['markers'])
     out['today']=panel(brief_today,out['wallet'],memory,now,tz,run)
     out['realized_7d']=panel(brief_realized,memory,now)
-    for k in ('wallet','positions','closes','funnel','health','today','realized_7d','growth','experiments'):
-        if out[k].get('collection_error'): out['alerts'].append({'code':'section_unavailable','message':k+': '+out[k]['collection_error']})
+    for k in ('wallet','positions','closes','funnel','health','markers','today','realized_7d','growth','experiments'):
+        if out[k].get('collection_error'): out['alerts'].append({'code':'section_unavailable','message':k+': '+out[k]['collection_error'],'id':'section_unavailable:'+k})
     return out
 
 # Entry files are named <position>.json; only a base58 address may become a path or a journal pattern.
@@ -1632,12 +1700,13 @@ def trace(profile, state, query, days=7, now=None, run=None):
     return out
 
 if __name__=='__main__':
-    # argv: profile state since [zones,comma,separated] [daily | fast | slow | brief hours n | trace days query].
+    # argv: profile state since [zones,comma,separated] [daily | fast | slow | brief hours n | alerts | trace days query].
     # `daily` refreshes only the day-bucketed panels; `fast` and `slow` are the two halves of the
     # full snapshot (no argument) that the server refreshes on separate periods.
     zones=tuple(sys.argv[4].split(',')) if len(sys.argv)>4 and sys.argv[4] else ('UTC',)
     if len(sys.argv)>5 and sys.argv[5]=='brief':
         out=scrub(brief(Path(sys.argv[1]),hours=int(sys.argv[6]),n=int(sys.argv[7]),tz=zones[0]))
+    elif len(sys.argv)>5 and sys.argv[5]=='alerts': out=scrub(alerts(Path(sys.argv[1])))
     elif len(sys.argv)>7 and sys.argv[5]=='trace':
         out=scrub(trace(Path(sys.argv[1]),Path(sys.argv[2]),sys.argv[7],days=int(sys.argv[6])))
     elif len(sys.argv)>5 and sys.argv[5]=='daily': out=clean(daily(Path(sys.argv[1]),sys.argv[3],zones))
