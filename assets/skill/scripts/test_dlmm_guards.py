@@ -223,6 +223,9 @@ def main():
          patch.object(monitor, "run_command", return_value=("1", "", 0)) as capacity:
         monitor.queue_settlement("position")
         path = Path(tmp) / "position.json"
+        # Age survives retries: the file is rewritten every attempt, queued_at is not.
+        queued_at = json.loads(path.read_text())["queued_at"]
+        assert isinstance(queued_at, float) and queued_at > 0
         with patch.object(monitor, "run_command_json", side_effect=[({"success": True, "amount_raw": "10"}, None), ({"success": False}, "slippage")]) as first:
             monitor.settle_pending()
         assert first.call_args_list[1].args[0].endswith(" 15 100 1 --small-settlement")

@@ -722,6 +722,71 @@ async function liquidateLegacyBags(execute = false, max = undefined) {
   });
 }
 
+// Operator command (no timer): archive pending markers whose blockhash expired
+// with a final outcome, and retire day-old dust settlements. Rules live in
+// dlmm_stale_markers.js. A dry run uses the public key when configured, takes
+// no lock and writes nothing; --execute holds the entry and swap locks (and
+// each pending close's lock) so no writer races the move.
+async function reconcileStaleMarkersCommand(execute = false) {
+  const markers = require("./dlmm_stale_markers");
+  const publicKey = !execute && process.env.SOLANA_PUBLIC_KEY
+    ? new PublicKey(process.env.SOLANA_PUBLIC_KEY) : getWallet().publicKey;
+  const owner = publicKey.toString(), memoriesDir = path.join(PROFILE_DIR, "memories");
+  let firstClose = null;
+  const closedAt = position => {
+    if (!firstClose) {
+      firstClose = new Map();
+      try {
+        for (const line of fs.readFileSync(path.join(memoriesDir, "dlmm_closes.jsonl"), "utf8").split("\n")) {
+          if (!line) continue;
+          try {
+            const r = JSON.parse(line);
+            if (typeof r.position === "string" && Number.isFinite(r.ts) && !firstClose.has(r.position)) firstClose.set(r.position, r.ts);
+          } catch { /* A torn line is no evidence. */ }
+        }
+      } catch { /* No journal: age stays unknown. */ }
+    }
+    return firstClose.get(position) ?? null;
+  };
+  const deps = { memoriesDir, fs, path, closedAt, quote: dustQuoteLamports,
+    finalizedHeight: () => runWithFailover(c => c.getBlockHeight("finalized")),
+    signatureStatuses: sigs => runWithFailover(async c =>
+      (await c.getSignatureStatuses(sigs, { searchTransactionHistory: true })).value),
+    positionExists: address => runWithFailover(c => positionAccountExists(c, address)).catch(() => null),
+    walletBalanceRaw: mint => runWithFailover(async c => {
+      const res = await c.getParsedTokenAccountsByOwner(publicKey, { mint: new PublicKey(mint) }, "finalized");
+      let total = 0n;
+      for (const a of res.value) {
+        const raw = a.account.data?.parsed?.info?.tokenAmount?.amount;
+        if (!/^\d+$/.test(String(raw))) return null;
+        total += BigInt(raw);
+      }
+      return total.toString();
+    }).catch(() => null) };
+  if (!execute || process.env.DRY_RUN === "true") return markers.reconcileStaleMarkers({ execute: false }, deps);
+  const releases = [await acquireDeployLock(owner)];
+  try {
+    releases.push(await acquireSwapLock(owner));
+    const closes = path.join(memoriesDir, "dlmm_pending_closes");
+    for (const f of fs.existsSync(closes) ? fs.readdirSync(closes).filter(f => f.endsWith(".json")) : []) {
+      releases.push(await acquireSwapLock(`close-${f.replace(/\.json$/, "")}`));
+    }
+    return await markers.reconcileStaleMarkers({ execute: true }, deps);
+  } finally {
+    for (const release of releases.reverse()) await release();
+  }
+}
+
+// A closed position's deploy obviously landed: its reservation (kept through
+// blockhash expiry on success, then never revisited) is resolved now.
+function clearDeployReservation(position) {
+  try {
+    const file = path.join(PROFILE_DIR, "memories", "dlmm_pending_deploys", `${getWallet().publicKey}.json`);
+    if (!fs.existsSync(file)) return;
+    if (JSON.parse(fs.readFileSync(file, "utf8")).position === position) fs.rmSync(file, { force: true });
+  } catch (_) { /* Marker hygiene must never fail a completed close. */ }
+}
+
 async function assertNoTokenExposure(pool, wallet) {
   // Read position accounts, not cached portfolio values or bin arrays. Empty
   // NFTs also block until the monitor reconciles them. Includes sibling pools
@@ -1174,6 +1239,7 @@ async function closePosition(positionAddressStr, emptyOnly = false) {
     release = await acquireSwapLock(`close-${positionAddressStr}`);
     observe("lock_acquired");
     const result = await closePositionLocked(positionAddressStr, emptyOnly, observe);
+    if (result.success && !result.dryRun) clearDeployReservation(positionAddressStr);
     observe(result.success ? "completed" : result.pending ? "pending" : "refused");
     return result;
   } catch (error) {
@@ -2181,6 +2247,9 @@ async function main() {
       const res = await liquidateLegacyBags(execute, max);
       console.log(JSON.stringify(res));
       if (!res.success) process.exitCode = 1;
+    } else if (command === "reconcile-stale-markers") {
+      const { execute } = require("./dlmm_stale_markers").parseArgs(args.slice(1));
+      console.log(JSON.stringify(await reconcileStaleMarkersCommand(execute)));
     } else if (command === "accounting") {
       const recorded = await reconcileAccounting();
       const { collect } = require("./dlmm_nav.js");
@@ -2361,5 +2430,5 @@ async function main() {
 }
 
 if (require.main === module) main();
-module.exports = { resolveEntryActiveBin, settlementInventory, swapAmountRaw, reclaimEmptyAccounts, liquidateLegacyBags, assertRootBudget, reconcileAccounting, recordSubmission, closePosition, swapToken, confirmSignedTransaction, deployPosition, acquireDeployLock, acquireSwapLock, reconcilePendingSwap,
+module.exports = { resolveEntryActiveBin, settlementInventory, swapAmountRaw, reclaimEmptyAccounts, liquidateLegacyBags, reconcileStaleMarkersCommand, clearDeployReservation, assertRootBudget, reconcileAccounting, recordSubmission, closePosition, swapToken, confirmSignedTransaction, deployPosition, acquireDeployLock, acquireSwapLock, reconcilePendingSwap,
   assertNoTokenExposure, positionIsEmpty, positionAccountExists, slippageBpsToPercent, settlementRentClose, ordinarySettlementRentClose, tokenAccountCanClose, getPositionRiskMark, candidateBinSnapshot };

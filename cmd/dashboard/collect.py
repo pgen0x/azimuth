@@ -1329,8 +1329,8 @@ def brief_health(profile, run, now, statvfs=os.statvfs, meminfo='/proc/meminfo')
 
 def brief_markers(memory, now):
     """Executor markers older than MARKER_STALE_S. Pending markers are written once per submission, so mtime is
-    their age. A settlement rewrites its file on every retry, so its age is the close that opened it when the
-    close journal has one; a stuck settlement would otherwise look fresh forever."""
+    their age. A settlement rewrites its file on every retry, so its age is its own queued_at, else the close
+    that opened it when the close journal has one; a stuck settlement would otherwise look fresh forever."""
     closed={}
     if (memory/'dlmm_settlements').is_dir() and any((memory/'dlmm_settlements').glob('*.json')):
         rows,_=read_jsonl(memory/'dlmm_closes.jsonl')
@@ -1344,12 +1344,15 @@ def brief_markers(memory, now):
             total+=1
             try: born=f.stat().st_mtime
             except OSError: continue
-            if name=='dlmm_settlements' and f.stem in closed: born=min(born,closed[f.stem])
+            if name=='dlmm_settlements':
+                if f.stem in closed: born=min(born,closed[f.stem])
+                q=read_json(f)
+                if isinstance(q,dict) and number(q.get('queued_at')): born=min(born,q['queued_at'])
             age=now-born
             if age>MARKER_STALE_S:
                 c=stale.setdefault(name,{'count':0,'oldest_s':0})
                 c['count']+=1; c['oldest_s']=max(c['oldest_s'],round(age))
-    return {'total':total,'stale':stale,'basis':'Marker files in memories/'+','.join(MARKER_DIRS)+'; age = file mtime (settlement: its close ts when older).'}
+    return {'total':total,'stale':stale,'basis':'Marker files in memories/'+','.join(MARKER_DIRS)+'; age = file mtime (settlement: its queued_at or close ts when older).'}
 
 def _span(s):
     return '%.1fd'%(s/86400) if s>=86400 else '%.1fh'%(s/3600)

@@ -517,6 +517,43 @@ The sale does not close the emptied account. The rent timer closes it on its
 next tick, as an ordinary empty-account refund. The proceeds are a one-time
 conversion of tokens already marked in NAV, not trading income.
 
+### Stale executor markers (operator command)
+
+`node dlmm_executor.js reconcile-stale-markers [--execute]` archives pending
+markers that nothing can still happen to. Writers clear a marker once they see a
+verdict, but some stop looking first. A swap whose confirm timed out is checked
+again only when the same mint pair swaps again, and a sold bag never does. A
+close whose confirm timed out is never retried once the monitor sees the
+position gone. Each such marker outlives its blockhash forever and keeps the
+dashboard's `marker_stale` alert firing.
+
+A `dlmm_pending_{swaps,deploys,closes,rent}` marker is archived only when its
+`lastValidBlockHeight` is below the finalized height and its signature status is
+final: finalized ok, finalized failed, or absent after expiry. A landed close
+also needs the position account gone. Anything else stays, including a
+`confirmed` status, an unmeasured read and an unreadable file. An expired
+`*.json.route` Hadron exclusion is archived as well.
+
+A deferred settlement (`swap_no_route` or `net_recovery_below_floor`) is retired
+when all of these hold:
+
+- it is at least 24h old, by its `queued_at` or else its first close journal row;
+- its position account is gone;
+- the wallet holds no more of the mint than `remaining_raw`;
+- a fresh quote finds no route, or quotes under 5,000 lamports (one base fee).
+
+Retiring hands the mint to the dust rules, which never burn a no-route balance
+either. It runs only within 800s of the monitor's last attempt, so it cannot
+collide with the next 900s retry.
+
+Archived files move to `memories/archive/markers/<dir>/`, each with a
+`<file>.resolution.json` holding the verdict and the evidence. A file that
+changed since it was classified is left alone. Without `--execute` (or with
+`DRY_RUN=true`) it uses `SOLANA_PUBLIC_KEY`, takes no lock and writes nothing.
+`--execute` holds the entry lock, the wallet swap lock and every pending close's
+lock. A completed close now also removes its own deploy reservation, so the
+deploy marker no longer outlives the position.
+
 ### Externally initiated rent maintenance
 
 The observed CLEANAL wrapper is classified as `rent_maintenance` only when every
