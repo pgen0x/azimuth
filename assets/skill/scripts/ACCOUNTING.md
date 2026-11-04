@@ -417,6 +417,15 @@ signed transaction identity for reconciliation before another batch can run.
 Rent batches use a finalized blockhash and require a measured network fee below
 the reclaimed rent before signing; a missing fee still prevents submission.
 
+The CLI reports refusals that the next timer run resolves by itself as
+`{"success":true,"deferred":true,"reason":...}` with exit 0, so the unit does not
+show `failed` for them: `pending_trading_blockhash` (an unexpired trading
+marker), `network_fee_unknown_or_uneconomic`, `entry_lock_busy` and
+`swap_lock_busy`. These refusals still send nothing. A trading marker without
+`lastValidBlockHeight`, an unreadable settlement marker, a failed dust
+simulation, a confirmation timeout on a signed send, and RPC or configuration
+errors still exit 1 and fire the alerts.
+
 `--dust` (opt-in, off in the shipped unit) also admits NONZERO accounts whose
 whole balance is worth at most half the rent it locks. Settlement closes an ATA
 only when its swap empties it, so dust-sized remainders otherwise lock

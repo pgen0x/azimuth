@@ -510,6 +510,22 @@ function writeDustQuoteCache(file, cache) {
   }
 }
 
+// Refusals that a later timer run resolves by itself. The CLI reports them as a
+// successful deferral (exit 0), like the batch-minimum path, so the unit stays
+// green. Anything else, including a confirmation timeout on a signed send, still
+// exits 1. Matching is exact so a reworded refusal falls back to an alert.
+const RENT_WAIT_REFUSALS = [
+  ["Rent reclaim refused: wait for pending trading blockhash expiry", "pending_trading_blockhash"],
+  ["Rent reclaim refused: unknown or uneconomic network fee", "network_fee_unknown_or_uneconomic"],
+  ["ENTRY BUSY: another deploy is active for this wallet", "entry_lock_busy"],
+  ["SWAP BUSY: another matching swap is active for this wallet", "swap_lock_busy"],
+];
+
+function rentDeferralReason(err) {
+  const hit = RENT_WAIT_REFUSALS.find(([message]) => err?.message === message);
+  return hit ? hit[1] : null;
+}
+
 async function reclaimEmptyAccounts(execute = false, batch = false, dust = false) {
   const { TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID, createCloseAccountInstruction } = require("@solana/spl-token");
   const wallet = getWallet(), owner = wallet.publicKey.toString();
@@ -527,7 +543,12 @@ async function reclaimEmptyAccounts(execute = false, batch = false, dust = false
         const dir = path.join(PROFILE_DIR, "memories", name);
         for (const file of fs.existsSync(dir) ? fs.readdirSync(dir).filter(f => f.endsWith(".json")) : []) {
           const marker = JSON.parse(fs.readFileSync(path.join(dir, file), "utf8"));
-          if (!Number.isSafeInteger(marker.lastValidBlockHeight) || finalizedHeight <= marker.lastValidBlockHeight) {
+          // Every writer records lastValidBlockHeight, so a marker without one is
+          // corrupt state for the operator, not a wait that expiry will resolve.
+          if (!Number.isSafeInteger(marker.lastValidBlockHeight)) {
+            throw new Error(`Rent reclaim refused: pending trading marker ${name}/${file} has no lastValidBlockHeight`);
+          }
+          if (finalizedHeight <= marker.lastValidBlockHeight) {
             throw new Error("Rent reclaim refused: wait for pending trading blockhash expiry");
           }
         }
@@ -2241,7 +2262,15 @@ async function main() {
   try {
     if (command === "reclaim-empty-accounts") {
       if (args.slice(1).some(arg => !["--execute", "--batch", "--dust"].includes(arg))) throw new Error("Usage: reclaim-empty-accounts [--execute] [--batch] [--dust]");
-      console.log(JSON.stringify(await reclaimEmptyAccounts(args.includes("--execute"), args.includes("--batch"), args.includes("--dust"))));
+      let res;
+      try {
+        res = await reclaimEmptyAccounts(args.includes("--execute"), args.includes("--batch"), args.includes("--dust"));
+      } catch (err) {
+        const reason = rentDeferralReason(err);
+        if (!reason) throw err;
+        res = { success: true, deferred: true, reason, detail: err.message };
+      }
+      console.log(JSON.stringify(res));
     } else if (command === "liquidate-legacy-bags") {
       const { execute, max } = require("./dlmm_legacy_bags").parseArgs(args.slice(1));
       const res = await liquidateLegacyBags(execute, max);
@@ -2430,5 +2459,5 @@ async function main() {
 }
 
 if (require.main === module) main();
-module.exports = { resolveEntryActiveBin, settlementInventory, swapAmountRaw, reclaimEmptyAccounts, liquidateLegacyBags, reconcileStaleMarkersCommand, clearDeployReservation, assertRootBudget, reconcileAccounting, recordSubmission, closePosition, swapToken, confirmSignedTransaction, deployPosition, acquireDeployLock, acquireSwapLock, reconcilePendingSwap,
+module.exports = { resolveEntryActiveBin, settlementInventory, swapAmountRaw, reclaimEmptyAccounts, rentDeferralReason, liquidateLegacyBags, reconcileStaleMarkersCommand, clearDeployReservation, assertRootBudget, reconcileAccounting, recordSubmission, closePosition, swapToken, confirmSignedTransaction, deployPosition, acquireDeployLock, acquireSwapLock, reconcilePendingSwap,
   assertNoTokenExposure, positionIsEmpty, positionAccountExists, slippageBpsToPercent, settlementRentClose, ordinarySettlementRentClose, tokenAccountCanClose, getPositionRiskMark, candidateBinSnapshot };
