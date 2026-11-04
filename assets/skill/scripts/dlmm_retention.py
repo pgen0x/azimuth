@@ -32,10 +32,13 @@ DAY = 86400
 #   candidate paper <= 1800s.
 # dlmm_candidate_fee_forecasts: shadow due index <= horizon (86400s), paper <= 900s,
 #   executor reads only the tail (dlmm_entry_forecast.MAX_BYTES).
+# dlmm_geometry_shadow_obs: no live reader (the monitor only appends); the
+#   report reads full history through archived_rows.
 POLICY = {
     'dlmm_bin_samples.jsonl': (('ts',), 2),
     'dlmm_candidate_bin_samples.jsonl': (('collected_at', 'ts'), 2),
     'dlmm_candidate_fee_forecasts.jsonl': (('recorded_at',), 2),
+    'dlmm_geometry_shadow_obs.jsonl': (('ts',), 2),
 }
 DEFAULT_KEEP_DAYS = 14
 GRACE_SECONDS = 1.0

@@ -215,6 +215,9 @@ def flush_tick_observers(pending):
         try:
             if kind == 'shadow':
                 shadow_exit_observe(*args)
+            elif kind == 'geometry':
+                from dlmm_geometry_shadow import observe as geometry_observe
+                geometry_observe(PROFILE_DIR, *args)
             elif not record_close_bin_observation(*args):
                 print('CLOSE_BIN_OBSERVATION_ERROR unmeasured')
         except Exception as error:
@@ -2361,6 +2364,11 @@ def main():
         if active_bin is not None and lower_bin is not None and upper_bin is not None:
             in_range = lower_bin <= active_bin <= upper_bin
             print(f"Position bins: active={active_bin}, range=[{lower_bin}, {upper_bin}], in_range={in_range}")
+        # Shadow geometry study: reuse this tick's active-bin read; written only
+        # by flush_tick_observers, after every risk/close decision of the tick.
+        if (active_bin is not None and meta.get("mode") == "pulse" and meta.get("strategy") == "sol_bidask"
+                and os.environ.get("DLMM_GEOMETRY_SHADOW", "1") != "0" and len(pending_observers) < 256):
+            pending_observers.append(('geometry', (pos_addr, pool, active_bin, time.time())))
 
         # Old peaks can be USD returns. Start a new SOL peak once; never compare
         # a legacy USD high-water mark with a SOL-denominated exit threshold.
