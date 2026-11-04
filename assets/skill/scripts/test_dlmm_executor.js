@@ -9,7 +9,7 @@ const source = fs.readFileSync(path.join(__dirname, "dlmm_executor.js"), "utf8")
 const worker = process.argv[2];
 const root = worker ? process.argv[3] : fs.mkdtempSync(path.join(os.tmpdir(), "dlmm-guards-"));
 let reads = 0, sends = 0, builds = 0, minted = 0, height = 100, sendError = false, buildError = false;
-let lastSlippage = null, lastMaxRetries = null;
+let lastSlippage = null, lastMaxRetries = null, lastStrategy = null, lastTotals = null;
 let positions = [], confirmationError = false, signatureStatus = null;
 let confirmTimeout = false, accountExists = true, failNextSend = false, sendFailed = false;
 let candidateCreates = 0, candidateTradeChecks = 0, candidateTradeAfter = Infinity;
@@ -29,7 +29,10 @@ const pool = {
   removeLiquidity: async () => transaction(),
   getActiveBin: async () => ({ binId: 0, price: "1" }), fromPricePerLamport: (x) => x,
   initializePositionAndAddLiquidityByStrategy: async (args) => {
-    assert.equal(args.strategy.minBinId, -20); assert.equal(args.strategy.maxBinId, 0);
+    // The range follows the SDK's own anchor (moves only on a re-anchor).
+    assert.equal(args.strategy.minBinId, pool.lbPair.activeId - 20);
+    assert.equal(args.strategy.maxBinId, pool.lbPair.activeId);
+    lastStrategy = args.strategy; lastTotals = [String(args.totalXAmount), String(args.totalYAmount)];
     lastSlippage = args.slippage; builds++; if (buildError) throw new Error("build failed"); return transaction();
   },
   createExtendedEmptyPosition: async () => [transaction()],
@@ -1024,18 +1027,51 @@ vm.runInNewContext("const productionExitTransport=confirmExitTransaction;confirm
   await release();
   await (await acquireDeployLock(wallet.publicKey.toString()))();
   // A fresh range anchor must agree with the cached SDK instruction anchor.
-  // Both directions and malformed reads refuse before any build or signature.
+  // A small drift refreshes the SDK cache ONCE; malformed reads, drift past
+  // ENTRY_MAX_BIN_DRIFT (3) in either direction, and a bin that moves again
+  // after that refresh all refuse before any build or signature.
   const originalActiveRead = pool.getActiveBin;
+  let refetches = 0, refetchTo = null;
+  pool.refetchStates = async () => { refetches++; pool.lbPair.activeId = refetchTo; };
+  const withActiveReads = async (sequence, refreshTo, run) => {
+    let read = 0;
+    pool.getActiveBin = async () => ({binId: sequence[Math.min(read++, sequence.length - 1)], price: "1"});
+    refetchTo = refreshTo; refetches = 0;
+    try { return await run(); }
+    finally { pool.getActiveBin = originalActiveRead; pool.lbPair.activeId = 0; }
+  };
+  const { resolveEntryActiveBin } = sandbox.module.exports;
+  // No drift: same object path as before, and the SDK cache is not refreshed.
+  const steady = await withActiveReads([0], 9, () => resolveEntryActiveBin(pool));
+  assert.equal(steady.activeBin.binId, 0); assert.equal(steady.reanchor, null); assert.equal(refetches, 0);
+  // Small drift: one refresh, then both anchors name the new bin.
+  for (const drift of [1, -1, 3, -3]) {
+    const moved = await withActiveReads([drift], drift, async () => {
+      const out = await resolveEntryActiveBin(pool);
+      assert.equal(pool.lbPair.activeId, drift);
+      return out;
+    });
+    assert.equal(moved.activeBin.binId, drift); assert.equal(refetches, 1);
+    assert.deepEqual({...moved.reanchor}, {cached_bin: 0, active_bin: drift, drift});
+  }
   const beforeDrift = {builds, sends, signCalls};
-  for (const binId of [-1, 1, NaN, undefined]) {
-    pool.getActiveBin = async () => ({binId, price: "1"});
-    const refused = await deploy();
+  for (const [sequence, refreshTo, refreshed, why] of [
+    [[NaN], null, 0, /unreadable/], [[undefined], null, 0, /unreadable/],
+    [[4], 4, 0, /drift 4 bins exceeds 3/], [[-4], -4, 0, /drift -4 bins exceeds 3/],
+    [[500], 500, 0, /drift 500 bins exceeds 3/],
+    [[2, 3], 3, 1, /moved again/],    // second drift: the bin kept moving
+    [[2, 2], 3, 1, /moved again/],    // refreshed SDK anchor disagrees with the fresh read
+    [[-3, NaN], -3, 1, /moved again/],
+  ]) {
+    const refused = await withActiveReads(sequence, refreshTo, deploy);
     assert.equal(refused.success, false);
-    assert.match(refused.error, /active bin changed/);
+    assert.match(refused.error, /^ENTRY REFUSED: active bin changed during entry preparation/);
+    assert.match(refused.error, why);
+    assert.equal(refetches, refreshed);
     assert.deepEqual({builds, sends, signCalls}, beforeDrift);
     assert.ok(!fs.existsSync(marker));
   }
-  pool.getActiveBin = originalActiveRead;
+  refetches = 0;
   // The initial anchor can agree, then become stale during build/simulation.
   // Refuse either side of the funded range, or an invalid fresh observation,
   // without sending, signing or recording a position as deployed.
@@ -1057,6 +1093,7 @@ vm.runInNewContext("const productionExitTransport=confirmExitTransaction;confirm
   pool.getActiveBin = async () => ({binId: ++validRangeReads === 1 ? 0 : -1, price: "1"});
   const parallel = await Promise.allSettled([deploy(), deploy()]);
   pool.getActiveBin = originalActiveRead;
+  assert.equal(refetches, 0); // agreeing anchors never refresh
   assert.equal(parallel.filter((r) => r.status === "fulfilled" && r.value.success).length, 1);
   assert.equal(lastSlippage, 10);
   assert.equal(sends, 1);
@@ -1122,6 +1159,26 @@ vm.runInNewContext("const productionExitTransport=confirmExitTransaction;confirm
   reservePost=20000000; // exact reserve boundary remains permitted
   assert.equal((await deploy()).success, true); assert.equal(sends, 7); // expired reservation recovers
   clearMarker();reservePost=300000000;
+  const steadyTotals = lastTotals;
+  // Small drift deploys end to end from the refreshed bin: same ticket, same
+  // strategy, range/provenance/pre-sign check re-derived, guards re-run.
+  for (const drift of [3, -2]) {
+    const counted = {sends, builds, signCalls, reserveReads};
+    const moved = await withActiveReads([drift], drift, deploy);
+    assert.equal(moved.success, true); assert.equal(refetches, 1);
+    assert.equal(builds, counted.builds + 1); assert.equal(sends, counted.sends + 1);
+    assert.ok(reserveReads > counted.reserveReads); // native reserve simulation re-ran
+    assert.deepEqual({...lastStrategy}, {minBinId: drift - 20, maxBinId: drift, strategyType: lastStrategy.strategyType});
+    assert.deepEqual(lastTotals, steadyTotals);
+    const entry = JSON.parse(fs.readFileSync(path.join(root, "memories/dlmm_entries", `${moved.position}.json`)));
+    assert.equal(entry.entry_bin, drift); assert.equal(entry.amount_y, 0.1); assert.equal(entry.bins_below, 20);
+    assert.deepEqual(entry.active_bin_reanchor, {cached_bin: 0, active_bin: drift, drift});
+    assert.deepEqual([entry.pre_sign_bin_check.active_bin, entry.pre_sign_bin_check.lower_bin,
+      entry.pre_sign_bin_check.upper_bin], [drift, drift - 20, drift]);
+    clearMarker();
+    // Keep the absolute counters asserted further down independent of this case.
+    ({sends, builds, signCalls} = counted);
+  }
   const oldCreates=pool.createExtendedEmptyPosition;
   pool.createExtendedEmptyPosition=async()=>[transaction(),transaction()];
   let reserveSteps=0;
