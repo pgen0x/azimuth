@@ -1,0 +1,10 @@
+# Optional. install.sh renders __PROFILE__ into <profile>/systemd/; copy from there.
+[Unit]
+Description=Azimuth archive of stale executor markers with final on-chain outcomes
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/node __PROFILE__/skills/solana-dlmm/scripts/dlmm_executor.js reconcile-stale-markers --execute
+TimeoutStartSec=300
+UMask=0077
+# Anything still ambiguous stays in place; the next run looks again.

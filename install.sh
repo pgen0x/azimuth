@@ -160,10 +160,10 @@ echo "→ Building Go daemon"
 ( cd "$REPO" && go build -o azimuth . ) && echo "   built $REPO/azimuth"
 
 echo "→ Rendering optional Solana units into $PROFILE/systemd"
-# Accounting, shadow, rent, research and alert timers are opt-in, so they are only
+# Accounting, shadow, rent, marker, research and alert timers are opt-in, so they are only
 # rendered for this profile, never written into the live unit directory.
 mkdir -p "$PROFILE/systemd"
-for u in azimuth-sol-accounting azimuth-sol-shadow azimuth-sol-rent \
+for u in azimuth-sol-accounting azimuth-sol-shadow azimuth-sol-rent azimuth-sol-markers \
   azimuth-sol-net-experiment azimuth-sol-net-research@ azimuth-sol-price-path azimuth-sol-candidate-paper \
   azimuth-sol-retention azimuth-alerts; do
   sed "s#__PROFILE__#$PROFILE#g" "$REPO/assets/systemd/$u.service" > "$PROFILE/systemd/$u.service"
