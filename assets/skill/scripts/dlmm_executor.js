@@ -937,7 +937,10 @@ async function deployPosition(poolAddressStr, amountX, amountY, binsBelow, binsA
         // Keep the reservation through blockhash expiry even on success: an
         // immediately-following RPC may lag the confirming endpoint. Exits are
         // never blocked; this briefly delays only the next wallet deployment.
-        return { success: true, position: newPosition.publicKey.toString(), txHash: txHashes[0], txHashes };
+        // entry_bin/lower_bin/upper_bin: the anchor this range was built on, for
+        // the pipeline's shadow geometry journal (dlmm_geometry_shadow.py).
+        return { success: true, position: newPosition.publicKey.toString(), txHash: txHashes[0], txHashes,
+          entry_bin: activeBin.binId, lower_bin: minBinId, upper_bin: maxBinId };
       } catch (err) {
         if (!submitted && err.message.startsWith("ENTRY REFUSED:")) return { success: false, error: err.message };
         if (!submitted) throw err; // Read/build failure: another RPC is safe.
