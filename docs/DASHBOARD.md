@@ -63,7 +63,7 @@ mode) are split into days in the viewer's IANA time zone: the page sends
 `Intl.DateTimeFormat().resolvedOptions().timeZone` as `?tz=`. The server validates the name with Go's embedded
 zone database; a missing value means UTC, an invalid one falls back to UTC with `tz_fallback: true`. Each
 response states the zone it used in `tz`. A zone is computed on first request (about a second) and kept in the
-30-second refresh for the six most recently used zones, UTC always included. Every time the page displays names
+10-minute slow-panel refresh for the six most recently used zones, UTC always included. Every time the page displays names
 its zone.
 
 ## JSON API
@@ -79,7 +79,19 @@ its zone.
 | `/api/redis` | Timestamped fixed capacity keys, position tracking sample, cooldown and dedup TTLs |
 | `/api/agent/brief?hours=12&n=10&tz=ZONE&format=text` | Agent brief (see below): wallet, open positions, recent closes, entry funnel, health, alerts. JSON by default, the CLI's text with `format=text` |
 
-Refreshes serve an immutable in-memory snapshot. A background collector updates every 30 seconds with a 60-second deadline per run (a slow run delays the next one; runs never overlap). Collection failure retains the previous snapshot and exposes an error. Browser activity never invokes NAV collection, accounting runs, blockchain RPC, model/provider probes or Helius Wallet API.
+Refreshes serve an immutable in-memory snapshot, built from two collector halves with a 60-second deadline
+per run (a slow run delays the next one; runs never overlap):
+
+- **Fast panels, every 60 seconds:** the event journal, latest NAV row, source freshness, unit states, Hermes
+  and Redis. `collected_at` is this half's time.
+- **Slow panels, every 10 minutes:** day calendars per zone, the 14-day NAV bridge, the dust rent ledger and
+  Robinhood (unit journals, positions, closes). `slow_collected_at` is this half's time. They are day-scale or
+  48h-scale evidence, and were about 80% of a refresh's CPU (NAV lookups in a ~200MB `dlmm_nav.jsonl` per zone,
+  `journalctl --grep` over 48 hours).
+
+Fast plus slow panels carry the same content as a single full collection at the same instant (tested), plus `slow_collected_at`. Collection
+failure retains the previous snapshot or slow panels and exposes an error; a failed slow half is retried on the
+next 60-second tick. Browser activity never invokes NAV collection, accounting runs, blockchain RPC, model/provider probes or Helius Wallet API.
 
 ## Agent brief
 

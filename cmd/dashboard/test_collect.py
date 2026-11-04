@@ -711,7 +711,8 @@ class PerformanceParityTests(unittest.TestCase):
 
     def test_scrub_equals_clean_of_own_only(self):
         value={'pool':'p','api_key':'x','nested':[{'TOKEN':'y','ok':float('inf'),'n':1,'b':True,'z':None,
-               'lp_comparison':{'a':1},'t':('tuple','kept')}],'msg':'TOKEN=abc tail','otherbot_x':1,7:'int key'}
+               'lp_comparison':{'a':1},'t':('tuple','kept')}],'msg':'TOKEN=abc tail','otherbot_x':1,7:'int key',
+               'mixed':[{1:'one'},{True:'true'},{'1':'str one'},{'pool':'p','api_key':'again'}]}
         for extra in ('', 'otherbot'):
             pattern=c.hide_pattern(extra)
             self.assertEqual(json.dumps(c.scrub(value,pattern),sort_keys=True,default=str),

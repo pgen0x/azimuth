@@ -109,13 +109,28 @@ def scrub(value, pattern=None):
     """clean(own_only(value)) in one traversal: the collector's output is ~600k nodes, so the
     second walk was a third of a refresh. Same key filter, same masking, same output."""
     pattern = pattern or hide_pattern()
-    keep = pattern.search
+    # ~300k keys but only hundreds of distinct ones, and strings repeat (pools, mints, stages):
+    # each distinct key/string is judged once per call. Key -> None (hidden) or (name, masked).
+    keys = {}; texts = {}
+    def key(k):
+        name = str(k)
+        if pattern.search(name): return None
+        return redact_text(name), secret_name(k)
     def walk(v):
         t = type(v)
-        if t is str: return redact_text(v)
+        if t is str:
+            r = texts.get(v)
+            if r is None: r = texts[v] = redact_text(v)
+            return r
         if t is dict:
-            return {redact_text(str(k)): '[masked]' if secret_name(k) else walk(x)
-                    for k, x in v.items() if not keep(str(k))}
+            out = {}
+            for k, x in v.items():
+                if type(k) is str:
+                    kk = keys.get(k, keys)
+                    if kk is keys: kk = keys[k] = key(k)
+                else: kk = key(k)  # 1 == True == 1.0 share a dict slot; only str keys are cached
+                if kk is not None: out[kk[0]] = '[masked]' if kk[1] else walk(x)
+            return out
         if t is list: return [walk(x) for x in v]
         if t is int or t is bool or v is None: return v
         if t is float: return v if math.isfinite(v) else None
