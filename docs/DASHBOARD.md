@@ -77,8 +77,32 @@ its zone.
 | `/api/robinhood?tz=ZONE&n=200` | Robinhood Chain: monitor unit state, scanner toggles, last `n` (1 to 1000) log lines, open positions per the journals, successful closes per quote asset and local day, stranded tokens |
 | `/api/hermes` | Profile/model/fallback configuration, skills, gateway state, recent session metadata |
 | `/api/redis` | Timestamped fixed capacity keys, position tracking sample, cooldown and dedup TTLs |
+| `/api/agent/brief?hours=12&n=10&tz=ZONE&format=text` | Agent brief (see below): wallet, open positions, recent closes, entry funnel, health, alerts. JSON by default, the CLI's text with `format=text` |
 
 Refreshes serve an immutable in-memory snapshot. A background collector updates every 30 seconds with a 60-second deadline per run (a slow run delays the next one; runs never overlap). Collection failure retains the previous snapshot and exposes an error. Browser activity never invokes NAV collection, accounting runs, blockchain RPC, model/provider probes or Helius Wallet API.
+
+## Agent brief
+
+One compact read for an orchestrating agent, from the same collector (its `brief` mode), read only:
+
+```bash
+azimuth-dashboard brief --profile ~/.hermes/profiles/<profile>            # text, about 40-60 lines
+azimuth-dashboard brief --json --hours 24 --n 20 --tz Asia/Jakarta --profile ...
+```
+
+The subcommand needs no HTTP server, login or Redis. `/api/agent/brief` serves the same result behind the
+normal sign-in, cached for 20 seconds per parameter set, with one collector run at a time.
+
+| Section | Source and basis |
+| --- | --- |
+| wallet | `dlmm_nav.jsonl`, last snapshot per day in `tz` over 14 days: native, cash, known, rent, daily deltas (the rows `.orchestra/scoreboard.py` reads; pass its zone to match its day split). External flows are not netted out. |
+| positions | Latest `MONITOR_REPORT:` line of `azimuth-sol-monitor.service` (15 min); a newer `0 position(s) found on-chain` line empties it. pnl is a portfolio MARK, never money. |
+| closes | Last close row per position in `dlmm_closes.jsonl`, joined to `dlmm_realized.jsonl`. Money is `realized_sol` only; `pnl_basis` is `realized`, `unmeasured` (row with a null figure) or `not_reconciled` (no row yet). |
+| funnel | `azimuth.service` journal markers (`SIGNAL batch sent`, `entry_route=... reason=...`, audit/cooldown/lone rejects, direct deploy runs), `dlmm_pipeline_rejects.jsonl` gates and submitted deploy transactions in `dlmm_transactions.jsonl` (recorded before broadcast, not chain-confirmed). |
+| health | `azimuth`, `azimuth-sol-monitor`, `hermes-gateway`, `azimuth-dashboard` active + enabled; failed user units; disk free % of the profile volume; MemAvailable; age of the monitor's last `OBSERVER_TICK`. |
+| alerts | disk free < 15%, MemAvailable < 1200 MB, core unit not active / not enabled / failed, any failed user unit, no deploy submitted in 12 h, monitor tick older than 2 min, a section that could not be read. |
+
+The dashboard's **ops** section shows the funnel, health and alerts of this brief.
 
 ## Source traceability and scope
 

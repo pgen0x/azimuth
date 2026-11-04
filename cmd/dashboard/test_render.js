@@ -6,10 +6,10 @@ async function render(tab, payload, fail=false) {
   const content = {innerHTML: ''}, stamp = {textContent: ''}, intervals = [], calls = [];
   const els = {'#content': content, '#stamp': stamp, '#rhlog': {innerHTML: ''}, '#rhcount': {textContent: ''}};
   const document = {querySelector: s => els[s] || {}, querySelectorAll: () => []};
-  const fixtures = {overview: {nav: {}, services: [], sources: []}, capital: {north_star: {days: []}, nav_bridge: {}},
+  const fixtures = {ops: {funnel: {}, health: {}, alerts: []}, overview: {nav: {}, services: [], sources: []}, capital: {north_star: {days: []}, nav_bridge: {}},
     live: {live: {}}, journal: {rows: [], total_in_retained_tail: 0}, hermes: {}, redis: {rows: []}};
   const ctx = {document, Date, console, fetch: async url => {
-    calls.push(url); const name = url.replace('/api/', '').split('?')[0];
+    calls.push(url); const name = {'agent/brief': 'ops'}[url.replace('/api/', '').split('?')[0]] || url.replace('/api/', '').split('?')[0];
     if (fail && name === tab) return {ok: false, status: 500, text: async () => 'synthetic failure'};
     return {ok: true, status: 200, json: async () => name === tab ? payload : fixtures[name]};
   }, setInterval: fn => intervals.push(fn), module: {exports: {}}};
@@ -23,7 +23,7 @@ async function render(tab, payload, fail=false) {
 }
 (async () => {
   const warning = 'Local collection failed; last successful snapshot retained';
-  for (const tab of ['capital', 'live', 'robinhood', 'journal', 'hermes', 'redis', 'overview']) {
+  for (const tab of ['capital', 'live', 'robinhood', 'journal', 'hermes', 'redis', 'overview', 'ops']) {
     const r = await render(tab, {collected_at: 123, collection_error: warning, rows: [], total_in_retained_tail: 0, services: [], sources: []});
     assert(r.html.includes(warning) && r.html.includes('role="alert"'), tab);
     assert(r.stamp.includes('Observed') && !r.stamp.endsWith('Unknown'), tab);
@@ -118,6 +118,22 @@ async function render(tab, payload, fail=false) {
   assert(rhEmpty.log.includes('No log lines retained'), 'empty log state');
   const rhFail = await render('robinhood', null, true);
   assert(rhFail.html.includes('Could not load this section'), 'robinhood error state');
+  // Ops: funnel, health and alerts from the agent brief; unknown stays Unknown, red flags are announced.
+  const ops = await render('ops', {collected_at: 1000, alerts: [{code: 'disk_low', message: 'disk free 9.0% < 15% <b>'}],
+    funnel: {hours: 12, status: 'ok', batches: 3, batch_pools: 4, deploys: 1, last_deploy_ts: 900, direct_deploy: {deployed: 0, not_deployed: 2},
+      routes: {hermes_ai: 2, 'deterministic_fallback:timeout': 1}, daemon_rejects: {'re-entry cooldown': 5}, pipeline_rejects: {downtrend_h6: 2}},
+    health: {units: [{unit: 'azimuth.service', active: 'active', sub: 'running', enabled: 'enabled'}, {unit: 'azimuth-sol-monitor.service', active: 'failed', sub: 'failed', enabled: 'disabled'}],
+      failed_units: ['azimuth-sol-monitor.service'], disk_free_pct: 9, mem_available_mb: null, monitor_tick_age_s: 400}});
+  assert(ops.calls.some(u => u === '/api/agent/brief?hours=12'), 'ops reads the agent brief');
+  assert(ops.html.includes('role="alert"') && ops.html.includes('disk_low') && ops.html.includes('&lt;b&gt;') && !ops.html.includes('<b>'), 'alerts announced and escaped');
+  assert(ops.html.includes('deterministic_fallback:timeout') && ops.html.includes('downtrend_h6') && ops.html.includes('re-entry cooldown'), 'funnel histograms');
+  assert(ops.html.includes('MemAvailable</span><strong class="">Unknown') || ops.html.includes('MemAvailable</span><strong>Unknown'), 'unmeasured memory is Unknown');
+  assert(ops.html.includes('7 min ago') && ops.html.includes('badge bad">failed / failed') && ops.html.includes('badge bad">disabled'), 'stale tick and failed unit');
+  assert(ops.timerFetches > 0, 'ops refreshes on the timer');
+  const opsOk = await render('ops', {collected_at: 1, alerts: [], funnel: {}, health: {}});
+  assert(opsOk.html.includes('No red flags') && opsOk.html.includes('No observed records'), 'empty ops');
+  const opsFail = await render('ops', null, true);
+  assert(opsFail.html.includes('Could not load this section'), 'ops error state');
   // The overview must not restate a fixed SOL entry floor: the cash policy decides entry.
   for (const native of [0.1, 0.2, 1, null]) {
     const ov = await render('overview', {nav: {native_sol: native, ts: 1}, services: [], sources: []});
@@ -125,5 +141,5 @@ async function render(tab, payload, fail=false) {
     assert(!ov.html.includes('meets the'), 'a static balance never reads as entry authorization');
     assert(ov.html.includes('configured cash policy'), 'neutral entry-policy note');
   }
-  console.log('dashboard render: 41 synthetic cases passed');
+  console.log('dashboard render: 49 synthetic cases passed');
 })().catch(error => {console.error(error); process.exitCode = 1;});
