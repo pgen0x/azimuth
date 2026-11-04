@@ -448,23 +448,30 @@ function tokenAccountCanClose(account, owner, raw = "0") {
     && Number.isSafeInteger(account.lamports) && account.lamports > 0;
 }
 
-// Full-balance token -> SOL quote for dust maintenance. Returns lamports out,
-// or null when the value is unknown. Unknown never authorizes a burn.
-// A "no route" answer is unknown too, not zero: it bounds nothing about the
-// balance's size, routes come back (a live settlement has sat deferred on
-// swap_no_route), and a marker-less bag would otherwise burn in full.
+// Full-balance token -> SOL quote for dust maintenance. Returns
+// { lamports } or { verdict } when the value is unknown. Unknown never
+// authorizes a burn. A "no route" answer is unknown too, not zero: it bounds
+// nothing about the balance's size, routes come back (a live settlement has
+// sat deferred on swap_no_route), and a marker-less bag would otherwise burn
+// in full. The verdict only decides how long the account is skipped.
+const DUST_NO_ROUTE_CODES = ["COULD_NOT_FIND_ANY_ROUTE", "NO_ROUTES_FOUND", "TOKEN_NOT_TRADABLE"];
 async function dustQuoteLamports(mint, raw) {
   const sol = "So11111111111111111111111111111111111111112";
   try {
     const url = `https://api.jup.ag/swap/v1/quote?inputMint=${mint}&outputMint=${sol}&amount=${raw}&slippageBps=100`;
     const res = await fetch(url, { signal: AbortSignal.timeout(8000) });
-    if (!res.ok) return null;
+    if (!res.ok) {
+      if (res.status === 429) return { verdict: "rate_limited" };
+      let code;
+      try { code = JSON.parse(await res.text()).errorCode; } catch { /* Non-JSON stays unavailable. */ }
+      return { verdict: res.status === 400 && DUST_NO_ROUTE_CODES.includes(code) ? "no_route" : "unavailable" };
+    }
     const q = await res.json();
     if (q?.inputMint !== mint || q?.outputMint !== sol || q?.inAmount !== raw
-        || !/^\d+$/.test(String(q?.outAmount))) return null;
-    return BigInt(q.outAmount);
+        || !/^\d+$/.test(String(q?.outAmount))) return { verdict: "unavailable" };
+    return { lamports: BigInt(q.outAmount) };
   } catch {
-    return null;
+    return { verdict: "unavailable" };
   }
 }
 
@@ -472,7 +479,36 @@ async function dustQuoteLamports(mint, raw) {
 // rent than the tokens are worth. A balance is dust when a fresh full-balance
 // quote prices it at most half the rent it locks; it is burned and the account
 // closed in the same transaction, returning the rent as native SOL.
-const DUST_MAX_QUOTES = 16;
+//
+// The quote budget is small and the wallet's accounts come back in the same
+// RPC order every run, so an executing run remembers which account balances
+// it already found not-dust (dlmm_dust_quote_cache.json, keyed by account,
+// holding mint + raw balance) and skips them for a while; the budget then
+// reaches accounts further down the list instead of re-quoting the same head
+// forever. Only skips are cached: a dust verdict is always re-quoted fresh
+// before a burn. Quotes are paced for the keyless Jupiter tier, and a 429
+// ends the run's quoting rather than spending the budget on rate limits.
+const DUST_MAX_QUOTES = 8;
+const DUST_QUOTE_GAP_MS = 2100;
+const DUST_SKIP_TTL_MS = { keep: 6 * 3600e3, no_route: 6 * 3600e3, unavailable: 45 * 60e3, rate_limited: 45 * 60e3 };
+
+function readDustQuoteCache(file, now) {
+  let cache;
+  try { cache = JSON.parse(fs.readFileSync(file, "utf8")); } catch { return {}; }
+  if (!cache || typeof cache !== "object" || Array.isArray(cache)) return {};
+  return Object.fromEntries(Object.entries(cache).filter(([, e]) => Number.isFinite(e?.ts)
+    && Object.hasOwn(DUST_SKIP_TTL_MS, e.verdict) && e.ts <= now && now - e.ts < DUST_SKIP_TTL_MS[e.verdict]));
+}
+
+function writeDustQuoteCache(file, cache) {
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(`${file}.tmp`, JSON.stringify(cache));
+    fs.renameSync(`${file}.tmp`, file);
+  } catch (err) {
+    console.warn(`dust quote cache not saved: ${err.message}`);
+  }
+}
 
 async function reclaimEmptyAccounts(execute = false, batch = false, dust = false) {
   const { TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID, createCloseAccountInstruction } = require("@solana/spl-token");
@@ -522,18 +558,30 @@ async function reclaimEmptyAccounts(execute = false, batch = false, dust = false
           catch { throw new Error("Rent reclaim refused: unreadable settlement marker"); }
           if (mint) excluded.add(mint);
         }
+        // Only a run that can burn remembers skips; a preview stays stateless.
+        const cachePath = path.join(PROFILE_DIR, "memories", "dlmm_dust_quote_cache.json");
+        const useCache = execute && process.env.DRY_RUN !== "true";
+        const now = Date.now(), skip = useCache ? readDustQuoteCache(cachePath, now) : {};
+        const remembered = { ...skip };
         let quotes = 0;
         for (const candidate of candidates) {
           const info = candidate.account.data?.parsed?.info, raw = info?.tokenAmount?.amount;
-          const decimals = info?.tokenAmount?.decimals;
+          const decimals = info?.tokenAmount?.decimals, key = candidate.pubkey.toString();
           if (!/^[1-9]\d*$/.test(String(raw)) || !Number.isInteger(decimals) || excluded.has(info.mint)
               || !tokenAccountCanClose(candidate.account, owner, raw)) continue;
+          // A changed balance (a later settlement topped it up) is a new question.
+          if (skip[key]?.mint === info.mint && skip[key]?.raw === raw) continue;
           if (accounts.length >= 8 || quotes >= DUST_MAX_QUOTES) break;
-          quotes++;
+          if (quotes++) await new Promise(resolve => setTimeout(resolve, DUST_QUOTE_GAP_MS));
           const quote = await dustQuoteLamports(info.mint, raw);
-          if (quote === null || quote * 2n > BigInt(candidate.account.lamports)) continue;
-          accounts.push({ ...candidate, dust: { raw, decimals, quote_lamports: Number(quote) } });
+          if (quote.lamports === undefined || quote.lamports * 2n > BigInt(candidate.account.lamports)) {
+            remembered[key] = { ts: now, verdict: quote.verdict || "keep", mint: info.mint, raw };
+            if (quote.verdict === "rate_limited") break;
+            continue;
+          }
+          accounts.push({ ...candidate, dust: { raw, decimals, quote_lamports: Number(quote.lamports) } });
         }
+        if (useCache) writeDustQuoteCache(cachePath, remembered);
       }
       let nativeBalance = null;
       if (batch && accounts.length === 1) {

@@ -1515,12 +1515,14 @@ vm.runInNewContext("const productionExitTransport=confirmExitTransaction;confirm
     // balance: no-route codes, rate limits, auth/server errors, mismatched echoes.
     const unknowns={"nr-any":{status:400,code:"COULD_NOT_FIND_ANY_ROUTE"},"nr-none":{status:400,code:"NO_ROUTES_FOUND"},
       "nr-tradable":{status:400,code:"TOKEN_NOT_TRADABLE"},"s400":{status:400,code:"BAD_REQUEST"},"s401":{status:401},
-      "s429":{status:429},"s500":{status:500},"echo-amount":{out:"1",echo:{inAmount:"999"}},
+      "s500":{status:500},"echo-amount":{out:"1",echo:{inAmount:"999"}},
       "echo-mint":{out:"1",echo:{inputMint:"other-mint"}},"echo-out":{out:"1",echo:{outputMint:"other-mint"}}};
     Object.assign(quotes,unknowns);quoted.length=0;
-    tokenAccounts=Object.keys(unknowns).map(m=>dustAccount(`big-${m}`,"1000000000000",m));
-    assert.equal((await reclaimEmptyAccounts(false,false,true)).accounts.length,0);
-    assert.deepEqual(quoted,Object.keys(unknowns));
+    for(const part of [Object.keys(unknowns).slice(0,5),Object.keys(unknowns).slice(5)]){ // budget is 8 per run
+      quoted.length=0;tokenAccounts=part.map(m=>dustAccount(`big-${m}`,"1000000000000",m));
+      assert.equal((await reclaimEmptyAccounts(false,false,true)).accounts.length,0);
+      assert.deepEqual(quoted,part);
+    }
     // Nonzero accounts must pass the closeability rule BEFORE any quote: a second
     // Token-2022 extension or a delegate keeps them; immutableOwner alone is fine.
     Object.assign(quotes,{"t22-fee-mint":"1","t22-ok-mint":"1","delegated-mint":"1"});quoted.length=0;
@@ -1529,18 +1531,70 @@ vm.runInNewContext("const productionExitTransport=confirmExitTransaction;confirm
       dustAccount("delegated","5","delegated-mint",{delegate:"someone"})];
     assert.deepEqual(Array.from((await reclaimEmptyAccounts(false,false,true)).accounts,a=>a.account),["t22-ok"]);
     assert.deepEqual(quoted,["t22-ok-mint"]);
-    // Quoting stops once eight accounts are admitted, and never exceeds 16 per run.
+    // Quoting stops once eight accounts are admitted, and never exceeds 8 per run (each quote is paced).
     quotes["dust-mint"]="700000";quoted.length=0;
     tokenAccounts=Array.from({length:10},(_,i)=>dustAccount(`cheap-${i}`,"5","dust-mint"));
     assert.equal((await reclaimEmptyAccounts(false,false,true)).accounts.length,8);assert.equal(quoted.length,8);
     quoted.length=0;tokenAccounts=Array.from({length:20},(_,i)=>dustAccount(`kept-${i}`,"7","rich-mint"));
-    assert.equal((await reclaimEmptyAccounts(false,false,true)).accounts.length,0);assert.equal(quoted.length,16);
+    assert.equal((await reclaimEmptyAccounts(false,false,true)).accounts.length,0);assert.equal(quoted.length,8);
     // Fee plus forfeited quotes must stay below the rent: here the fee alone would
     // pass (744220 < 1488440) but fee + forfeited equals the rent, so nothing sends.
     quotes["dust-mint"]="744220";tokenAccounts=[dustAccount("dust","5","dust-mint")];
     const sendsBeforeBoundary=sends;fee=744220;
     await assert.rejects(reclaimEmptyAccounts(true,false,true),/uneconomic/);assert.equal(sends,sendsBeforeBoundary);
     fee=5000;
+    // Starvation: the RPC returns accounts in the same order every run, so a full
+    // budget of not-dust heads used to be re-quoted forever. An executing run
+    // caches non-dust verdicts per account balance and the next run reaches the tail.
+    // A preview stays stateless; a dust verdict is never cached (re-quoted fresh).
+    const cacheFile=path.join(root,"memories/dlmm_dust_quote_cache.json");fs.rmSync(cacheFile,{force:true});
+    const heads=Array.from({length:8},(_,i)=>`head-${i}`),tails=["tail-0","tail-1"];
+    for(const m of [...heads,"head-8"])quotes[m]="800000";for(const m of tails)quotes[m]="700000";
+    const starved=()=>[...heads,...tails].map((m,i)=>dustAccount(`acct-${m}`,String(i+1),m));
+    const delays=[],timer=sandbox.setTimeout;
+    sandbox.setTimeout=(cb,delay)=>{delays.push(delay);return timer(cb,delay);};
+    quoted.length=0;tokenAccounts=starved();
+    assert.equal((await reclaimEmptyAccounts(false,false,true)).accounts.length,0);assert.deepEqual(quoted,heads);
+    assert.equal(fs.existsSync(cacheFile),false); // a preview never writes the cache
+    assert.equal(delays.filter(d=>d===2100).length,7); // paced between quotes, not before the first
+    sandbox.setTimeout=timer;
+    quoted.length=0;const sendsBeforeCache=sends;
+    const first=await reclaimEmptyAccounts(true,false,true); // all heads keep: nothing to send
+    assert.equal(first.accounts.length,0);assert.deepEqual(quoted,heads);assert.equal(sends,sendsBeforeCache);
+    const cached=JSON.parse(fs.readFileSync(cacheFile,"utf8"));
+    assert.deepEqual(Object.keys(cached).sort(),heads.map(m=>`acct-${m}`).sort());
+    assert.ok(heads.every((m,i)=>cached[`acct-${m}`].verdict==="keep"&&cached[`acct-${m}`].mint===m&&cached[`acct-${m}`].raw===String(i+1)));
+    quoted.length=0;rentInstructions.length=0;
+    const second=await reclaimEmptyAccounts(true,false,true);
+    assert.deepEqual(quoted,tails);assert.deepEqual(Array.from(second.accounts,a=>a.mint),tails);
+    assert.equal(sends,sendsBeforeCache+1);
+    assert.ok(!Object.keys(JSON.parse(fs.readFileSync(cacheFile,"utf8"))).some(k=>k.startsWith("acct-tail")));
+    quoted.length=0;env.DRY_RUN="true";
+    await reclaimEmptyAccounts(true,false,true);assert.deepEqual(quoted,heads); // DRY_RUN ignores the cache
+    delete env.DRY_RUN;
+    // Expired, future-dated, unknown-verdict and malformed entries never skip,
+    // nor does a changed balance or mint; a corrupt file is an empty cache, never a refusal.
+    const hour=3600e3,nowMs=sandbox.Date.now(),entry=(i,o)=>({ts:nowMs-hour,verdict:"keep",mint:`head-${i}`,raw:String(i+1),...o});
+    fs.writeFileSync(cacheFile,JSON.stringify({"acct-head-0":entry(0,{ts:nowMs-6*hour}),"acct-head-1":entry(1,{ts:nowMs+hour}),
+      "acct-head-2":entry(2,{verdict:"dust"}),"acct-head-3":entry(3,{ts:"x"}),"acct-head-4":entry(4,{verdict:"unavailable"}),
+      "acct-head-5":entry(5,{raw:"999"}),"acct-head-6":entry(6,{mint:"other"}),"acct-head-7":entry(7,{verdict:"no_route"}),
+      "acct-head-8":entry(8,{})}));
+    quoted.length=0;tokenAccounts=Array.from({length:9},(_,i)=>dustAccount(`acct-head-${i}`,String(i+1),`head-${i}`));
+    await reclaimEmptyAccounts(true,false,true);
+    assert.deepEqual(quoted,["head-0","head-1","head-2","head-3","head-4","head-5","head-6"]); // 4 is past 45m; 7, 8 inside 6h
+    tokenAccounts=starved().slice(0,6);
+    fs.writeFileSync(cacheFile,"{");quoted.length=0;
+    await reclaimEmptyAccounts(true,false,true);assert.deepEqual(quoted,heads.slice(0,6));
+    // A 429 ends the run's quoting (it would spend the rest of the budget on
+    // rate-limit answers) and skips that mint for one interval; never burns.
+    fs.rmSync(cacheFile,{force:true});quotes["head-0"]={status:429};quoted.length=0;tokenAccounts=starved();
+    assert.equal((await reclaimEmptyAccounts(true,false,true)).accounts.length,0);assert.deepEqual(quoted,["head-0"]);
+    assert.equal(JSON.parse(fs.readFileSync(cacheFile,"utf8"))["acct-head-0"].verdict,"rate_limited");
+    quoted.length=0;await reclaimEmptyAccounts(false,false,true);assert.deepEqual(quoted,["head-0"]); // preview stops too
+    quoted.length=0;rentInstructions.length=0;const sendsBeforeLimit=sends;
+    await reclaimEmptyAccounts(true,false,true); // next interval: skips the limited mint, reaches the tail
+    assert.deepEqual(quoted,[...heads.slice(1),"tail-0"]);assert.equal(sends,sendsBeforeLimit+1); // budget is still 8
+    fs.rmSync(cacheFile,{force:true});quotes["head-0"]="800000";
     fs.writeFileSync(path.join(settleDir,"bad.json"),"{");
     await assert.rejects(reclaimEmptyAccounts(false,false,true),/unreadable settlement marker/);
     fs.rmSync(settleDir,{recursive:true,force:true});
