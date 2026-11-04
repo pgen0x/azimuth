@@ -136,6 +136,7 @@ the 2 h before deploy, the entry file (including `active_bin_reanchor`), the mon
 position (count, MARK pnl min/max, out-of-range ticks), every close-journal row (marks labeled), the settlement
 file, the `dlmm_realized.jsonl` row (the arbiter) and the cooldowns the monitor printed at close plus the daemon's
 later `in re-entry cooldown` skips for the pool. Redis is not read; cooldowns come from the unit journals.
+A pair name (`NIO-SOL` or `SOL-NIO`, any case) is looked up as its symbol.
 Exit status 3 means nothing was found.
 
 ## Source traceability and scope
