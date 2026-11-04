@@ -474,6 +474,40 @@ are a move from recoverable account reserves to spendable SOL, **not trading
 profit**. Portfolio NAV includes both sides; the network fee is a cost. Historical
 root cash accounting is not retroactively credited with these wallet-level funds.
 
+### Legacy token bags (operator command)
+
+`node dlmm_executor.js liquidate-legacy-bags [--execute] [--max N]` sells token
+balances the dust rule never burns: those quoted above half their account's rent.
+Most predate the settlement queue (2026-10-01), so nothing else will ever sell them.
+It has no timer. Without `--execute` (or with `DRY_RUN=true`) it only prints
+the plan. It uses `SOLANA_PUBLIC_KEY` when that is set, takes no lock and writes
+no file.
+
+A candidate is the wallet's only nonzero account for its mint, and it must be
+that mint's ATA. It must also pass the same closeability rule as rent reclaim.
+Wrapped SOL, mints of open positions and mints held by a `dlmm_settlements`
+marker are excluded. Each candidate gets a fresh full-balance quote: at most 16
+per run, 2.1s apart, and a 429 stops quoting. Accounts the dust cache last
+called `keep` are quoted first. A bag is sellable when the quote exceeds half
+the rent and also exceeds a 10,000-lamport fee estimate. The highest quotes sell
+first, up to `--max` (default 4).
+
+Any unexpired or unreadable `dlmm_pending_{swaps,deploys,rent}` marker refuses
+`--execute`. So does an unreadable or mintless settlement marker. The run holds
+the entry lock, so neither a deploy nor rent maintenance can run during it.
+Before each sale the state is read again, and the sale stops if the balance,
+the exclusions or the markers changed. Each sale goes through the ordinary
+`swapToken` path, with its own swap lock, pending marker, route retry and
+`swap` submission record. It sells the exact raw balance, capped at 15% price
+impact and 100 bps slippage. The simulated net cash after fees must be at
+least 1 lamport. The quote must echo the same input mint, SOL output, raw amount
+and `ExactIn`. The first sale that fails, stays pending or is refused ends the
+run with `success:false`.
+
+The sale does not close the emptied account. The rent timer closes it on its
+next tick, as an ordinary empty-account refund. The proceeds are a one-time
+conversion of tokens already marked in NAV, not trading income.
+
 ### Externally initiated rent maintenance
 
 The observed CLEANAL wrapper is classified as `rent_maintenance` only when every
