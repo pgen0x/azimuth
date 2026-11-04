@@ -149,6 +149,9 @@ Measured over the 7d to 2026-08-19, the journal mark overstated the week's loss 
 **Commands**:
 *   `python3 .../dlmm_realized.py --days 30` — backfill the window, then print the divergence report
 *   `python3 .../dlmm_realized.py --check` — report only, no API calls
+*   `python3 .../dlmm_realized.py --days 2 --if-pending --quiet` — fetch only when a close in the window has no realized row (local read, no API call otherwise)
+
+**Cadence**: `dlmm_monitor_loop.sh` runs the `--if-pending` form in one background worker 5 min after `dlmm_closes.jsonl` changes (indexer lag), then every 15 min, never alongside the daily report's `--days 7` run. Timing lives in `dlmm_realized_cadence.sh`.
 
 ### 4. `dlmm_executor.js` — SDK Transaction Executor
 **Purpose**: Interacts directly with Meteora DLMM program on-chain. Invoked by Python runners. Supports RPC failover rotation.

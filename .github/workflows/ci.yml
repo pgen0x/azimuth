@@ -64,6 +64,8 @@ jobs:
           python3 assets/skill/scripts/test_dlmm_exit_liquidity.py
           python3 assets/skill/scripts/test_dlmm_yield_availability.py
           python3 assets/skill/scripts/test_dlmm_alerts.py
+          python3 assets/skill/scripts/test_dlmm_realized.py
+          bash assets/skill/scripts/test_dlmm_realized_cadence.sh
           python3 assets/skill/scripts/test_dlmm_risk_integration.py
           python3 assets/hermes/scripts/test_sol_dlmm_exit_review_gate.py
           python3 assets/skill/scripts/test_dlmm_entry_liquidity.py
