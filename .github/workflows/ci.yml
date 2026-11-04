@@ -99,4 +99,5 @@ jobs:
           python3 assets/skill/scripts/test_dlmm_observer_idle.py
           python3 assets/skill/scripts/test_dlmm_width_study.py
           python3 assets/skill/scripts/test_dlmm_ai_health.py
+          python3 assets/skill/scripts/test_dlmm_signal_record.py
           python3 assets/hermes/plugins/dlmm-report-guard/test_guard.py
