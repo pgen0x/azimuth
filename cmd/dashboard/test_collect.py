@@ -680,6 +680,56 @@ class BriefTests(unittest.TestCase):
         codes={a['code'] for a in c.brief_alerts(dict(healthy,monitor_tick_age_s=None,units=[]),{},T)}
         self.assertEqual(codes,{'monitor_tick_unknown','no_deploy_12h','core_unit_missing'})
 
+    def test_alerts_carry_ids_and_rent_rule(self):
+        healthy={'units':[{'unit':u,'active':'active','enabled':'enabled'} for u in c.CORE_UNITS],'failed_units':[],'disk_free_pct':50,'mem_available_mb':4000,'monitor_tick_age_s':10}
+        down=dict(healthy,units=[dict(healthy['units'][0],active='failed'),dict(healthy['units'][1],active='failed')]+healthy['units'][2:])
+        ids={a['id'] for a in c.brief_alerts(down,{'last_deploy_ts':T},T)}
+        self.assertEqual(ids,{'core_unit_down:'+c.CORE_UNITS[0],'core_unit_down:'+c.CORE_UNITS[1]})
+        rent=dict(healthy,rent_unit={'load':'loaded','active':'failed','result':'exit-code'},failed_units=[c.RENT_UNIT])
+        self.assertEqual({a['code'] for a in c.brief_alerts(rent,{'last_deploy_ts':T},T)},{'rent_failing'})
+        for ok in ({'load':'loaded','active':'inactive','result':'success'},{'load':'not-found','active':'inactive','result':'success'},None):
+            self.assertEqual(c.brief_alerts(dict(healthy,rent_unit=ok),{'last_deploy_ts':T},T),[])
+        # The unattended floor is the OOM line, not the brief's heavy-step line.
+        self.assertEqual(c.brief_alerts(dict(healthy,mem_available_mb=1000),{'last_deploy_ts':T},T,mem_min=c.ALERT_MEM_MIN_MB),[])
+        self.assertEqual([a['code'] for a in c.brief_alerts(dict(healthy,mem_available_mb=700),{'last_deploy_ts':T},T,mem_min=c.ALERT_MEM_MIN_MB)],['mem_low'])
+
+    def test_rent_unit_read_from_its_own_show(self):
+        base=brief_run()
+        def run(argv,**kw):
+            if argv[:4]==['systemctl','--user','show',c.RENT_UNIT]:
+                return SimpleNamespace(stdout='Id=%s\nLoadState=loaded\nActiveState=failed\nResult=exit-code\n'%c.RENT_UNIT,stderr='',returncode=0)
+            return base(argv,**kw)
+        h=c.brief_health(self.p,run,T,statvfs=lambda _:SimpleNamespace(f_bavail=50,f_blocks=100),meminfo='/nonexistent')
+        self.assertEqual(h['rent_unit'],{'load':'loaded','active':'failed','result':'exit-code'})
+        self.assertNotIn('rent_unit',c.brief_health(self.p,base,T,statvfs=lambda _:SimpleNamespace(f_bavail=50,f_blocks=100),meminfo='/nonexistent'))
+
+    def test_markers_stale_by_mtime_and_settlement_by_close(self):
+        P='P'*40
+        for d in c.MARKER_DIRS: (self.m/d).mkdir()
+        def put(d,name,age):
+            f=self.m/d/(name+'.json'); f.write_text('{}'); os.utime(f,(T-age,T-age))
+        put('dlmm_pending_swaps','old',3*DAY); put('dlmm_pending_swaps','new',60); put('dlmm_pending_deploys','fresh',600)
+        put('dlmm_settlements',P,30)  # rewritten on every retry, but its close is 5 days old
+        rows(self.m/'dlmm_closes.jsonl',[dict(ts=T-5*DAY,position=P,reason='x'),dict(ts=T-60,position=P,reason='retry row')])
+        out=c.brief_markers(self.m,T)
+        self.assertEqual(out['total'],4)
+        self.assertEqual(out['stale'],{'dlmm_pending_swaps':{'count':1,'oldest_s':3*DAY},'dlmm_settlements':{'count':1,'oldest_s':5*DAY}})
+        msg=[a for a in c.brief_alerts({'units':[{'unit':u,'active':'active','enabled':'enabled'} for u in c.CORE_UNITS],'monitor_tick_age_s':1},{'last_deploy_ts':T},T,out)]
+        self.assertEqual([a['code'] for a in msg],['marker_stale'])
+        self.assertIn('dlmm_pending_swaps 1 (oldest 3.0d)',msg[0]['message'])
+        self.assertEqual(c.brief_markers(self.m/'absent',T)['stale'],{})
+
+    def test_alerts_mode_offline(self):
+        rows(self.m/'dlmm_transactions.jsonl',[dict(ts=T-60,kind='deploy'),dict(ts=T-30,kind='swap')])
+        mem=self.p/'meminfo';mem.write_text('MemAvailable:    1024000 kB\n')
+        vfs=SimpleNamespace(f_bavail=50,f_blocks=100)
+        out=c.alerts(self.p,now=T,run=brief_run(ticks=[(T-15,'OBSERVER_TICK {}')]),statvfs=lambda _:vfs,meminfo=str(mem))
+        self.assertEqual(out['alerts'],[]);self.assertEqual(out['funnel']['last_deploy_ts'],T-60)
+        broken=c.alerts(self.p,now=T,run=lambda *a,**k:1/0,statvfs=lambda _:vfs,meminfo=str(mem))
+        self.assertIn('section_unavailable:health',{a['id'] for a in broken['alerts']})
+        json.dumps(c.scrub(out),allow_nan=False)
+        self.assertIn('id',json.dumps(c.scrub(broken)))
+
     def test_brief_end_to_end_offline(self):
         rows(self.m/'dlmm_nav.jsonl',[snap(T-DAY-60,1,native=1.0),snap(T-60,2,native=1.5)])
         rows(self.m/'dlmm_transactions.jsonl',[dict(ts=T-60,kind='deploy')])

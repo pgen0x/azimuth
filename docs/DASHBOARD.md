@@ -112,11 +112,37 @@ normal sign-in, cached for 20 seconds per parameter set, with one collector run 
 | closes | Last close row per position in `dlmm_closes.jsonl`, joined to `dlmm_realized.jsonl`. Money is `realized_sol` only; `pnl_basis` is `realized`, `unmeasured` (row with a null figure) or `not_reconciled` (no row yet). |
 | funnel | `azimuth.service` journal markers (`SIGNAL batch sent`, `entry_route=... reason=...`, audit/cooldown/lone rejects, direct deploy runs), `dlmm_pipeline_rejects.jsonl` gates and submitted deploy transactions in `dlmm_transactions.jsonl` (recorded before broadcast, not chain-confirmed). |
 | health | `azimuth`, `azimuth-sol-monitor`, `hermes-gateway`, `azimuth-dashboard` active + enabled; failed user units; disk free % of the profile volume; MemAvailable; age of the monitor's last `OBSERVER_TICK`. |
-| alerts | disk free < 15%, MemAvailable < 1200 MB, core unit not active / not enabled / failed, any failed user unit, no deploy submitted in 12 h, monitor tick older than 2 min, a section that could not be read. |
+| alerts | disk free < 15%, MemAvailable < 1200 MB, core unit not active / not enabled / failed, any failed user unit, `azimuth-sol-rent` failed (when installed), an executor marker (`dlmm_pending_{swaps,deploys,rent,closes}`, `dlmm_settlements`) older than 2 h, no deploy submitted in 12 h, monitor tick older than 2 min, a section that could not be read. Each alert has an `id` (its code, plus the unit for per-unit rules). |
 | today | Today's native SOL (latest `dlmm_nav.jsonl` snapshot, day in `tz`) minus yesterday's last; the rent reclaimed since local midnight from the `azimuth-sol-rent` unit journal, verified against wallet transaction facts (the same rules as the live dust ledger), and the delta net of that rent. Any unverified rent receipt makes the rent total null; a labeled verified subtotal is shown beside it. |
 | realized_7d | `dlmm_realized.jsonl` rows closed in the last 7 days: n, measured, sum and mean `realized_sol` by mode (from the close journal) and by entry route (the entry file's `risk_sizing.source`: `from_batch` = `deterministic`, `from_signal` = `ai`; older entries `unknown`, missing file `no_entry_file`). Unmeasured rows count in n, never as 0. |
 
 The dashboard's **ops** section shows the funnel, health and alerts of this brief.
+
+## Operator alerts
+
+The brief's alert rules, run unattended so a red flag reaches the operator without an agent watching:
+
+```bash
+azimuth-dashboard alerts -profile ~/.hermes/profiles/<profile>                     # print new/cleared alerts
+azimuth-dashboard alerts -profile ... -send-cmd "hermes send -t telegram"           # pipe them to a sender
+```
+
+It runs only the panels its rules read (health, last deploy, markers; under a second). Differences from the
+brief: MemAvailable alerts below **800 MB** (the OOM line, not the brief's 1200 MB heavy-step line), and
+`no_deploy_12h` is marked `i` (info) rather than `!`.
+
+- **Dedup.** `-state-file` (default `~/.local/state/azimuth/alerts.json`) remembers, per alert id, whether the
+  operator was last told it is firing. A message goes out only when an alert starts or clears, at most one per
+  alert id per 6 h; a raise or clear held back by that cap goes out on the first run after the window opens. A
+  standing alert is only listed under `still firing` when something else is sent.
+- **Blind runs never clear.** If the collector fails, or any section is unavailable, alerts missing from that
+  run keep their state; `collector_failed` is raised instead.
+- **Sending.** The plain-text message (at most 1000 characters) is piped on stdin to `-send-cmd`, split on
+  whitespace like `REPORT_CMD`. Empty prints it. A send failure is logged to stderr, leaves the state unsaved so
+  the next run retries, and exits 0 so the timer stays green; only bad flags exit non-zero.
+- **Timer.** `assets/systemd/azimuth-alerts.{service,timer}` (every 10 min) are rendered into
+  `<profile>/systemd/` by `install.sh` and never enabled by it. Copy both to `~/.config/systemd/user/`, add the
+  `-send-cmd` drop-in shown in the service file, then `systemctl --user enable --now azimuth-alerts.timer`.
 
 ## Trace
 

@@ -1,0 +1,11 @@
+[Unit]
+Description=Check Azimuth operator alerts every ten minutes
+
+[Timer]
+OnStartupSec=5min
+OnUnitActiveSec=10min
+AccuracySec=1min
+Unit=azimuth-alerts.service
+
+[Install]
+WantedBy=timers.target
