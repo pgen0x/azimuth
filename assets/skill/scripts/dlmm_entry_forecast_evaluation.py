@@ -83,7 +83,7 @@ def evaluate(entries, accounting, forecast_bytes, samples, start, end):
 
 
 if __name__ == '__main__':
-    from dlmm_accounting import report, rows
+    from dlmm_accounting import report
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--profile', type=Path, required=True)
     parser.add_argument('--start', type=float, required=True)
@@ -91,5 +91,7 @@ if __name__ == '__main__':
     memory = args.profile/'memories'
     entries = [json.loads(p.read_text()) for p in (memory/'dlmm_entries').glob('*.json')]
     journal = memory/FORECAST_FILE
-    print(json.dumps(evaluate(entries, report(args.profile), journal.read_bytes() if journal.exists() else b'',
-                              list(rows(memory/'dlmm_candidate_bin_samples.jsonl')), args.start, time.time()), indent=2))
+    # Include rows dlmm_retention.py moved to memories/archive/ (byte-exact, so hashes hold).
+    from dlmm_retention import archived_bytes, archived_rows
+    print(json.dumps(evaluate(entries, report(args.profile), archived_bytes(journal),
+                              list(archived_rows(memory/'dlmm_candidate_bin_samples.jsonl')), args.start, time.time()), indent=2))

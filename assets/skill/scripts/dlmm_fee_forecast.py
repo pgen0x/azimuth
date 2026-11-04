@@ -239,12 +239,14 @@ def score_forecasts(forecasts, samples, cutoff, validate):
 
 if __name__ == '__main__':
     import time
-    from dlmm_accounting import rows
     from dlmm_shadow import validate_candidate_snapshot
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--profile', type=Path, required=True)
     parser.add_argument('--as-of', type=float, default=None)
     args = parser.parse_args()
     memory = args.profile/'memories'
-    print(json.dumps(score_forecasts(rows(memory/FORECAST_FILE), rows(memory/'dlmm_candidate_bin_samples.jsonl'),
+    # Include rows dlmm_retention.py moved to memories/archive/.
+    from dlmm_retention import archived_rows
+    print(json.dumps(score_forecasts(list(archived_rows(memory/FORECAST_FILE)),
+                                    list(archived_rows(memory/'dlmm_candidate_bin_samples.jsonl')),
                                     time.time() if args.as_of is None else args.as_of, validate_candidate_snapshot), indent=2))

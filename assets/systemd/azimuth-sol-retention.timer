@@ -1,0 +1,11 @@
+[Unit]
+Description=Archive old Azimuth research journal rows once a day
+
+[Timer]
+OnCalendar=*-*-* 03:17:00 UTC
+RandomizedDelaySec=10min
+Persistent=true
+Unit=azimuth-sol-retention.service
+
+[Install]
+WantedBy=timers.target
