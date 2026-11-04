@@ -249,6 +249,36 @@ func clip(s string, n int) string {
 	return string(r[:n-1]) + "…"
 }
 
+// realizedCells renders {group: {n, measured, sum_sol, mean_sol}} as "group n=.. sum .. mean ..", largest n first.
+func realizedCells(v any) string {
+	m := obj(v)
+	if len(m) == 0 {
+		return "none"
+	}
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		a, _ := numOK(obj(m[keys[i]])["n"])
+		c, _ := numOK(obj(m[keys[j]])["n"])
+		if a != c {
+			return a > c
+		}
+		return keys[i] < keys[j]
+	})
+	parts := []string{}
+	for _, k := range keys {
+		c := obj(m[k])
+		cell := fmt.Sprintf("%s n=%s sum %s mean %s", k, str(c["n"]), solN(c["sum_sol"], true, 6), solN(c["mean_sol"], true, 6))
+		if c["measured"] != c["n"] {
+			cell += fmt.Sprintf(" (%s measured)", str(c["measured"]))
+		}
+		parts = append(parts, cell)
+	}
+	return strings.Join(parts, " · ")
+}
+
 func sectionError(b *strings.Builder, m object) bool {
 	if e, ok := m["collection_error"].(string); ok {
 		fmt.Fprintf(b, "  unavailable: %s\n", e)
@@ -292,6 +322,23 @@ func briefText(d object) string {
 				mark = " (so far)"
 			}
 			fmt.Fprintf(&b, "  %-10s %7s %8s %8s %8s %8s%s\n", str(r["day"]), sol(r["native_sol"], false), sol(r["cash_sol"], false), sol(r["d_cash_sol"], true), sol(r["known_sol"], false), sol(r["d_known_sol"], true), mark)
+		}
+	}
+
+	td := obj(d["today"])
+	fmt.Fprintf(&b, "TODAY %s %s · native Δ %s SOL vs prior day · rent reclaimed %s SOL (%s tx, net of fees %s) · Δ ex-rent %s · rent %s\n",
+		str(td["day"]), str(td["tz"]), sol(td["native_delta_sol"], true), sol(td["rent_reclaimed_sol"], true), str(td["rent_tx"]),
+		sol(td["rent_native_gain_sol"], true), sol(td["native_delta_ex_rent_sol"], true), str(td["rent_status"]))
+	if !sectionError(&b, td) && td["rent_reclaimed_sol"] == nil && td["rent_verified_subtotal_sol"] != nil {
+		fmt.Fprintf(&b, "  rent total unverified; verified subtotal %s SOL over %s of %s tx (not a total)\n",
+			sol(td["rent_verified_subtotal_sol"], true), str(td["rent_verified_tx"]), str(td["rent_tx"]))
+	}
+
+	rz := obj(d["realized_7d"])
+	fmt.Fprintf(&b, "REALIZED %sd (arbiter) · %s\n", str(rz["days"]), str(rz["status"]))
+	if !sectionError(&b, rz) {
+		for _, group := range []string{"by_mode", "by_route"} {
+			fmt.Fprintf(&b, "  %-6s %s\n", strings.TrimPrefix(group, "by_"), realizedCells(rz[group]))
 		}
 	}
 

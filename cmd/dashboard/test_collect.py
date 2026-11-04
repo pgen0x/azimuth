@@ -693,6 +693,167 @@ class BriefTests(unittest.TestCase):
         json.dumps(c.clean(out),allow_nan=False)
         broken=c.brief(self.p,now=T,run=lambda *a,**k:1/0,statvfs=lambda _:vfs,meminfo=str(mem))
         self.assertIn('section_unavailable',{a['code'] for a in broken['alerts']})
+        self.assertIn('today',out);self.assertIn('realized_7d',out)
+
+    def test_realized_by_mode_and_route(self):
+        A,B,C,D,E='A'*40,'B'*40,'C'*40,'D'*40,'E'*40
+        entries=self.m/'dlmm_entries';entries.mkdir()
+        (entries/(A+'.json')).write_text(json.dumps({'risk_sizing':{'source':'from_batch'}}))
+        (entries/(B+'.json')).write_text(json.dumps({'risk_sizing':{'source':'from_signal'}}))
+        (entries/(C+'.json')).write_text(json.dumps({'mode':'pulse'}))  # pre-provenance entry
+        rows(self.m/'dlmm_closes.jsonl',[dict(ts=T-100,position=A,mode='pulse'),dict(ts=T-90,position=B,mode='turnover'),
+                                         dict(ts=T-80,position=C,mode='pulse'),dict(ts=T-70,position=D,mode='pulse')])
+        rows(self.m/'dlmm_realized.jsonl',[dict(position=A,closed_at=T-100,realized_sol=.002),dict(position=B,closed_at=T-90,realized_sol=-.001),
+                                           dict(position=C,closed_at=T-80,realized_sol=None),dict(position=D,closed_at=T-70,realized_sol=.004),
+                                           dict(position=E,closed_at=T-8*DAY,realized_sol=9.0)])
+        out=c.brief_realized(self.m,T)
+        self.assertEqual(out['by_mode']['pulse'],{'n':3,'measured':2,'sum_sol':.006,'mean_sol':.003})
+        self.assertEqual(out['by_mode']['turnover']['sum_sol'],-.001)
+        r=out['by_route']
+        self.assertEqual((r['deterministic']['sum_sol'],r['ai']['sum_sol'],r['no_entry_file']['sum_sol']),(.002,-.001,.004))
+        self.assertEqual(r['unknown'],{'n':1,'measured':0,'sum_sol':None,'mean_sol':None})  # unmeasured is never 0
+        self.assertNotIn(9.0,[x['sum_sol'] for x in out['by_mode'].values()])
+
+    def test_today_native_delta_and_rent(self):
+        wallet={'as_of':T-60,'days':[{'day':'d1','status':'ok','native_sol':1.0},{'day':'d2','status':'partial_day','native_sol':1.25,'d_external_sol':0.0}]}
+        rent=dict(status='ok',executed_tx=2,rent_recovered_lamports=200_000_000,liquid_native_gain_sol=.199,
+                  verified_subtotal={'rent_recovered_lamports':200_000_000,'transactions':2},source_metadata={'journal':{'status':'ok'}})
+        with patch.object(c,'dust_ledger',return_value=rent) as ledger:
+            out=c.brief_today(wallet,self.m,T,'UTC',None)
+        self.assertEqual(ledger.call_args[0][1],c.day_start(c.local_day(T,c.zone('UTC')),c.zone('UTC')))
+        self.assertAlmostEqual(out['native_delta_sol'],.25);self.assertAlmostEqual(out['rent_reclaimed_sol'],.2)
+        self.assertAlmostEqual(out['native_delta_ex_rent_sol'],.051);self.assertEqual(out['native_as_of'],T-60)
+        with patch.object(c,'dust_ledger',return_value=dict(rent,rent_recovered_lamports=None,liquid_native_gain_sol=None,status='partial',
+                                                           verified_subtotal={'rent_recovered_lamports':100_000_000,'transactions':1})):
+            out=c.brief_today({'days':[{'native_sol':1.0}]},self.m,T,'UTC',None)
+        self.assertEqual((out['native_delta_sol'],out['rent_reclaimed_sol'],out['native_delta_ex_rent_sol']),(None,None,None))
+        self.assertEqual((out['rent_verified_subtotal_sol'],out['rent_verified_tx']),(.1,1))
+
+POS='Pos1111111111111111111111111111111111111'
+POOL='PooL111111111111111111111111111111111111'
+POOL2='PooL222222222222222222222222222222222222'
+
+def trace_run(scanner=(), monitor_reports=(), cooldown_set=(), cooldown_hits=()):
+    """Fake bounded_run for trace: answers by unit and --grep pattern, honours --since/--until like journalctl."""
+    calls=[]
+    def run(argv,**kw):
+        calls.append(argv); g=argv[argv.index('--grep')+1] if '--grep' in argv else ''
+        lo=float(argv[argv.index('--since')+1][1:]) if '--since' in argv else 0
+        hi=float(argv[argv.index('--until')+1][1:]) if '--until' in argv else 9e18
+        if 'azimuth.service' in argv: msgs=cooldown_hits if g=='re-entry cooldown' else scanner
+        elif g.startswith('^MONITOR_REPORT'): msgs=monitor_reports
+        else: msgs=cooldown_set
+        return SimpleNamespace(stdout=jlines([(t,m) for t,m in msgs if lo<=t<=hi]) if msgs else '',stderr='',returncode=0,capture_status='ok')
+    run.calls=calls
+    return run
+
+def report(pnl,in_range=True,pos=POS):
+    return 'MONITOR_REPORT:'+json.dumps({'positions':[{'position':'other','pnl_pct':-50},{'position':pos,'pnl_pct':pnl,'pnl_sol':pnl/1000,'in_range':in_range}]})
+
+class TraceTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp=tempfile.TemporaryDirectory();self.p=Path(self.tmp.name)/'prof';self.m=self.p/'memories';self.m.mkdir(parents=True)
+        self.s=Path(self.tmp.name)/'state';self.s.mkdir()
+        (self.m/'dlmm_entries').mkdir();(self.m/'dlmm_settlements').mkdir()
+        self.net=patch.object(socket.socket,'connect',side_effect=AssertionError('offline only'));self.net.start()
+        self.t0=T-3600;self.t1=T-1800
+    def tearDown(self): self.net.stop();self.tmp.cleanup()
+
+    def seed(self, source='from_signal'):
+        t0,t1=self.t0,self.t1
+        (self.m/'dlmm_entries'/(POS+'.json')).write_text(json.dumps({'pool':POOL,'pair':'NIO-SOL','base_symbol':'NIO','mode':'pulse','strategy':'sol_bidask',
+            'size_sol':.1,'entry_id':'e1','deployed_at':t0,'entry_bin':-428,'bins_below':44,'bins_above':0,'bin_snapshot':{'bins':[1]*1000},
+            'risk_sizing':{'source':source,'adjusted_score':90.5,'accepted_ticket_sol':.1},'active_bin_reanchor':{'cached':-430,'fresh':-428,'drift':2}}))
+        rows(self.m/'dlmm_closes.jsonl',[dict(ts=t1,position=POS,pool=POOL,pair='NIO-SOL',mode='pulse',reason='Low yield',pnl_pct=1.0,pnl_sol=.001,
+                                              age_min=30,ai_holds=1,txs=['x'],event='exit',pnl_basis='pre_swap_mark'),
+                                         dict(ts=t1-100,position='other',pool=POOL2,pair='NIO-SOL',mode='pulse',reason='SL')])
+        rows(self.m/'dlmm_realized.jsonl',[dict(position=POS,pool=POOL,pair='NIO-SOL',closed_at=t1,created_at=t0,realized_sol=.0012,fetched_at=t1+600)])
+        rows(self.m/'dlmm_pipeline_rejects.jsonl',[dict(ts=t0-600,pool=POOL,gate='downtrend_h6',mode='pulse',name='NIO-SOL'),
+                                                   dict(ts=t0-9*3600,pool=POOL,gate='old',mode='pulse',name='NIO-SOL'),
+                                                   dict(ts=t0-600,pool=POOL2,gate='other_pool',mode='pulse',name='NIO-SOL')])
+        (self.m/'dlmm_settlements'/(POS+'.json')).write_text(json.dumps({'state':'deferred','reason':'swap_no_route','last_attempt':t1+60}))
+        sig=lambda pools:{'payload':[{'pool':p,'base_symbol':s,'score':80,'mode':'pulse'} for p,s in pools]}
+        rows(self.s/'solana_deliveries.jsonl',[dict(delivery_id='old',observed_at=t0-3*3600,stage='prepared',signal=sig([(POOL,'NIO')])),
+                                               dict(delivery_id='d1',observed_at=t0-20,stage='prepared',signal=sig([(POOL2,'X'),(POOL,'NIO')])),
+                                               dict(delivery_id='d1',observed_at=t0-19,stage='accepted',http_status=202),
+                                               dict(delivery_id='d2',observed_at=t0-10,stage='prepared',signal=sig([(POOL2,'X')]))])
+        import base64,sqlite3
+        ident=base64.urlsafe_b64encode(json.dumps(['prof','dlmm-signal','d1'],separators=(',',':')).encode()).decode().rstrip('=')
+        with sqlite3.connect(self.p/'state.db') as db:
+            db.execute('CREATE TABLE sessions (id TEXT, source TEXT, chat_id TEXT, started_at REAL, ended_at REAL, end_reason TEXT)')
+            db.execute('CREATE TABLE messages (id INTEGER PRIMARY KEY, session_id TEXT, role TEXT, content TEXT, timestamp REAL)')
+            db.execute('INSERT INTO sessions VALUES (?,?,?,?,?,?)',('s1','webhook','webhook:v2:'+ident,t0-18,None,None))
+            db.executemany('INSERT INTO messages (session_id,role,content,timestamp) VALUES (?,?,?,?)',
+                           [('s1','assistant','thinking',t0-15),('s1','assistant','Pick NIO\n'+'x'*500,t0-5),('s1','assistant','',t0-4),('s1','user','hi',t0-3)])
+
+    def test_position_timeline_ai_route(self):
+        self.seed(); t0,t1=self.t0,self.t1
+        run=trace_run(
+            scanner=[(t0-20,'scanner[pulse]: SIGNAL batch sent 2 pools: X(80), NIO(80)'),(t0-20,'scanner[pulse]: entry_route=hermes_ai probe_cached=false'),
+                     (t0-20,'scanner[pulse]: SIGNAL batch sent 1 pools: ANIO(70)')],
+            monitor_reports=[(t0+20,report(-2.0)),(t0+40,report(3.5,False)),(t0+60,report(1.0))],
+            cooldown_set=[(t1+1,'🚫 Re-entry cooldown set for NIO: 1h (reason: normal exit)'),(t1+1,'🚫 Re-entry cooldown set for NIOX: 1h'),
+                          (t1+1,'🚫 Pool cooldown set 4h (low yield): '+POOL),(t1+2,'🔴 REPEAT LOSS #2 in 7d — escalating NIO cooldown to 24h')],
+            cooldown_hits=[(t1+60,'scanner[pulse]: NIO (PooL1111) in re-entry cooldown (59m left)'),(t1+120,'scanner[pulse]: NIO (PooL1111) in re-entry cooldown (58m left)'),
+                           (t1+90,'scanner[pulse]: NIO (PooL2222) in re-entry cooldown (5m left)')])
+        out=c.trace(self.p,self.s,POS,now=T,run=run)
+        self.assertEqual((out['kind'],out['status']),('position','ok'))
+        s=out['summary']
+        self.assertEqual((s['route'],s['pool'],s['symbol'],s['realized_sol'],s['pnl_basis'],s['state']),('ai',POOL,'NIO',.0012,'realized','closed'))
+        stages=[e['stage'] for e in out['events']]
+        self.assertEqual(stages,['pipeline_reject','batch_sent','batch_logged','route','webhook_accepted','hermes_decision','entry','active_bin_reanchor',
+                                 'monitor_ticks','close','cooldown_set','cooldown_set','cooldown_set','settlement','cooldown_blocked','realized'])
+        ev={e['stage']:e for e in out['events']}
+        self.assertEqual(ev['batch_sent']['delivery_id'],'d1');self.assertEqual(ev['batch_sent']['candidates'],2)
+        self.assertEqual(ev['webhook_accepted']['http_status'],202)
+        self.assertEqual(ev['route']['route'],'hermes_ai')
+        self.assertTrue(ev['hermes_decision']['text'].startswith('Pick NIO x'));self.assertEqual(len(ev['hermes_decision']['text']),300)
+        self.assertEqual(ev['pipeline_reject']['gate'],'downtrend_h6')
+        self.assertEqual(ev['active_bin_reanchor']['drift'],2)
+        self.assertNotIn('bin_snapshot',json.dumps(out))
+        m=ev['monitor_ticks']
+        self.assertEqual((m['ticks'],m['pnl_pct_min'],m['pnl_pct_max'],m['pnl_pct_max_at'],m['oor_ticks']),(3,-2.0,3.5,t0+40,1))
+        self.assertEqual((ev['close']['mark_pnl_pct'],ev['close']['mark_basis'],ev['close']['ai_holds']),(1.0,'pre_swap_mark',1))
+        self.assertNotIn('NIOX',json.dumps([e for e in out['events'] if e['stage']=='cooldown_set']))
+        self.assertEqual(ev['cooldown_blocked']['count'],2)
+        self.assertEqual(ev['settlement']['state'],'deferred')
+        argv=next(a for a in run.calls if any(x.startswith('^MONITOR_REPORT') for x in a))
+        self.assertIn('^MONITOR_REPORT:.*'+POS,argv)
+        json.dumps(c.scrub(out),allow_nan=False)
+
+    def test_position_deterministic_route_anchors_on_direct_deploy(self):
+        self.seed('from_batch'); t0=self.t0
+        (self.s/'solana_deliveries.jsonl').unlink()
+        run=trace_run(scanner=[(t0-700,'scanner[pulse]: entry_route=hermes_ai probe_cached=false'),
+                               (t0-15,'scanner[pulse]: entry_route=deterministic_fallback reason=command_timeout probe_cached=false; batch not sent to Hermes'),
+                               (t0+10,'scanner[pulse]: direct deploy done (deployed=true) for NIO(69)')])
+        out=c.trace(self.p,self.s,POS,now=T,run=run)
+        ev={e['stage']:e for e in out['events']}
+        self.assertEqual(out['summary']['route'],'deterministic')
+        self.assertEqual((ev['route']['route'],ev['route']['fallback_reason'],ev['direct_deploy']['deployed']),('deterministic_fallback','command_timeout',True))
+        self.assertNotIn('batch_sent',ev);self.assertNotIn('hermes_decision',ev)
+        self.assertEqual(out['sources']['deliveries'],'missing')
+
+    def test_symbol_and_pool_listing(self):
+        self.seed()
+        out=c.trace(self.p,self.s,'nio',now=T,run=trace_run())
+        self.assertEqual((out['kind'],out['status']),('symbol','ok'))
+        self.assertEqual({p['position'] for p in out['positions']},{POS,'other'})
+        self.assertEqual(out['reject_gates'],{'downtrend_h6':1,'old':1,'other_pool':1})
+        self.assertEqual((out['realized_sum_sol'],out['realized_measured']),(.0012,1))
+        pool=c.trace(self.p,self.s,POOL,now=T,run=trace_run())
+        self.assertEqual((pool['kind'],[p['position'] for p in pool['positions']],pool['reject_gates']),('pool',[POS],{'downtrend_h6':1,'old':1}))
+        self.assertEqual(c.trace(self.p,self.s,'NOPE',now=T,run=trace_run())['status'],'not_found')
+
+    def test_query_never_becomes_a_path_or_pattern(self):
+        self.seed()
+        (self.m/'evil.json').write_text(json.dumps({'pool':POOL}))
+        run=trace_run()
+        for q in ('../evil','../memories/evil','.*'):
+            out=c.trace(self.p,self.s,q,now=T,run=run)
+            self.assertEqual((out['kind'],out['status']),('symbol','not_found'))
+        self.assertEqual(run.calls,[])
+        self.assertIsNone(c.read_entry(self.m,'../evil'))
 
 class PerformanceParityTests(unittest.TestCase):
     """The cheap paths must produce exactly what the reference paths produce."""
