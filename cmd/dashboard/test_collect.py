@@ -694,4 +694,60 @@ class BriefTests(unittest.TestCase):
         broken=c.brief(self.p,now=T,run=lambda *a,**k:1/0,statvfs=lambda _:vfs,meminfo=str(mem))
         self.assertIn('section_unavailable',{a['code'] for a in broken['alerts']})
 
+class PerformanceParityTests(unittest.TestCase):
+    """The cheap paths must produce exactly what the reference paths produce."""
+    setUp=CollectorTests.setUp
+    tearDown=CollectorTests.tearDown
+
+    def test_redaction_fast_path_equals_full_rules(self):
+        import random
+        rng=random.Random(7)
+        alphabet='abkKsS-_:= \t\n"\'/.0123456789' + 'Bearer sk-mnemonic phrase words seed' + 'Kſİé'
+        corpus=list(SECRETS)+['pool-A','9gAKLMXq27oLVwnkW1tJxCuGEcbS4GZ1w3Ar2DnsLz6W','23h37m20s','', '\n',
+                               'plain text', 'SK-X', 'bEaReR x', 'Seed Words y', 'K', 'SK-x', 'ſk-x']
+        corpus+=[''.join(rng.choice(alphabet) for _ in range(rng.randint(0,24))) for _ in range(20000)]
+        for text in corpus:
+            self.assertEqual(c.redact_text(text),c._redact_text(text),repr(text))
+
+    def test_scrub_equals_clean_of_own_only(self):
+        value={'pool':'p','api_key':'x','nested':[{'TOKEN':'y','ok':float('inf'),'n':1,'b':True,'z':None,
+               'lp_comparison':{'a':1},'t':('tuple','kept')}],'msg':'TOKEN=abc tail','otherbot_x':1,7:'int key'}
+        for extra in ('', 'otherbot'):
+            pattern=c.hide_pattern(extra)
+            self.assertEqual(json.dumps(c.scrub(value,pattern),sort_keys=True,default=str),
+                             json.dumps(c.clean(c.own_only(value,pattern)),sort_keys=True,default=str))
+
+    def test_fast_plus_slow_equals_full_collect(self):
+        profile=self.m/'profile';m=profile/'memories';m.mkdir(parents=True)
+        bridge_fixture(m); RobinhoodTests.closes(self,m)
+        with patch.object(c.subprocess,'run',runner()),patch.object(c,'bounded_run',rh_run()),\
+             patch.object(c.time,'time',return_value=T),frozen_clock():
+            full=c.collect(profile,profile,1,('UTC','Asia/Jakarta'))
+            slow=c.slow_panels(profile,1,('UTC','Asia/Jakarta'),T)
+            fast=c.fast_panels(profile,profile,1,T)
+        self.assertEqual(set(slow)-{'collected_at'},set(c.SLOW_KEYS))
+        merged=c.scrub({'collected_at':T,**{k:slow[k] for k in c.SLOW_KEYS},**fast})
+        self.assertEqual(json.dumps(merged,sort_keys=True),json.dumps(full,sort_keys=True))
+        # Non-trivial on both sides: a measured calendar day and Robinhood closes reach the snapshot.
+        self.assertTrue(any(d.get('known_sol') for d in full['by_tz']['Asia/Jakarta']['north_star']['days']))
+        self.assertEqual(full['by_tz']['UTC']['robinhood']['totals']['USDG']['closes'],1)
+        self.assertEqual(full['nav']['ts'],T)
+
+    def test_jsonl_memo_rereads_a_changed_file_and_isolates_meta(self):
+        path=self.m/'j.jsonl'; rows(path,[{'a':1}])
+        first,meta=c.read_jsonl(path); meta['invalid_lines']+=5; first.append({'mutated':True})
+        again,meta2=c.read_jsonl(path)
+        self.assertEqual((again,meta2['invalid_lines']),([{'a':1}],0))
+        with path.open('a') as f: f.write(json.dumps({'a':2})+'\n')
+        self.assertEqual(c.read_jsonl(path)[0],[{'a':1},{'a':2}])
+        path.unlink(); self.assertEqual(c.read_jsonl(path)[1]['status'],'missing')
+
+    def test_recent_entries_match_glob_order(self):
+        d=self.m/'dlmm_entries';d.mkdir()
+        for i in range(5):
+            p=d/('e%d.json'%i);p.write_text('{}');os.utime(p,(1000+i%3,1000+i%3))
+        (d/'.hidden.json').write_text('{}');(d/'note.txt').write_text('');(d/'dangling.json').symlink_to(d/'missing')
+        want=sorted((p for p in d.glob('*.json') if p.exists()),key=lambda p:p.stat().st_mtime,reverse=True)[:3]
+        self.assertEqual(c.recent_entries(d,3),want)
+
 if __name__=='__main__': unittest.main()

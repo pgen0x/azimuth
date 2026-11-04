@@ -370,7 +370,24 @@ def north_star(memory, now, days=14, tz='UTC'):
                        'External deposits/withdrawals are not netted out of either delta; check d_external_sol before reading a jump as profit.',
                        'Refundable rent is a recoverable reserve, not income; native growth can be recovered principal or rent.']}
 
+_JSONL_MEMO={}
+
 def read_jsonl(path, cap=64*1024*1024):
+    """read_jsonl_uncached, reused within one collector process while the file's identity
+    (inode, size, mtime) is unchanged: several panels parse the same journals (closes, wallet
+    transactions, realized, Robinhood positions), once per viewer zone for some. Callers get
+    their own list and meta, because some count into meta; rows are shared and read-only."""
+    try:
+        info=os.stat(path,follow_symlinks=False)
+        sig=(str(path),cap,info.st_dev,info.st_ino,info.st_size,info.st_mtime_ns)
+    except OSError: sig=None
+    hit=_JSONL_MEMO.get(sig) if sig else None
+    if hit is None:
+        hit=read_jsonl_uncached(path,cap)
+        if sig: _JSONL_MEMO[sig]=hit
+    return list(hit[0]),dict(hit[1])
+
+def read_jsonl_uncached(path, cap=64*1024*1024):
     """Whole-file JSONL read for exact window sums; over `cap` the bridge is marked incomplete."""
     rows,meta=[],{'path':str(path),'status':'missing','invalid_lines':0}
     try:
@@ -923,8 +940,28 @@ def recent_entries(folder, limit=100):
     found.sort(key=lambda x:x[0],reverse=True)
     return [p for _,p in found[:limit]]
 
+# Slow panels: day-scale or 48h-scale evidence (day calendars, the 14-day NAV bridge, the rent
+# journal, Robinhood unit journals). They cost most of a refresh (~0.8s per viewer zone for the
+# calendar on a ~200MB dlmm_nav.jsonl, ~2.5s of journalctl --grep) and need no minute freshness,
+# so the server refreshes them on a longer period than the fast panels and merges the two.
+SLOW_KEYS=('by_tz','nav_bridge','live','robinhood')
+
+def slow_panels(profile, since=None, zones=('UTC',), now=None):
+    now=now or time.time(); memory=profile/'memories'; since=cutover(since,now)
+    return {'collected_at':now,**daily(profile,since,zones,now),'nav_bridge':panel(nav_bridge,memory,now),
+            'live':{'dust':panel(dust_ledger,memory,since)},'robinhood':panel(robinhood,memory,now)}
+
 def collect(profile, state, since=None, zones=('UTC',)):
-    now=time.time();memory=profile/'memories';sources=[];events=[]
+    """Full snapshot: fast panels plus slow panels, in one process (the reference output)."""
+    now=time.time()
+    out=fast_panels(profile,state,since,now)
+    slow=slow_panels(profile,since,zones,now)
+    # Same key order as before the split, so the serialized snapshot is byte-identical.
+    return scrub({'collected_at':now,'by_tz':slow['by_tz'],'nav_bridge':slow['nav_bridge'],'live':slow['live'],
+                  'robinhood':slow['robinhood'],**out})
+
+def fast_panels(profile, state, since=None, now=None):
+    now=now or time.time();memory=profile/'memories';sources=[];events=[]
     since=cutover(since,now)
     nav,meta=tail(memory/'dlmm_nav.jsonl',1);sources.append(meta)
     for filename,stage,root in [
@@ -1005,7 +1042,7 @@ def collect(profile, state, since=None, zones=('UTC',)):
         except (OSError,ValueError): pass
     hermes['gateway'] = next((s for s in services if s.get('Id')=='hermes-gateway.service'), {'ActiveState':'unknown'})
     events.sort(key=lambda e:e.get('time') or 0,reverse=True)
-    return scrub({'collected_at':now,**daily(profile,since,zones,now),'nav_bridge':panel(nav_bridge,memory,now),'live':{'dust':panel(dust_ledger,memory,since)},'robinhood':panel(robinhood,memory,now),'nav':nav[-1] if nav else {},'journal':events,'sources':sources,'hermes':hermes,'services':services})
+    return {'nav':nav[-1] if nav else {},'journal':events,'sources':sources,'hermes':hermes,'services':services}
 
 # Agent brief: one compact, read-only status read for an orchestrating agent (CLI `brief` and /api/agent/brief).
 # Every figure keeps its basis; marks are labeled as marks and a missing source is reported, never zero.
@@ -1177,10 +1214,15 @@ def brief(profile, now=None, hours=12, n=10, tz='UTC', run=None, statvfs=os.stat
     return out
 
 if __name__=='__main__':
-    # argv: profile state since [zones,comma,separated] [daily | brief hours n]; `daily` refreshes only the day-bucketed panels.
+    # argv: profile state since [zones,comma,separated] [daily | fast | slow | brief hours n].
+    # `daily` refreshes only the day-bucketed panels; `fast` and `slow` are the two halves of the
+    # full snapshot (no argument) that the server refreshes on separate periods.
     zones=tuple(sys.argv[4].split(',')) if len(sys.argv)>4 and sys.argv[4] else ('UTC',)
     if len(sys.argv)>5 and sys.argv[5]=='brief':
         out=scrub(brief(Path(sys.argv[1]),hours=int(sys.argv[6]),n=int(sys.argv[7]),tz=zones[0]))
     elif len(sys.argv)>5 and sys.argv[5]=='daily': out=clean(daily(Path(sys.argv[1]),sys.argv[3],zones))
+    elif len(sys.argv)>5 and sys.argv[5]=='fast':
+        now=time.time(); out=scrub({'collected_at':now,**fast_panels(Path(sys.argv[1]),Path(sys.argv[2]),sys.argv[3],now)})
+    elif len(sys.argv)>5 and sys.argv[5]=='slow': out=scrub(slow_panels(Path(sys.argv[1]),sys.argv[3],zones))
     else: out=collect(Path(sys.argv[1]),Path(sys.argv[2]),sys.argv[3] if len(sys.argv)>3 else None,zones)
     print(json.dumps(out,allow_nan=False))
