@@ -58,8 +58,9 @@ func TestBriefTextCompactAndHonest(t *testing.T) {
 	d["alerts"] = many
 	obj(d["positions"])["positions"] = many
 	obj(d["closes"])["recent"] = many[:10]
-	if lines := strings.Count(briefText(d), "\n"); lines > 60 {
-		t.Fatalf("text brief is %d lines, want <= 60", lines)
+	// 60 lines + one GROWTH and one EXPERIMENTS line.
+	if lines := strings.Count(briefText(d), "\n"); lines > 62 {
+		t.Fatalf("text brief is %d lines, want <= 62", lines)
 	}
 	// A failed section names itself instead of rendering empty numbers.
 	d["funnel"] = object{"status": "unavailable", "collection_error": "Panel evidence could not be read: OSError"}

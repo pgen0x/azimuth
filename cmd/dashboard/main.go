@@ -80,7 +80,7 @@ const (
 )
 
 // slowKeys must match SLOW_KEYS in collect.py.
-var slowKeys = []string{"by_tz", "nav_bridge", "live", "robinhood"}
+var slowKeys = []string{"by_tz", "nav_bridge", "live", "robinhood", "experiments"}
 
 // collect runs one collector mode ("fast", "slow" or "daily") and decodes its snapshot.
 func (s *server) collect(ctx context.Context, mode string, zones []string) (object, error) {
@@ -322,7 +322,7 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch r.URL.Path {
 	case "/api/overview":
 		value = object{"collected_at": data["collected_at"], "collection_error": failure, "nav": data["nav"], "services": data["services"], "sources": data["sources"]}
-	case "/api/capital", "/api/live", "/api/robinhood":
+	case "/api/capital", "/api/live", "/api/robinhood", "/api/growth":
 		lines, ok := logLines(r.URL.Query().Get("n"))
 		if !ok {
 			http.Error(w, "invalid n: use 1 to 1000", 400)
@@ -337,6 +337,8 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		zoneInfo := object{"tz": tz, "tz_fallback": fallback, "tz_error": problem}
 		if r.URL.Path == "/api/capital" {
 			value = object{"north_star": panels["north_star"], "nav_bridge": data["nav_bridge"]}
+		} else if r.URL.Path == "/api/growth" {
+			value = object{"collected_at": data["collected_at"], "north_star": panels["north_star"], "growth": panels["growth"], "experiments": data["experiments"]}
 		} else if r.URL.Path == "/api/robinhood" {
 			value = robinhoodView(data, panels, lines)
 		} else {

@@ -287,6 +287,55 @@ func sectionError(b *strings.Builder, m object) bool {
 	return false
 }
 
+// growthParts names the today-split components in brief order; a missing one prints "unmeasured".
+var growthParts = []struct{ key, name string }{
+	{"realized_lp", "realized LP"}, {"rent_reclaimed", "rent"}, {"network_fees", "fees"}, {"external", "external"}, {"other", "other"},
+}
+
+func briefGrowth(b *strings.Builder, g object) {
+	// One line: the TODAY section above already names the day and zone.
+	if e, ok := g["collection_error"].(string); ok {
+		fmt.Fprintf(b, "GROWTH unavailable: %s\n", e)
+		return
+	}
+	if g["components"] == nil {
+		fmt.Fprintf(b, "GROWTH Δnative %s SOL · %s\n", sol(g["d_native_sol"], true), str(g["status"]))
+		return
+	}
+	byKey := map[string]object{}
+	for _, x := range list(g["components"]) {
+		byKey[str(obj(x)["component"])] = obj(x)
+	}
+	parts := []string{}
+	for _, p := range growthParts {
+		c, v := byKey[p.key], "unmeasured"
+		if c != nil && c["sol"] != nil {
+			v = solN(c["sol"], true, 6)
+		}
+		if n, _ := numOK(c["pending"]); n > 0 {
+			v += fmt.Sprintf(" (%s/%s closes not reconciled, so far %s)", str(c["pending"]), str(c["closes"]), solN(c["measured_subtotal_sol"], true, 6))
+		}
+		parts = append(parts, p.name+" "+v)
+	}
+	fmt.Fprintf(b, "GROWTH Δnative %s SOL · %s · %s\n", sol(g["d_native_sol"], true), strings.Join(parts, " · "), str(g["status"]))
+}
+
+// briefExperiments is one line: counts only, each study's own report decides.
+func briefExperiments(b *strings.Builder, e object) {
+	if e["collection_error"] != nil {
+		fmt.Fprintf(b, "EXPERIMENTS unavailable: %s\n", str(e["collection_error"]))
+		return
+	}
+	g, hc, ra := obj(e["geometry_shadow"]), obj(e["hold_canary"]), obj(e["active_bin_reanchor"])
+	rep, arms := obj(g["report"]), obj(hc["arms"])
+	verdict := str(rep["verdict"])
+	if rep["status"] != "ok" {
+		verdict = "report " + str(rep["status"])
+	}
+	fmt.Fprintf(b, "EXPERIMENTS geometry shadow %s entries/%s paired/%s treated %s · hold canary A %s B %s · re-anchor %s/%s entries\n",
+		str(g["entries"]), str(rep["closed"]), str(rep["treated"]), verdict, str(arms["A"]), str(arms["B"]), str(ra["reanchored"]), str(ra["entries"]))
+}
+
 func briefText(d object) string {
 	var b strings.Builder
 	now := d["collected_at"]
@@ -341,6 +390,8 @@ func briefText(d object) string {
 			fmt.Fprintf(&b, "  %-6s %s\n", strings.TrimPrefix(group, "by_"), realizedCells(rz[group]))
 		}
 	}
+	briefGrowth(&b, obj(d["growth"]))
+	briefExperiments(&b, obj(d["experiments"]))
 
 	p := obj(d["positions"])
 	pos := list(p["positions"])

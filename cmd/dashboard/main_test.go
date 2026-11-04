@@ -226,6 +226,7 @@ with tempfile.TemporaryDirectory() as tmp:
             {'position':'c','closed_at':base+30,'realized_sol':-0.2},{'position':'old','closed_at':base-10,'realized_sol':9.0},
             {'position':'a','closed_at':base+10,'realized_sol':0.25}]))
         (m/'dlmm_closes.jsonl').write_text(''.join(json.dumps({'position':p,'mode':md})+'\n' for p,md in [('a','pulse'),('b','pulse'),('old','pulse')]))
+        _JSONL_MEMO.clear()  # same-size rewrite inside one mtime tick would hit the read memo
         r=realized_by_mode(m,base,TZ); assert r['tz']==TZ
         cell=r['days'][time.strftime('%Y-%m-%d',time.gmtime(20000*day))]
         assert cell['pulse']=={'closes':2,'measured':1,'unmeasured':1,'realized_sol':0.25}  # last row per position wins
@@ -233,6 +234,7 @@ with tempfile.TemporaryDirectory() as tmp:
     # A DST zone: the same close lands on different local days either side of the boundary.
     rows=[{'position':'x','closed_at':1730606400,'realized_sol':0.1}]  # 2024-11-03 04:00 UTC = 00:00 EDT
     (m/'dlmm_realized.jsonl').write_text(json.dumps(rows[0])+'\n')
+    _JSONL_MEMO.clear()
     assert list(realized_by_mode(m,0,'America/New_York')['days'])==['2024-11-03']
     assert list(realized_by_mode(m,0,'Pacific/Kiritimati')['days'])==['2024-11-03']
     assert list(realized_by_mode(m,0,'Pacific/Pago_Pago')['days'])==['2024-11-02']
