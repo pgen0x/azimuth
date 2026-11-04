@@ -43,8 +43,7 @@ func TestBriefTextCompactAndHonest(t *testing.T) {
 		"n/a not_reconciled", "+0.000012 realized", "realized n/a SOL",
 		"batches 3 (4 pools)", "hermes_ai 2, deterministic_fallback:timeout 1", "daemon rejects: none",
 		"HEALTH disk free 9%", "azimuth=active/enabled",
-		"GROWTH today 2033-05-18 (UTC) Δnative +0.0695 SOL · partial",
-		"realized LP unmeasured (1/1 closes not reconciled, so far +0.000000) · rent +0.068436 · fees -0.000055 · external +0.000000 · other unmeasured",
+		"GROWTH Δnative +0.0695 SOL · realized LP unmeasured (1/1 closes not reconciled, so far +0.000000) · rent +0.068436 · fees -0.000055 · external +0.000000 · other unmeasured · partial",
 		"EXPERIMENTS geometry shadow 0 entries/0 paired/0 treated NEED-DATA · hold canary A 14 B 12 · re-anchor 0/27 entries",
 	} {
 		if !strings.Contains(text, want) {
