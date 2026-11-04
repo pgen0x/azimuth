@@ -33,7 +33,8 @@ def record_pipeline_candidates(profile, cli):
         if cli.from_batch:
             records = json.loads(cli.from_batch)
         elif cli.from_signal:
-            records = [json.loads(cli.from_signal)]
+            from dlmm_signal_record import parse_signal_record
+            records = [parse_signal_record(cli.from_signal)]
         else:
             return 0
         if not isinstance(records, list):

@@ -12,6 +12,7 @@ import math
 import shlex
 from pathlib import Path
 from dlmm_pool_cash_gate import negative_pool_cash
+from dlmm_signal_record import parse_signal_record, SignalRecordError
 from local_indicators import check_local_indicators
 from tz_util import local_time_str
 from dlmm_monitor import position_live_onchain, load_soul_dlmm_params as load_exit_params
@@ -1230,7 +1231,7 @@ def defer_capacity_signals(cli, wallet=True):
     if cli.mode not in ("casual", "multiday", "turnover", "pulse"):
         return
     try:
-        records = json.loads(cli.from_batch) if cli.from_batch else [json.loads(cli.from_signal)]
+        records = json.loads(cli.from_batch) if cli.from_batch else [parse_signal_record(cli.from_signal)]
     except (TypeError, ValueError):
         return
     if not isinstance(records, list):
@@ -1377,17 +1378,16 @@ def main():
         # divergence between two independent trending snapshots that used to cause
         # "--pool ... not found in valid candidates. Aborting." The live gates below
         # (open positions, cooldown, momentum, bin-array rent) still run.
-        try:
-            signal_record = json.loads(cli.from_signal)
-        except Exception as e:
-            print(f"Aborting: --from-signal is not valid JSON: {e}")
-            sys.exit(1)
         # The record must be one payload element (docs/SIGNAL_SCHEMA.md), not the
-        # whole signal or its payload array. Validate the keys the pipeline
+        # whole signal or a multi-record array. A lone element still wrapped in
+        # its array, or followed by the array's closing bracket, is unambiguous
+        # and accepted (dlmm_signal_record.py). Validate the keys the pipeline
         # accesses unconditionally so a malformed record aborts here with a clear
         # message instead of a KeyError deep in ranking/deploy.
-        if isinstance(signal_record, list):
-            print("Aborting: --from-signal got an array; pass ONE payload element (a single pool record)")
+        try:
+            signal_record = parse_signal_record(cli.from_signal)
+        except SignalRecordError as e:
+            print(f"Aborting: {e}")
             sys.exit(1)
         required = ("pool", "name", "base_mint", "base_symbol", "tvl", "volatility", "score")
         missing = [k for k in required if k not in signal_record]
