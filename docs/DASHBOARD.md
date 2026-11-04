@@ -95,7 +95,7 @@ normal sign-in, cached for 20 seconds per parameter set, with one collector run 
 
 | Section | Source and basis |
 | --- | --- |
-| wallet | `dlmm_nav.jsonl`, last snapshot per day in `tz` over 14 days: native, cash, known, rent, daily deltas (the rows `.orchestra/scoreboard.py` reads; pass its zone to match its day split). External flows are not netted out. |
+| wallet | `dlmm_nav.jsonl`, last snapshot per day in `tz` over 14 days: native, cash, known, rent, daily deltas (the rows the capital north star reads; days split in `tz`). External flows are not netted out. |
 | positions | Latest `MONITOR_REPORT:` line of `azimuth-sol-monitor.service` (15 min); a newer `0 position(s) found on-chain` line empties it. pnl is a portfolio MARK, never money. |
 | closes | Last close row per position in `dlmm_closes.jsonl`, joined to `dlmm_realized.jsonl`. Money is `realized_sol` only; `pnl_basis` is `realized`, `unmeasured` (row with a null figure) or `not_reconciled` (no row yet). |
 | funnel | `azimuth.service` journal markers (`SIGNAL batch sent`, `entry_route=... reason=...`, audit/cooldown/lone rejects, direct deploy runs), `dlmm_pipeline_rejects.jsonl` gates and submitted deploy transactions in `dlmm_transactions.jsonl` (recorded before broadcast, not chain-confirmed). |

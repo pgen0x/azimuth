@@ -987,7 +987,7 @@ def brief_wallet(memory, now, tz):
             'native_sol':latest.get('native_sol'),'cash_sol':latest.get('cash_sol'),'known_sol':latest.get('known_sol'),
             'refundable_rent_sol':latest.get('refundable_rent_sol'),'wallet_history_complete':latest.get('wallet_history_complete'),
             'd_known_measured_sum_sol':sum(measured) if measured else None,'d_known_measured_days':len(measured),'days':days,
-            'basis':'dlmm_nav.jsonl, last snapshot per day in '+tz+' (same rows as .orchestra/scoreboard.py). known = native + SPL mark + LP mark + rent; cash omits SPL marks. External flows are not netted out.'}
+            'basis':'dlmm_nav.jsonl, last snapshot per day in '+tz+' (same rows as the capital north star). known = native + SPL mark + LP mark + rent; cash omits SPL marks. External flows are not netted out.'}
 
 def brief_positions(run, now):
     """Open positions from the exit monitor's own latest MONITOR_REPORT. A newer
