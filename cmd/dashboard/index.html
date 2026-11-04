@@ -109,6 +109,50 @@ function deltaBars(rows,k,tipFor,W,H=200){
     else marks+=`<path class="bar ${v>0?'fp':'fn'}" d="${barPath(x,bw,y0,f.y(+v))}"${dim}/>`});
   return `<svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" aria-hidden="true">${defs}${f.g}${marks}${rows.map((r,i)=>col(f,i,T,tipFor(r))).join('')}</svg>`}
 
+/* Stacked bars from zero (parts sum to cash) with one overlay line; hatched stub where a part is unmeasured. */
+function stackChart(rows,parts,line,tipFor,W,H=230){
+  const tot=r=>parts.every(p=>isNum(r[p.k]))?parts.reduce((a,p)=>a+Number(r[p.k]),0):null;
+  const vals=rows.flatMap(r=>[tot(r),r[line.k]]).filter(isNum).map(Number);
+  if(!vals.length)return emptyChart('No measured days in this window yet.');
+  const [hid,defs]=hatch(),L=62,R=14,T=12,B=28,sc=nice(Math.min(0,...vals),Math.max(...vals)),f=frame(W,H,L,R,T,B,rows.length,sc,rows.map(r=>r.day));
+  const bw=Math.max(2,Math.min(24,f.band*.62)),y0=f.y(0);let marks='',d='',pen=false;
+  rows.forEach((r,i)=>{const x=f.cx(i)-bw/2,dim=r.status==='partial_day'?' opacity=".7"':'';
+    if(tot(r)===null){if(r.status!=='no_snapshot')marks+=`<rect class="unm" x="${x.toFixed(1)}" y="${(y0-10).toFixed(1)}" width="${bw.toFixed(1)}" height="10" fill="url(#${hid})" stroke="#6b727a" stroke-width="1"/>`}
+    else{let a=0;parts.forEach(p=>{const v=Number(r[p.k]);if(!(v>0))return;const b=a+v;if(Math.abs(f.y(b)-f.y(a))>=.5)marks+=`<path class="bar" d="${barPath(x,bw,f.y(a),f.y(b),false)}" style="fill:${p.color}"${dim}/>`;a=b})}
+    if(isNum(r[line.k])){d+=(pen?'L':'M')+f.cx(i).toFixed(1)+' '+f.y(+r[line.k]).toFixed(1);pen=true}else pen=false});
+  marks+=`<path d="${d}" fill="none" style="stroke:${line.color}" stroke-width="2" stroke-dasharray="5 3" stroke-linejoin="round"/>`;
+  const legend=`<div class="legend">${parts.map(p=>`<span><i class="sq" style="background:${p.color}"></i>${esc(p.name)}</span>`).join('')}<span><i style="background:${line.color}"></i>${esc(line.name)} (dashed)</span><span><i class="sq hatch"></i>Unmeasured</span></div>`;
+  return legend+`<svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" aria-hidden="true">${defs}${f.g}${marks}${rows.map((r,i)=>col(f,i,T,tipFor(r))).join('')}</svg>`}
+
+/* Growth: native SOL per day and where today's native change came from. Unmeasured stays "unmeasured". */
+function growthPanels(d){
+  if(d.error)return grid(panel(12,12,head('growth / native')+`<p class="note warn" role="status">Growth data unavailable: ${esc(d.error)}</p>`,'Growth'));
+  const g=d.growth||{},ns=d.north_star||{},ex=d.experiments||{};
+  const rows=(ns.days||[]).slice(-31).map((r,i,a)=>({...r,d_native_sol:i&&isNum(r.native_sol)&&isNum(a[i-1].native_sol)?r.native_sol-a[i-1].native_sol:null}));
+  const zone=`days in ${esc(DAY_TZ)}`;
+  const val=c=>isNum(c.sol)?`<span class="${tone(c.sol)}">${esc(fx(c.sol))}</span>`:'<span class="muted">unmeasured</span>';
+  const why=c=>c.component==='realized_lp'?(c.pending?`${num(c.pending)} of ${num(c.closes)} closes not reconciled yet; measured so far ${fx(c.measured_subtotal_sol)}`:`${num(c.closes)} closes`)
+    :c.component==='rent_reclaimed'?(isNum(c.rent_recovered_sol)?`rent ${num(c.rent_recovered_sol)} − forfeited ${num(c.forfeited_quote_sol)} · ${num(c.closed_accounts)} accounts`:`rent unit receipts not fully verified on-chain${c.pending?` (${num(c.pending)} pending)`:''}; verified so far ${fx(c.measured_subtotal_sol)}`)
+    :c.component==='network_fees'?`${num(c.transactions)} landed transactions`:c.component==='other'&&!isNum(c.sol)?'needs every other part measured':'';
+  let today=head('growth / today',g.day?esc(long(g.day))+', so far':'');
+  if(g.collection_error)today+=`<p class="note warn" role="status">${esc(g.collection_error)}</p>`;
+  else if(g.status==='insufficient_snapshots')today+='<p class="note warn">No NAV snapshot before local midnight and after it yet: today\'s native change is unmeasured.</p>';
+  else today+=`<p class="hero ${tone(g.d_native_sol)}">${esc(fx(g.d_native_sol))}</p><p class="muted">Δ native SOL · ${esc(num(g.native_start_sol))} → ${esc(num(g.native_end_sol))} · ${esc(date(g.start_ts))} → ${esc(date(g.end_ts))}</p>`
+    +table(['Part','SOL','Evidence'],(g.components||[]).map(c=>[esc(c.label)+(c.component==='other'?' <span class="badge">residual</span>':''),val(c),`<span class="muted">${esc(why(c))}</span>`]),[1])
+    +`<p class="muted">Context: Δ LP mark ${esc(fx(g.d_lp_mark_sol))} · Δ refundable rent ${esc(fx(g.d_refundable_rent_sol))} SOL (capital parked or released, not income).</p>`;
+  const tip=r=>r.status==='no_snapshot'?`No snapshot\n${long(r.day)}`:[`Native ${num(r.native_sol)} SOL`,long(r.day),`LP mark ${num(r.lp_mark_sol)} · rent ${num(r.refundable_rent_sol)}`,`Cash ${num(r.cash_sol)} · known ${num(r.known_sol)}`,r.status==='partial_day'?'Today, so far':''].filter(Boolean).join('\n');
+  const tipD=r=>[isNum(r.d_native_sol)?`${fx(r.d_native_sol)} SOL Δ native`:'Δ native unmeasured',long(r.day),r.d_external_sol?`Includes external flow ${fx(r.d_external_sol)} SOL`:'',r.status==='partial_day'?'Today, so far':''].filter(Boolean).join('\n');
+  const geo=ex.geometry_shadow||{},rep=geo.report||{},gate=rep.gate||{},hc=ex.hold_canary||{},arms=hc.arms||{},ra=ex.active_bin_reanchor||{};
+  const verdict=v=>v?`<span class="badge${v==='KILL'?' bad':v==='PROPOSE-CANARY'?' ok':''}">${esc(v)}</span>`:'<span class="muted">report unavailable</span>';
+  const studies=ex.collection_error?`<p class="note warn" role="status">${esc(ex.collection_error)}</p>`:table(['Study','n so far','Detail','Status'],[
+    ['Geometry shadow · BidAsk coverage, live vs wider arm',`${num(geo.entries)} entries`,`${num(rep.closed)} paired closes · treated ${num(rep.treated)} / ${num(gate.min_n)} · pools ${num(rep.pools)} / ${num(gate.min_pools)} · days ${num(rep.days)} / ${num(gate.min_days)}`,rep.status==='ok'?verdict(rep.verdict):verdict(null)],
+    ['Pulse hold canary · A/B',`${num(hc.closes)} closes`,`A ${num(arms.A)} · B ${num(arms.B)}${hc.first_ts?' · since '+esc(date(hc.first_ts)):''}`,hc.closes?'<span class="badge">running</span>':'<span class="muted">no labeled closes</span>'],
+    ['Active-bin re-anchor',`${num(ra.reanchored)} of ${num(ra.entries)} entries`,isNum(ra.max_drift_bins)?`max drift ${num(ra.max_drift_bins)} bins`:'no re-anchor recorded',`<span class="muted">since ${esc(date(ra.since))}</span>`]],[1]);
+  return grid(panel(5,12,today,'Today\'s native SOL change'),
+    panel(7,12,head('growth / balance',`stacked parts sum to cash, SOL · ${zone}`)+chart('Stacked bars of native SOL, LP mark and refundable rent per day, with known SOL as a dashed line',W=>stackChart(rows,[{k:'native_sol',name:'Native',color:'var(--s1)'},{k:'lp_mark_sol',name:'LP mark',color:'var(--s2)'},{k:'refundable_rent_sol',name:'Refundable rent',color:'var(--s0)'}],{k:'known_sol',name:'Known',color:'var(--ink-2)'},tip,W))
+      +chart('Bar chart of daily change in native SOL',W=>deltaBars(rows,'d_native_sol',tipD,W,150))+'<p class="muted">Bars below: Δ native per day. External deposits and withdrawals are not netted out.</p>'),
+    panel(12,12,head('experiments / live studies','counts only; each study\'s own report decides')+studies+`<p class="muted">${esc(ex.basis||'')}</p>`,'Experiments'))}
+
 /* Calendar heatmap (Monday-first weeks). Unmeasured days are hatched, never zero. */
 function calendar(rows,k){
   const days=rows.filter(r=>isDay(r.day));
@@ -183,8 +227,8 @@ let tab='overview',offset=0,query='',stage='',request=0;
 async function api(path){const r=await fetch('/api/'+path);if(r.status===401&&typeof location!=='undefined'){location.href='/login';throw Error('Session expired: sign in again')}if(!r.ok)throw Error(await r.text());return r.json()}
 const tzq='tz='+encodeURIComponent(VIEW_TZ);
 async function render(){const req=++request;const main=$('#content');if(main.classList)main.classList.add('loading');try{let html='';charts=[];
-if(tab==='overview') {const o=await api('overview');const n=o.nav||{};
-html=freshness(o);
+if(tab==='overview') {const [o,gr]=await Promise.all([api('overview'),api('growth?'+tzq).catch(e=>({error:e.message}))]);const n=o.nav||{};
+html=freshness(o)+(gr&&gr.tz?zoneNote(gr):'')+growthPanels(gr||{});
 html+=grid(panel(4,12,`${head('overview / known','SOL')}<p class="hero">${esc(num(n.known_asset_subtotal_sol))}</p><p class="muted">Native + SPL mark + LP mark + refundable rent. Complete NAV: ${esc(num(n.nav_sol))}${n.nav_sol==null?' (incomplete valuation)':''}.</p><p class="muted">Snapshot ${esc(date(n.ts))} · ${esc(age(n.ts))} · ${(n.issues||[]).length} valuation issues</p>`,'Known SOL subtotal'),
   panel(8,12,`${head('overview / wallet','SOL · each with its own evidence time')}<div class="mg">${metric('Native SOL',num(n.native_sol),'Snapshot '+age(n.ts))}${metric('SPL mark · SOL',num(n.spl_mark_sol),'Partial valuation; see missing marks')}${metric('LP capital mark · SOL',num(n.lp_mark_sol),'Position valuation, not executable cash')}${metric('Refundable rent · SOL',num(n.refundable_rent_sol),'Recoverable reserve, not profit')}${metric('Complete NAV · SOL',num(n.nav_sol),n.nav_sol==null?'Incomplete valuation':'Observed portfolio value')}</div>`),
   panel(12,12,`<p class="note" style="margin:0">${n.native_sol==null?'Native balance unavailable.':'Native balance is shown for context only.'} Entry is decided by the configured cash policy (reserve, rent allowance, minimum ticket) together with the other entry guards; this panel does not determine entry capacity. Native balance growth can include principal and rent recovery.</p>`),

@@ -369,6 +369,7 @@ def north_star(memory, now, days=14, tz='UTC'):
         tokens=row.get('tokens') if isinstance(row.get('tokens'),list) else []
         item={'day':day.isoformat(),'status':'partial_day' if day==today else 'ok',
               'ts':row['ts'],'source':source,'native_sol':row.get('native_sol'),'cash_sol':cash,'known_sol':known,
+              'lp_mark_sol':row.get('lp_mark_sol'),'spl_mark_sol':row.get('spl_mark_sol'),
               'refundable_rent_sol':row.get('refundable_rent_sol'),'wallet_history_complete':row.get('wallet_history_complete'),
               'unpriced_tokens':sum(1 for i in row.get('issues') or [] if isinstance(i,str) and i.startswith('unpriced_token:')),
               'quote_deferred_tokens':sum(1 for x in tokens if isinstance(x,dict) and x.get('mark_error')=='quote_budget_deferred'),
@@ -589,7 +590,7 @@ def nav_bridge(memory, now, days=14):
                unpriced_tokens=[sum(1 for t in s.get('tokens') or [] if isinstance(t,dict) and t.get('mark_sol') is None) for s in (a,b)])
     return out
 
-def dust_ledger(memory, since, run=None):
+def dust_ledger(memory, since, run=None, until=None):
     """Deduped receipts are claims. Only finalized balance/account facts verify them.
     The quote is always an off-chain receipt valuation, never on-chain income.
     Missing evidence makes window totals unknown; measured subtotals stay labeled.
@@ -623,6 +624,7 @@ def dust_ledger(memory, since, run=None):
         try: row=json.loads(body[body.index('{'):]); stamp=float(head)
         except ValueError: invalid+=1; continue
         if not number(stamp) or stamp<since: continue
+        if until is not None and stamp>until: continue  # receipts after the window end belong to the next one
         if not isinstance(row,dict): invalid+=1; continue
         if 'success' not in row and 'txHash' not in row: continue
         out['runs']+=1
@@ -747,6 +749,126 @@ def realized_by_mode(memory, since, tz='UTC'):
         if number(r.get('realized_sol')): cell['measured']+=1; cell['realized_sol']=(cell['realized_sol'] or 0)+r['realized_sol']
         else: cell['unmeasured']+=1
     return {'tz':tz,'since':since,'status':'partial' if incomplete(meta) or incomplete(closemeta) else 'ok','sources':{'realized':meta,'closes':closemeta},'days':days,'basis':'Measured subtotal of realized_sol by close time (local day in the viewer time zone) and mode. Null realized = unmeasured; a wholly unmeasured cohort is Unknown, not 0.'}
+
+def _closes_in(closerows, lo, hi):
+    """Positions with an exit row in (lo, hi]. dlmm_closes.jsonl carries no success flag."""
+    return {r['position'] for r in closerows if r.get('event') in (None,'exit') and identifier(r.get('position'))
+            and number(r.get('ts')) and lo<r['ts']<=hi}
+
+def growth_today(memory, now, tz='UTC', run=None):
+    """Today's change in native SOL (local day in `tz`), split into measured parts:
+    realized LP (dlmm_realized, the arbiter), rent reclaimed (rent unit: closed-account rent minus
+    forfeited quotes), network fees, external transfers, and other (the residual). Window = the last
+    NAV snapshot before local midnight -> the latest snapshot. A part with missing evidence is None
+    (unmeasured), never 0, and then `other` is None too."""
+    L=1e9; z=zone(tz); path=memory/'dlmm_nav.jsonl'; today=local_day(now,z)
+    sources={'nav_start':{},'nav_end':{}}; need=('native_sol','slot')
+    b=nav_at(path,now,need=need,meta=sources['nav_end'])
+    a=nav_at(path,day_start(today,z)-1e-3,need=need,meta=sources['nav_start'])
+    out={'tz':tz,'day':today.isoformat(),'sources':sources,
+         'basis':'Δ native SOL from the last NAV snapshot before local midnight to the latest snapshot. '
+                 'realized_lp = realized_sol of positions closed in the window (dlmm_realized.jsonl); '
+                 'rent_reclaimed = rent recovered by the rent unit minus forfeited quote valuations; '
+                 'network_fees = fees of every landed wallet transaction in the slot window; '
+                 'external = transfers classified external; other = Δ native minus those parts '
+                 '(principal moved into/out of open LP, swap settlement, close-path ATA rent; forfeited quotes are '
+                 'not native flows, so other carries them back).'}
+    if not a or not b or a['ts']>=b['ts'] or not lamports(a.get('slot')) or not lamports(b.get('slot')):
+        out['status']='insufficient_snapshots'; return out
+    d_native=b['native_sol']-a['native_sol']
+    diff=lambda k:b[k]-a[k] if number(a.get(k)) and number(b.get(k)) else None
+    out.update(start_ts=a['ts'],end_ts=b['ts'],native_start_sol=a['native_sol'],native_end_sol=b['native_sol'],
+               d_native_sol=d_native,d_lp_mark_sol=diff('lp_mark_sol'),d_refundable_rent_sol=diff('refundable_rent_sol'))
+    # Realized LP: union of close-journal exits and realized rows dated in the window.
+    realrows,sources['realized']=read_jsonl(memory/'dlmm_realized.jsonl')
+    closerows,sources['closes']=read_jsonl(memory/'dlmm_closes.jsonl')
+    realized=keyed(realrows,'position',sources['realized'])
+    closed=_closes_in(closerows,a['ts'],b['ts'])|{p for p,r in realized.items() if number(r.get('closed_at')) and a['ts']<r['closed_at']<=b['ts']}
+    measured=[realized[p]['realized_sol'] for p in closed if p in realized and number(realized[p].get('realized_sol'))]
+    pending=len(closed)-len(measured)
+    rz_known=pending==0 and not incomplete(sources['realized']) and not incomplete(sources['closes'])
+    # Fees and external transfers: wallet transactions in the slot window.
+    txrows,sources['wallet_transactions']=read_jsonl(memory/'dlmm_wallet_transactions.jsonl')
+    fees=ext=0; tx_known=(not incomplete(sources['wallet_transactions']) and a.get('wallet_history_complete') is True
+                          and b.get('wallet_history_complete') is True); n=0
+    for r in keyed(txrows,'signature',sources['wallet_transactions']).values():
+        if r.get('landed') is False: continue
+        if not lamports(r.get('slot')): tx_known=False; continue
+        if not a['slot']<r['slot']<=b['slot']: continue
+        n+=1
+        if lamports(r.get('fee_lamports')): fees+=r['fee_lamports']
+        else: tx_known=False
+        if r.get('classification')=='external_transfer':
+            if lamports(r.get('wallet_delta_lamports'),True): ext+=r['wallet_delta_lamports']+(r.get('fee_lamports') or 0)
+            else: tx_known=False
+    dust=dust_ledger(memory,a['ts'],run,until=b['ts']); sources['rent_unit']=dust.get('source_metadata',{}).get('journal',{'status':dust.get('status')})
+    rent,quote=dust.get('rent_recovered_lamports'),dust.get('forfeited_quote_lamports')
+    rent_known=rent is not None and quote is not None; vs=dust.get('verified_subtotal') or {}
+    comps=[dict(component='realized_lp',label='Realized LP (closed positions, arbiter)',sol=sum(measured) if rz_known else None,
+                measured_subtotal_sol=sum(measured),closes=len(closed),pending=pending),
+           dict(component='rent_reclaimed',label='Rent reclaimed (closed accounts − forfeited quotes)',
+                sol=(rent-quote)/L if rent_known else None,rent_recovered_sol=None if rent is None else rent/L,
+                forfeited_quote_sol=None if quote is None else quote/L,closed_accounts=dust.get('closed_accounts'),
+                measured_subtotal_sol=(vs.get('rent_recovered_lamports',0)-vs.get('forfeited_quote_lamports',0))/L,
+                pending=vs.get('unknown') or 0),
+           dict(component='network_fees',label='Network fees (all landed transactions)',sol=-fees/L if tx_known else None,transactions=n),
+           dict(component='external',label='External transfers',sol=ext/L if tx_known else None)]
+    parts=[c['sol'] for c in comps]
+    comps.append(dict(component='other',label='Other (principal in/out of open LP, swaps, close rent)',
+                      sol=d_native-sum(parts) if all(number(v) for v in parts) else None))
+    out.update(components=comps,status='ok' if all(number(c['sol']) for c in comps) else 'partial')
+    return out
+
+GEOMETRY_REPORT='skills/solana-dlmm/scripts/dlmm_geometry_shadow_report.py'
+
+def experiments(profile, since, now, run=None):
+    """Live shadow/canary studies and their n so far. Counts only: outcomes stay with each study's
+    own pre-registered report, so the dashboard never becomes a place to peek at a canary."""
+    memory=profile/'memories'; run=run or bounded_run
+    rows,meta=read_jsonl(memory/'dlmm_geometry_shadow.jsonl')
+    entries=[r for r in rows if r.get('kind')=='entry']
+    geo={'entries':len(entries),'live_entries':sum(1 for r in entries if not r.get('dry_run')),
+         'first_ts':min((r['ts'] for r in entries if number(r.get('ts'))),default=None),'source':meta,'report':{'status':'missing'}}
+    try:
+        obs=os.stat(memory/'dlmm_geometry_shadow_obs.jsonl',follow_symlinks=False); geo['obs_bytes']=obs.st_size
+    except OSError: geo['obs_bytes']=None
+    script=profile/GEOMETRY_REPORT
+    if script.is_file():
+        try:
+            res=run(['python3',str(script),'--profile',str(profile)],timeout=6,cap=1024*1024)
+            if getattr(res,'capture_status','ok')!='ok' or res.returncode!=0: geo['report']={'status':'failed'}
+            else:
+                rep,_=json.JSONDecoder().raw_decode(res.stdout.lstrip())
+                geo['report']={'status':'ok',**select(rep,'verdict entries closed open_positions treated pools days identical_arms gate')}
+        except (OSError,ValueError,AttributeError): geo['report']={'status':'failed'}
+    closes,cmeta=read_jsonl(memory/'dlmm_closes.jsonl'); last={}
+    for r in closes:
+        if r.get('event') in (None,'exit') and r.get('hold_canary_arm') in ('A','B') and identifier(r.get('position')) and number(r.get('ts')):
+            last[r['position']]=r
+    arms={k:sum(1 for r in last.values() if r['hold_canary_arm']==k) for k in ('A','B')}
+    canary={'arms':arms,'closes':len(last),'first_ts':min((r['ts'] for r in last.values()),default=None),
+            'last_ts':max((r['ts'] for r in last.values()),default=None),'source':cmeta}
+    n=hits=0; drifts=[]; last_ts=None
+    for path in recent_entries(memory/'dlmm_entries',limit=2000):
+        try:
+            if path.stat().st_mtime<since: break  # newest first
+            raw=read_regular(path,1024*1024)
+        except (OSError,ValueError): continue
+        n+=1
+        if b'active_bin_reanchor' not in raw: continue
+        try: ra=json.loads(raw).get('active_bin_reanchor')
+        except ValueError: continue
+        if not isinstance(ra,dict): continue
+        hits+=1
+        if number(ra.get('drift')): drifts.append(abs(ra['drift']))
+    reanchor={'entries':n,'reanchored':hits,'max_drift_bins':max(drifts,default=None),'since':since}
+    seen=lambda m:m.get('status')=='missing' or not incomplete(m)  # no journal yet = nothing recorded yet
+    return {'collected_at':now,'status':'ok' if seen(meta) and seen(cmeta) else 'partial',
+            'geometry_shadow':geo,'hold_canary':canary,'active_bin_reanchor':reanchor,
+            'basis':'Counts only, read-only. Geometry shadow: dlmm_geometry_shadow.jsonl entry rows, verdict and paired '
+                    'closes from dlmm_geometry_shadow_report.py (its own pre-registered gate). Hold canary: last exit row '
+                    'per position in dlmm_closes.jsonl carrying hold_canary_arm (labeled only while the canary is on). '
+                    'Re-anchor: dlmm_entries files modified since the cutover that record active_bin_reanchor.'}
 
 # Robinhood Chain (Uniswap v3/v4). Read only: executor/monitor journals, systemd state and unit journals;
 # no RPC. Ether has two spellings (v3 WETH, v4 native ETH), so both settle as ETH; USDG is never summed with it.
@@ -939,7 +1061,7 @@ def cutover(since, now): return float(since) if since and float(since)>0 else no
 def daily(profile, since, zones, now=None):
     """Day-bucketed panels, once per requested IANA zone."""
     now=now or time.time(); memory=profile/'memories'; since=cutover(since,now)
-    return {'collected_at':now,'by_tz':{tz:{'north_star':panel(north_star,memory,now,CALENDAR_DAYS,tz),'realized':panel(realized_by_mode,memory,since,tz),'robinhood':panel(rh_closes,memory,tz)} for tz in zones}}
+    return {'collected_at':now,'by_tz':{tz:{'north_star':panel(north_star,memory,now,CALENDAR_DAYS,tz),'realized':panel(realized_by_mode,memory,since,tz),'robinhood':panel(rh_closes,memory,tz),'growth':panel(growth_today,memory,now,tz)} for tz in zones}}
 
 def recent_entries(folder, limit=100):
     """Newest `limit` *.json entry files by mtime. scandir reuses the directory read for the stat,
@@ -959,12 +1081,13 @@ def recent_entries(folder, limit=100):
 # journal, Robinhood unit journals). They cost most of a refresh (~0.8s per viewer zone for the
 # calendar on a ~200MB dlmm_nav.jsonl, ~2.5s of journalctl --grep) and need no minute freshness,
 # so the server refreshes them on a longer period than the fast panels and merges the two.
-SLOW_KEYS=('by_tz','nav_bridge','live','robinhood')
+SLOW_KEYS=('by_tz','nav_bridge','live','robinhood','experiments')
 
 def slow_panels(profile, since=None, zones=('UTC',), now=None):
     now=now or time.time(); memory=profile/'memories'; since=cutover(since,now)
     return {'collected_at':now,**daily(profile,since,zones,now),'nav_bridge':panel(nav_bridge,memory,now),
-            'live':{'dust':panel(dust_ledger,memory,since)},'robinhood':panel(robinhood,memory,now)}
+            'live':{'dust':panel(dust_ledger,memory,since)},'robinhood':panel(robinhood,memory,now),
+            'experiments':panel(experiments,profile,since,now)}
 
 def collect(profile, state, since=None, zones=('UTC',)):
     """Full snapshot: fast panels plus slow panels, in one process (the reference output)."""
@@ -973,7 +1096,7 @@ def collect(profile, state, since=None, zones=('UTC',)):
     slow=slow_panels(profile,since,zones,now)
     # Same key order as before the split, so the serialized snapshot is byte-identical.
     return scrub({'collected_at':now,'by_tz':slow['by_tz'],'nav_bridge':slow['nav_bridge'],'live':slow['live'],
-                  'robinhood':slow['robinhood'],**out})
+                  'robinhood':slow['robinhood'],'experiments':slow['experiments'],**out})
 
 def fast_panels(profile, state, since=None, now=None):
     now=now or time.time();memory=profile/'memories';sources=[];events=[]
@@ -1223,10 +1346,12 @@ def brief(profile, now=None, hours=12, n=10, tz='UTC', run=None, statvfs=os.stat
     out['closes']=panel(brief_closes,memory,now,hours,n)
     out['funnel']=panel(brief_funnel,memory,run,now,hours)
     out['health']=panel(brief_health,profile,run,now,statvfs,meminfo)
+    out['growth']=panel(growth_today,memory,now,tz,run)
+    out['experiments']=panel(experiments,profile,cutover(None,now),now,run)
     out['alerts']=brief_alerts(out['health'],out['funnel'],now)
     out['today']=panel(brief_today,out['wallet'],memory,now,tz,run)
     out['realized_7d']=panel(brief_realized,memory,now)
-    for k in ('wallet','positions','closes','funnel','health','today','realized_7d'):
+    for k in ('wallet','positions','closes','funnel','health','today','realized_7d','growth','experiments'):
         if out[k].get('collection_error'): out['alerts'].append({'code':'section_unavailable','message':k+': '+out[k]['collection_error']})
     return out
 

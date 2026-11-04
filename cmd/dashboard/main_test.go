@@ -11,7 +11,7 @@ import (
 )
 
 func TestReadOnlyCachedAPI(t *testing.T) {
-	s := &server{data: object{"live": object{"dust": object{"runs": 3}}, "by_tz": object{"UTC": object{"north_star": object{"days": []any{}}}}, "nav": object{"nav_sol": nil, "native_sol": 0.0}, "journal": []any{object{"stage": "swap", "evidence": object{"signature": "proof-1"}}, object{"stage": "gate", "evidence": object{"pool": "pool-2"}}}}}
+	s := &server{data: object{"live": object{"dust": object{"runs": 3}}, "experiments": object{"hold_canary": object{"closes": 2}}, "by_tz": object{"UTC": object{"north_star": object{"days": []any{}}, "growth": object{"d_native_sol": 0.25}}}, "nav": object{"nav_sol": nil, "native_sol": 0.0}, "journal": []any{object{"stage": "swap", "evidence": object{"signature": "proof-1"}}, object{"stage": "gate", "evidence": object{"pool": "pool-2"}}}}}
 	cookie := signIn(t, s)
 	for _, tc := range []struct {
 		method, path, host string
@@ -28,6 +28,9 @@ func TestReadOnlyCachedAPI(t *testing.T) {
 		{"GET", "/api/live", "localhost", 200, `"live":{"dust":{"runs":3},`},
 		{"GET", "/api/command", "localhost", 404, "404"},
 		{"GET", "/api/capital?tz=Mars/Olympus", "localhost", 200, `"tz_fallback":true`},
+		{"GET", "/api/growth", "localhost", 200, `"growth":{"d_native_sol":0.25}`},
+		{"GET", "/api/growth", "localhost", 200, `"experiments":{"hold_canary":{"closes":2}}`},
+		{"GET", "/api/growth?tz=Mars/Olympus", "localhost", 200, `"tz_fallback":true`},
 	} {
 		r := httptest.NewRequest(tc.method, tc.path, nil)
 		r.Host = tc.host
@@ -226,6 +229,7 @@ with tempfile.TemporaryDirectory() as tmp:
             {'position':'c','closed_at':base+30,'realized_sol':-0.2},{'position':'old','closed_at':base-10,'realized_sol':9.0},
             {'position':'a','closed_at':base+10,'realized_sol':0.25}]))
         (m/'dlmm_closes.jsonl').write_text(''.join(json.dumps({'position':p,'mode':md})+'\n' for p,md in [('a','pulse'),('b','pulse'),('old','pulse')]))
+        _JSONL_MEMO.clear()  # same-size rewrite inside one mtime tick would hit the read memo
         r=realized_by_mode(m,base,TZ); assert r['tz']==TZ
         cell=r['days'][time.strftime('%Y-%m-%d',time.gmtime(20000*day))]
         assert cell['pulse']=={'closes':2,'measured':1,'unmeasured':1,'realized_sol':0.25}  # last row per position wins
@@ -233,6 +237,7 @@ with tempfile.TemporaryDirectory() as tmp:
     # A DST zone: the same close lands on different local days either side of the boundary.
     rows=[{'position':'x','closed_at':1730606400,'realized_sol':0.1}]  # 2024-11-03 04:00 UTC = 00:00 EDT
     (m/'dlmm_realized.jsonl').write_text(json.dumps(rows[0])+'\n')
+    _JSONL_MEMO.clear()
     assert list(realized_by_mode(m,0,'America/New_York')['days'])==['2024-11-03']
     assert list(realized_by_mode(m,0,'Pacific/Kiritimati')['days'])==['2024-11-03']
     assert list(realized_by_mode(m,0,'Pacific/Pago_Pago')['days'])==['2024-11-02']
@@ -275,7 +280,7 @@ func TestEveryPanelRetainsCollectionFailure(t *testing.T) {
 func TestCapitalLiveLocalReadOnlyMatrix(t *testing.T) {
 	s := &server{data: object{"collected_at": 123}}
 	cookie := signIn(t, s)
-	for _, path := range []string{"/api/capital", "/api/live", "/api/robinhood"} {
+	for _, path := range []string{"/api/capital", "/api/live", "/api/robinhood", "/api/growth"} {
 		for _, host := range []string{"localhost", "127.0.0.1:8787", "[::1]:8787", "attacker.invalid", "192.0.2.1:8787"} {
 			for _, method := range []string{"GET", "HEAD", "POST", "PUT", "DELETE", "PATCH"} {
 				r := httptest.NewRequest(method, path, nil)

@@ -861,6 +861,107 @@ class TraceTests(unittest.TestCase):
         self.assertEqual(run.calls,[])
         self.assertIsNone(c.read_entry(self.m,'../evil'))
 
+MIDNIGHT=T-T%DAY  # UTC local midnight of T's day
+
+def nsnap(ts,slot,native,**kw): r=snap(ts,slot,native);r.update(kw);return r
+def stamped(rows_): return ''.join('%.1f fixture node[1]: %s\n'%(t,json.dumps(r)) for t,r in rows_)
+
+class GrowthTests(unittest.TestCase):
+    """Today's native split: parts reconcile exactly to Δ native, and missing evidence is None."""
+    setUp=CollectorTests.setUp
+    tearDown=CollectorTests.tearDown
+    def fixture(self,closes=None,realized=None,receipts=None,m=None):
+        m=m or self.m
+        rows(m/'dlmm_nav.jsonl',[nsnap(MIDNIGHT-DAY,50,0.9),nsnap(MIDNIGHT-100,100,1.0,refundable_rent_sol=.01),
+                                 nsnap(MIDNIGHT+60,120,1.0),nsnap(T-60,200,1.103,refundable_rent_sol=.008,lp_mark_sol=.2)])
+        rows(m/'dlmm_wallet_transactions.jsonl',[
+            dict(signature='close-P',slot=150,wallet_delta_lamports=99995000,fee_lamports=5000,failed=False),
+            fact(slot=160),
+            dict(signature='ext',slot=170,wallet_delta_lamports=1000000,fee_lamports=0,classification='external_transfer',failed=False),
+            dict(signature='before',slot=90,wallet_delta_lamports=-7,fee_lamports=5000,failed=False),
+            dict(signature='unlanded',slot=180,landed=False,wallet_delta_lamports=0,fee_lamports=5000)])
+        rows(m/'dlmm_closes.jsonl',closes if closes is not None else [dict(position='P',ts=T-1000,event='exit'),dict(position='old',ts=MIDNIGHT-500,event='exit')])
+        rows(m/'dlmm_realized.jsonl',realized if realized is not None else [dict(position='P',closed_at=T-1000,realized_sol=.05),dict(position='old',closed_at=MIDNIGHT-500,realized_sol=9)])
+        run=runner(stamped(receipts if receipts is not None else [(T-500,receipt())]))
+        return c.growth_today(m,T,'UTC',run)
+    def comp(self,g): return {x['component']:x for x in g['components']}
+    def test_parts_reconcile_to_native_delta(self):
+        g=self.fixture();k=self.comp(g)
+        self.assertEqual(g['status'],'ok');self.assertEqual(g['day'],'2033-05-18')
+        self.assertEqual((g['start_ts'],g['end_ts']),(MIDNIGHT-100,T-60))
+        self.assertAlmostEqual(g['d_native_sol'],.103,12)
+        self.assertEqual(k['realized_lp']['sol'],.05)          # 'old' closed before midnight: excluded
+        self.assertAlmostEqual(k['rent_reclaimed']['sol'],(2000000-1000)/1e9,12)
+        self.assertAlmostEqual(k['network_fees']['sol'],-10000/1e9,12)  # before-window and unlanded excluded
+        self.assertAlmostEqual(k['external']['sol'],.001,12)
+        self.assertAlmostEqual(sum(x['sol'] for x in g['components']),g['d_native_sol'],12)
+        self.assertAlmostEqual(g['d_refundable_rent_sol'],-.002,12);self.assertAlmostEqual(g['d_lp_mark_sol'],.2,12)
+    def test_unreconciled_close_is_unmeasured_not_zero(self):
+        g=self.fixture(closes=[dict(position='P',ts=T-1000,event='exit'),dict(position='Q',ts=T-900)])
+        k=self.comp(g)
+        self.assertIsNone(k['realized_lp']['sol']);self.assertEqual((k['realized_lp']['pending'],k['realized_lp']['closes']),(1,2))
+        self.assertEqual(k['realized_lp']['measured_subtotal_sol'],.05)
+        self.assertIsNone(k['other']['sol']);self.assertEqual(g['status'],'partial')
+    def test_unverified_rent_receipt_is_unmeasured(self):
+        rows(self.m/'x',[]);g=self.fixture(receipts=[(T-500,receipt(txHash='not-ingested'))])
+        self.assertIsNone(self.comp(g)['rent_reclaimed']['sol']);self.assertIsNone(self.comp(g)['other']['sol'])
+        self.assertEqual((self.comp(g)['rent_reclaimed']['pending'],self.comp(g)['rent_reclaimed']['measured_subtotal_sol']),(1,0))
+    def test_rent_receipt_after_the_window_end_is_not_counted(self):
+        g=self.fixture(receipts=[(T-500,receipt()),(T-10,receipt(txHash='late-not-ingested'))])
+        self.assertAlmostEqual(self.comp(g)['rent_reclaimed']['sol'],(2000000-1000)/1e9,12)
+    def test_no_snapshot_before_midnight(self):
+        rows(self.m/'dlmm_nav.jsonl',[snap(MIDNIGHT+60,120),snap(T-60,200)])
+        self.assertEqual(c.growth_today(self.m,T,'UTC',runner('')).get('status'),'insufficient_snapshots')
+    def test_viewer_zone_moves_the_window(self):
+        self.fixture()
+        g=c.growth_today(self.m,T,'Asia/Tokyo',runner(''))  # Tokyo midnight is 15:00 UTC the day before
+        self.assertEqual(g['day'],'2033-05-18');self.assertEqual(g['start_ts'],MIDNIGHT-DAY)
+    def test_north_star_carries_lp_mark(self):
+        self.fixture();ns=c.north_star(self.m,T,2,'UTC')
+        self.assertEqual(ns['days'][-1]['lp_mark_sol'],.2)
+    def test_daily_and_brief_carry_growth(self):
+        p=self.m/'profile';(p/'memories').mkdir(parents=True);want=self.fixture(m=p/'memories')
+        with patch.object(c,'bounded_run',runner('')):
+            d=c.daily(p,0,('UTC',),now=T);self.assertIn('growth',d['by_tz']['UTC'])
+            self.assertIn('experiments',c.slow_panels(p,0,('UTC',),now=T))
+        b=c.brief(p,now=T,run=runner(''),statvfs=lambda _:SimpleNamespace(f_bavail=1,f_blocks=1),meminfo=str(self.m/'none'))
+        self.assertEqual(b['growth']['d_native_sol'],want['d_native_sol']);self.assertIn('hold_canary',b['experiments'])
+
+class ExperimentsTests(unittest.TestCase):
+    setUp=CollectorTests.setUp
+    tearDown=CollectorTests.tearDown
+    def test_counts_only_and_report_verdict(self):
+        p=self.m;mem=p/'memories';(mem/'dlmm_entries').mkdir(parents=True)
+        rows(mem/'dlmm_geometry_shadow.jsonl',[dict(kind='entry',ts=T-5),dict(kind='entry',ts=T-4,dry_run=True),dict(kind='other')])
+        rows(mem/'dlmm_closes.jsonl',[dict(position='p1',ts=T-3,hold_canary_arm='A'),dict(position='p1',ts=T-2,event='exit',hold_canary_arm='A'),
+                                      dict(position='p2',ts=T-1,hold_canary_arm='B'),dict(position='p3',ts=T-1),dict(position='p4',ts=T,event='compound',hold_canary_arm='B')])
+        (mem/'dlmm_entries'/'a.json').write_text(json.dumps({'active_bin_reanchor':{'cached_bin':5,'active_bin':3,'drift':-2}}))
+        (mem/'dlmm_entries'/'b.json').write_text(json.dumps({'mode':'pulse'}))
+        for f in ('a.json','b.json'): os.utime(mem/'dlmm_entries'/f,(T-60,T-60))
+        old=mem/'dlmm_entries'/'old.json';old.write_text(json.dumps({'active_bin_reanchor':{'drift':3}}));os.utime(old,(T-10*DAY,T-10*DAY))
+        script=p/c.GEOMETRY_REPORT;script.parent.mkdir(parents=True);script.write_text('')
+        calls=[]
+        def run(argv,**k):
+            calls.append(argv)
+            return SimpleNamespace(stdout=json.dumps({'verdict':'NEED-DATA','entries':1,'closed':0,'treated':0,'gate':{'min_n':30},'positions':['x']},indent=2)+'\nNEED-DATA: n=0/30\n',stderr='',returncode=0,capture_status='ok')
+        with patch.object(c.os.path,'getmtime',side_effect=AssertionError):
+            e=c.experiments(p,T-7*DAY,T,run)
+        self.assertEqual(calls,[['python3',str(script),'--profile',str(p)]])
+        self.assertEqual((e['geometry_shadow']['entries'],e['geometry_shadow']['live_entries']),(2,1))
+        self.assertEqual(e['geometry_shadow']['report']['verdict'],'NEED-DATA');self.assertNotIn('positions',e['geometry_shadow']['report'])
+        self.assertEqual(e['hold_canary']['arms'],{'A':1,'B':1});self.assertEqual(e['hold_canary']['closes'],2)
+        self.assertEqual((e['active_bin_reanchor']['entries'],e['active_bin_reanchor']['reanchored'],e['active_bin_reanchor']['max_drift_bins']),(2,1,2))
+        self.assertNotIn('realized_sol',json.dumps(e))  # counts only: no outcome to peek at
+    def test_empty_profile_is_ok_and_missing_report_is_named(self):
+        e=c.experiments(self.m,T-DAY,T,lambda *a,**k:1/0)
+        self.assertEqual(e['status'],'ok');self.assertEqual(e['geometry_shadow']['entries'],0)
+        self.assertEqual(e['geometry_shadow']['report'],{'status':'missing'})
+        self.assertEqual(e['active_bin_reanchor']['entries'],0)
+    def test_failed_report_is_failed(self):
+        script=self.m/c.GEOMETRY_REPORT;script.parent.mkdir(parents=True);script.write_text('')
+        e=c.experiments(self.m,T-DAY,T,lambda *a,**k:SimpleNamespace(stdout='',stderr='boom',returncode=1,capture_status='ok'))
+        self.assertEqual(e['geometry_shadow']['report'],{'status':'failed'})
+
 class PerformanceParityTests(unittest.TestCase):
     """The cheap paths must produce exactly what the reference paths produce."""
     setUp=CollectorTests.setUp
