@@ -109,7 +109,9 @@ def run(profile, output, cutoff):
             'Network/cleanup budget 26151 lamports; full principal rent return assumed; separate ATA and extra-cost stress.',
             'Pool cohorts can overlap across pools; sums are diagnostic, not a funded portfolio or wallet backtest.',
             'Historical periods have been inspected. Future paper execution validation required.'], promotion_allowed=False))
-    samples = [s for s in iter_rows(memory/'dlmm_candidate_bin_samples.jsonl')
+    # Include rows dlmm_retention.py moved to memories/archive/.
+    from dlmm_retention import archived_rows
+    samples = [s for s in archived_rows(memory/'dlmm_candidate_bin_samples.jsonl')
                if s.get('status') == 'observed' and s.get('collected_at', math.inf) <= cutoff]
     hashes = {sample_hash(s): s for s in samples}
     by_pool = collections.defaultdict(list)
@@ -117,7 +119,7 @@ def run(profile, output, cutoff):
         by_pool[s['pool']].append(s)
     for pool in by_pool:
         by_pool[pool].sort(key=lambda s: (s['ts'], s['collected_at']))
-    forecasts = list(iter_rows(memory/'dlmm_candidate_fee_forecasts.jsonl'))
+    forecasts = list(archived_rows(memory/'dlmm_candidate_fee_forecasts.jsonl'))
     selected = select_cohorts(forecasts, cutoff)
     results = []
     for f in selected:

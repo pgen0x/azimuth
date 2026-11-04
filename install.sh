@@ -164,7 +164,8 @@ echo "→ Rendering optional Solana units into $PROFILE/systemd"
 # rendered for this profile, never written into the live unit directory.
 mkdir -p "$PROFILE/systemd"
 for u in azimuth-sol-accounting azimuth-sol-shadow azimuth-sol-rent \
-  azimuth-sol-net-experiment azimuth-sol-net-research@ azimuth-sol-price-path azimuth-sol-candidate-paper; do
+  azimuth-sol-net-experiment azimuth-sol-net-research@ azimuth-sol-price-path azimuth-sol-candidate-paper \
+  azimuth-sol-retention; do
   sed "s#__PROFILE__#$PROFILE#g" "$REPO/assets/systemd/$u.service" > "$PROFILE/systemd/$u.service"
   cp "$REPO/assets/systemd/$u.timer" "$PROFILE/systemd/$u.timer"
 done
