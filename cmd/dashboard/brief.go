@@ -312,8 +312,10 @@ func briefGrowth(b *strings.Builder, g object) {
 		if c != nil && c["sol"] != nil {
 			v = solN(c["sol"], true, 6)
 		}
-		if n, _ := numOK(c["pending"]); n > 0 {
+		if n, _ := numOK(c["pending"]); n > 0 && p.key == "realized_lp" {
 			v += fmt.Sprintf(" (%s/%s closes not reconciled, so far %s)", str(c["pending"]), str(c["closes"]), solN(c["measured_subtotal_sol"], true, 6))
+		} else if n > 0 && c["sol"] == nil {
+			v += fmt.Sprintf(" (%s pending, verified so far %s)", str(c["pending"]), solN(c["measured_subtotal_sol"], true, 6))
 		}
 		parts = append(parts, p.name+" "+v)
 	}

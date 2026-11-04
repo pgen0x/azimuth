@@ -22,6 +22,11 @@ func fixtureBrief() object {
 	            {"ts":1999990000,"pair":"C-SOL","mode":"pulse","reason":"SL","hold_min":3,"realized_sol":0.000012,"pnl_basis":"realized"}]},
 	"funnel":{"hours":12,"status":"ok","batches":3,"batch_pools":4,"deploys":1,"last_deploy_ts":1999999000,"direct_deploy":{"deployed":0,"not_deployed":1},
 	  "routes":{"hermes_ai":2,"deterministic_fallback:timeout":1},"daemon_rejects":{},"pipeline_rejects":{"downtrend_h6":2}},
+	"growth":{"day":"2033-05-18","tz":"UTC","status":"partial","d_native_sol":0.0695,"components":[
+	  {"component":"realized_lp","sol":null,"pending":1,"closes":1,"measured_subtotal_sol":0},{"component":"rent_reclaimed","sol":0.068436},
+	  {"component":"network_fees","sol":-0.000055},{"component":"external","sol":0},{"component":"other","sol":null}]},
+	"experiments":{"status":"ok","geometry_shadow":{"entries":0,"report":{"status":"ok","verdict":"NEED-DATA","closed":0,"treated":0}},
+	  "hold_canary":{"arms":{"A":14,"B":12}},"active_bin_reanchor":{"entries":27,"reanchored":0}},
 	"health":{"units":[{"unit":"azimuth.service","active":"active","enabled":"enabled"}],"failed_units":[],"disk_free_pct":9,"mem_available_mb":2000,"monitor_tick_age_s":15}}`
 	var d object
 	if err := json.Unmarshal([]byte(raw), &d); err != nil {
@@ -38,6 +43,9 @@ func TestBriefTextCompactAndHonest(t *testing.T) {
 		"n/a not_reconciled", "+0.000012 realized", "realized n/a SOL",
 		"batches 3 (4 pools)", "hermes_ai 2, deterministic_fallback:timeout 1", "daemon rejects: none",
 		"HEALTH disk free 9%", "azimuth=active/enabled",
+		"GROWTH today 2033-05-18 (UTC) Δnative +0.0695 SOL · partial",
+		"realized LP unmeasured (1/1 closes not reconciled, so far +0.000000) · rent +0.068436 · fees -0.000055 · external +0.000000 · other unmeasured",
+		"EXPERIMENTS geometry shadow 0 entries/0 paired/0 treated NEED-DATA · hold canary A 14 B 12 · re-anchor 0/27 entries",
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("missing %q in:\n%s", want, text)

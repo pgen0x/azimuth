@@ -2,15 +2,15 @@
 // DOM stub, synthetic evidence; no browser/network/service access.
 const fs = require('node:fs'), vm = require('node:vm'), assert = require('node:assert/strict'), {execFileSync} = require('node:child_process');
 const script = fs.readFileSync(__dirname + '/index.html', 'utf8').match(/<script>([\s\S]*?)<\/script>/)[1];
-async function render(tab, payload, fail=false) {
+async function render(tab, payload, fail=false, extra={}) {
   const content = {innerHTML: ''}, stamp = {textContent: ''}, intervals = [], calls = [];
   const els = {'#content': content, '#stamp': stamp, '#rhlog': {innerHTML: ''}, '#rhcount': {textContent: ''}};
   const document = {querySelector: s => els[s] || {}, querySelectorAll: () => []};
   const fixtures = {ops: {funnel: {}, health: {}, alerts: []}, overview: {nav: {}, services: [], sources: []}, capital: {north_star: {days: []}, nav_bridge: {}},
-    live: {live: {}}, journal: {rows: [], total_in_retained_tail: 0}, hermes: {}, redis: {rows: []}};
+    live: {live: {}}, journal: {rows: [], total_in_retained_tail: 0}, hermes: {}, redis: {rows: []}, growth: {tz: 'UTC', north_star: {days: []}, growth: {}, experiments: {}}, ...extra};
   const ctx = {document, Date, console, fetch: async url => {
     calls.push(url); const name = {'agent/brief': 'ops'}[url.replace('/api/', '').split('?')[0]] || url.replace('/api/', '').split('?')[0];
-    if (fail && name === tab) return {ok: false, status: 500, text: async () => 'synthetic failure'};
+    if ((fail && name === tab) || (extra.failing || []).includes(name)) return {ok: false, status: 500, text: async () => 'synthetic failure'};
     return {ok: true, status: 200, json: async () => name === tab ? payload : fixtures[name]};
   }, setInterval: fn => intervals.push(fn), module: {exports: {}}};
   vm.runInNewContext(script + '\nmodule.exports={render,setTab:t=>{tab=t}};', ctx);
@@ -141,5 +141,27 @@ async function render(tab, payload, fail=false) {
     assert(!ov.html.includes('meets the'), 'a static balance never reads as entry authorization');
     assert(ov.html.includes('configured cash policy'), 'neutral entry-policy note');
   }
-  console.log('dashboard render: 49 synthetic cases passed');
+  // Growth: today's split keeps unmeasured parts unmeasured; experiments are counts only.
+  const day = (d, native, extra = {}) => ({day: d, status: 'ok', native_sol: native, lp_mark_sol: 0.1, refundable_rent_sol: 0.05, cash_sol: native + 0.15, known_sol: native + 0.2, ...extra});
+  const growth = {tz: 'UTC', north_star: {days: [day('2033-05-16', 1), {day: '2033-05-17', status: 'no_snapshot'}, day('2033-05-18', 1.1, {status: 'partial_day'})]},
+    growth: {day: '2033-05-18', status: 'partial', d_native_sol: 0.1, native_start_sol: 1, native_end_sol: 1.1, start_ts: 1, end_ts: 2, d_lp_mark_sol: 0, d_refundable_rent_sol: -0.05,
+      components: [{component: 'realized_lp', label: 'Realized LP', sol: null, closes: 2, pending: 1, measured_subtotal_sol: 0.02},
+        {component: 'rent_reclaimed', label: 'Rent reclaimed', sol: 0.049, rent_recovered_sol: 0.05, forfeited_quote_sol: 0.001, closed_accounts: 3},
+        {component: 'network_fees', label: 'Network fees', sol: -0.00001, transactions: 2}, {component: 'external', label: 'External', sol: 0},
+        {component: 'other', label: 'Other', sol: null}]},
+    experiments: {status: 'ok', basis: 'Counts only.', geometry_shadow: {entries: 4, report: {status: 'ok', verdict: 'NEED-DATA', closed: 1, treated: 1, pools: 1, days: 1, gate: {min_n: 30, min_pools: 10, min_days: 7}}},
+      hold_canary: {arms: {A: 14, B: 12}, closes: 26, first_ts: 1}, active_bin_reanchor: {entries: 27, reanchored: 0, max_drift_bins: null, since: 1}}};
+  const gv = await render('overview', {nav: {}, services: [], sources: []}, false, {growth});
+  assert(gv.calls.some(u => u.startsWith('/api/growth?tz=')), 'growth is fetched with the viewer zone');
+  assert(gv.html.includes('growth / today') && gv.html.includes('+0.100000'), 'today native delta');
+  assert(gv.html.includes('1 of 2 closes not reconciled yet'), 'pending closes named');
+  assert((gv.html.match(/>unmeasured</g) || []).length === 2, 'realized and other stay unmeasured, never 0');
+  assert(gv.html.includes('+0.049000') && gv.html.includes('−0.000010'), 'measured parts signed');
+  assert(gv.html.includes('growth / balance') && gv.html.includes('style="fill:var(--s1)"'), 'stacked native bars drawn');
+  assert(gv.html.includes('experiments / live studies') && gv.html.includes('A 14 · B 12') && gv.html.includes('NEED-DATA') && gv.html.includes('0 of 27 entries'), 'experiments counts');
+  const ovFail = await render('overview', {nav: {}, services: [], sources: []}, false, {failing: ['growth']});
+  assert(ovFail.html.includes('overview / known') && ovFail.html.includes('Growth data unavailable: synthetic failure'), 'a growth failure never blanks the overview');
+  const ovEmpty = await render('overview', {nav: {}, services: [], sources: []});
+  assert(ovEmpty.html.includes('No measured days in this window yet') && ovEmpty.html.includes('report unavailable'), 'empty growth states');
+  console.log('dashboard render: 59 synthetic cases passed');
 })().catch(error => {console.error(error); process.exitCode = 1;});

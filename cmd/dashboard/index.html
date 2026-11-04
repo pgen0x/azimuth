@@ -132,7 +132,7 @@ function growthPanels(d){
   const zone=`days in ${esc(DAY_TZ)}`;
   const val=c=>isNum(c.sol)?`<span class="${tone(c.sol)}">${esc(fx(c.sol))}</span>`:'<span class="muted">unmeasured</span>';
   const why=c=>c.component==='realized_lp'?(c.pending?`${num(c.pending)} of ${num(c.closes)} closes not reconciled yet; measured so far ${fx(c.measured_subtotal_sol)}`:`${num(c.closes)} closes`)
-    :c.component==='rent_reclaimed'?(isNum(c.rent_recovered_sol)?`rent ${num(c.rent_recovered_sol)} − forfeited ${num(c.forfeited_quote_sol)} · ${num(c.closed_accounts)} accounts`:'rent unit receipts not fully verified on-chain')
+    :c.component==='rent_reclaimed'?(isNum(c.rent_recovered_sol)?`rent ${num(c.rent_recovered_sol)} − forfeited ${num(c.forfeited_quote_sol)} · ${num(c.closed_accounts)} accounts`:`rent unit receipts not fully verified on-chain${c.pending?` (${num(c.pending)} pending)`:''}; verified so far ${fx(c.measured_subtotal_sol)}`)
     :c.component==='network_fees'?`${num(c.transactions)} landed transactions`:c.component==='other'&&!isNum(c.sol)?'needs every other part measured':'';
   let today=head('growth / today',g.day?esc(long(g.day))+', so far':'');
   if(g.collection_error)today+=`<p class="note warn" role="status">${esc(g.collection_error)}</p>`;

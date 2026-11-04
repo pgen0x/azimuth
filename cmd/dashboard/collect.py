@@ -803,12 +803,14 @@ def growth_today(memory, now, tz='UTC', run=None):
             else: tx_known=False
     dust=dust_ledger(memory,a['ts'],run,until=b['ts']); sources['rent_unit']=dust.get('source_metadata',{}).get('journal',{'status':dust.get('status')})
     rent,quote=dust.get('rent_recovered_lamports'),dust.get('forfeited_quote_lamports')
-    rent_known=rent is not None and quote is not None
+    rent_known=rent is not None and quote is not None; vs=dust.get('verified_subtotal') or {}
     comps=[dict(component='realized_lp',label='Realized LP (closed positions, arbiter)',sol=sum(measured) if rz_known else None,
                 measured_subtotal_sol=sum(measured),closes=len(closed),pending=pending),
            dict(component='rent_reclaimed',label='Rent reclaimed (closed accounts − forfeited quotes)',
                 sol=(rent-quote)/L if rent_known else None,rent_recovered_sol=None if rent is None else rent/L,
-                forfeited_quote_sol=None if quote is None else quote/L,closed_accounts=dust.get('closed_accounts')),
+                forfeited_quote_sol=None if quote is None else quote/L,closed_accounts=dust.get('closed_accounts'),
+                measured_subtotal_sol=(vs.get('rent_recovered_lamports',0)-vs.get('forfeited_quote_lamports',0))/L,
+                pending=vs.get('unknown') or 0),
            dict(component='network_fees',label='Network fees (all landed transactions)',sol=-fees/L if tx_known else None,transactions=n),
            dict(component='external',label='External transfers',sol=ext/L if tx_known else None)]
     parts=[c['sol'] for c in comps]
@@ -860,8 +862,8 @@ def experiments(profile, since, now, run=None):
         hits+=1
         if number(ra.get('drift')): drifts.append(abs(ra['drift']))
     reanchor={'entries':n,'reanchored':hits,'max_drift_bins':max(drifts,default=None),'since':since}
-    geo_ok=meta.get('status')=='missing' or not incomplete(meta)  # no journal yet = no entries yet
-    return {'collected_at':now,'status':'ok' if geo_ok and not incomplete(cmeta) else 'partial',
+    seen=lambda m:m.get('status')=='missing' or not incomplete(m)  # no journal yet = nothing recorded yet
+    return {'collected_at':now,'status':'ok' if seen(meta) and seen(cmeta) else 'partial',
             'geometry_shadow':geo,'hold_canary':canary,'active_bin_reanchor':reanchor,
             'basis':'Counts only, read-only. Geometry shadow: dlmm_geometry_shadow.jsonl entry rows, verdict and paired '
                     'closes from dlmm_geometry_shadow_report.py (its own pre-registered gate). Hold canary: last exit row '
