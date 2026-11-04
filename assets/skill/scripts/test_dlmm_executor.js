@@ -1459,7 +1459,10 @@ vm.runInNewContext("const productionExitTransport=confirmExitTransaction;confirm
     for (const lastValidBlockHeight of [height, null]) {
       fs.writeFileSync(pendingFile, JSON.stringify({lastValidBlockHeight}));
       rentHeightReads = 0;
-      await assert.rejects(reclaimEmptyAccounts(true), /Rent reclaim refused: wait for pending trading blockhash expiry/);
+      // In flight waits for expiry; a marker without its height is corrupt state.
+      await assert.rejects(reclaimEmptyAccounts(true), lastValidBlockHeight === null
+        ? /Rent reclaim refused: pending trading marker .*guard-test\.json has no lastValidBlockHeight/
+        : /^Error: Rent reclaim refused: wait for pending trading blockhash expiry$/);
       assert.equal(rentHeightReads, 1); // Policy refusal must not query every RPC.
       assert.equal(sends, beforeRent);
     }
@@ -1799,6 +1802,38 @@ vm.runInNewContext("const productionExitTransport=confirmExitTransaction;confirm
     await sandbox.module.exports.runCLI();
     assert.deepEqual(Array.from(cliRentArgs),[options.includes("--execute"),options.includes("--batch"),options.includes("--dust")]);
   }
+  // WAIT refusals report a deferral and exit 0; HARD refusals still exit 1.
+  const { rentDeferralReason } = sandbox.module.exports;
+  const waits = {
+    "Rent reclaim refused: wait for pending trading blockhash expiry": "pending_trading_blockhash",
+    "Rent reclaim refused: unknown or uneconomic network fee": "network_fee_unknown_or_uneconomic",
+    "ENTRY BUSY: another deploy is active for this wallet": "entry_lock_busy",
+    "SWAP BUSY: another matching swap is active for this wallet": "swap_lock_busy",
+  };
+  const hards = ["Rent reclaim refused: pending trading marker dlmm_pending_swaps/x.json has no lastValidBlockHeight",
+    "Rent reclaim refused: unreadable settlement marker", "Rent reclaim refused: dust burn simulation failed",
+    "Transaction confirmation timeout: signature remains pending", "All 3 RPC endpoints failed to execute the command.",
+    "SOLANA_PRIVATE_KEY is not set", "disk full",
+    "Rent reclaim refused: unknown or uneconomic network fee (extra)"];
+  for (const [message, reason] of Object.entries(waits)) assert.equal(rentDeferralReason(new Error(message)), reason);
+  for (const message of hards) assert.equal(rentDeferralReason(new Error(message)), null);
+  assert.equal(rentDeferralReason(undefined), null);
+  const realConsole=sandbox.console;
+  for (const [message, reason] of [...Object.entries(waits), ...hards.map(m => [m, null])]) {
+    const out=[];sandbox.console={...realConsole,log:line=>out.push(line)};
+    sandbox.captureCLIRent=async()=>{throw new Error(message);};
+    vm.runInNewContext("reclaimEmptyAccounts = captureCLIRent;",sandbox);
+    sandbox.process.argv=originalArgv.concat(["reclaim-empty-accounts","--execute","--batch"]);
+    if (reason) {
+      await sandbox.module.exports.runCLI();
+      assert.deepEqual(JSON.parse(out[0]),{success:true,deferred:true,reason,detail:message});
+    } else {
+      await assert.rejects(sandbox.module.exports.runCLI(),/exit 1/);assert.equal(out.length,0);
+    }
+  }
+  sandbox.console=realConsole;
+  sandbox.captureCLIRent=async(...args)=>{cliRentArgs=args;return {success:true};};
+  vm.runInNewContext("reclaimEmptyAccounts = captureCLIRent;",sandbox);
   cliRentArgs=null;sandbox.process.argv=originalArgv.concat(["reclaim-empty-accounts","--unknown"]);
   await assert.rejects(sandbox.module.exports.runCLI(),/exit 1/);assert.equal(cliRentArgs,null);
   let cliBagArgs;
