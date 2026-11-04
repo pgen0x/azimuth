@@ -9,6 +9,9 @@ Restart=on-failure
 RestartSec=5
 NoNewPrivileges=true
 UMask=0077
+# Soft cap: above it the kernel reclaims and throttles (journal page cache first) instead of
+# letting a refresh push the host into OOM. Steady state is ~80MB server + ~70MB collector.
+MemoryHigh=384M
 
 [Install]
 WantedBy=default.target

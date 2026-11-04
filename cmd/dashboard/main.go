@@ -57,6 +57,10 @@ type server struct {
 	zoneMu         sync.Mutex // serializes first-use day-bucket computations
 	briefs         briefCache
 	runBrief       func(ctx context.Context, profile, state string, hours, n int, tz string) (object, error) // nil = runBrief; tests stub it
+	slow           object                                                                                    // last good slow panels (see slowKeys); merged into every fast snapshot
+	slowAt         time.Time                                                                                 // when slow was collected; zero = never
+	slowFailure    string
+	runCollector   func(ctx context.Context, mode string, zones []string) ([]byte, error) // nil = python3; tests stub it
 }
 
 var identifier = regexp.MustCompile(`^[A-Za-z0-9_.:-]{1,150}$`)
@@ -66,11 +70,27 @@ var identifier = regexp.MustCompile(`^[A-Za-z0-9_.:-]{1,150}$`)
 // ticks while a run is slow, so a longer deadline never overlaps runs, it only stretches the period.
 const collectDeadline = 60 * time.Second
 
-// refresh runs the collector once.
-func (s *server) refresh() {
-	ctx, cancel := context.WithTimeout(context.Background(), collectDeadline)
-	defer cancel()
-	output, err := exec.CommandContext(ctx, "python3", "-c", collector, s.profile, s.state, strconv.FormatInt(s.since, 10), strings.Join(s.zoneList(), ",")).Output()
+// Refresh cadence. The fast panels (event journal, latest NAV row, services, Hermes) refresh every
+// refreshPeriod. The slow panels are day-scale or 48h-scale evidence (day calendars per viewer zone,
+// the 14-day NAV bridge, the rent journal, Robinhood unit journals) and were ~80% of a refresh's
+// CPU, mostly journalctl --grep and NAV lookups in a ~200MB file; they refresh every slowPeriod.
+const (
+	refreshPeriod = 60 * time.Second
+	slowPeriod    = 10 * time.Minute
+)
+
+// slowKeys must match SLOW_KEYS in collect.py.
+var slowKeys = []string{"by_tz", "nav_bridge", "live", "robinhood"}
+
+// collect runs one collector mode ("fast", "slow" or "daily") and decodes its snapshot.
+func (s *server) collect(ctx context.Context, mode string, zones []string) (object, error) {
+	run := s.runCollector
+	if run == nil {
+		run = func(ctx context.Context, mode string, zones []string) ([]byte, error) {
+			return exec.CommandContext(ctx, "python3", "-c", collector, s.profile, s.state, strconv.FormatInt(s.since, 10), strings.Join(zones, ","), mode).Output()
+		}
+	}
+	output, err := run(ctx, mode, zones)
 	var data object
 	if err == nil {
 		err = json.Unmarshal(output, &data)
@@ -84,7 +104,35 @@ func (s *server) refresh() {
 				detail = detail[:300]
 			}
 		}
-		log.Printf("collector failed: %v %s", err, detail)
+		log.Printf("collector (%s) failed: %v %s", mode, err, detail)
+		return nil, err
+	}
+	return data, nil
+}
+
+// refresh collects the fast panels, and the slow panels too when they are due, then publishes
+// fast + last good slow as one snapshot. Runs are sequential, never concurrent.
+func (s *server) refresh() {
+	s.mu.RLock()
+	due := s.slow == nil || time.Since(s.slowAt) >= slowPeriod
+	s.mu.RUnlock()
+	if due {
+		ctx, cancel := context.WithTimeout(context.Background(), collectDeadline)
+		slow, err := s.collect(ctx, "slow", s.zoneList())
+		cancel()
+		s.mu.Lock()
+		if err == nil {
+			s.slow, s.slowAt, s.slowFailure = slow, time.Now(), ""
+		} else {
+			// Retry on the next fast tick rather than waiting a whole slow period.
+			s.slowFailure = "Slow panel collection failed; last successful slow panels retained"
+		}
+		s.mu.Unlock()
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), collectDeadline)
+	defer cancel()
+	data, err := s.collect(ctx, "fast", nil)
+	if err != nil {
 		s.mu.Lock()
 		s.failure = "Local collection failed; last successful snapshot retained"
 		s.mu.Unlock()
@@ -92,8 +140,16 @@ func (s *server) refresh() {
 	}
 	data["redis"] = s.redisSnapshot(ctx, data)
 	s.mu.Lock()
+	for _, k := range slowKeys {
+		if v, ok := s.slow[k]; ok {
+			data[k] = v
+		}
+	}
+	if s.slow != nil {
+		data["slow_collected_at"] = s.slow["collected_at"]
+	}
 	s.data = data
-	s.failure = ""
+	s.failure = s.slowFailure
 	s.mu.Unlock()
 }
 
@@ -432,7 +488,7 @@ func main() {
 	}
 	s.refresh()
 	go func() {
-		for range time.Tick(30 * time.Second) {
+		for range time.Tick(refreshPeriod) {
 			s.refresh()
 		}
 	}()

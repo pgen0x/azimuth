@@ -2,8 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
-	"os/exec"
 	"regexp"
 	"strconv"
 	"time"
@@ -89,35 +87,39 @@ func (s *server) daily(data object, tz string) (object, string) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	output, err := exec.CommandContext(ctx, "python3", "-c", collector, s.profile, s.state, strconv.FormatInt(s.since, 10), tz, "daily").Output()
-	var fresh object
-	if err == nil {
-		err = json.Unmarshal(output, &fresh)
-	}
+	fresh, err := s.collect(ctx, "daily", []string{tz})
 	panels := zonePanels(fresh, tz)
 	if err != nil || panels == nil {
 		return nil, "Day buckets for this time zone could not be computed"
 	}
 	s.useZone(tz)
 	s.mu.Lock()
-	if s.data != nil {
-		// Copy-on-write: readers may hold the previous snapshot.
-		next := make(object, len(s.data))
-		for k, v := range s.data {
-			next[k] = v
-		}
-		byTZ := object{}
-		if old, ok := s.data["by_tz"].(map[string]any); ok {
-			for k, v := range old {
-				byTZ[k] = v
-			}
-		}
-		byTZ[tz] = panels
-		next["by_tz"] = byTZ
-		s.data = next
-	}
+	s.data = withZone(s.data, tz, panels)
+	// The slow cache too, or the next fast refresh would drop this zone until the next slow run.
+	s.slow = withZone(s.slow, tz, panels)
 	s.mu.Unlock()
 	return panels, ""
+}
+
+// withZone returns a copy of data with by_tz[tz] set (copy-on-write: readers may hold the
+// previous snapshot). A nil snapshot stays nil.
+func withZone(data object, tz string, panels object) object {
+	if data == nil {
+		return nil
+	}
+	next := make(object, len(data))
+	for k, v := range data {
+		next[k] = v
+	}
+	byTZ := object{}
+	if old, ok := data["by_tz"].(map[string]any); ok {
+		for k, v := range old {
+			byTZ[k] = v
+		}
+	}
+	byTZ[tz] = panels
+	next["by_tz"] = byTZ
+	return next
 }
 
 func zonePanels(data object, tz string) object {
