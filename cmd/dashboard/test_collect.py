@@ -1073,4 +1073,95 @@ class PerformanceParityTests(unittest.TestCase):
         want=sorted((p for p in d.glob('*.json') if p.exists()),key=lambda p:p.stat().st_mtime,reverse=True)[:3]
         self.assertEqual(c.recent_entries(d,3),want)
 
+SKILL_SCRIPTS=Path(__file__).resolve().parents[2]/'assets'/'skill'/'scripts'
+PA,PB,PC,PD='A'*40,'B'*40,'C'*40,'D'*40
+
+def close(pos,ts,pnl_sol=-1.0,reason='take profit',**kw):
+    # pnl_sol here is the journal MARK; the loss rules must never read it.
+    return dict(position=pos,pair=pos[:4]+'-SOL',ts=ts,pnl_sol=pnl_sol,pnl_pct=-50.0,reason=reason,dry_run=False,**kw)
+
+class LossAlertTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp=tempfile.TemporaryDirectory();self.p=Path(self.tmp.name)/'prof';self.m=self.p/'memories';self.m.mkdir(parents=True)
+        # The profile's scripts dir is a symlink into the repo, as installed.
+        (self.p/'skills'/'solana-dlmm').mkdir(parents=True);(self.p/'skills'/'solana-dlmm'/'scripts').symlink_to(SKILL_SCRIPTS)
+    def tearDown(self): self.tmp.cleanup()
+    def run_rules(self,closes,realized,env=None):
+        rows(self.m/'dlmm_closes.jsonl',closes);rows(self.m/'dlmm_realized.jsonl',realized)
+        loss=c.loss_evidence(self.p,T,env or {})
+        return loss,{a['id']:a for a in c.loss_alerts(loss)}
+
+    def test_single_close_reads_realized_never_the_mark(self):
+        loss,got=self.run_rules([close(PA,T-3600),close(PB,T-3600),close(PC,T-3600)],
+            [dict(position=PA,realized_sol=-0.06,realized_pct=-20.0),dict(position=PB,realized_sol=-0.049,realized_pct=-15.0)],{'ALERT_DAY_LOSS_SOL':'1'})
+        self.assertEqual(set(got),{'loss_single:'+PA})
+        self.assertIn('-0.0600 SOL <= -0.05',got['loss_single:'+PA]['message'])
+        # PC has no realized row: unmeasured, never its -1.0 mark and never 0.
+        pc=[x for x in loss['closes'] if x['position']==PC][0]
+        self.assertIsNone(pc['realized_sol']);self.assertEqual(loss['day']['unmeasured'],1)
+        self.assertAlmostEqual(loss['day']['realized_sol'],-0.109)
+        # Older than 24h: the per-close rule no longer reports it.
+        _,got=self.run_rules([close(PA,T-DAY-60)],[dict(position=PA,realized_sol=-0.2,realized_pct=-40.0)])
+        self.assertNotIn('loss_single:'+PA,got)
+
+    def test_day_window(self):
+        closes=[close(PA,T-3600),close(PB,T-7200),close(PC,T-9000)]
+        realized=[dict(position=PA,realized_sol=-0.04),dict(position=PB,realized_sol=-0.045)]
+        _,got=self.run_rules(closes,realized)
+        self.assertIn('loss_day',got);self.assertNotIn('loss_single:'+PA,got)
+        self.assertIn('2 measured close(s), 1 unmeasured (not counted)',got['loss_day']['message'])
+        _,got=self.run_rules(closes,[dict(position=PA,realized_sol=-0.04),dict(position=PB,realized_sol=0.01)])
+        self.assertNotIn('loss_day',got)
+        # Every close unmeasured: no sum, no alert, never a 0.0 total.
+        loss,got=self.run_rules(closes,[])
+        self.assertIsNone(loss['day']['realized_sol']);self.assertEqual(got,{})
+
+    def test_week_window(self):
+        closes=[close(p,T-d*DAY) for p,d in ((PA,2),(PB,4),(PC,6.5),(PD,8))]
+        realized=[dict(position=p,realized_sol=-0.055) for p in (PA,PB,PC,PD)]
+        loss,got=self.run_rules(closes,realized)
+        self.assertEqual(set(got),{'loss_week'});self.assertEqual(loss['week']['measured'],3)  # PD is outside 7d
+        self.assertIn('7d realized -0.1650',got['loss_week']['message'])
+        _,got=self.run_rules(closes,realized,{'ALERT_WEEK_LOSS_SOL':'0.2'})
+        self.assertEqual(got,{})
+
+    def test_emergency_gap(self):
+        sl='EMERGENCY Stop-Loss (-14.20% <= -11.0% floor) — bypasses grace/holds'
+        closes=[close(PA,T-600,reason=sl),close(PB,T-600,reason=sl),close(PC,T-600,reason=sl),close(PD,T-600,reason='Stop-Loss')]
+        realized=[dict(position=PA,realized_sol=-0.03,realized_pct=-23.0),dict(position=PB,realized_sol=-0.02,realized_pct=-21.0),
+                  dict(position=PD,realized_sol=-0.01,realized_pct=-60.0)]
+        _,got=self.run_rules(closes,realized,{'ALERT_DAY_LOSS_SOL':'1'})
+        # PA past 2x the floor; PB inside it; PC unmeasured; PD was not an emergency close.
+        self.assertEqual(set(got),{'loss_emergency_gap:'+PA})
+        self.assertIn('-23.00%',got['loss_emergency_gap:'+PA]['message'])
+
+    def test_thresholds_from_env(self):
+        th,bad=c.loss_thresholds({})
+        self.assertEqual(th,{'ALERT_SINGLE_LOSS_SOL':0.05,'ALERT_DAY_LOSS_SOL':0.08,'ALERT_WEEK_LOSS_SOL':0.15});self.assertEqual(bad,[])
+        th,bad=c.loss_thresholds({'ALERT_SINGLE_LOSS_SOL':'0.1','ALERT_DAY_LOSS_SOL':'-1','ALERT_WEEK_LOSS_SOL':'nan'})
+        self.assertEqual(th['ALERT_SINGLE_LOSS_SOL'],0.1);self.assertEqual(bad,['ALERT_DAY_LOSS_SOL','ALERT_WEEK_LOSS_SOL'])
+        _,got=self.run_rules([],[],{'ALERT_DAY_LOSS_SOL':'x'})
+        self.assertEqual(set(got),{'loss_threshold_invalid'})
+
+    def test_dedup_ids_and_duplicate_journal_rows(self):
+        # A re-journaled close (timeout/re-adoption) is one close: one id, counted once.
+        closes=[close(PA,T-3600),close(PA,T-3000)]
+        loss,got=self.run_rules(closes,[dict(position=PA,realized_sol=-0.09)])
+        self.assertEqual(loss['day']['closes'],1);self.assertAlmostEqual(loss['day']['realized_sol'],-0.09)
+        self.assertEqual(sorted(got),['loss_day','loss_single:'+PA])
+        _,again=self.run_rules(closes,[dict(position=PA,realized_sol=-0.09)])
+        self.assertEqual(sorted(again),sorted(got))  # stable ids are what the Go state file dedups on
+
+    def test_wired_into_alerts_and_missing_skill_is_loud(self):
+        rows(self.m/'dlmm_closes.jsonl',[close(PA,T-60)]);rows(self.m/'dlmm_realized.jsonl',[dict(position=PA,realized_sol=-0.07)])
+        vfs=SimpleNamespace(f_bavail=50,f_blocks=100);mem=self.p/'meminfo';mem.write_text('MemAvailable:    1024000 kB\n')
+        with patch.dict(os.environ,{},clear=False):
+            for k in ('ALERT_SINGLE_LOSS_SOL','ALERT_DAY_LOSS_SOL','ALERT_WEEK_LOSS_SOL'): os.environ.pop(k,None)
+            out=c.alerts(self.p,now=T,run=lambda *a,**k:1/0,statvfs=lambda _:vfs,meminfo=str(mem))
+            self.assertIn('loss_single:'+PA,{a['id'] for a in out['alerts']})
+            json.dumps(c.scrub(out),allow_nan=False)
+            (self.p/'skills'/'solana-dlmm'/'scripts').unlink()
+            out=c.alerts(self.p,now=T,run=lambda *a,**k:1/0,statvfs=lambda _:vfs,meminfo=str(mem))
+            self.assertIn('section_unavailable:loss',{a['id'] for a in out['alerts']})
+
 if __name__=='__main__': unittest.main()

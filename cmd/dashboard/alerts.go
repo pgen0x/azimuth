@@ -48,6 +48,10 @@ type alertState struct {
 // infoCodes are reported but are not red flags.
 var infoCodes = map[string]bool{"no_deploy_12h": true}
 
+// eventCodes name one past event (a single bad close), not a condition that can recover. The collector
+// reports each for a fixed lookback; when it ages out it is forgotten without a "cleared" message.
+var eventCodes = map[string]bool{"loss_single": true, "loss_emergency_gap": true}
+
 func runAlertCollector(ctx context.Context, profile string) ([]alert, error) {
 	cmd := exec.CommandContext(ctx, "python3", "-c", collector, profile, "", "0", "UTC", "alerts")
 	output, err := cmd.Output()
@@ -127,6 +131,10 @@ func stepAlerts(st *alertState, current []alert, now time.Time, keepMissing bool
 			continue
 		}
 		r.Active = false
+		if eventCodes[r.Code] {
+			delete(st.Alerts, id)
+			continue
+		}
 		switch {
 		case r.Notified && allowed(r):
 			r.Notified, r.LastSent = false, t
