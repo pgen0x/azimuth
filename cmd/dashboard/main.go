@@ -56,9 +56,9 @@ type server struct {
 	zones          []string   // recently requested non-UTC zones, least recent first
 	zoneMu         sync.Mutex // serializes first-use day-bucket computations
 	briefs         briefCache
-	runBrief       func(ctx context.Context, profile, state string, hours, n int, tz string) (object, error) // nil = runBrief; tests stub it
-	slow           object                                                                                    // last good slow panels (see slowKeys); merged into every fast snapshot
-	slowAt         time.Time                                                                                 // when slow was collected; zero = never
+	runBrief       func(ctx context.Context, profile, state string, hours, n int, tz string, since int64) (object, error) // nil = runBrief; tests stub it
+	slow           object                                                                                                 // last good slow panels (see slowKeys); merged into every fast snapshot
+	slowAt         time.Time                                                                                              // when slow was collected; zero = never
 	slowFailure    string
 	runCollector   func(ctx context.Context, mode string, zones []string) ([]byte, error) // nil = python3; tests stub it
 }
@@ -82,12 +82,21 @@ const (
 // slowKeys must match SLOW_KEYS in collect.py.
 var slowKeys = []string{"by_tz", "nav_bridge", "live", "robinhood", "experiments"}
 
+// collectorCommand runs the embedded collector with args. The source goes in on stdin (`python3 -`), never
+// as `python3 -c <source>`: Linux caps one argv string at 128 KiB (MAX_ARG_STRLEN) and collect.py outgrew it,
+// which fails every run with "argument list too long". sys.argv indexes are the same either way.
+func collectorCommand(ctx context.Context, args ...string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, "python3", append([]string{"-"}, args...)...)
+	cmd.Stdin = strings.NewReader(collector)
+	return cmd
+}
+
 // collect runs one collector mode ("fast", "slow" or "daily") and decodes its snapshot.
 func (s *server) collect(ctx context.Context, mode string, zones []string) (object, error) {
 	run := s.runCollector
 	if run == nil {
 		run = func(ctx context.Context, mode string, zones []string) ([]byte, error) {
-			return exec.CommandContext(ctx, "python3", "-c", collector, s.profile, s.state, strconv.FormatInt(s.since, 10), strings.Join(zones, ","), mode).Output()
+			return collectorCommand(ctx, s.profile, s.state, strconv.FormatInt(s.since, 10), strings.Join(zones, ","), mode).Output()
 		}
 	}
 	output, err := run(ctx, mode, zones)

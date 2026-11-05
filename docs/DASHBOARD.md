@@ -77,7 +77,7 @@ its zone.
 | `/api/robinhood?tz=ZONE&n=200` | Robinhood Chain: monitor unit state, scanner toggles, last `n` (1 to 1000) log lines, open positions per the journals, successful closes per quote asset and local day, stranded tokens |
 | `/api/hermes` | Profile/model/fallback configuration, skills, gateway state, recent session metadata |
 | `/api/redis` | Timestamped fixed capacity keys, position tracking sample, cooldown and dedup TTLs |
-| `/api/agent/brief?hours=12&n=10&tz=ZONE&format=text` | Agent brief (see below): wallet, open positions, recent closes, entry funnel, health, alerts. JSON by default, the CLI's text with `format=text` |
+| `/api/agent/brief?hours=12&n=10&tz=ZONE&funnel_since=RFC3339&format=text` | Agent brief (see below): wallet, open positions, recent closes, entry funnel, health, alerts. JSON by default, the CLI's text with `format=text` |
 
 Refreshes serve an immutable in-memory snapshot, built from two collector halves with a 60-second deadline
 per run (a slow run delays the next one; runs never overlap):
@@ -111,12 +111,13 @@ normal sign-in, cached for 20 seconds per parameter set, with one collector run 
 | positions | Latest `MONITOR_REPORT:` line of `azimuth-sol-monitor.service` (15 min); a newer `0 position(s) found on-chain` line empties it. pnl is a portfolio MARK, never money. |
 | closes | Last close row per position in `dlmm_closes.jsonl`, joined to `dlmm_realized.jsonl`. Money is `realized_sol` only; `pnl_basis` is `realized`, `unmeasured` (row with a null figure) or `not_reconciled` (no row yet). |
 | funnel | `azimuth.service` journal markers (`SIGNAL batch sent`, `entry_route=... reason=...`, audit/cooldown/lone rejects, direct deploy runs), `dlmm_pipeline_rejects.jsonl` gates and submitted deploy transactions in `dlmm_transactions.jsonl` (recorded before broadcast, not chain-confirmed). |
+| entry_funnel | Fixed last-24h and last-1h windows: batches, route (`hermes_ai` / `deterministic_fallback` with reason), deploys split verified / unverified / no verdict (`dlmm_deploy_verifications.jsonl`, written by the pipeline after its on-chain existence check, or report-guard receipts), and rejects by gate. `conviction_floor` is the larger of its `dlmm_pipeline_rejects.jsonl` rows and the journal's `Batch reject ... conviction score` lines, never their sum. Also the live base ticket (`compute_deploy_amount` of the latest native balance under the profile cash policy), the lowest score per mode that passes the conviction floor and still risk-scales to the minimum entry, and realized SOL by entry score band (`<50`, `50-70`, `>=70`, on `risk_sizing.adjusted_score`) for positions deployed since `--funnel-since` / `funnel_since` (RFC3339 or unix seconds; default 2026-11-05T15:00:00Z). |
 | health | `azimuth`, `azimuth-sol-monitor`, `hermes-gateway`, `azimuth-dashboard` active + enabled; failed user units; disk free % of the profile volume; MemAvailable; age of the monitor's last `OBSERVER_TICK`. |
 | alerts | disk free < 15%, MemAvailable < 1200 MB, core unit not active / not enabled / failed, any failed user unit, `azimuth-sol-rent` failed (when installed), an executor marker (`dlmm_pending_{swaps,deploys,rent,closes}`, `dlmm_settlements`) older than 2 h, no deploy submitted in 12 h, monitor tick older than 2 min, a section that could not be read. Each alert has an `id` (its code, plus the unit for per-unit rules). |
 | today | Today's native SOL (latest `dlmm_nav.jsonl` snapshot, day in `tz`) minus yesterday's last; the rent reclaimed since local midnight from the `azimuth-sol-rent` unit journal, verified against wallet transaction facts (the same rules as the live dust ledger), and the delta net of that rent. Any unverified rent receipt makes the rent total null; a labeled verified subtotal is shown beside it. |
 | realized_7d | `dlmm_realized.jsonl` rows closed in the last 7 days: n, measured, sum and mean `realized_sol` by mode (from the close journal) and by entry route (the entry file's `risk_sizing.source`: `from_batch` = `deterministic`, `from_signal` = `ai`; older entries `unknown`, missing file `no_entry_file`). Unmeasured rows count in n, never as 0. |
 
-The dashboard's **ops** section shows the funnel, health and alerts of this brief.
+The dashboard's **ops** section shows the funnel, entry funnel, health and alerts of this brief.
 
 ## Operator alerts
 
