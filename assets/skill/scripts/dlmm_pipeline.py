@@ -524,6 +524,22 @@ def reconcile_redis_vs_meteora():
         print(f"[reconcile] Warning: {e}")
 
 
+def record_deploy_verification(profile, position, mode, verified):
+    """Append the on-chain existence verdict for one submitted deploy to
+    memories/dlmm_deploy_verifications.jsonl, so the dashboard can split deploys
+    into verified / unverified on both entry routes (the report guard only sees
+    the AI route). Best effort: telemetry must never change a deploy."""
+    try:
+        if not isinstance(position, str) or not position:
+            return False
+        row = dict(ts=time.time(), position=position, mode=mode, verified=bool(verified))
+        with open(os.path.join(profile, "memories", "dlmm_deploy_verifications.jsonl"), "a") as f:
+            f.write(json.dumps(row) + "\n")
+        return True
+    except Exception:
+        return False
+
+
 def compute_deploy_amount(wallet_sol):
     reserve = CASH_POLICY['native_reserve_lamports']/1e9
     minimum = CASH_POLICY['minimum_entry_lamports']/1e9
@@ -1117,6 +1133,7 @@ def apply_batch_conviction(candidates, mode="multiday"):
             c["score"] = float(c.get("score", 0)) + adj
             print(f"Batch conviction {c['name']}: {adj:+.1f} ({', '.join(c.get('_conviction_notes', [])) or 'weights'}) -> score {c['score']:.1f}")
         if float(c.get("score", 0)) < floor:
+            record_pipeline_reject(PROFILE_DIR, mode, "conviction_floor", c.get("pool"), c.get("base_mint"), c.get("sol_is_x"), c.get("name"))
             print(f"Batch reject {c['name']} - conviction score {float(c.get('score', 0)):.1f} < {floor:.0f} {mode} floor")
             continue
         kept.append(c)
@@ -2204,6 +2221,9 @@ def main():
                 verified = True
                 break
             time.sleep(4)
+
+    if not is_dry_run:
+        record_deploy_verification(PROFILE_DIR, position_address, mode, verified)
 
     active_bin = bins_below
     active_price = 0.0
