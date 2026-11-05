@@ -959,6 +959,18 @@ BATCH_CONVICTION_FLOOR = {"casual": 30.0, "multiday": 12.0, "turnover": 30.0, "p
 
 
 
+def entry_route_label(cli, batch_mode):
+    """Who chose this entry: the daemon's --from-batch run is its deterministic
+    route, --from-pool is the Hermes agent's pick of a delivered record, and a
+    hand-passed --from-signal record (manual, or the agent's fallback) stays
+    from_signal."""
+    if batch_mode:
+        return "deterministic_fallback"
+    if getattr(cli, "from_pool", None):
+        return "hermes_ai"
+    return "from_signal"
+
+
 def risk_scaled_ticket(deploy_sol, score, mode):
     """Keep the existing risk multiplier without raising a subminimum ticket."""
     if score is None:
@@ -1956,6 +1968,11 @@ def main():
             "requested_ticket_sol": original_deploy, "multiplier": risk_multiplier,
             "accepted_ticket_sol": deploy_sol,
             "minimum_entry_lamports": CASH_POLICY["minimum_entry_lamports"],
+            # Score-band experiment: the rest of what decided this size.
+            # requested_ticket_sol is compute_deploy_amount(wallet_native_sol).
+            "conviction_floor": BATCH_CONVICTION_FLOOR.get(mode, 12.0),
+            "wallet_native_sol": sol_balance,
+            "entry_route": entry_route_label(cli, batch_mode),
         }
 
     # 5. Indicators Check (batch mode already ran this inside the pick loop)
@@ -2240,6 +2257,9 @@ def main():
         # Entry-time signal snapshot — the monitor copies this into the close
         # journal so dlmm_weights.py can learn which signals predict winners.
         "signal": entry_context["signal"],
+        # What decided the size (score, floor, multiplier, tickets, wallet,
+        # route) — the monitor copies it onto the close record.
+        "risk_sizing": risk_sizing,
     }
 
     if not is_dry_run:

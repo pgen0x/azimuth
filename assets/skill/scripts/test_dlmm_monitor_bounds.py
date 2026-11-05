@@ -66,6 +66,44 @@ class CloseBinObservationTests(unittest.TestCase):
             self.assertEqual(calls,['close'] if dry else ['close','observation'])
 
 
+class CloseRiskSizingTests(unittest.TestCase):
+    """The close record carries the entry's sizing evidence under the same keys."""
+    SIZING = dict(version=1, source="from_signal", entry_route="hermes_ai", adjusted_score=62.5,
+                  conviction_floor=30.0, multiplier=0.906, requested_ticket_sol=.2,
+                  accepted_ticket_sol=.18, wallet_native_sol=.71)
+
+    def close_row(self, directory, meta):
+        with patch.object(monitor, "PROFILE_DIR", directory), contextlib.redirect_stdout(io.StringIO()):
+            monitor.log_close(POOL, "T-SOL", dict(meta, mode="pulse"), POSITION, 1.0, .001, 0.0, 12.0,
+                              "Low yield", [], True)
+        rows = (Path(directory) / "memories" / "dlmm_closes.jsonl").read_text().splitlines()
+        return json.loads(rows[-1])
+
+    def write_entry(self, directory, entry):
+        path = Path(directory) / "memories" / "dlmm_entries" / (POSITION + ".json")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(entry))
+
+    def test_meta_sizing_is_copied_verbatim(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self.assertEqual(self.close_row(directory, dict(risk_sizing=self.SIZING))["risk_sizing"], self.SIZING)
+
+    def test_entry_file_fills_in_for_older_or_adopted_meta(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self.write_entry(directory, dict(position=POSITION, pool=POOL, risk_sizing=self.SIZING))
+            self.assertEqual(self.close_row(directory, {})["risk_sizing"], self.SIZING)
+
+    def test_unknown_sizing_stays_null(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self.assertIsNone(self.close_row(directory, {})["risk_sizing"])
+            for entry in [dict(position=POSITION, pool="other", risk_sizing=self.SIZING),
+                          dict(position="parent", pool=POOL, risk_sizing=self.SIZING),
+                          dict(position=POSITION, pool=POOL, risk_sizing="bad"), []]:
+                with self.subTest(entry=entry):
+                    self.write_entry(directory, entry)
+                    self.assertIsNone(self.close_row(directory, {})["risk_sizing"])
+
+
 class PositionBoundsTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
