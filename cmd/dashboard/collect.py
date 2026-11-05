@@ -1296,6 +1296,128 @@ def brief_funnel(memory, run, now, hours):
                 'Deploys: submitted deploy transactions in dlmm_transactions.jsonl (recorded before broadcast, not chain-confirmed).')
     return f
 
+# Entry funnel panel. The default start is the score-gate change this panel was built to watch;
+# brief/--funnel-since moves it. Constants below mirror dlmm_pipeline.py (compute_deploy_amount,
+# risk_scaled_ticket, BATCH_CONVICTION_FLOOR); test_collect.py pins the parity.
+FUNNEL_SINCE_DEFAULT=1793890800  # 2026-11-05T15:00:00Z
+CONVICTION_FLOOR={'casual':30.0,'multiday':12.0,'turnover':30.0,'pulse':30.0}
+SCORE_BANDS=(('<50',None,50.0),('50-70',50.0,70.0),('>=70',70.0,None))
+ENTRY_GREP=FUNNEL_GREP+r'|Batch reject .* conviction score'
+CASH_POLICY_PATH='skills/solana-dlmm/scripts/dlmm_cash_policy.json'
+
+def deploy_ticket(wallet_sol, policy):
+    """compute_deploy_amount(native) from dlmm_pipeline.py, same policy file."""
+    reserve=policy['native_reserve_lamports']/1e9; minimum=policy['minimum_entry_lamports']/1e9
+    if wallet_sol<sum(policy[k] for k in ('native_reserve_lamports','entry_rent_allowance_lamports','minimum_entry_lamports'))/1e9: return 0.0
+    dynamic=max(0.0,wallet_sol-reserve)*0.45
+    if dynamic<0.3: return minimum
+    return round(min(5.0,dynamic),2)
+
+def risk_ticket(base, score, floor, minimum):
+    """risk_scaled_ticket from dlmm_pipeline.py: the ticket a pick of this score is sized to (0 = refused)."""
+    mult=0.5+0.5*max(0.0,min(1.0,(float(score)-floor)/40.0))
+    amount=round(base*mult,2) if mult<1.0 else base
+    return amount if amount>=minimum else 0.0
+
+def min_clearing_score(base, floor, minimum):
+    """Lowest score (0.1 steps) that passes the conviction floor AND sizes to at least the minimum ticket."""
+    if not number(base) or base<minimum or base<=0: return None
+    for i in range(401):
+        s=floor+i/10
+        if risk_ticket(base,s,floor,minimum)>=minimum: return round(s,1)
+    return None
+
+def score_band(score):
+    if not number(score): return 'unscored'
+    return next(label for label,lo,hi in SCORE_BANDS if (lo is None or score>=lo) and (hi is None or score<hi))
+
+def _verdicts(memory, cut):
+    """position -> True/False from the pipeline's verification rows and the report guard's receipts."""
+    out={}; status={}
+    rows,meta=tail(memory/'dlmm_deploy_verifications.jsonl',limit=20000,budget=2*1024*1024); status['verifications']=meta.get('status')
+    for r in rows:
+        if number(r.get('ts')) and r['ts']>=cut-3600 and identifier(r.get('position')) and isinstance(r.get('verified'),bool):
+            out[r['position']]=out.get(r['position'],False) or r['verified']
+    guard,gmeta=tail(memory/'dlmm_report_guard.jsonl',limit=20000,budget=4*1024*1024); status['report_guard']=gmeta.get('status')
+    for g in guard:
+        if not number(g.get('ts')) or g['ts']<cut-3600: continue
+        for e in g.get('executions') or []:
+            if isinstance(e,dict) and identifier(e.get('position')) and not e.get('dry_run') and isinstance(e.get('execution_verified'),bool):
+                out[e['position']]=out.get(e['position'],False) or e['execution_verified']
+    return out,status
+
+def entry_funnel(profile, run, now, since=None, native_sol=None, native_as_of=None):
+    """Last 24h and 1h of the entry funnel, the live base ticket and score cutoff, and realized SOL by score band."""
+    memory=profile/'memories'; since=float(since) if number(since) and since>0 else FUNNEL_SINCE_DEFAULT
+    cut=now-86400
+    msgs,jstatus=_journal(run,'azimuth.service',['--since','@%d'%int(cut),'--grep',ENTRY_GREP,'-n','20000'],cap=8*1024*1024,timeout=8)
+    rej,rmeta=tail(memory/'dlmm_pipeline_rejects.jsonl',limit=20000,budget=4*1024*1024)
+    txs,tmeta=tail(memory/'dlmm_transactions.jsonl',limit=100000,budget=4*1024*1024)
+    verdict,vstatus=_verdicts(memory,cut)
+    def window(hours):
+        lo=now-hours*3600
+        w={'hours':hours,'batches':0,'batch_pools':0,'routes':{'hermes_ai':0,'deterministic_fallback':0},'fallback_reasons':{},
+           'deploys':{'total':0,'verified':0,'unverified':0,'unknown':0},'rejects':{}}
+        journal_conviction=0
+        for t,m in msgs:
+            if not number(t) or t<lo: continue
+            if (b:=re.search(r'SIGNAL batch sent (\d+) pools',m)): w['batches']+=1; w['batch_pools']+=int(b[1])
+            elif (r:=re.search(r'entry_route=([a-z_]+)(?: reason=([a-z_]+))?',m)):
+                w['routes'][r[1]]=w['routes'].get(r[1],0)+1
+                if r[2]: w['fallback_reasons'][r[2]]=w['fallback_reasons'].get(r[2],0)+1
+            elif re.search(r'Batch reject .* conviction score',m): journal_conviction+=1
+        for r in rej:
+            if number(r.get('ts')) and r['ts']>=lo: g=str(r.get('gate') or 'unknown')[:60]; w['rejects'][g]=w['rejects'].get(g,0)+1
+        # The pipeline journals conviction_floor rows only since this panel; the azimuth journal carries the
+        # direct route's "Batch reject" lines. Both see the same rejects, so take the larger, never the sum.
+        if journal_conviction>w['rejects'].get('conviction_floor',0): w['rejects']['conviction_floor']=journal_conviction
+        seen=set()
+        for r in txs:
+            if r.get('kind')!='deploy' or not number(r.get('ts')) or r['ts']<lo: continue
+            p=r.get('position'); key=p if identifier(p) else ('tx',r.get('signature'),r['ts'])
+            if key in seen: continue
+            seen.add(key); w['deploys']['total']+=1
+            v=verdict.get(p) if identifier(p) else None
+            w['deploys']['verified' if v is True else 'unverified' if v is False else 'unknown']+=1
+        return w
+    out={'status':'partial' if jstatus!='ok' or incomplete(rmeta) or incomplete(tmeta) else 'ok','journal':jstatus,
+         'windows':[window(24),window(1)],'sources':{'pipeline_rejects':rmeta.get('status'),'transactions':tmeta.get('status'),**vstatus}}
+    # Live base ticket and the score that clears the minimum entry after risk scaling.
+    ticket={'native_sol':native_sol,'native_as_of':native_as_of,'base_ticket_sol':None,'minimum_entry_sol':None,'min_score':{},'status':'ok'}
+    try:
+        policy=read_json(profile/CASH_POLICY_PATH)
+        ticket['minimum_entry_sol']=policy['minimum_entry_lamports']/1e9
+        if number(native_sol):
+            ticket['base_ticket_sol']=deploy_ticket(native_sol,policy)
+            for mode,floor in sorted(CONVICTION_FLOOR.items()):
+                ticket['min_score'][mode]={'floor':floor,'min_score':min_clearing_score(ticket['base_ticket_sol'],floor,ticket['minimum_entry_sol'])}
+        else: ticket['status']='no_native_balance'
+    except (OSError,ValueError,KeyError,TypeError): ticket['status']='no_cash_policy'
+    ticket['basis']=('compute_deploy_amount(latest dlmm_nav native_sol) with the profile cash policy; min_score = lowest score that passes '
+                     'the mode conviction floor and still risk-scales to >= minimum entry. null = no score can (base below minimum).')
+    out['ticket']=ticket
+    # Realized SOL by entry score band for positions deployed since `since`.
+    bands={label:{'n':0,'measured':0,'pending':0,'sum_sol':None,'mean_sol':None} for label in [b[0] for b in SCORE_BANDS]+['unscored']}
+    real,zmeta=read_jsonl(memory/'dlmm_realized.jsonl'); realized=keyed(real,'position',zmeta)
+    try: names=[e for e in os.scandir(memory/'dlmm_entries') if e.name.endswith('.json') and e.stat().st_mtime>=since-3600]
+    except OSError: names=[]
+    for e in names:
+        row=read_entry(memory,e.name[:-5])
+        if not row or not number(row.get('deployed_at')) or row['deployed_at']<since or row['deployed_at']>now: continue
+        rs=row.get('risk_sizing') if isinstance(row.get('risk_sizing'),dict) else {}
+        cell=bands[score_band(rs.get('adjusted_score'))]; cell['n']+=1
+        z=realized.get(row.get('position') or e.name[:-5]); v=z.get('realized_sol') if z else None
+        if number(v): cell['measured']+=1; cell['sum_sol']=(cell['sum_sol'] or 0)+v
+        else: cell['pending']+=1
+    for cell in bands.values(): cell['mean_sol']=cell['sum_sol']/cell['measured'] if cell['measured'] else None
+    out['score_bands']={'since':since,'bands':bands,'status':'partial' if incomplete(zmeta) else 'ok',
+                        'basis':'Entries deployed since `since`, banded by risk_sizing.adjusted_score (the score the ticket was sized on), '
+                                'joined to dlmm_realized.jsonl. pending = open or not reconciled yet; sum/mean cover measured rows only.'}
+    out['basis']=('Batches/routes: azimuth.service journal markers. Rejects: dlmm_pipeline_rejects.jsonl gates; conviction_floor is the larger of '
+                  'its rows and the journal "Batch reject ... conviction score" lines. Deploys: distinct positions with a deploy row in '
+                  'dlmm_transactions.jsonl; verified/unverified from dlmm_deploy_verifications.jsonl or report-guard receipts, unknown = no verdict on record.')
+    return out
+
 def brief_health(profile, run, now, statvfs=os.statvfs, meminfo='/proc/meminfo'):
     h={'units':[],'failed_units':[],'disk_free_pct':None,'mem_available_mb':None,'monitor_tick_age_s':None}
     try:
@@ -1407,7 +1529,7 @@ def alerts(profile, now=None, run=None, statvfs=os.statvfs, meminfo='/proc/memin
         if out[k].get('collection_error'): out['alerts'].append({'code':'section_unavailable','message':k+': '+out[k]['collection_error'],'id':'section_unavailable:'+k})
     return out
 
-def brief(profile, now=None, hours=12, n=10, tz='UTC', run=None, statvfs=os.statvfs, meminfo='/proc/meminfo'):
+def brief(profile, now=None, hours=12, n=10, tz='UTC', run=None, statvfs=os.statvfs, meminfo='/proc/meminfo', since=None):
     now=now or time.time(); run=run or bounded_run; memory=profile/'memories'
     hours=max(1,min(168,int(hours))); n=max(1,min(50,int(n)))
     out={'collected_at':now,'hours':hours,'n':n}
@@ -1415,6 +1537,7 @@ def brief(profile, now=None, hours=12, n=10, tz='UTC', run=None, statvfs=os.stat
     out['positions']=panel(brief_positions,run,now)
     out['closes']=panel(brief_closes,memory,now,hours,n)
     out['funnel']=panel(brief_funnel,memory,run,now,hours)
+    out['entry_funnel']=panel(entry_funnel,profile,run,now,since,out['wallet'].get('native_sol'),out['wallet'].get('as_of'))
     out['health']=panel(brief_health,profile,run,now,statvfs,meminfo)
     out['growth']=panel(growth_today,memory,now,tz,run)
     out['experiments']=panel(experiments,profile,cutover(None,now),now,run)
@@ -1422,7 +1545,7 @@ def brief(profile, now=None, hours=12, n=10, tz='UTC', run=None, statvfs=os.stat
     out['alerts']=brief_alerts(out['health'],out['funnel'],now,out['markers'])
     out['today']=panel(brief_today,out['wallet'],memory,now,tz,run)
     out['realized_7d']=panel(brief_realized,memory,now)
-    for k in ('wallet','positions','closes','funnel','health','markers','today','realized_7d','growth','experiments'):
+    for k in ('wallet','positions','closes','funnel','entry_funnel','health','markers','today','realized_7d','growth','experiments'):
         if out[k].get('collection_error'): out['alerts'].append({'code':'section_unavailable','message':k+': '+out[k]['collection_error'],'id':'section_unavailable:'+k})
     return out
 
@@ -1708,7 +1831,7 @@ if __name__=='__main__':
     # full snapshot (no argument) that the server refreshes on separate periods.
     zones=tuple(sys.argv[4].split(',')) if len(sys.argv)>4 and sys.argv[4] else ('UTC',)
     if len(sys.argv)>5 and sys.argv[5]=='brief':
-        out=scrub(brief(Path(sys.argv[1]),hours=int(sys.argv[6]),n=int(sys.argv[7]),tz=zones[0]))
+        out=scrub(brief(Path(sys.argv[1]),hours=int(sys.argv[6]),n=int(sys.argv[7]),tz=zones[0],since=float(sys.argv[3] or 0)))
     elif len(sys.argv)>5 and sys.argv[5]=='alerts': out=scrub(alerts(Path(sys.argv[1])))
     elif len(sys.argv)>7 and sys.argv[5]=='trace':
         out=scrub(trace(Path(sys.argv[1]),Path(sys.argv[2]),sys.argv[7],days=int(sys.argv[6])))

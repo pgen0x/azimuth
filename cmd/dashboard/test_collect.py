@@ -748,6 +748,72 @@ class BriefTests(unittest.TestCase):
         broken=c.brief(self.p,now=T,run=lambda *a,**k:1/0,statvfs=lambda _:vfs,meminfo=str(mem))
         self.assertIn('section_unavailable',{a['code'] for a in broken['alerts']})
         self.assertIn('today',out);self.assertIn('realized_7d',out)
+        self.assertIn('entry_funnel',out);self.assertEqual(len(out['entry_funnel']['windows']),2)
+
+    def test_entry_funnel_windows(self):
+        A,B,C='A'*40,'B'*40,'C'*40
+        scanner=[(T-7200,'scanner[pulse]: SIGNAL batch sent 2 pools: A(80), B(70)'),(T-7199,'scanner[pulse]: entry_route=hermes_ai probe_cached=false; AI probe passed'),
+                 (T-600,'scanner[pulse]: entry_route=deterministic_fallback reason=timeout probe_cached=false; batch not sent'),
+                 (T-590,'Batch reject X-SOL - conviction score 25.0 < 30 pulse floor'),(T-580,'Batch reject Y-SOL - conviction score 20.0 < 30 pulse floor'),
+                 (T-90000,'scanner[pulse]: SIGNAL batch sent 9 pools: old')]
+        rows(self.m/'dlmm_pipeline_rejects.jsonl',[dict(ts=T-500,gate='conviction_floor'),dict(ts=T-5000,gate='downtrend_h6'),dict(ts=T-90000,gate='old')])
+        rows(self.m/'dlmm_transactions.jsonl',[dict(ts=T-100,kind='deploy',position=A),dict(ts=T-99,kind='deploy',position=A),
+                                               dict(ts=T-5000,kind='deploy',position=B),dict(ts=T-6000,kind='deploy',position=C),dict(ts=T-50,kind='close',position=A)])
+        rows(self.m/'dlmm_deploy_verifications.jsonl',[dict(ts=T-95,position=A,verified=True),dict(ts=T-4990,position=B,verified=False)])
+        rows(self.m/'dlmm_report_guard.jsonl',[dict(ts=T-4980,executions=[dict(position=B,dry_run=False,execution_verified=True)])])
+        out=c.entry_funnel(self.p,brief_run(scanner=scanner),T)
+        day,hour=out['windows']
+        self.assertEqual((day['batches'],day['batch_pools'],day['routes']),(1,2,{'hermes_ai':1,'deterministic_fallback':1}))
+        self.assertEqual(day['fallback_reasons'],{'timeout':1})
+        # Journal saw 2 conviction rejects, the jsonl 1: the larger wins, never the sum.
+        self.assertEqual(day['rejects'],{'conviction_floor':2,'downtrend_h6':1})
+        self.assertEqual(day['deploys'],{'total':3,'verified':2,'unverified':0,'unknown':1})
+        self.assertEqual((hour['batches'],hour['rejects'],hour['deploys']['total'],hour['deploys']['verified']),(0,{'conviction_floor':2},1,1))
+        self.assertEqual(out['ticket']['status'],'no_cash_policy')
+
+    def test_entry_funnel_ticket_and_score_bands(self):
+        pol=self.p/c.CASH_POLICY_PATH;pol.parent.mkdir(parents=True)
+        pol.write_text(json.dumps(dict(version=1,native_reserve_lamports=50_000_000,entry_rent_allowance_lamports=15_000_000,minimum_entry_lamports=100_000_000)))
+        entries=self.m/'dlmm_entries';entries.mkdir()
+        since=T-3600
+        def entry(pos,score,at):
+            (entries/(pos+'.json')).write_text(json.dumps({'position':pos,'deployed_at':at,'risk_sizing':{'adjusted_score':score} if score is not None else None}))
+            os.utime(entries/(pos+'.json'),(at,at))  # the collector prefilters entry files by mtime
+        for pos,score,at in (('A'*40,45.0,T-100),('B'*40,69.9,T-90),('C'*40,70.0,T-80),('D'*40,None,T-70),('E'*40,90.0,T-7200)):
+            entry(pos,score,at)
+        rows(self.m/'dlmm_realized.jsonl',[dict(position='A'*40,realized_sol=-.002),dict(position='C'*40,realized_sol=.003),dict(position='E'*40,realized_sol=9.0)])
+        out=c.entry_funnel(self.p,brief_run(),T,since,0.6,T-60)
+        b=out['score_bands']['bands']
+        self.assertEqual(b['<50'],{'n':1,'measured':1,'pending':0,'sum_sol':-.002,'mean_sol':-.002})
+        self.assertEqual((b['50-70']['n'],b['50-70']['pending'],b['50-70']['sum_sol']),(1,1,None))
+        self.assertEqual((b['>=70']['n'],b['>=70']['sum_sol']),(1,.003))  # E deployed before `since`
+        self.assertEqual(b['unscored']['n'],1)
+        t=out['ticket']
+        self.assertEqual((t['base_ticket_sol'],t['minimum_entry_sol']),(0.1,0.1))  # 0.55*0.45 < 0.3 floor -> minimum ticket
+        # A minimum-sized base ticket clears only once round(0.1*mult,2) reaches 0.10: mult 0.95, 36 points over the floor.
+        self.assertEqual(t['min_score']['pulse'],{'floor':30.0,'min_score':66.0})
+        self.assertEqual(c.entry_funnel(self.p,brief_run(),T,since,0.1)['ticket']['min_score']['pulse']['min_score'],None)
+
+    def test_ticket_math_matches_pipeline(self):
+        scripts=Path(__file__).resolve().parents[2]/'assets/skill/scripts'
+        sys.path.insert(0,str(scripts))
+        try: import dlmm_pipeline as pipeline
+        except Exception as e: self.skipTest('pipeline import unavailable: %r'%e)
+        finally: sys.path.remove(str(scripts))
+        self.assertEqual(c.CONVICTION_FLOOR,pipeline.BATCH_CONVICTION_FLOOR)
+        pol=pipeline.CASH_POLICY;minimum=pol['minimum_entry_lamports']/1e9
+        for i in range(0,1200,7):
+            w=i/100
+            self.assertEqual(c.deploy_ticket(w,pol),pipeline.compute_deploy_amount(w),w)
+            base=c.deploy_ticket(w,pol)
+            for mode,floor in c.CONVICTION_FLOOR.items():
+                for s in (floor-1,floor,floor+7.3,floor+20,floor+39.9,floor+50):
+                    self.assertEqual(c.risk_ticket(base,s,floor,minimum) if s>=floor else 0.0,
+                                     pipeline.risk_scaled_ticket(base,s,mode)[0] if s>=floor else 0.0,(w,mode,s))
+                m=c.min_clearing_score(base,floor,minimum)
+                if m is not None:
+                    self.assertGreater(pipeline.risk_scaled_ticket(base,m,mode)[0],0)
+                    if m>floor: self.assertEqual(pipeline.risk_scaled_ticket(base,round(m-0.1,1),mode)[0],0.0)
 
     def test_realized_by_mode_and_route(self):
         A,B,C,D,E='A'*40,'B'*40,'C'*40,'D'*40,'E'*40
