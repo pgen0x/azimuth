@@ -1,6 +1,10 @@
 """Funnel telemetry rows: conviction-floor rejects and deploy verification verdicts."""
+import ast
 import json
 import os
+import textwrap
+import time
+from types import SimpleNamespace
 from pathlib import Path
 import tempfile
 import unittest
@@ -58,6 +62,52 @@ class FunnelRowTests(unittest.TestCase):
         self.assertFalse(pipeline.record_deploy_verification(str(self.profile / 'missing'), 'Pos1', 'pulse', True))
         self.assertFalse(pipeline.record_deploy_verification(str(self.profile), None, 'pulse', True))
 
+
+    # The real deploy -> verification block of main(), executed on its own: every entry route
+    # (batch, --from-signal, --from-pool) reaches it through the one executor deploy call.
+    def run_verify_block(self, res, pnl_results):
+        source = Path(pipeline.__file__).read_text()
+        start = source.index('    position_address = res.get("position"')
+        end = source.index('    active_bin = bins_below', start)
+        calls = []
+
+        def pnl(cmd):
+            calls.append(cmd)
+            return (pnl_results.pop(0) if pnl_results else None), 'not indexed'
+        ns = dict(vars(pipeline), res=res, winner=dict(pool=POOL), mode='pulse', PROFILE_DIR=str(self.profile),
+                  run_command_json=pnl, time=SimpleNamespace(sleep=lambda s: None, time=time.time))
+        exec(compile(textwrap.dedent(source[start:end]), pipeline.__file__, 'exec'), ns)
+        return ns, calls
+
+    def test_unverified_deploy_is_recorded_false(self):
+        ns, calls = self.run_verify_block(dict(success=True, position='PosU', txHash='tx'), [])
+        self.assertIs(ns['verified'], False)
+        self.assertEqual(len(calls), 3)  # the UNVERIFIED branch: three on-chain lookups, all empty
+        self.assertEqual([(r['position'], r['verified']) for r in self.rows('dlmm_deploy_verifications.jsonl')], [('PosU', False)])
+
+    def test_late_verified_deploy_is_recorded_true(self):
+        ns, calls = self.run_verify_block(dict(success=True, position='PosV', txHash='tx'), [None, dict(success=True)])
+        self.assertIs(ns['verified'], True)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual([(r['position'], r['verified']) for r in self.rows('dlmm_deploy_verifications.jsonl')], [('PosV', True)])
+
+    def test_dry_run_deploy_writes_no_row(self):
+        ns, calls = self.run_verify_block(dict(success=True, dryRun=True), [])
+        self.assertIs(ns['verified'], True)
+        self.assertEqual((calls, self.rows('dlmm_deploy_verifications.jsonl')), ([], []))
+
+    def test_single_deploy_site_binds_verified_first(self):
+        tree = ast.parse(Path(pipeline.__file__).read_text())
+        main = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == 'main')
+        deploys = [n for n in ast.walk(main) if isinstance(n, ast.Call) and getattr(n.func, 'id', None) == 'run_command_json'
+                   and n.args and getattr(n.args[0], 'id', None) == 'deploy_cmd']
+        records = [n for n in ast.walk(main) if isinstance(n, ast.Call) and getattr(n.func, 'id', None) == 'record_deploy_verification']
+        self.assertEqual((len(deploys), len(records)), (1, 1))
+        # `verified` is bound unconditionally at main()'s top level, after the deploy and before the record.
+        binds = [s for s in main.body if isinstance(s, ast.Assign) and any(getattr(t, 'id', None) == 'verified' for t in s.targets)]
+        self.assertEqual(len(binds), 1)
+        self.assertLess(deploys[0].lineno, binds[0].lineno)
+        self.assertLess(binds[0].lineno, records[0].lineno)
 
 if __name__ == '__main__':
     unittest.main()
