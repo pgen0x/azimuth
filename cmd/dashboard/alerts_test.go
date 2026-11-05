@@ -161,3 +161,33 @@ func TestAlertsRunPrintsByDefaultAndSurvivesFailures(t *testing.T) {
 		t.Fatalf("bad usage must exit 2, got %d", code)
 	}
 }
+
+func TestStepAlertsEventCodesPageOnceAndAgeOutQuietly(t *testing.T) {
+	st := &alertState{}
+	loss := alert{"loss_single:PosA", "loss_single", "PEPE-SOL close realized -0.0700 SOL"}
+	day := alert{"loss_day", "loss_day", "24h realized -0.0900 SOL"}
+	d := stepAlerts(st, []alert{loss, day}, t0, false)
+	if codes(d.raised) != "loss_day,loss_single" {
+		t.Fatalf("first run: %+v", d)
+	}
+	// Dedup: the same close keeps firing for its lookback and is never resent.
+	d = stepAlerts(st, []alert{loss, day}, t0.Add(7*time.Hour), false)
+	if len(d.raised)+len(d.cleared) != 0 {
+		t.Fatalf("event resent: %+v", d)
+	}
+	// A section failure keeps it remembered.
+	stepAlerts(st, nil, t0.Add(8*time.Hour), true)
+	if st.Alerts["loss_single:PosA"] == nil {
+		t.Fatalf("event forgotten on an incomplete run")
+	}
+	// Aged out of the lookback: forgotten with no "cleared"; the window alert clears normally.
+	d = stepAlerts(st, nil, t0.Add(25*time.Hour), false)
+	if codes(d.cleared) != "loss_day" || st.Alerts["loss_single:PosA"] != nil {
+		t.Fatalf("aged out: %+v %+v", d, st.Alerts)
+	}
+	// A second bad close is a new id and pages on its own.
+	d = stepAlerts(st, []alert{{"loss_single:PosB", "loss_single", "B"}}, t0.Add(26*time.Hour), false)
+	if codes(d.raised) != "loss_single" {
+		t.Fatalf("second close: %+v", d)
+	}
+}

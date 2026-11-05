@@ -127,10 +127,21 @@ azimuth-dashboard alerts -profile ~/.hermes/profiles/<profile>                  
 azimuth-dashboard alerts -profile ... -send-cmd "hermes send -t telegram"           # pipe them to a sender
 ```
 
-It runs only the panels its rules read (health, last deploy, markers; under a second). Differences from the
+It runs only the panels its rules read (health, last deploy, markers, realized losses; under a second). Differences from the
 brief: MemAvailable alerts below **800 MB** (the OOM line, not the brief's 1200 MB heavy-step line), and
 `no_deploy_12h` is marked `i` (info) rather than `!`.
 
+- **Realized losses.** Closes in `dlmm_closes.jsonl` are joined to `dlmm_realized.jsonl` through the skill's
+  `apply_realized` (loaded from `<profile>/skills/solana-dlmm/scripts`); the journal's `pnl_sol` mark is never
+  read as money. `loss_single:<position>`: one close in the last 24 h realized at or below
+  `-ALERT_SINGLE_LOSS_SOL` (default 0.05). `loss_day` / `loss_week`: the measured realized sum over the rolling
+  24 h / 7 d at or below `-ALERT_DAY_LOSS_SOL` (0.08) / `-ALERT_WEEK_LOSS_SOL` (0.15); the message names how
+  many closes are unmeasured (no realized row yet), which are never counted as 0.
+  `loss_emergency_gap:<position>`: an `EMERGENCY Stop-Loss` close in the last 24 h whose realized percent is
+  worse than 2x the floor in its reason (a gap or rug filled far below the trigger). Thresholds come from the
+  alerts process environment (an `Environment=` line in the unit drop-in); a value that is not a positive
+  number keeps the default and raises `loss_threshold_invalid`. Alert only: nothing trades or stops. The
+  per-close alerts page once per close and are forgotten without a `cleared` message when they age out of 24 h.
 - **Dedup.** `-state-file` (default `~/.local/state/azimuth/alerts.json`) remembers, per alert id, whether the
   operator was last told it is firing. A message goes out only when an alert starts or clears, at most one per
   alert id per 6 h; a raise or clear held back by that cap goes out on the first run after the window opens. A

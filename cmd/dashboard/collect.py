@@ -1,5 +1,5 @@
 """Local evidence only: no network clients, trading imports or write operations."""
-import base64, functools, json, math, os, re, selectors, signal, sqlite3, stat, subprocess, sys, time
+import base64, functools, importlib.util, json, math, os, re, selectors, signal, sqlite3, stat, subprocess, sys, time
 from pathlib import Path
 from types import SimpleNamespace
 from datetime import datetime, timedelta, time as clock
@@ -1402,8 +1402,9 @@ def alerts(profile, now=None, run=None, statvfs=os.statvfs, meminfo='/proc/memin
     out['health']=panel(brief_health,profile,run,now,statvfs,meminfo)
     out['funnel']=panel(lambda m:{'last_deploy_ts':last_deploy_ts(m)},memory)
     out['markers']=panel(brief_markers,memory,now)
-    out['alerts']=brief_alerts(out['health'],out['funnel'],now,out['markers'],ALERT_MEM_MIN_MB)
-    for k in ('health','funnel','markers'):
+    out['loss']=panel(loss_evidence,profile,now)
+    out['alerts']=brief_alerts(out['health'],out['funnel'],now,out['markers'],ALERT_MEM_MIN_MB)+loss_alerts(out['loss'])
+    for k in ('health','funnel','markers','loss'):
         if out[k].get('collection_error'): out['alerts'].append({'code':'section_unavailable','message':k+': '+out[k]['collection_error'],'id':'section_unavailable:'+k})
     return out
 
@@ -1419,10 +1420,11 @@ def brief(profile, now=None, hours=12, n=10, tz='UTC', run=None, statvfs=os.stat
     out['growth']=panel(growth_today,memory,now,tz,run)
     out['experiments']=panel(experiments,profile,cutover(None,now),now,run)
     out['markers']=panel(brief_markers,memory,now)
-    out['alerts']=brief_alerts(out['health'],out['funnel'],now,out['markers'])
+    out['loss']=panel(loss_evidence,profile,now)
+    out['alerts']=brief_alerts(out['health'],out['funnel'],now,out['markers'])+loss_alerts(out['loss'])
     out['today']=panel(brief_today,out['wallet'],memory,now,tz,run)
     out['realized_7d']=panel(brief_realized,memory,now)
-    for k in ('wallet','positions','closes','funnel','health','markers','today','realized_7d','growth','experiments'):
+    for k in ('wallet','positions','closes','funnel','health','markers','loss','today','realized_7d','growth','experiments'):
         if out[k].get('collection_error'): out['alerts'].append({'code':'section_unavailable','message':k+': '+out[k]['collection_error'],'id':'section_unavailable:'+k})
     return out
 
@@ -1464,6 +1466,90 @@ def brief_realized(memory, now, days=7):
     return {'days':days,'status':'partial' if incomplete(rmeta) or incomplete(cmeta) else 'ok','by_mode':by_mode,'by_route':by_route,
             'basis':'dlmm_realized.jsonl rows by closed_at. Mode from dlmm_closes.jsonl; route from the entry file risk_sizing.source '
                     '(from_batch = deterministic, from_signal = ai). n counts closes; sum/mean cover measured rows only; null = unmeasured, never 0.'}
+
+# Realized-loss alerts. Bigger tickets make one bad close cost several times what it used to, so these rules
+# page on realized SOL only: dlmm_closes.jsonl joined through the skill's own apply_realized, never the
+# journal's pnl_sol mark. A close with no realized row yet is unmeasured: it is counted and named as such,
+# never summed as 0. Alert only; nothing here trades or stops anything.
+DAY_S=86400
+LOSS_THRESHOLDS=(('ALERT_SINGLE_LOSS_SOL',0.05),('ALERT_DAY_LOSS_SOL',0.08),('ALERT_WEEK_LOSS_SOL',0.15))
+# dlmm_monitor's emergency close reason: "EMERGENCY Stop-Loss (-14.20% <= -11.0% floor) ...".
+EMERGENCY_SL=re.compile(r'EMERGENCY Stop-Loss \((-?\d+(?:\.\d+)?)% <= (-?\d+(?:\.\d+)?)% floor\)')
+# Realized past this multiple of the floor means the exit filled far below where it fired: a gap or a rug.
+EMERGENCY_GAP_MULT=2.0
+
+def loss_thresholds(env=None):
+    """Positive finite SOL amounts from the environment; anything else keeps the default and is reported."""
+    env=os.environ if env is None else env
+    out={}; invalid=[]
+    for name,default in LOSS_THRESHOLDS:
+        raw=env.get(name)
+        try: v=float(raw) if raw not in (None,'') else default
+        except ValueError: v=None
+        if v is None or not math.isfinite(v) or v<=0: invalid.append(name); v=default
+        out[name]=v
+    return out,invalid
+
+def _skill_apply_realized(profile):
+    """The skill's apply_realized, loaded from the profile's scripts dir without touching sys.modules."""
+    path=Path(profile)/'skills'/'solana-dlmm'/'scripts'/'dlmm_realized.py'
+    spec=importlib.util.spec_from_file_location('azimuth_alerts_dlmm_realized',path)
+    module=importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+    return module.apply_realized
+
+def loss_evidence(profile, now, env=None, apply_realized=None):
+    memory=Path(profile)/'memories'
+    thresholds,invalid=loss_thresholds(env)
+    rows_,meta=read_jsonl(memory/'dlmm_closes.jsonl')
+    # Copies: read_jsonl rows are shared, and apply_realized rewrites its records in place.
+    week=[dict(r) for r in rows_ if isinstance(r,dict) and number(r.get('ts')) and now-7*DAY_S<=r['ts']<=now
+          and r.get('dry_run') is not True]
+    if week:
+        # Pass the caller's path: an imported dlmm_realized resolves its own default to the repo checkout.
+        (apply_realized or _skill_apply_realized(profile))(week,path=str(memory/'dlmm_realized.jsonl'))
+    closes=[]
+    for r in week:
+        ok=r.get('pnl_basis')=='realized' and number(r.get('pnl_sol'))
+        m=EMERGENCY_SL.search(r.get('reason') or '') if isinstance(r.get('reason'),str) else None
+        closes.append({'position':r.get('position'),'pair':r.get('pair'),'ts':r['ts'],
+                       'reason':clean(str(r.get('reason') or ''))[:80],
+                       'realized_sol':r['pnl_sol'] if ok else None,
+                       'realized_pct':r['pnl_pct'] if ok and number(r.get('pnl_pct')) else None,
+                       'emergency_floor_pct':float(m.group(2)) if m else None})
+    def window(seconds):
+        cell=[c for c in closes if c['ts']>=now-seconds]
+        got=[c['realized_sol'] for c in cell if c['realized_sol'] is not None]
+        return {'closes':len(cell),'measured':len(got),'unmeasured':len(cell)-len(got),'realized_sol':sum(got) if got else None}
+    return {'status':'partial' if incomplete(meta) else 'ok','source':meta,'now':now,'thresholds':thresholds,
+            'invalid_thresholds':invalid,'closes':closes,'day':window(DAY_S),'week':window(7*DAY_S),
+            'basis':'dlmm_closes.jsonl rows by ts, joined to dlmm_realized.jsonl through apply_realized. realized_sol '
+                    'covers measured rows only; unmeasured = no realized row yet, never 0.'}
+
+def _label(c): return c.get('pair') or (c.get('position') or '?')[:8]
+
+def loss_alerts(loss):
+    """Ids: one per close for the per-close rules (so each bad close pages once), one per window."""
+    a=[]
+    if not isinstance(loss,dict) or loss.get('collection_error') or 'closes' not in loss: return a
+    def flag(code,msg,subject=None): a.append({'code':code,'message':msg,'id':code+(':'+subject if subject else '')})
+    th=loss['thresholds']; now=loss['now']
+    if loss.get('invalid_thresholds'):
+        flag('loss_threshold_invalid','not a positive SOL amount, using the default: '+', '.join(loss['invalid_thresholds']))
+    single=th['ALERT_SINGLE_LOSS_SOL']
+    for c in loss['closes']:
+        if c['ts']<now-DAY_S or not identifier(c.get('position')): continue
+        v=c['realized_sol']; pct=c['realized_pct']; floor=c['emergency_floor_pct']
+        if v is not None and v<=-single:
+            flag('loss_single','%s close realized %+.4f SOL <= -%g (%s)'%(_label(c),v,single,c['reason']),c['position'])
+        if floor is not None and pct is not None and floor<0 and pct<=EMERGENCY_GAP_MULT*floor:
+            flag('loss_emergency_gap','%s EMERGENCY stop-loss realized %+.2f%%, worse than %gx the %.1f%% floor: '
+                 'gap or rug, the exit filled far below its trigger'%(_label(c),pct,EMERGENCY_GAP_MULT,floor),c['position'])
+    for key,code,name,span in (('day','loss_day','ALERT_DAY_LOSS_SOL','24h'),('week','loss_week','ALERT_WEEK_LOSS_SOL','7d')):
+        w=loss[key]; limit=th[name]
+        if w['realized_sol'] is not None and w['realized_sol']<=-limit:
+            extra=', %d unmeasured (not counted)'%w['unmeasured'] if w['unmeasured'] else ''
+            flag(code,'%s realized %+.4f SOL <= -%g over %d measured close(s)%s'%(span,w['realized_sol'],limit,w['measured'],extra))
+    return a
 
 def brief_today(wallet, memory, now, tz, run):
     """Today's native SOL delta against yesterday's last snapshot, and the part of today that was rent reclaim."""
