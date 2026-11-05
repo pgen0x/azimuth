@@ -39,7 +39,7 @@ type briefEntry struct {
 }
 
 func runBrief(ctx context.Context, profile, state string, hours, n int, tz string, since int64) (object, error) {
-	cmd := exec.CommandContext(ctx, "python3", "-c", collector, profile, state, strconv.FormatInt(since, 10), tz, "brief", strconv.Itoa(hours), strconv.Itoa(n))
+	cmd := collectorCommand(ctx, profile, state, strconv.FormatInt(since, 10), tz, "brief", strconv.Itoa(hours), strconv.Itoa(n))
 	output, err := cmd.Output()
 	if err != nil {
 		detail := ""

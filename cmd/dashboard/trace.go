@@ -22,7 +22,7 @@ import (
 const traceCLIDeadline = 90 * time.Second
 
 func runTrace(ctx context.Context, profile, state, query string, days int) (object, error) {
-	cmd := exec.CommandContext(ctx, "python3", "-c", collector, profile, state, "0", "UTC", "trace", strconv.Itoa(days), query)
+	cmd := collectorCommand(ctx, profile, state, "0", "UTC", "trace", strconv.Itoa(days), query)
 	output, err := cmd.Output()
 	if err != nil {
 		detail := ""

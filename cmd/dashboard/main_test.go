@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"net/http/httptest"
 	"os"
@@ -99,7 +100,7 @@ with tempfile.TemporaryDirectory() as tmp:
     assert 'before broadcast' in deploy['note']
 
 `
-	out, err := exec.Command("python3", "-c", code).CombinedOutput()
+	out, err := pythonStdin(code)
 	if err != nil {
 		t.Fatalf("collector check: %v %s", err, out)
 	}
@@ -147,7 +148,7 @@ for TZ,OFF in (('Asia/Jakarta',7*3600),('America/Sao_Paulo',-3*3600),('UTC',0)):
     assert d[4]['status']=='no_snapshot' and 'd_cash_sol' not in d[5]  # a missing day breaks the chain
     assert d[6]['status']=='partial_day' and abs(d[6]['d_cash_sol']-0.1)<1e-12 and abs(d[6]['d_known_sol']-0.1)<1e-12 and d[6]['d_external_sol']==0
 `
-	out, err := exec.Command("python3", "-c", code).CombinedOutput()
+	out, err := pythonStdin(code)
 	if err != nil {
 		t.Fatalf("north star check: %v %s", err, out)
 	}
@@ -186,7 +187,7 @@ with tempfile.TemporaryDirectory() as tmp:
     (m/'dlmm_realized.jsonl').unlink()
     assert nav_bridge(m,T,days=1)['incomplete_sources']==['realized']
 `
-	out, err := exec.Command("python3", "-c", code).CombinedOutput()
+	out, err := pythonStdin(code)
 	if err != nil {
 		t.Fatalf("nav bridge check: %v %s", err, out)
 	}
@@ -242,7 +243,7 @@ with tempfile.TemporaryDirectory() as tmp:
     assert list(realized_by_mode(m,0,'Pacific/Kiritimati')['days'])==['2024-11-03']
     assert list(realized_by_mode(m,0,'Pacific/Pago_Pago')['days'])==['2024-11-02']
 `
-	out, err := exec.Command("python3", "-c", code).CombinedOutput()
+	out, err := pythonStdin(code)
 	if err != nil {
 		t.Fatalf("live ledger check: %v %s", err, out)
 	}
@@ -335,5 +336,23 @@ func TestRobinhoodLogLimitAndZone(t *testing.T) {
 	}
 	if len(section["logs"].([]any)) != 5 {
 		t.Fatal("request mutated the cached snapshot")
+	}
+}
+
+// pythonStdin runs a test program that embeds the collector; stdin, like collectorCommand, because the
+// source is past the 128 KiB single-argument limit.
+func pythonStdin(code string) ([]byte, error) {
+	cmd := exec.Command("python3", "-")
+	cmd.Stdin = strings.NewReader(code)
+	return cmd.CombinedOutput()
+}
+
+func TestCollectorCommandPastArgLimit(t *testing.T) {
+	if len(collector) <= 128*1024 {
+		t.Skip("collector still fits one argv string")
+	}
+	out, err := collectorCommand(context.Background(), t.TempDir(), t.TempDir(), "0", "UTC", "alerts").Output()
+	if err != nil || !strings.Contains(string(out), `"alerts"`) {
+		t.Fatalf("collector over stdin: %v %s", err, out)
 	}
 }
