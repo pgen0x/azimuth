@@ -149,8 +149,11 @@ class ObserveBoundsTests(unittest.TestCase):
         os.mkfifo(path)
         reader = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
         try:
-            with patch.dict(os.environ, {'DLMM_SHADOW_EXITS': '1'}), patch.object(monitor, 'PROFILE_DIR', str(self.profile)):
+            with patch.dict(os.environ, {'DLMM_SHADOW_EXITS': '1'}), patch.object(monitor, 'PROFILE_DIR', str(self.profile)), \
+                    contextlib.redirect_stdout(io.StringIO()) as out:
                 monitor.shadow_exit_observe(POSITION, 'pulse', 0, None, 0, False, {})
+            # The refusal is reported, not silent (research_not_regular).
+            self.assertEqual(out.getvalue(), 'SHADOW_EXIT_OBSERVATION_ERROR OSError\n')
             self.assertEqual(os.read(reader, 4096), b'')  # writer closed, nothing written into the pipe
         finally:
             os.close(reader)
