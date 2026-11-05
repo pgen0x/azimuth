@@ -891,6 +891,25 @@ def log_hold(pos_addr, hold_minutes, reason, meta=None, count=None):
     except Exception as e:
         print(f"⚠️ Failed to write hold journal: {e}")
 
+def _entry_risk_sizing(meta, pos_addr, pool):
+    """Redis meta carries risk_sizing for entries since 2026-11-05; older or
+    adopted positions fall back to the exact-position entry file."""
+    sizing = meta.get("risk_sizing")
+    if isinstance(sizing, dict):
+        return sizing
+    if not re.fullmatch(r"[1-9A-HJ-NP-Za-km-z]{32,44}", str(pos_addr)):
+        return None
+    try:
+        with open(os.path.join(PROFILE_DIR, "memories", "dlmm_entries", pos_addr + ".json"),
+                  encoding="utf-8") as entry_file:
+            entry = json.load(entry_file)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(entry, dict) or entry.get("position") != pos_addr or entry.get("pool") != pool:
+        return None
+    sizing = entry.get("risk_sizing")
+    return sizing if isinstance(sizing, dict) else None
+
 def log_close(pool, pair, meta, pos_addr, pnl_pct, realized_sol, fee_per_tvl_24h,
               age_min, reason, txs, dry_run, event="exit", unclaimed_fees_sol=None,
               pnl_basis=None):
@@ -937,6 +956,9 @@ def log_close(pool, pair, meta, pos_addr, pnl_pct, realized_sol, fee_per_tvl_24h
         # Entry-time signal snapshot (written by dlmm_pipeline.py at deploy) —
         # dlmm_weights.py correlates these with pnl_pct to learn signal weights.
         "signal": meta.get("signal"),
+        # Entry sizing evidence, same keys as the entry file's risk_sizing.
+        # Null for entries sized without a signal (manual, re-center child).
+        "risk_sizing": _entry_risk_sizing(meta, pos_addr, pool),
         # "exit" | "compound" — which path ended the position. Only "exit" rows
         # existed before 2026-08-17, so absence means "exit" for older rows.
         # A re-center is NOT a third value: the close that feeds one is a real
