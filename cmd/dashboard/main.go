@@ -56,9 +56,9 @@ type server struct {
 	zones          []string   // recently requested non-UTC zones, least recent first
 	zoneMu         sync.Mutex // serializes first-use day-bucket computations
 	briefs         briefCache
-	runBrief       func(ctx context.Context, profile, state string, hours, n int, tz string) (object, error) // nil = runBrief; tests stub it
-	slow           object                                                                                    // last good slow panels (see slowKeys); merged into every fast snapshot
-	slowAt         time.Time                                                                                 // when slow was collected; zero = never
+	runBrief       func(ctx context.Context, profile, state string, hours, n int, tz string, since int64) (object, error) // nil = runBrief; tests stub it
+	slow           object                                                                                                 // last good slow panels (see slowKeys); merged into every fast snapshot
+	slowAt         time.Time                                                                                              // when slow was collected; zero = never
 	slowFailure    string
 	runCollector   func(ctx context.Context, mode string, zones []string) ([]byte, error) // nil = python3; tests stub it
 }

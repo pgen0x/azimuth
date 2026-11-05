@@ -1,5 +1,8 @@
 # Build artifacts
 /azimuth
+# `go build` inside cmd/dashboard (or `./...` from there) writes the binary next to the source.
+/cmd/dashboard/dashboard
+/azimuth-dashboard
 *.exe
 /dist/
 

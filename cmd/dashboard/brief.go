@@ -38,8 +38,8 @@ type briefEntry struct {
 	data object
 }
 
-func runBrief(ctx context.Context, profile, state string, hours, n int, tz string) (object, error) {
-	cmd := exec.CommandContext(ctx, "python3", "-c", collector, profile, state, "0", tz, "brief", strconv.Itoa(hours), strconv.Itoa(n))
+func runBrief(ctx context.Context, profile, state string, hours, n int, tz string, since int64) (object, error) {
+	cmd := exec.CommandContext(ctx, "python3", "-c", collector, profile, state, strconv.FormatInt(since, 10), tz, "brief", strconv.Itoa(hours), strconv.Itoa(n))
 	output, err := cmd.Output()
 	if err != nil {
 		detail := ""
@@ -81,8 +81,23 @@ func briefParams(hours, n, tz string) (int, int, string, error) {
 	return h, c, zone, nil
 }
 
-func (s *server) agentBrief(hours, n int, tz string) (object, error) {
-	key := fmt.Sprintf("%d/%d/%s", hours, n, tz)
+// funnelSince parses the entry-funnel score-band start: RFC3339 or unix seconds. Empty = 0, which the
+// collector reads as its default start (FUNNEL_SINCE_DEFAULT).
+func funnelSince(v string) (int64, error) {
+	if v == "" {
+		return 0, nil
+	}
+	if t, err := time.Parse(time.RFC3339, v); err == nil {
+		return t.Unix(), nil
+	}
+	if n, err := strconv.ParseInt(v, 10, 64); err == nil && n >= 0 {
+		return n, nil
+	}
+	return 0, fmt.Errorf("invalid funnel_since: use RFC3339 (2026-11-05T15:00:00Z) or unix seconds")
+}
+
+func (s *server) agentBrief(hours, n int, tz string, since int64) (object, error) {
+	key := fmt.Sprintf("%d/%d/%s/%d", hours, n, tz, since)
 	s.briefs.mu.Lock()
 	defer s.briefs.mu.Unlock()
 	if e, ok := s.briefs.entries[key]; ok && time.Since(e.at) < briefCacheTTL {
@@ -94,7 +109,7 @@ func (s *server) agentBrief(hours, n int, tz string) (object, error) {
 	if run == nil {
 		run = runBrief
 	}
-	data, err := run(ctx, s.profile, s.state, hours, n, tz)
+	data, err := run(ctx, s.profile, s.state, hours, n, tz, since)
 	if err != nil {
 		return nil, err
 	}
@@ -116,7 +131,13 @@ func briefMain(args []string, stdout, stderr io.Writer) int {
 	tz := fs.String("tz", "UTC", "IANA zone for wallet day buckets")
 	profile := fs.String("profile", filepath.Join(home, ".hermes/profiles/dlmm"), "Hermes profile directory")
 	state := fs.String("state", filepath.Join(home, ".local/state/azimuth"), "persisted state directory")
+	sinceFlag := fs.String("funnel-since", "", "start of the entry-funnel score bands, RFC3339 or unix seconds (default 2026-11-05T15:00:00Z)")
 	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	since, err := funnelSince(*sinceFlag)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
 		return 2
 	}
 	h, c, zone, err := briefParams(strconv.Itoa(*hours), strconv.Itoa(*n), *tz)
@@ -130,7 +151,7 @@ func briefMain(args []string, stdout, stderr io.Writer) int {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), briefCLIDeadline)
 	defer cancel()
-	data, err := runBrief(ctx, *profile, *state, h, c, zone)
+	data, err := runBrief(ctx, *profile, *state, h, c, zone, since)
 	if err != nil {
 		fmt.Fprintln(stderr, err)
 		return 1
@@ -433,6 +454,8 @@ func briefText(d object) string {
 		fmt.Fprintf(&b, "  pipeline rejects: %s\n", counts(f["pipeline_rejects"], 8))
 	}
 
+	briefEntryFunnel(&b, obj(d["entry_funnel"]))
+
 	h := obj(d["health"])
 	fmt.Fprintf(&b, "HEALTH disk free %s%% · MemAvailable %s MB · monitor tick %ss ago · failed units %d\n", str(h["disk_free_pct"]), str(h["mem_available_mb"]), str(h["monitor_tick_age_s"]), len(list(h["failed_units"])))
 	if !sectionError(&b, h) {
@@ -454,7 +477,12 @@ func (s *server) serveBrief(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	data, err := s.agentBrief(hours, n, tz)
+	since, err := funnelSince(q.Get("funnel_since"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	data, err := s.agentBrief(hours, n, tz, since)
 	if err != nil {
 		log.Print(err)
 		w.Header().Set("Content-Type", "application/json")
@@ -469,4 +497,50 @@ func (s *server) serveBrief(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(data)
+}
+
+// briefEntryFunnel renders the entry_funnel section: two windows, the live ticket, score bands. Six lines.
+func briefEntryFunnel(b *strings.Builder, f object) {
+	fmt.Fprintf(b, "ENTRY FUNNEL · %s\n", str(f["status"]))
+	if sectionError(b, f) {
+		return
+	}
+	for _, x := range list(f["windows"]) {
+		w := obj(x)
+		r, dp := obj(w["routes"]), obj(w["deploys"])
+		fb := str(r["deterministic_fallback"])
+		if len(obj(w["fallback_reasons"])) > 0 {
+			fb += " (" + counts(w["fallback_reasons"], 3) + ")"
+		}
+		fmt.Fprintf(b, "  %sh batches %s (%s pools) · route ai %s / fallback %s · deploys %s: verified %s, unverified %s, unknown %s\n",
+			str(w["hours"]), str(w["batches"]), str(w["batch_pools"]), str(r["hermes_ai"]), fb,
+			str(dp["total"]), str(dp["verified"]), str(dp["unverified"]), str(dp["unknown"]))
+		fmt.Fprintf(b, "    rejects: %s\n", counts(w["rejects"], 8))
+	}
+	t := obj(f["ticket"])
+	modes := obj(t["min_score"])
+	keys := make([]string, 0, len(modes))
+	for k := range modes {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	cells := make([]string, 0, len(keys))
+	for _, k := range keys {
+		m := obj(modes[k])
+		s := "none"
+		if v, ok := numOK(m["min_score"]); ok {
+			s = fmt.Sprintf(">=%.1f", v)
+		}
+		cells = append(cells, fmt.Sprintf("%s %s (floor %s)", k, s, str(m["floor"])))
+	}
+	fmt.Fprintf(b, "  ticket base %s SOL · minimum %s · clearing score %s · %s\n",
+		sol(t["base_ticket_sol"], false), sol(t["minimum_entry_sol"], false), strings.Join(cells, ", "), str(t["status"]))
+	sb := obj(f["score_bands"])
+	bands := obj(sb["bands"])
+	parts := []string{}
+	for _, k := range []string{"<50", "50-70", ">=70", "unscored"} {
+		c := obj(bands[k])
+		parts = append(parts, fmt.Sprintf("%s n=%s realized %s (%s measured, %s pending)", k, str(c["n"]), solN(c["sum_sol"], true, 6), str(c["measured"]), str(c["pending"])))
+	}
+	fmt.Fprintf(b, "  score bands since %s: %s\n", stamp(sb["since"]), strings.Join(parts, " · "))
 }

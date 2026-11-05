@@ -130,6 +130,16 @@ async function render(tab, payload, fail=false, extra={}) {
   assert(ops.html.includes('MemAvailable</span><strong class="">Unknown') || ops.html.includes('MemAvailable</span><strong>Unknown'), 'unmeasured memory is Unknown');
   assert(ops.html.includes('7 min ago') && ops.html.includes('badge bad">failed / failed') && ops.html.includes('badge bad">disabled'), 'stale tick and failed unit');
   assert(ops.timerFetches > 0, 'ops refreshes on the timer');
+  const ef = await render('ops', {collected_at: 1, alerts: [], funnel: {}, health: {}, entry_funnel: {status: 'ok',
+    windows: [{hours: 24, batches: 65, batch_pools: 66, routes: {hermes_ai: 65, deterministic_fallback: 3}, fallback_reasons: {timeout: 3},
+               deploys: {total: 3, verified: 2, unverified: 1, unknown: 0}, rejects: {conviction_floor: 2, '<i>x</i>': 1}},
+              {hours: 1, batches: 5, batch_pools: 5, routes: {hermes_ai: 5, deterministic_fallback: 0}, fallback_reasons: {}, deploys: {total: 0}, rejects: {}}],
+    ticket: {status: 'ok', base_ticket_sol: 0.1, minimum_entry_sol: 0.1, min_score: {pulse: {floor: 30, min_score: 66}, multiday: {floor: 12, min_score: null}}},
+    score_bands: {since: 1793890800, bands: {'<50': {n: 1, measured: 1, pending: 0, sum_sol: -0.002, mean_sol: -0.002}}}}});
+  assert(ef.html.includes('ops / entry-funnel') && ef.html.includes('conviction_floor') && ef.html.includes('(timeout 3)'), 'entry funnel windows and gates');
+  assert(ef.html.includes('&lt;i&gt;x&lt;/i&gt;') && !ef.html.includes('<i>x</i>'), 'reject gate escaped');
+  assert(ef.html.includes('None (base below minimum)') && ef.html.includes('>66<'), 'clearing score per mode');
+  assert(ef.html.includes('−0.002000') && ef.html.includes('&gt;=70'), 'score bands, unmeasured shown as Unknown');
   const opsOk = await render('ops', {collected_at: 1, alerts: [], funnel: {}, health: {}});
   assert(opsOk.html.includes('No red flags') && opsOk.html.includes('No observed records'), 'empty ops');
   const opsFail = await render('ops', null, true);
