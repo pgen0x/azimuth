@@ -4,10 +4,64 @@
 #   2. installs the dlmm-signal webhook subscription (agent decision logic)
 #   3. builds the Go discovery daemon
 # It never touches your wallet keys — those live in the profile .env you create.
+#
+# Default (no flags) installs and enables the core units only. Operator tooling and
+# research timers are opt-in through the flags below; see ./install.sh --help.
 set -euo pipefail
 
-PROFILE="${1:-$HOME/.hermes/profiles/dlmm}"
+usage() {
+  cat <<'USAGE'
+Usage: ./install.sh [PROFILE_DIR] [flags]
+
+PROFILE_DIR defaults to ~/.hermes/profiles/dlmm.
+
+Without flags: core units only (azimuth, azimuth-sol-monitor enabled;
+azimuth-rh-monitor installed, not enabled). No other unit is enabled.
+
+Opt-in flags (each installs and enables only what it names; re-runs are safe):
+  --with-dashboard   build ~/.local/bin/azimuth-dashboard, install + enable
+                     azimuth-dashboard.service (read-only, 127.0.0.1:8787)
+  --with-alerts      build the same binary, install + enable azimuth-alerts.timer
+                     (read-only; prints to its journal until you add -send-cmd)
+  --with-ops         install + enable azimuth-sol-markers.timer and
+                     azimuth-sol-retention.timer (retention dry run shown first).
+                     Copies azimuth-sol-rent.* too, but does NOT enable it.
+  --with-rent-reclaim-signs-tx
+                     install + enable azimuth-sol-rent.timer. It SIGNS AND SENDS
+                     Solana transactions (closes empty token accounts) every 30m.
+  --with-research    install + enable the research timers: accounting, shadow,
+                     candidate-paper, net-experiment, price-path (no trading).
+                     azimuth-sol-net-research@ is copied, never enabled.
+  --no-build         skip npm install and both Go builds (re-runs, tests)
+  -h, --help         show this help
+
+Environment:
+  SYSTEMCTL          systemctl command to use (default systemctl; SYSTEMCTL=echo
+                     prints the calls instead, for a dry run against a temp HOME)
+USAGE
+}
+
+PROFILE=""
+WITH_DASHBOARD=0 WITH_ALERTS=0 WITH_OPS=0 WITH_RENT_TX=0 WITH_RESEARCH=0 NO_BUILD=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h|--help) usage; exit 0 ;;
+    --with-dashboard) WITH_DASHBOARD=1 ;;
+    --with-alerts) WITH_ALERTS=1 ;;
+    --with-ops) WITH_OPS=1 ;;
+    --with-rent-reclaim-signs-tx) WITH_RENT_TX=1 ;;
+    --with-research) WITH_RESEARCH=1 ;;
+    --no-build) NO_BUILD=1 ;;
+    -*) echo "unknown flag: $1" >&2; usage >&2; exit 2 ;;
+    *)
+      if [ -n "$PROFILE" ]; then echo "only one profile path, got: $PROFILE and $1" >&2; exit 2; fi
+      PROFILE="$1" ;;
+  esac
+  shift
+done
+PROFILE="${PROFILE:-$HOME/.hermes/profiles/dlmm}"
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SYSTEMCTL="${SYSTEMCTL:-systemctl}"
 
 echo "→ Target Hermes profile: $PROFILE"
 mkdir -p "$PROFILE/skills/solana-dlmm" "$PROFILE/skills/solana-web3/scripts"
@@ -149,6 +203,9 @@ else
   echo "   created $SUB_DST"
 fi
 
+if [ "$NO_BUILD" = 1 ]; then
+  echo "→ --no-build: skipping npm install and Go builds"
+else
 echo "→ npm install (Meteora SDK) in repo"
 # Installed in the repo, not the profile: dlmm_executor.js is reached through the
 # scripts/ symlink, and Node resolves require() against the script's *real* path
@@ -158,6 +215,24 @@ echo "→ npm install (Meteora SDK) in repo"
 
 echo "→ Building Go daemon"
 ( cd "$REPO" && go build -o azimuth . ) && echo "   built $REPO/azimuth"
+
+if [ "$WITH_DASHBOARD" = 1 ] || [ "$WITH_ALERTS" = 1 ]; then
+  echo "→ Building azimuth-dashboard into $HOME/.local/bin"
+  # Build to a temp name, then rename: replacing a running binary in place is unsafe,
+  # a rename is not. Updates of a live dashboard belong to docs/DASHBOARD_DEPLOY.md.
+  mkdir -p "$HOME/.local/bin"
+  dash_tmp="$(mktemp "$HOME/.local/bin/azimuth-dashboard.build.XXXXXXXX")"
+  if ( cd "$REPO" && go build -o "$dash_tmp" ./cmd/dashboard ); then
+    chmod 755 "$dash_tmp"
+    mv -f "$dash_tmp" "$HOME/.local/bin/azimuth-dashboard"
+    echo "   built $HOME/.local/bin/azimuth-dashboard"
+  else
+    rm -f "$dash_tmp"
+    echo "   ⚠ dashboard build failed — fix it, then re-run with the same flags"
+    exit 1
+  fi
+fi
+fi
 
 echo "→ Rendering optional Solana units into $PROFILE/systemd"
 # Accounting, shadow, rent, marker, research and alert timers are opt-in, so they are only
@@ -184,7 +259,7 @@ echo "→ Installing user systemd services"
 #   azimuth-rh-monitor          — Robinhood Chain exit loop. Installed, NOT enabled:
 #                              that venue is observe-only until you deploy there.
 # Idempotent: re-running rewrites the units and restarts what is enabled.
-if command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >/dev/null 2>&1; then
+if command -v "$SYSTEMCTL" >/dev/null 2>&1 && "$SYSTEMCTL" --user show-environment >/dev/null 2>&1; then
   UNIT_DIR="$HOME/.config/systemd/user"
   mkdir -p "$UNIT_DIR"
   sed "s#__PROFILE__#$PROFILE#g" "$REPO/assets/systemd/azimuth-sol-monitor.service" > "$UNIT_DIR/azimuth-sol-monitor.service"
@@ -195,12 +270,12 @@ if command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >/d
   GATEWAY_UNIT="hermes-gateway-$(basename "$PROFILE").service"
   sed -e "s#__REPO__#$REPO#g" -e "s#__GATEWAY__#$GATEWAY_UNIT#g" \
     "$REPO/assets/systemd/azimuth.service" > "$UNIT_DIR/azimuth.service"
-  systemctl --user daemon-reload
-  systemctl --user enable --now azimuth-sol-monitor.service
+  "$SYSTEMCTL" --user daemon-reload
+  "$SYSTEMCTL" --user enable --now azimuth-sol-monitor.service
   echo "   installed + started azimuth-sol-monitor.service"
   if [ -f "$REPO/.env" ]; then
-    systemctl --user enable --now azimuth.service
-    systemctl --user restart azimuth.service
+    "$SYSTEMCTL" --user enable --now azimuth.service
+    "$SYSTEMCTL" --user restart azimuth.service
     echo "   installed + started azimuth.service"
   else
     echo "   installed azimuth.service (not started — create $REPO/.env first,"
@@ -209,7 +284,85 @@ if command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >/d
   echo "   installed azimuth-rh-monitor.service (not enabled — Robinhood venue is observe-only)"
   echo "   ⚠ run 'loginctl enable-linger $USER' once so the loops survive logout/reboot"
   echo "   logs: journalctl --user -u azimuth -f"
+
+  # Opt-in units. Only files from assets/systemd are written, with the same
+  # __PROFILE__ / __REPO__ rewrite as above; %h is left for systemd.
+  render_unit() {
+    sed -e "s#__PROFILE__#$PROFILE#g" -e "s#__REPO__#$REPO#g" \
+      "$REPO/assets/systemd/$1" > "$UNIT_DIR/$1"
+  }
+  OPT_ENABLE=()
+  if [ "$WITH_DASHBOARD" = 1 ]; then
+    render_unit azimuth-dashboard.service
+    # The stock unit passes no -profile and so reads ~/.hermes/profiles/dlmm. For another
+    # profile, write the drop-in docs/DASHBOARD.md describes, unless one of yours exists.
+    if [ "$PROFILE" != "$HOME/.hermes/profiles/dlmm" ]; then
+      dropin="$UNIT_DIR/azimuth-dashboard.service.d/profile.conf"
+      want="$(printf '[Service]\nExecStart=\nExecStart=%%h/.local/bin/azimuth-dashboard -env-file %s/.env -profile %s\n' "$REPO" "$PROFILE")"
+      if [ -f "$dropin" ] && [ "$(cat "$dropin")" != "$want" ]; then
+        echo "   ⚠ kept existing $dropin (differs from the generated one; check its -profile)"
+      else
+        mkdir -p "$(dirname "$dropin")"
+        printf '%s\n' "$want" > "$dropin"
+        echo "   wrote $dropin (-profile $PROFILE)"
+      fi
+    fi
+    OPT_ENABLE+=(azimuth-dashboard.service)
+  fi
+  if [ "$WITH_ALERTS" = 1 ]; then
+    render_unit azimuth-alerts.service; render_unit azimuth-alerts.timer
+    OPT_ENABLE+=(azimuth-alerts.timer)
+  fi
+  if [ "$WITH_OPS" = 1 ]; then
+    for u in azimuth-sol-markers azimuth-sol-retention azimuth-sol-rent; do
+      render_unit "$u.service"; render_unit "$u.timer"
+    done
+    # The retention timer runs with --apply (archives rows older than 14 days into
+    # memories/archive/). Show what the first run would move before enabling it.
+    echo "   retention dry run (nothing written):"
+    python3 "$PROFILE/skills/solana-dlmm/scripts/dlmm_retention.py" --profile "$PROFILE" --keep-days 14 \
+      | python3 -c '
+import json, sys
+rows = [r for r in json.load(sys.stdin) if r.get("archived_rows")]
+for r in rows:
+    print("     would archive %s rows (%s bytes) of %s" % (r["archived_rows"], r["archived_bytes"], r["file"]))
+print("     the timer applies this daily" if rows else "     nothing older than 14 days to archive")
+' || echo "     ⚠ retention dry run failed; check it before relying on the timer"
+    OPT_ENABLE+=(azimuth-sol-markers.timer azimuth-sol-retention.timer)
+  fi
+  if [ "$WITH_RENT_TX" = 1 ]; then
+    render_unit azimuth-sol-rent.service; render_unit azimuth-sol-rent.timer
+    echo "   ⚠ azimuth-sol-rent.timer SIGNS AND SENDS transactions from the profile wallet"
+    echo "     every 30 min (closes empty token accounts, reclaims their rent)."
+    OPT_ENABLE+=(azimuth-sol-rent.timer)
+  fi
+  if [ "$WITH_RESEARCH" = 1 ]; then
+    for u in azimuth-sol-accounting azimuth-sol-shadow azimuth-sol-candidate-paper \
+      azimuth-sol-net-experiment azimuth-sol-price-path azimuth-sol-net-research@; do
+      render_unit "$u.service"; render_unit "$u.timer"
+    done
+    OPT_ENABLE+=(azimuth-sol-accounting.timer azimuth-sol-shadow.timer azimuth-sol-candidate-paper.timer
+      azimuth-sol-net-experiment.timer azimuth-sol-price-path.timer)
+    echo "   azimuth-sol-net-research@ copied, not enabled (needs an instance name:"
+    echo "     systemctl --user enable --now azimuth-sol-net-research@<name>.timer)"
+  fi
+  if [ "${#OPT_ENABLE[@]}" -gt 0 ]; then
+    "$SYSTEMCTL" --user daemon-reload
+    "$SYSTEMCTL" --user enable --now "${OPT_ENABLE[@]}"
+    echo "   enabled: ${OPT_ENABLE[*]}"
+  fi
+  if [ "$WITH_DASHBOARD" = 1 ]; then
+    echo "   dashboard: http://127.0.0.1:8787 — serves no data until DASHBOARD_PASSWORD_HASH is set"
+    echo "     (docs/DASHBOARD_DEPLOY.md#password-hash). Status text: azimuth-dashboard brief"
+  fi
+  if [ "$WITH_ALERTS" = 1 ]; then
+    echo "   alerts print to their journal only. To deliver them, add a drop-in with -send-cmd"
+    echo "     (see the header of assets/systemd/azimuth-alerts.service)."
+  fi
 else
+  if [ $((WITH_DASHBOARD + WITH_ALERTS + WITH_OPS + WITH_RENT_TX + WITH_RESEARCH)) -gt 0 ]; then
+    echo "   ⚠ no user systemd: the --with-* flags installed nothing. Unit files are in $PROFILE/systemd."
+  fi
   echo "   ⚠ no user systemd available — run the loop + daemon yourself:"
   echo "     nohup bash $PROFILE/skills/solana-dlmm/scripts/dlmm_monitor_loop.sh &"
   echo "     ( cd $REPO && set -a && . ./.env && set +a && nohup ./azimuth & )"

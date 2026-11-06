@@ -98,10 +98,19 @@ found"). `loginctl enable-linger $USER` is what keeps them alive across logout.
 | `azimuth` | the `azimuth` daemon in this repo (entry signals) | `install.sh` ← `assets/systemd/azimuth.service` |
 | `azimuth-sol-monitor` | 20s Solana exit loop (`dlmm_monitor_loop.sh`) — the real safety net | `install.sh` ← `assets/systemd/azimuth-sol-monitor.service` |
 | `azimuth-rh-monitor` | Robinhood Chain exit loop (`uni_monitor_loop.sh`); installed disabled | `install.sh` ← `assets/systemd/azimuth-rh-monitor.service` |
+| `azimuth-dashboard` | local read-only dashboard, `127.0.0.1:8787` (`cmd/dashboard`) | `install.sh --with-dashboard` (opt-in) |
+| `azimuth-alerts` (.timer) | `azimuth-dashboard alerts` every 10m; sends only with `-send-cmd` | `install.sh --with-alerts` (opt-in) |
+| `azimuth-sol-markers` (.timer) | archives settled executor markers every 6h; no tx | `install.sh --with-ops` (opt-in) |
+| `azimuth-sol-retention` (.timer) | gzips research rows older than 14d daily (`--apply`) | `install.sh --with-ops` (opt-in, dry run first) |
+| `azimuth-sol-rent` (.timer) | reclaims empty token-account rent every 30m — **signs tx** | `install.sh --with-rent-reclaim-signs-tx` only |
+| `azimuth-sol-{accounting,shadow,candidate-paper,net-experiment,price-path}` (.timer) | research observers; read-only RPC/quotes, local journals only | `install.sh --with-research` (opt-in) |
+| `azimuth-sol-net-research@<name>` (.timer) | frozen paired net research instance | copied by `--with-research`; enable by hand |
 | `hermes-gateway-<profile>` | Hermes gateway that receives the webhook, and ticks the profile's cron jobs | Hermes, not this repo |
 
-Units not listed here are **not** this repo's, and `install.sh` must never
-write them.
+Every repo unit lives in `assets/systemd/`. Without flags `install.sh` enables
+only the first two (the daemon once `<repo>/.env` exists); every `--with-*`
+flag is opt-in. Units not listed here are **not** this repo's, and `install.sh`
+must never write them.
 
 ```bash
 journalctl --user -u azimuth -f          # live tail
