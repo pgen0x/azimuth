@@ -5,6 +5,44 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.15.0](https://github.com/pgen0x/azimuth/compare/v2.14.1...v2.15.0) (2026-11-06)
+
+
+### Features
+
+* **dashboard:** agent brief CLI, /api/agent/brief and ops panel ([#279](https://github.com/pgen0x/azimuth/issues/279)) ([3346dfb](https://github.com/pgen0x/azimuth/commit/3346dfb9fd577c48dfd7871a66f097e6025b1a89))
+* **dashboard:** entry funnel panel and brief lines ([#300](https://github.com/pgen0x/azimuth/issues/300)) ([18431bd](https://github.com/pgen0x/azimuth/commit/18431bd244895da93d1ebd1ed9f8cc42ab837acc))
+* **dashboard:** growth and experiments panels ([#290](https://github.com/pgen0x/azimuth/issues/290)) ([5dbbc76](https://github.com/pgen0x/azimuth/commit/5dbbc76f5f5183f9b6a107af3d059afa76dabf48))
+* **dashboard:** realized-loss operator alerts ([#298](https://github.com/pgen0x/azimuth/issues/298)) ([80ab875](https://github.com/pgen0x/azimuth/commit/80ab875f366783f09247a169a07e6e94525218cf))
+* **dashboard:** trace subcommand and brief realized/today panels ([#288](https://github.com/pgen0x/azimuth/issues/288)) ([1e27e3f](https://github.com/pgen0x/azimuth/commit/1e27e3f8c7bb9d038e3ce21c1395387ec4a9f277))
+* **dashboard:** unattended operator alerts with dedup ([#292](https://github.com/pgen0x/azimuth/issues/292)) ([68397d6](https://github.com/pgen0x/azimuth/commit/68397d65eb09e9398d044fbf60878d295d9ae27b))
+* **entry:** journal score-band sizing evidence on entry and close ([#297](https://github.com/pgen0x/azimuth/issues/297)) ([578daed](https://github.com/pgen0x/azimuth/commit/578daed5140f10580b398eba15398f7b735ca04b))
+* **install:** opt-in operator tooling flags and docs for every unit ([#302](https://github.com/pgen0x/azimuth/issues/302)) ([c9adf5b](https://github.com/pgen0x/azimuth/commit/c9adf5b5495c2ef0434a9e667e4a161c05b35d82))
+* **rent:** liquidate-legacy-bags operator command ([#287](https://github.com/pgen0x/azimuth/issues/287)) ([e603fa6](https://github.com/pgen0x/azimuth/commit/e603fa621725159a6eaf78d78caf82954ab7b0f2))
+* **retention:** gzip-archive old rows of large research journals ([#281](https://github.com/pgen0x/azimuth/issues/281)) ([38c037f](https://github.com/pgen0x/azimuth/commit/38c037fd1cbfa3e630ca2c1d775caeca41a65e95))
+* **shadow:** log 0.35 vs 0.40 sol_bidask coverage arms per pulse deploy ([#286](https://github.com/pgen0x/azimuth/issues/286)) ([837dc60](https://github.com/pgen0x/azimuth/commit/837dc6011f2a43c1103b292df18231b5f32828d2))
+* **systemd:** optional 6-hourly stale-marker reconcile timer ([#294](https://github.com/pgen0x/azimuth/issues/294)) ([4ecb1c7](https://github.com/pgen0x/azimuth/commit/4ecb1c76ec3540c0546b52f3e052f43ce111dc0e))
+
+
+### Bug Fixes
+
+* **accounting:** preserve historical cash evidence boundaries ([80b45b1](https://github.com/pgen0x/azimuth/commit/80b45b14b981ebfbf3a4f086d21c40f04674d0a4))
+* **accounting:** preserve root cash evidence and historical boundaries ([7289dae](https://github.com/pgen0x/azimuth/commit/7289dae81117846f78647e7c6d293feb0de28be6))
+* **dashboard:** trace accepts pair names as symbol lookups ([#289](https://github.com/pgen0x/azimuth/issues/289)) ([c46f926](https://github.com/pgen0x/azimuth/commit/c46f926e5b08ec881529aa97a723401b4827ed45))
+* **entry:** copy-safe AI deploy command via --from-pool and --audit ([#283](https://github.com/pgen0x/azimuth/issues/283)) ([d13b076](https://github.com/pgen0x/azimuth/commit/d13b076ed9ef7daa4176519b63bfa039567afed3))
+* **entry:** re-anchor once on small active-bin drift instead of refusing ([#285](https://github.com/pgen0x/azimuth/issues/285)) ([7491a1b](https://github.com/pgen0x/azimuth/commit/7491a1bb484ff7cc53fd73a627c305b22fce90f9))
+* **markers:** archive stale executor markers with final outcomes ([#293](https://github.com/pgen0x/azimuth/issues/293)) ([aeba4ad](https://github.com/pgen0x/azimuth/commit/aeba4ad36b91cdb250ed7ea83028ef1f1dbb7562))
+* **pipeline:** accept unambiguous --from-signal copy slips ([#280](https://github.com/pgen0x/azimuth/issues/280)) ([4229fb8](https://github.com/pgen0x/azimuth/commit/4229fb8428a064241da225e66b242597cb087964))
+* **realized:** reconcile closes within minutes, not once a day ([#295](https://github.com/pgen0x/azimuth/issues/295)) ([289d33a](https://github.com/pgen0x/azimuth/commit/289d33a6bfe88a1bd10468a27eb81f4e9b83efec))
+* **rent:** pace legacy-bag sales for the keyless Jupiter budget ([#291](https://github.com/pgen0x/azimuth/issues/291)) ([23713c6](https://github.com/pgen0x/azimuth/commit/23713c66e2fac2b13553eb53bbb01f72a401abfc))
+* **rent:** report self-resolving reclaim refusals as deferrals, not failures ([#296](https://github.com/pgen0x/azimuth/issues/296)) ([00b2b88](https://github.com/pgen0x/azimuth/commit/00b2b88ec2c37bd04cf37f1e53053aced0fc64f4))
+* **rent:** stop dust reclaim from re-quoting the same accounts forever ([#282](https://github.com/pgen0x/azimuth/issues/282)) ([7d4578f](https://github.com/pgen0x/azimuth/commit/7d4578f5bd6cdf8f92255692f57d836d405f0083))
+
+
+### Performance Improvements
+
+* **dashboard:** cut collector CPU ~7x with fast/slow refresh and single-pass scrub ([#284](https://github.com/pgen0x/azimuth/issues/284)) ([433d69e](https://github.com/pgen0x/azimuth/commit/433d69e788c0944ba13f1f533eb7968ae5b3bbdb))
+
 ## [2.14.1](https://github.com/pgen0x/azimuth/compare/v2.14.0...v2.14.1) (2026-11-02)
 
 
