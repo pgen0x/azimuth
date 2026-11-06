@@ -18,7 +18,8 @@ rtk go test ./cmd/dashboard
 
 Flags: `-listen`, `-profile`, `-state`, `-env-file`, `-redis`, `-dedup-prefix`, `-since` (live-change cutover, unix seconds; 0 = the last 7 days). Defaults use `~/.hermes/profiles/dlmm`, `~/.local/state/azimuth`, and repository `.env`; pass `-profile` when your Hermes profile has another name. The dashboard exits at startup if the profile directory does not exist, rather than serve empty panels. Only `REDIS_ADDR`, `REDISCLI_AUTH`, and `REDIS_SEEN_KEY` are read from that file; matching environment variables override file settings. `-redis disabled` skips Redis. Missing Redis configuration disables its panel. No credential is returned or logged. Config metadata is field-allowlisted; prompts, session messages, private keys and bot credentials are excluded.
 
-For a persistent user service, build the binary and install the included unit:
+For a persistent user service, `./install.sh <profile> --with-dashboard` builds the binary, installs and
+enables the unit, and writes the `profile.conf` drop-in below when the profile is not `dlmm`. By hand:
 
 ```sh
 rtk go build -o "$HOME/.local/bin/azimuth-dashboard" ./cmd/dashboard

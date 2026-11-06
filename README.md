@@ -32,6 +32,7 @@ its exit loop ships disabled until you deploy there yourself.
 - [Quick Start](#quick-start)
 - [What gets screened](#what-gets-screened)
 - [Configuration](#configuration)
+- [Operator tooling](#operator-tooling)
 - [Repo layout](#repo-layout)
 - [Example output](#example-output)
 - [Project Status](#project-status)
@@ -171,7 +172,14 @@ cd azimuth
 # the webhook subscription, SOUL.md section + cron job templates, the 20s
 # monitor-loop systemd service, and builds azimuth.
 ./install.sh ~/.hermes/profiles/<your-profile>
+
+# Optional operator tooling, each flag opt-in (./install.sh --help lists them):
+./install.sh ~/.hermes/profiles/<your-profile> --with-dashboard --with-alerts --with-ops
 ```
+
+Without flags only the core units are installed. The flags, and what each one
+enables, are in [Operator tooling](#operator-tooling). Re-running with the same
+flags is safe.
 
 The install enables `azimuth-sol-monitor.service` (user-level systemd), which runs
 `dlmm_monitor.py` every 20 seconds. **This loop is the trader-side safety net** —
@@ -446,6 +454,90 @@ All daemon config is via environment (see `.env.example`):
 | `ENABLE_AUDIT_GATE` | Jupiter token-audit gate: rejects >30% bot holders, ships bot % + global fees in the signal (fails open) |
 | `ENABLE_PVP_CHECK` | same-symbol rival detection: flags candidates contested by an established token with its own live DLMM pool — advisory `is_pvp` + rival stats, never rejects (fails open) |
 | `LONE_MIN_SCORE` | Conviction floor for single-candidate batches (degen score 0–100, default 50, 0 disables) |
+
+## Operator tooling
+
+Everything below is optional and off by default. `install.sh` renders every
+optional unit into `<profile>/systemd/` on each run; a `--with-*` flag also
+installs the named units into `~/.config/systemd/user/` and enables them.
+
+### Units
+
+| unit | family | what it runs | writes | default | install flag |
+|---|---|---|---|---|---|
+| `azimuth` | core | the Go discovery daemon | dedup set (Redis or memory); trades only through `DEPLOY_CMD` | on (once `<repo>/.env` exists) | none |
+| `azimuth-sol-monitor` | core | 20s Solana exit loop (`dlmm_monitor_loop.sh`) | **signs**: closes, swaps, re-centers | on | none |
+| `azimuth-rh-monitor` | core | Robinhood Chain exit loop (`uni_monitor_loop.sh`) | **signs** once enabled | installed, off | none (enable by hand) |
+| `azimuth-dashboard` | operator | local dashboard on `127.0.0.1:8787` | its own state in `~/.local/state/azimuth` | off | `--with-dashboard` |
+| `azimuth-alerts.timer` | operator | `azimuth-dashboard alerts` every 10 min | dedup state file; sends a message only with `-send-cmd` | off | `--with-alerts` |
+| `azimuth-sol-markers.timer` | operator | `dlmm_executor.js reconcile-stale-markers --execute` every 6h | moves settled marker files to `memories/archive/markers/`; RPC reads only | off | `--with-ops` |
+| `azimuth-sol-retention.timer` | operator | `dlmm_retention.py --keep-days 14 --apply` daily | gzips research rows older than 14 days into `memories/archive/` | off | `--with-ops` (dry run shown first) |
+| `azimuth-sol-rent.timer` | operator | `dlmm_executor.js reclaim-empty-accounts --execute --batch` every 30 min | **signs and sends** account-close transactions | off | `--with-rent-reclaim-signs-tx` |
+| `azimuth-sol-accounting.timer` | research | `dlmm_executor.js accounting` every 5 min | transaction/NAV journals in `memories/`, syncs pool memory; RPC reads only | off | `--with-research` |
+| `azimuth-sol-shadow.timer` | research | `dlmm_shadow.py` every 5 min | rejected-candidate outcomes and bin samples in `memories/` | off | `--with-research` |
+| `azimuth-sol-candidate-paper.timer` | research | `dlmm_candidate_paper.py` every minute | paper entries under `~/.local/state/azimuth/optimization/` | off | `--with-research` |
+| `azimuth-sol-net-experiment.timer` | research | `dlmm_net_experiment.py dry-tick` every minute | dry-run exit samples under `~/.local/state/azimuth/optimization/` | off | `--with-research` |
+| `azimuth-sol-price-path.timer` | research | `dlmm_price_path.py` every minute | candidate price paths in `memories/` | off | `--with-research` |
+| `azimuth-sol-net-research@.timer` | research | `dlmm_net_experiment.py dry-tick` per named instance | `~/.local/state/azimuth/optimization/<name>/` | off | copied by `--with-research`, enable `@<name>` by hand |
+
+Only the rent timer sends transactions, so it has its own flag. `--with-ops`
+installs its files but does not enable it.
+
+### Dashboard
+
+`azimuth-dashboard` serves overview, capital, live and ops pages on
+`127.0.0.1:8787` (loopback only; forward it over SSH for remote use). The
+pages show wallet and realized SOL, open positions, recent closes, the entry
+funnel, service health and the current alerts, all read from the profile's
+journals. It serves no data until `DASHBOARD_PASSWORD_HASH` is set, which goes
+in a separate environment file through a unit drop-in
+([password setup](docs/DASHBOARD_DEPLOY.md#password-hash)). The stock unit reads
+`~/.hermes/profiles/dlmm`; for another profile `--with-dashboard` writes the
+`profile.conf` drop-in described in [docs/DASHBOARD.md](docs/DASHBOARD.md).
+
+The same binary prints a short text status without the web server:
+
+```bash
+azimuth-dashboard brief --profile ~/.hermes/profiles/<your-profile>
+```
+
+Details: [docs/DASHBOARD.md](docs/DASHBOARD.md). Updating a running dashboard:
+[docs/DASHBOARD_DEPLOY.md](docs/DASHBOARD_DEPLOY.md).
+
+### Alerts
+
+`azimuth-alerts.timer` runs `azimuth-dashboard alerts` every 10 minutes and
+reports each new or cleared red flag once (at most once per alert per 6h):
+service health (core units, disk, memory, a stale monitor tick), stale
+executor markers, no deploy in 12h, and realized-SOL losses. The loss rules read realized SOL, never the journal's mark:
+
+| variable | default | fires when |
+|---|---|---|
+| `ALERT_SINGLE_LOSS_SOL` | 0.05 | one close in the last 24h realized at or below `-value` |
+| `ALERT_DAY_LOSS_SOL` | 0.08 | realized sum over the rolling 24h at or below `-value` |
+| `ALERT_WEEK_LOSS_SOL` | 0.15 | realized sum over the rolling 7d at or below `-value` |
+
+The alerts process reads these from its own environment, so set them with an
+`Environment=` line in a drop-in (`systemctl --user edit azimuth-alerts.service`).
+Without `-send-cmd` the messages only go to the unit's journal; to deliver them
+over Telegram, restate `ExecStart` in the same drop-in with
+`-send-cmd "%h/.local/bin/hermes send -t telegram"` (the unit header has the
+exact lines). Alerts never trade or stop anything.
+
+### Rent reclaim, markers, retention
+
+- **Rent reclaim** (`azimuth-sol-rent`) closes empty token accounts the wallet
+  owns and recovers their rent. It signs and sends transactions, which is why
+  it needs `--with-rent-reclaim-signs-tx`.
+- **Markers** (`azimuth-sol-markers`) archives executor markers (pending swap,
+  deploy, close and rent records) whose blockhash has expired and whose
+  outcome is final. Anything still ambiguous stays put. No transactions.
+- **Retention** (`azimuth-sol-retention`) moves research journal rows older
+  than 14 days into gzip archives under `memories/archive/`; readers include
+  the archives. `install.sh --with-ops` prints a dry run first.
+
+See [docs/OBSERVE_BUNDLE_DEPLOY.md](docs/OBSERVE_BUNDLE_DEPLOY.md) for the gated
+rollout of the observe bundle on a production checkout.
 
 ## Repo layout
 
