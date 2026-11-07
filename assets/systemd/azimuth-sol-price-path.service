@@ -4,6 +4,10 @@ Description=Azimuth native candidate price paths (research only)
 [Service]
 Type=oneshot
 ExecStart=/usr/bin/python3 __PROFILE__/skills/solana-dlmm/scripts/dlmm_price_path.py --profile __PROFILE__
-TimeoutStartSec=40
+# ~9s CPU normally; 40s timed out repeatedly under host memory/IO pressure.
+TimeoutStartSec=90
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
 UMask=0077
 NoNewPrivileges=true
