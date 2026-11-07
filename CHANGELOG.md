@@ -5,6 +5,14 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.15.1](https://github.com/pgen0x/azimuth/compare/v2.15.0...v2.15.1) (2026-11-07)
+
+
+### Bug Fixes
+
+* **systemd:** give price-path 90s and low CPU/IO priority under host pressure ([#305](https://github.com/pgen0x/azimuth/issues/305)) ([d52520a](https://github.com/pgen0x/azimuth/commit/d52520a972493d6df3f610a6d4dcce8cd22c87cb))
+* **systemd:** run retention at best-effort IO priority 7, not idle ([#303](https://github.com/pgen0x/azimuth/issues/303)) ([bb79cde](https://github.com/pgen0x/azimuth/commit/bb79cde986d5fab1d7c00132871c0a83640f0e56))
+
 ## [2.15.0](https://github.com/pgen0x/azimuth/compare/v2.14.1...v2.15.0) (2026-11-06)
 
 
