@@ -7,6 +7,8 @@ Type=oneshot
 # Rows older than 14 days move to memories/archive/; research readers include them.
 ExecStart=/usr/bin/python3 __PROFILE__/skills/solana-dlmm/scripts/dlmm_retention.py --profile __PROFILE__ --keep-days 14 --apply
 Nice=10
-IOSchedulingClass=idle
+# idle IO starves forever while other timers write; best-effort 7 still yields to them.
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
 TimeoutStartSec=1800
 UMask=0077
