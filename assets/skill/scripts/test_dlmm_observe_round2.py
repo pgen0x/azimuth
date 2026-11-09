@@ -247,6 +247,8 @@ class Round2Tests(unittest.TestCase):
                              turnover_trailing_trigger_pct=1.2, turnover_trailing_drop_pct=.6,
                              trailing_trigger_pct=3, trailing_drop_pct=1.5, is_dry_run_stored=False,
                              wallet_address='synthetic-wallet', native_mark={'synthetic': i},
+                             age_minutes=5.0, bp=None, write_close_intent=lambda *a, **k: None,
+                             clear_close_intent=lambda *a: None,
                              run_command=lambda *a: None, print=lambda *a: None)
                 scope['close_position'] = lambda pos, *a, **k: (events.append(('close', pos, k)) or ({'success': False}, None))
                 with patch.dict(os.environ, DLMM_SHADOW_EXITS=enabled), patch.object(monitor.time, 'time', return_value=1000):

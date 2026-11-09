@@ -2,6 +2,8 @@
 import contextlib
 import io
 import json
+import os
+import subprocess
 import time
 from pathlib import Path
 import tempfile
@@ -56,14 +58,104 @@ class CloseBinObservationTests(unittest.TestCase):
         for dry in (True,False):
             calls=[]
             scope=dict(vars(monitor),pending_observers=[],close_reason='risk exit',pair='TEST-SOL',is_dry_run_stored=dry,
-                       pos_addr=POSITION,pool=POOL,native_mark=self.mark(),wallet_address='wallet',emergency_close=True)
+                       pos_addr=POSITION,pool=POOL,native_mark=self.mark(),wallet_address='wallet',emergency_close=True,
+                       meta=dict(size_sol=.1),pnl_pct=-1.0,pnl_sol_actual=None,fee_per_tvl_24h=1.0,age_minutes=5.0,bp=None)
             scope['close_position']=lambda *a,**k:(calls.append('close') or (dict(success=False),None))
             scope['record_close_bin_observation']=lambda *a:calls.append('observation')
+            # The close row's inputs are persisted before the close is sent and
+            # dropped again when nothing landed; dry runs never write one.
+            scope['write_close_intent']=lambda *a,**k:calls.append('intent')
+            scope['clear_close_intent']=lambda *a:calls.append('clear')
             with contextlib.redirect_stdout(io.StringIO()):exec(code,scope)
-            self.assertEqual(calls,['close'])
+            sent=['close','clear'] if dry else ['intent','close','clear']
+            self.assertEqual(calls,sent)
             with patch.object(monitor, 'record_close_bin_observation', side_effect=lambda *a:calls.append('observation') or True):
                 monitor.flush_tick_observers(scope['pending_observers'])
-            self.assertEqual(calls,['close'] if dry else ['close','observation'])
+            self.assertEqual(calls,sent if dry else sent+['observation'])
+
+
+class ExecutorHeapCapTests(unittest.TestCase):
+    def test_cap_is_added_once_and_operator_value_wins(self):
+        self.assertEqual(monitor.cap_node_heap({})["NODE_OPTIONS"], "--max-old-space-size=768")
+        self.assertEqual(monitor.cap_node_heap({"NODE_OPTIONS": "--enable-source-maps"})["NODE_OPTIONS"],
+                         "--enable-source-maps --max-old-space-size=768")
+        own = {"NODE_OPTIONS": "--max-old-space-size=2048"}
+        self.assertEqual(monitor.cap_node_heap(dict(own)), own)
+        self.assertIn("--max-old-space-size", os.environ["NODE_OPTIONS"])  # applied at import
+
+    def test_capped_child_fails_fast_instead_of_growing(self):
+        with patch.object(monitor, "EXECUTOR_HEAP_MB", 32):
+            env = monitor.cap_node_heap({k: v for k, v in os.environ.items() if k != "NODE_OPTIONS"})
+        child = subprocess.run(["node", "-e", "const a=[];for(;;)a.push('x'.repeat(1<<16)+a.length)"],
+                               env=env, capture_output=True, timeout=60)
+        self.assertNotEqual(child.returncode, 0)
+        self.assertIn(b"heap", child.stderr.lower())
+
+
+class CloseIntentRecoveryTests(unittest.TestCase):
+    """A landed close whose process died before log_close is journaled next tick."""
+    META = dict(base_mint="MINT", mode="pulse", size_sol=.1, strategy="sol_bidask")
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        for p in (patch.object(monitor, "PROFILE_DIR", self.tmp.name),
+                  patch.object(monitor, "run_command", return_value=("1", "", 0)),
+                  contextlib.redirect_stdout(io.StringIO())):
+            p.start() if hasattr(p, "start") else p.__enter__()
+            self.addCleanup(p.stop if hasattr(p, "stop") else (lambda p=p: p.__exit__(None, None, None)))
+        self.intent = Path(self.tmp.name) / "memories" / "dlmm_close_intents" / (POSITION + ".json")
+        self.closes = Path(self.tmp.name) / "memories" / "dlmm_closes.jsonl"
+
+    def write(self):
+        monitor.write_close_intent(POSITION, POOL, "T-SOL", self.META, -1.5, -.0015, 12.0, 6.5,
+                                   "Fast-out dump exit", unclaimed_fees_sol=.0001, pnl_basis="pre_swap_mark")
+        self.assertTrue(self.intent.exists())
+
+    def rows(self):
+        return [json.loads(l) for l in self.closes.read_text().splitlines()] if self.closes.exists() else []
+
+    def test_proved_absent_close_is_journaled_once_from_intent(self):
+        self.write()
+        with patch.object(monitor, "position_live_onchain", return_value=False):
+            monitor.recover_close_intents()
+            monitor.recover_close_intents()
+        rows = self.rows()
+        self.assertEqual(len(rows), 1)
+        row = rows[0]
+        self.assertEqual((row["position"], row["pool"], row["pair"], row["mode"], row["reason"], row["txs"]),
+                         (POSITION, POOL, "T-SOL", "pulse", "Fast-out dump exit", []))
+        self.assertEqual((row["pnl_pct"], row["pnl_sol"], row["pnl_basis"], row["dry_run"]), (-1.5, -.0015, "pre_swap_mark", False))
+        self.assertIs(row["recovered_from_intent"], True)
+        self.assertFalse(self.intent.exists())
+        monitor.run_command.assert_any_call(f'redis-cli srem sol:dlmm:active_positions "{POSITION}"')
+
+    def test_live_unknown_and_already_journaled(self):
+        self.write()
+        with patch.object(monitor, "position_live_onchain", return_value=None):
+            monitor.recover_close_intents()
+        self.assertTrue(self.intent.exists())  # unmeasured: keep, never guess
+        with patch.object(monitor, "position_live_onchain", return_value=True):
+            monitor.recover_close_intents()
+        self.assertFalse(self.intent.exists())  # the close never landed; the rules decide again
+        self.assertEqual(self.rows(), [])
+        self.write()
+        self.closes.write_text(json.dumps(dict(position=POSITION, event="exit")) + "\n")
+        with patch.object(monitor, "position_live_onchain", side_effect=AssertionError("no read needed")):
+            monitor.recover_close_intents()
+        self.assertFalse(self.intent.exists())
+        self.assertEqual(len(self.rows()), 1)
+
+    def test_normal_close_never_leaves_an_intent_and_bad_files_are_skipped(self):
+        self.write()
+        monitor.clear_close_intent(POSITION)
+        self.assertFalse(self.intent.exists())
+        monitor.write_close_intent("../escape", POOL, "T-SOL", {}, 0, 0, 0, 0, "x")
+        self.assertEqual(sorted(os.listdir(self.intent.parent)), [])
+        (self.intent.parent / (POSITION + ".json")).write_text("{broken")
+        with patch.object(monitor, "position_live_onchain", side_effect=AssertionError("unreadable intent")):
+            monitor.recover_close_intents()
+        self.assertEqual(self.rows(), [])
 
 
 class CloseRiskSizingTests(unittest.TestCase):

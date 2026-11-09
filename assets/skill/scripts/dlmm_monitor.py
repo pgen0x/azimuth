@@ -21,6 +21,26 @@ METEORA_PORTFOLIO_API = "https://dlmm.datapi.meteora.ag/portfolio/open"
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROFILE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(SCRIPT_DIR)))
 
+# Every executor child inherits a bounded V8 heap. On 2026-11-08 one node child
+# of this loop reached ~4 GB RSS on a 4 GB host and the kernel's global OOM
+# killer took the monitor down mid-close, between a landed close and its journal
+# row. A child that hits this cap aborts inside its own process instead. Every
+# state-changing executor path persists its pending marker (close, deploy,
+# settlement swap) before it signs, so an abort is the same recoverable outcome
+# as the SIGKILL this loop already sends on a command timeout. An operator
+# NODE_OPTIONS that sets its own heap size wins.
+EXECUTOR_HEAP_MB = 768
+
+
+def cap_node_heap(env):
+    options = env.get("NODE_OPTIONS", "")
+    if "--max-old-space-size" not in options:
+        env["NODE_OPTIONS"] = f"{options} --max-old-space-size={EXECUTOR_HEAP_MB}".strip()
+    return env
+
+
+cap_node_heap(os.environ)
+
 def get_wallet_address():
     try:
         with open(os.path.join(PROFILE_DIR, ".env")) as f:
@@ -910,9 +930,127 @@ def _entry_risk_sizing(meta, pos_addr, pool):
     sizing = entry.get("risk_sizing")
     return sizing if isinstance(sizing, dict) else None
 
+CLOSE_JOURNAL_TAIL_BYTES = 4 * 1024 * 1024
+
+
+def _close_intent_dir():
+    return os.path.join(PROFILE_DIR, "memories", "dlmm_close_intents")
+
+
+def _intent_path(pos_addr):
+    if not re.fullmatch(r"[1-9A-HJ-NP-Za-km-z]{32,44}", str(pos_addr)):
+        return None
+    return os.path.join(_close_intent_dir(), pos_addr + ".json")
+
+
+def write_close_intent(pos_addr, pool, pair, meta, pnl_pct, realized_sol, fee_per_tvl_24h,
+                       age_min, reason, unclaimed_fees_sol=None, pnl_basis=None):
+    """Persist the close row's inputs BEFORE the close is sent.
+
+    A landed close whose process dies before log_close (2026-11-08: the OOM
+    killer, 25s after the close confirmed) used to leave no close row at all,
+    which the settlement proof then could not reconcile. The next tick turns a
+    surviving intent into the journal row once the chain proves the position
+    gone. Best effort: a failed write never blocks the exit."""
+    path = _intent_path(pos_addr)
+    if path is None:
+        return
+    record = dict(position=pos_addr, pool=pool, pair=pair, meta=meta, pnl_pct=pnl_pct,
+                  realized_sol=realized_sol, fee_per_tvl_24h=fee_per_tvl_24h, age_min=age_min,
+                  reason=reason, unclaimed_fees_sol=unclaimed_fees_sol, pnl_basis=pnl_basis,
+                  decided_at=time.time())
+    try:
+        os.makedirs(_close_intent_dir(), mode=0o700, exist_ok=True)
+        with open(path + ".tmp", "w", encoding="utf-8") as out:
+            json.dump(record, out)
+            out.flush()
+            os.fsync(out.fileno())
+        os.replace(path + ".tmp", path)
+    except (OSError, TypeError, ValueError) as exc:
+        print(f"⚠️ Close intent not recorded for {pos_addr}: {exc}")
+
+
+def clear_close_intent(pos_addr):
+    path = _intent_path(pos_addr)
+    if path is None:
+        return
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        print(f"⚠️ Close intent not cleared for {pos_addr}: {exc}")
+
+
+def _close_journaled(pos_addr):
+    """Whether the recent close journal already has an exit row for pos_addr."""
+    path = os.path.join(PROFILE_DIR, "memories", "dlmm_closes.jsonl")
+    try:
+        size = os.path.getsize(path)
+        with open(path, "rb") as f:
+            if size > CLOSE_JOURNAL_TAIL_BYTES:
+                f.seek(size - CLOSE_JOURNAL_TAIL_BYTES)
+                f.readline()
+            for line in f:
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    continue
+                if row.get("position") == pos_addr and row.get("event", "exit") == "exit":
+                    return True
+    except FileNotFoundError:
+        return False
+    return False
+
+
+def recover_close_intents():
+    """Journal closes that landed but never reached log_close.
+
+    Only an RPC-proved absence journals; a live position means the close never
+    happened (the rules decide again), and an unmeasured read keeps the intent."""
+    try:
+        names = [n for n in os.listdir(_close_intent_dir()) if n.endswith(".json")]
+    except FileNotFoundError:
+        return
+    for name in names:
+        pos_addr = name[:-len(".json")]
+        path = _intent_path(pos_addr)
+        if path is None:
+            continue
+        try:
+            with open(path, encoding="utf-8") as src:
+                intent = json.load(src)
+            if not isinstance(intent, dict) or intent.get("position") != pos_addr:
+                raise ValueError("intent does not name its position")
+        except (OSError, ValueError) as exc:
+            print(f"⚠️ Unreadable close intent {name}: {exc}")
+            continue
+        if _close_journaled(pos_addr):
+            clear_close_intent(pos_addr)
+            continue
+        live = position_live_onchain(pos_addr)
+        if live is None:
+            continue
+        if live:
+            clear_close_intent(pos_addr)
+            continue
+        meta = intent.get("meta") if isinstance(intent.get("meta"), dict) else {}
+        log_close(intent.get("pool"), intent.get("pair"), meta, pos_addr, intent.get("pnl_pct") or 0.0,
+                  intent.get("realized_sol"), intent.get("fee_per_tvl_24h") or 0.0,
+                  intent.get("age_min") or 0.0, intent.get("reason"), [], False,
+                  unclaimed_fees_sol=intent.get("unclaimed_fees_sol"),
+                  pnl_basis=intent.get("pnl_basis"), recovered_from_intent=True)
+        run_command(f"redis-cli srem sol:dlmm:active_positions \"{pos_addr}\"")
+        run_command(f"redis-cli del \"sol:dlmm:position:{pos_addr}\"")
+        run_command(f"redis-cli del \"sol:dlmm:position:{pos_addr}:oor_since\"")
+        clear_close_intent(pos_addr)
+        print(f"🩹 Journaled close of {pos_addr} ({intent.get('pair')}) from its intent: "
+              "the close landed but its process died before writing the row.")
+
+
 def log_close(pool, pair, meta, pos_addr, pnl_pct, realized_sol, fee_per_tvl_24h,
               age_min, reason, txs, dry_run, event="exit", unclaimed_fees_sol=None,
-              pnl_basis=None):
+              pnl_basis=None, recovered_from_intent=False):
     """Append a uniform close record to memories/dlmm_closes.jsonl. Every monitor
     close is journaled here; reconcile against the Meteora portfolio API (ground
     truth) with dlmm_reconcile.py.
@@ -993,6 +1131,10 @@ def log_close(pool, pair, meta, pos_addr, pnl_pct, realized_sol, fee_per_tvl_24h
         "pnl_basis": pnl_basis or "pre_swap_mark",
         "pnl_currency": "SOL",
     }
+    if recovered_from_intent:
+        # Written on a later tick from the pre-close intent: the decision-time
+        # mark is real, the close tx hashes were lost with the process.
+        entry["recovered_from_intent"] = True
     try:
         path = os.path.join(PROFILE_DIR, "memories", "dlmm_closes.jsonl")
         os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -2090,6 +2232,7 @@ def main():
             print(f"❌ Force-close failed: {close_err or close_res}")
         sys.exit(0)
 
+    recover_close_intents()
     active_positions = get_active_positions()
     if not active_positions:
         print("No tracked DLMM positions; checking on-chain positions for recovery.")
@@ -3106,9 +3249,21 @@ def main():
             print(f"🚨 Exiting Position {pair} - Reason: {close_reason}")
             env_prefix = "DRY_RUN=true " if is_dry_run_stored else ""
             close_decision_at = time.time()
+            if not is_dry_run_stored:
+                intent_size = meta.get("size_sol", DEFAULT_DEPLOY_SOL)
+                intent_reason = close_reason.lower()
+                write_close_intent(
+                    pos_addr, pool, pair, meta, pnl_pct,
+                    pnl_sol_actual if pnl_sol_actual is not None else intent_size * (pnl_pct / 100.0),
+                    fee_per_tvl_24h, age_minutes, close_reason,
+                    unclaimed_fees_sol=(float(bp.get("unclaimed_fees_sol") or 0.0) if bp else None),
+                    pnl_basis=("pre_swap_mark" if any(kw in intent_reason for kw in (
+                        "trailing", "dump", "stop-loss", "stop_loss", "sell pressure", "momentum", "giveback")) else None))
             close_res, close_err = close_position(pos_addr, env_prefix,
                                                  wallet_address, is_dry_run_stored,
                                                  emergency_exit=emergency_close)
+            if not (close_res and close_res.get("success")):
+                clear_close_intent(pos_addr)  # nothing landed that needs a row
             if not is_dry_run_stored and not (close_res or {}).get("dryRun") and len(pending_observers) < 256:
                 pending_observers.append(('close', (native_mark, pool, pos_addr, close_reason, close_decision_at)))
 
@@ -3162,6 +3317,7 @@ def main():
                           # block (below) runs the actual liquidation — see the
                           # field's docstring in log_close for why that matters.
                           pnl_basis=("pre_swap_mark" if is_dump_close else None))
+                clear_close_intent(pos_addr)
 
                 # Re-entry cooldown blacklist — prevent re-opening same token too soon
                 cooldown_key = f"sol:dlmm:cooldown:{base_symbol_cd}"
