@@ -5,6 +5,17 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.15.1](https://github.com/pgen0x/azimuth/compare/v2.15.0...v2.15.1) (2026-11-09)
+
+
+### Bug Fixes
+
+* **executor:** bound executor memory and make close journaling crash-safe ([#307](https://github.com/pgen0x/azimuth/issues/307)) ([2f6b401](https://github.com/pgen0x/azimuth/commit/2f6b401c834a01c9b8f62dfa29c62b8075b9d3f3))
+* **executor:** cap every Python-spawned node heap and backfill lost closes ([#308](https://github.com/pgen0x/azimuth/issues/308)) ([d13164f](https://github.com/pgen0x/azimuth/commit/d13164fb6cb1f5472e85020210d67fbbc7587b9c))
+* **settlement:** stop an unprovable dust proof from halting entries ([#306](https://github.com/pgen0x/azimuth/issues/306)) ([f3bed45](https://github.com/pgen0x/azimuth/commit/f3bed45ea3e6aa7b69e112c0f7dcca1cadaaf51b))
+* **systemd:** give price-path 90s and low CPU/IO priority under host pressure ([#305](https://github.com/pgen0x/azimuth/issues/305)) ([d52520a](https://github.com/pgen0x/azimuth/commit/d52520a972493d6df3f610a6d4dcce8cd22c87cb))
+* **systemd:** run retention at best-effort IO priority 7, not idle ([#303](https://github.com/pgen0x/azimuth/issues/303)) ([bb79cde](https://github.com/pgen0x/azimuth/commit/bb79cde986d5fab1d7c00132871c0a83640f0e56))
+
 ## [2.15.0](https://github.com/pgen0x/azimuth/compare/v2.14.1...v2.15.0) (2026-11-06)
 
 
