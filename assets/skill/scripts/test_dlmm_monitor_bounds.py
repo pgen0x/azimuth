@@ -84,8 +84,7 @@ class ExecutorHeapCapTests(unittest.TestCase):
         self.assertIn("--max-old-space-size", os.environ["NODE_OPTIONS"])  # applied at import
 
     def test_capped_child_fails_fast_instead_of_growing(self):
-        with patch.object(monitor, "EXECUTOR_HEAP_MB", 32):
-            env = monitor.cap_node_heap({k: v for k, v in os.environ.items() if k != "NODE_OPTIONS"})
+        env = monitor.cap_node_heap({k: v for k, v in os.environ.items() if k != "NODE_OPTIONS"}, heap_mb=32)
         child = subprocess.run(["node", "-e", "const a=[];for(;;)a.push('x'.repeat(1<<16)+a.length)"],
                                env=env, capture_output=True, timeout=60)
         self.assertNotEqual(child.returncode, 0)

@@ -12,6 +12,9 @@ import os
 from pathlib import Path
 import subprocess
 import time
+from dlmm_node_env import cap_node_heap
+
+cap_node_heap(os.environ)  # node children get a bounded heap
 
 from dlmm_realized import load_realized
 from dlmm_cash_sign import nonpositive_cash_upper_bounds, cash_sign_upper_bound

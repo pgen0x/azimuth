@@ -60,6 +60,7 @@ jobs:
           python3 assets/skill/scripts/test_dlmm_canonical_liquidity.py
           python3 assets/skill/scripts/test_dlmm_guards.py
           python3 assets/skill/scripts/test_dlmm_monitor_bounds.py
+          python3 assets/skill/scripts/test_dlmm_backfill_from_evidence.py
           python3 assets/skill/scripts/test_dlmm_hold_canary.py
           python3 assets/skill/scripts/test_dlmm_exit_liquidity.py
           python3 assets/skill/scripts/test_dlmm_yield_availability.py

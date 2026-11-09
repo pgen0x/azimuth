@@ -4,12 +4,16 @@ import collections
 import fcntl
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import subprocess
 import time
 import urllib.parse
 import urllib.request
+from dlmm_node_env import cap_node_heap
+
+cap_node_heap(os.environ)  # node children get a bounded heap
 
 from dlmm_candidate_replay import replay
 from dlmm_fee_forecast import candidate_fee_forecast, sample_hash

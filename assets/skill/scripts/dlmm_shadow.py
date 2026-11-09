@@ -13,7 +13,10 @@ import time
 import urllib.parse
 import urllib.request
 from decimal import Decimal, getcontext
+from dlmm_node_env import cap_node_heap
 from fractions import Fraction
+
+cap_node_heap(os.environ)  # node children get a bounded heap
 from dlmm_accounting import rows
 from dlmm_monitor import verified_risk_mark
 from dlmm_candidate_watch import WATCH_FILENAME

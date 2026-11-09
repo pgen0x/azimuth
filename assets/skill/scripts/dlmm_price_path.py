@@ -1,12 +1,16 @@
 """Collect bounded native price paths for research; never execute trades."""
 import argparse
 import json
+import os
 import subprocess
 import time
 from pathlib import Path
 from dlmm_shadow import index_candidate, iter_rows, append
 from dlmm_candidate_watch import WATCH_FILENAME
 from dlmm_net_experiment import write
+from dlmm_node_env import cap_node_heap
+
+cap_node_heap(os.environ)  # node children get a bounded heap
 
 
 def collect(profile, state_dir):
