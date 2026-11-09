@@ -1197,6 +1197,26 @@ RENT_UNIT='azimuth-sol-rent.service'
 # rent recovery and legacy-bag sales while live, so one that outlives 2h needs an operator.
 MARKER_DIRS=('dlmm_pending_swaps','dlmm_pending_deploys','dlmm_pending_rent','dlmm_pending_closes','dlmm_settlements')
 MARKER_STALE_S=2*3600
+# A settlement marker that holds every new entry for this long pages (a 2026-11-07 dust proof held them for over a day).
+SETTLEMENT_BLOCK_ALERT_S=30*60
+SETTLEMENT_UNPROVEN_VALUE_MAX_AGE_S=2*3600
+SETTLEMENT_UNPROVEN_VALUE_FLOOR_BPS=100
+DEFAULT_MINIMUM_ENTRY_LAMPORTS=100000000
+
+def settlement_blocks_entry(item, now, minimum_entry_lamports):
+    """Mirror of dlmm_executor.js settlementBlocksEntry: does this marker refuse every deploy?"""
+    if not isinstance(item,dict) or item.get('state')!='deferred': return True
+    if item.get('reason') in ('swap_no_route','net_recovery_below_floor'): return False
+    if item.get('reason')!='settlement_inventory_unproven': return True
+    value=item.get('remaining_value_lamports'); at=item.get('valued_at')
+    if not isinstance(value,str) or not value.isdigit() or not number(at) or at>now or now-at>SETTLEMENT_UNPROVEN_VALUE_MAX_AGE_S: return True
+    return int(value)*10000>minimum_entry_lamports*SETTLEMENT_UNPROVEN_VALUE_FLOOR_BPS
+
+def _minimum_entry_lamports(memory):
+    try: policy=read_json(memory.parent/'skills'/'solana-dlmm'/'scripts'/'dlmm_cash_policy.json')
+    except (OSError,ValueError): policy=None
+    v=policy.get('minimum_entry_lamports') if isinstance(policy,dict) else None
+    return v if isinstance(v,int) and not isinstance(v,bool) and v>0 else DEFAULT_MINIMUM_ENTRY_LAMPORTS
 FUNNEL_GREP=r'SIGNAL batch sent|entry_route=|rejected on audit|re-entry cooldown|lone candidate|direct deploy done'
 
 def _journal(run, unit, extra, cap=2*1024*1024, timeout=5):
@@ -1458,7 +1478,7 @@ def brief_markers(memory, now):
         rows,_=read_jsonl(memory/'dlmm_closes.jsonl')
         for r in rows:
             if identifier(r.get('position')) and number(r.get('ts')) and r['position'] not in closed: closed[r['position']]=r['ts']
-    stale={}; total=0
+    stale={}; total=0; blocking=[]; minimum=None
     for name in MARKER_DIRS:
         d=memory/name
         if not d.is_dir(): continue
@@ -1470,11 +1490,19 @@ def brief_markers(memory, now):
                 if f.stem in closed: born=min(born,closed[f.stem])
                 q=read_json(f)
                 if isinstance(q,dict) and number(q.get('queued_at')): born=min(born,q['queued_at'])
+                if minimum is None: minimum=_minimum_entry_lamports(memory)
+                if settlement_blocks_entry(q,now,minimum) and now-born>SETTLEMENT_BLOCK_ALERT_S:
+                    q=q if isinstance(q,dict) else {}
+                    blocking.append({'position':f.stem,'age_s':round(now-born),'state':q.get('state'),'reason':q.get('reason'),
+                                     'remaining_value_lamports':q.get('remaining_value_lamports')})
             age=now-born
             if age>MARKER_STALE_S:
                 c=stale.setdefault(name,{'count':0,'oldest_s':0})
                 c['count']+=1; c['oldest_s']=max(c['oldest_s'],round(age))
-    return {'total':total,'stale':stale,'basis':'Marker files in memories/'+','.join(MARKER_DIRS)+'; age = file mtime (settlement: its queued_at or close ts when older).'}
+    blocking.sort(key=lambda b:-b['age_s'])
+    return {'total':total,'stale':stale,'entries_blocked_by':blocking,
+            'basis':'Marker files in memories/'+','.join(MARKER_DIRS)+'; age = file mtime (settlement: its queued_at or close ts when older). '
+                    'entries_blocked_by: settlement markers the executor entry gate refuses deploys for, older than %dm.'%(SETTLEMENT_BLOCK_ALERT_S//60)}
 
 def _span(s):
     return '%.1fd'%(s/86400) if s>=86400 else '%.1fh'%(s/3600)
@@ -1510,6 +1538,12 @@ def brief_alerts(health, funnel, now, markers=None, mem_min=BRIEF_MEM_MIN_MB):
     if stale:
         parts=['%s %d (oldest %s)'%(k,v['count'],_span(v['oldest_s'])) for k,v in sorted(stale.items())]
         flag('marker_stale','pending marker(s) older than %s: %s'%(_span(MARKER_STALE_S),', '.join(parts)))
+    blocked=(markers or {}).get('entries_blocked_by') or []
+    if blocked:
+        b=blocked[0]
+        flag('entries_blocked_by_settlement','ALL entries refused for %s by settlement %s… (%s%s)%s'%(
+            _span(b['age_s']),b['position'][:8],b.get('state') or 'new',' '+b['reason'] if b.get('reason') else '',
+            '' if len(blocked)==1 else ' +%d more'%(len(blocked)-1)))
     return a
 
 def last_deploy_ts(memory):

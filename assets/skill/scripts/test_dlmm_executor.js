@@ -1013,6 +1013,23 @@ vm.runInNewContext("const productionExitTransport=confirmExitTransaction;confirm
   }
   fs.writeFileSync(path.join(settlementDir, "position.json"), JSON.stringify({state:"deferred",reason:"unknown"}));
   await assert.rejects(deploy(), /awaiting verified SOL settlement/);
+  // An unprovable inventory proof unblocks entries only as fresh, small, priced dust
+  const nowSec = sandbox.Date.now() / 1000;
+  const unproven = {state:"deferred",reason:"settlement_inventory_unproven",remaining_value_lamports:"66000",valued_at:nowSec - 60};
+  fs.writeFileSync(path.join(settlementDir, "position.json"), JSON.stringify(unproven));
+  { const unlock = await acquireDeployLock(wallet.publicKey.toString());
+    try { await assert.rejects(deploy(), /BUSY/); } finally { await unlock(); } }
+  for (const blocked of [{...unproven, remaining_value_lamports:"5000000"}, {...unproven, remaining_value_lamports:undefined},
+                         {...unproven, valued_at:nowSec - 3*3600}, {...unproven, state:"pending"}]) {
+    fs.writeFileSync(path.join(settlementDir, "position.json"), JSON.stringify(blocked));
+    await assert.rejects(deploy(), /awaiting verified SOL settlement/);
+  }
+  const { settlementBlocksEntry } = sandbox.module.exports;
+  assert.equal(settlementBlocksEntry({...unproven, remaining_value_lamports:"1000000"}, nowSec, 100000000), false);
+  assert.equal(settlementBlocksEntry({...unproven, remaining_value_lamports:"1000001"}, nowSec, 100000000), true);
+  assert.equal(settlementBlocksEntry({...unproven, remaining_value_lamports:66000}, nowSec, 100000000), true);
+  assert.equal(settlementBlocksEntry({...unproven, valued_at:nowSec + 10}, nowSec, 100000000), true);
+  assert.equal(settlementBlocksEntry(null, nowSec, 100000000), true);
   fs.writeFileSync(path.join(settlementDir, "position.json"), JSON.stringify({state:"deferred",reason:"swap_quote_threshold_unavailable"}));
   await assert.rejects(deploy(), /awaiting verified SOL settlement/);
   fs.rmSync(settlementDir, { recursive: true });
