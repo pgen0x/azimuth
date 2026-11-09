@@ -327,7 +327,7 @@ def main():
         path.unlink()
 
     # 2026-11-07: an unprovable dust proof rewrote its marker to pending on every
-    # retry and held all entries for 30h. A refusal is now loud, defers after
+    # retry and held all entries for over a day. A refusal is now loud, defers after
     # SETTLEMENT_UNPROVEN_DEFER_S with a priced remainder, and a deferred retry
     # never re-blocks entries unless a swap is actually about to be sent.
     with tempfile.TemporaryDirectory() as tmp, patch.object(monitor, "SETTLEMENT_DIR", tmp), \
@@ -337,7 +337,7 @@ def main():
          patch.object(monitor, "run_command", return_value=("1", "", 0)):
         path = Path(tmp) / "stuck.json"
         unproven = ({"success": False, "reason": "settlement_inventory_unproven"}, None)
-        priced = ({"success": True, "raw": "916431", "value_lamports": "66000", "valued_at": 123.0}, None)
+        priced = ({"success": True, "raw": "900000", "value_lamports": "66000", "valued_at": 123.0}, None)
         path.write_text(json.dumps(dict(position="stuck", mint="DUST", last_attempt=0, queued_at=time.time() - 600)))
         out = io.StringIO()
         with patch.object(monitor, "run_command_json", side_effect=[unproven]) as run, contextlib.redirect_stdout(out):
@@ -355,7 +355,7 @@ def main():
         assert "settlement-dust-value stuck DUST" in run.call_args_list[1].args[0]
         item = json.loads(path.read_text())
         assert (item["state"], item["reason"], item["remaining_raw"], item["remaining_value_lamports"], item["valued_at"]) == \
-            ("deferred", "settlement_inventory_unproven", "916431", "66000", 123.0)
+            ("deferred", "settlement_inventory_unproven", "900000", "66000", 123.0)
         with patch.object(monitor, "run_command_json") as run:  # inside the 15m backoff
             monitor.settle_pending()
             run.assert_not_called()
@@ -375,7 +375,7 @@ def main():
         path.write_text(json.dumps(dict(item, last_attempt=0)))
         def swap(cmd, **kw):
             if "settlement-balance" in cmd:
-                return ({"success": True, "amount_raw": "916431"}, None)
+                return ({"success": True, "amount_raw": "900000"}, None)
             assert json.loads(path.read_text())["state"] == "pending"
             return ({"success": False, "aborted": True, "reason": "swap_route_cooldown_no_route"}, None)
         with patch.object(monitor, "run_command_json", side_effect=swap):
@@ -384,7 +384,7 @@ def main():
         assert (item["state"], item["reason"]) == ("deferred", "settlement_inventory_unproven")
         # An unknown send outcome stays pending: the executor must reconcile it first.
         path.write_text(json.dumps(dict(item, last_attempt=0)))
-        with patch.object(monitor, "run_command_json", side_effect=[({"success": True, "amount_raw": "916431"}, None), (None, "timeout")]):
+        with patch.object(monitor, "run_command_json", side_effect=[({"success": True, "amount_raw": "900000"}, None), (None, "timeout")]):
             monitor.settle_pending()
         assert json.loads(path.read_text())["state"] == "pending"
 

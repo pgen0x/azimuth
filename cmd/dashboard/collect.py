@@ -1197,7 +1197,7 @@ RENT_UNIT='azimuth-sol-rent.service'
 # rent recovery and legacy-bag sales while live, so one that outlives 2h needs an operator.
 MARKER_DIRS=('dlmm_pending_swaps','dlmm_pending_deploys','dlmm_pending_rent','dlmm_pending_closes','dlmm_settlements')
 MARKER_STALE_S=2*3600
-# A settlement marker that holds every new entry for this long pages: the 2026-11-07 dust proof held 30h.
+# A settlement marker that holds every new entry for this long pages (a 2026-11-07 dust proof held them for over a day).
 SETTLEMENT_BLOCK_ALERT_S=30*60
 SETTLEMENT_UNPROVEN_VALUE_MAX_AGE_S=2*3600
 SETTLEMENT_UNPROVEN_VALUE_FLOOR_BPS=100

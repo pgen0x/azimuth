@@ -1014,7 +1014,6 @@ vm.runInNewContext("const productionExitTransport=confirmExitTransaction;confirm
   fs.writeFileSync(path.join(settlementDir, "position.json"), JSON.stringify({state:"deferred",reason:"unknown"}));
   await assert.rejects(deploy(), /awaiting verified SOL settlement/);
   // An unprovable inventory proof unblocks entries only as fresh, small, priced dust
-  // (the 2026-11-07 marker: 916431 raw quoted ~66k lamports held entries for 30h).
   const nowSec = sandbox.Date.now() / 1000;
   const unproven = {state:"deferred",reason:"settlement_inventory_unproven",remaining_value_lamports:"66000",valued_at:nowSec - 60};
   fs.writeFileSync(path.join(settlementDir, "position.json"), JSON.stringify(unproven));

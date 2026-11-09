@@ -1490,8 +1490,8 @@ def settle_pending():
 
     state=pending is written only when a swap is about to be sent: it is what
     the entry gate reads, so a marker that is merely being re-checked must not
-    flip back to blocking (2026-11-07: a 916431-raw dust proof that could never
-    pass held every entry for 30h because each retry rewrote it to pending)."""
+    flip back to blocking (2026-11-07: a dust proof that could never pass held
+    every entry for over a day because each retry rewrote it to pending)."""
     if not os.path.isdir(SETTLEMENT_DIR):
         return
     candidates = []
