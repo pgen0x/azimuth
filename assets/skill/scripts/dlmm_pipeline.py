@@ -11,6 +11,9 @@ import re
 import math
 import shlex
 from pathlib import Path
+from dlmm_node_env import cap_node_heap
+
+cap_node_heap(os.environ)  # node children get a bounded heap
 from dlmm_pool_cash_gate import negative_pool_cash
 from dlmm_signal_record import parse_signal_record, SignalRecordError, load_delivered_record
 from local_indicators import check_local_indicators

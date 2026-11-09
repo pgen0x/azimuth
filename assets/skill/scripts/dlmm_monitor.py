@@ -21,23 +21,8 @@ METEORA_PORTFOLIO_API = "https://dlmm.datapi.meteora.ag/portfolio/open"
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROFILE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(SCRIPT_DIR)))
 
-# Every executor child inherits a bounded V8 heap. On 2026-11-08 one node child
-# of this loop reached ~4 GB RSS on a 4 GB host and the kernel's global OOM
-# killer took the monitor down mid-close, between a landed close and its journal
-# row. A child that hits this cap aborts inside its own process instead. Every
-# state-changing executor path persists its pending marker (close, deploy,
-# settlement swap) before it signs, so an abort is the same recoverable outcome
-# as the SIGKILL this loop already sends on a command timeout. An operator
-# NODE_OPTIONS that sets its own heap size wins.
-EXECUTOR_HEAP_MB = 768
-
-
-def cap_node_heap(env):
-    options = env.get("NODE_OPTIONS", "")
-    if "--max-old-space-size" not in options:
-        env["NODE_OPTIONS"] = f"{options} --max-old-space-size={EXECUTOR_HEAP_MB}".strip()
-    return env
-
+# Every executor child inherits a bounded V8 heap (see dlmm_node_env).
+from dlmm_node_env import EXECUTOR_HEAP_MB, cap_node_heap  # noqa: E402
 
 cap_node_heap(os.environ)
 
