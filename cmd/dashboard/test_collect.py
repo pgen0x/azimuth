@@ -703,6 +703,33 @@ class BriefTests(unittest.TestCase):
         self.assertEqual(h['rent_unit'],{'load':'loaded','active':'failed','result':'exit-code'})
         self.assertNotIn('rent_unit',c.brief_health(self.p,base,T,statvfs=lambda _:SimpleNamespace(f_bavail=50,f_blocks=100),meminfo='/nonexistent'))
 
+    def test_settlement_entry_block_mirrors_executor_gate(self):
+        fresh=dict(state='deferred',reason='settlement_inventory_unproven',remaining_value_lamports='66000',valued_at=T-60)
+        cases=[({},True),(dict(state='pending'),True),(dict(state='deferred',reason='swap_no_route'),False),
+               (dict(state='deferred',reason='net_recovery_below_floor'),False),(dict(state='deferred',reason='other'),True),
+               (fresh,False),(dict(fresh,remaining_value_lamports='1000000'),False),(dict(fresh,remaining_value_lamports='1000001'),True),
+               (dict(fresh,remaining_value_lamports=None),True),(dict(fresh,remaining_value_lamports=66000),True),
+               (dict(fresh,valued_at=T-2*3600-1),True),(dict(fresh,valued_at=T+10),True),(dict(fresh,valued_at=None),True),('x',True)]
+        for item,blocks in cases:
+            with self.subTest(item=item): self.assertIs(c.settlement_blocks_entry(item,T,100000000),blocks)
+
+    def test_entries_blocked_by_settlement_alert(self):
+        d=self.m/'dlmm_settlements'; d.mkdir()
+        def put(name,item,age):
+            f=d/(name+'.json'); f.write_text(json.dumps(dict(item,queued_at=T-age))); os.utime(f,(T,T))
+        units={'units':[{'unit':u,'active':'active','enabled':'enabled'} for u in c.CORE_UNITS],'monitor_tick_age_s':1}
+        put('D'*40,dict(state='deferred',reason='settlement_inventory_unproven',remaining_value_lamports='66000',valued_at=T-60),30*3600)
+        put('Y'*40,dict(state='pending'),600)  # an ordinary close settling right now
+        out=c.brief_markers(self.m,T)
+        self.assertEqual(out['entries_blocked_by'],[])
+        self.assertNotIn('entries_blocked_by_settlement',[a['code'] for a in c.brief_alerts(units,{'last_deploy_ts':T},T,out)])
+        put('B'*40,dict(state='deferred',reason='settlement_inventory_unproven',remaining_value_lamports='5000000',valued_at=T-60),3*3600)
+        out=c.brief_markers(self.m,T)
+        self.assertEqual([b['position'] for b in out['entries_blocked_by']],['B'*40])
+        msg=[a for a in c.brief_alerts(units,{'last_deploy_ts':T},T,out) if a['code']=='entries_blocked_by_settlement']
+        self.assertEqual(len(msg),1)
+        self.assertIn('ALL entries refused for 3.0h by settlement BBBBBBBB… (deferred settlement_inventory_unproven)',msg[0]['message'])
+
     def test_markers_stale_by_mtime_and_settlement_by_close(self):
         P='P'*40
         for d in c.MARKER_DIRS: (self.m/d).mkdir()
@@ -715,8 +742,10 @@ class BriefTests(unittest.TestCase):
         self.assertEqual(out['total'],4)
         self.assertEqual(out['stale'],{'dlmm_pending_swaps':{'count':1,'oldest_s':3*DAY},'dlmm_settlements':{'count':1,'oldest_s':5*DAY}})
         msg=[a for a in c.brief_alerts({'units':[{'unit':u,'active':'active','enabled':'enabled'} for u in c.CORE_UNITS],'monitor_tick_age_s':1},{'last_deploy_ts':T},T,out)]
-        self.assertEqual([a['code'] for a in msg],['marker_stale'])
+        # The stateless 5-day settlement also holds every entry, so it pages on its own code.
+        self.assertEqual([a['code'] for a in msg],['marker_stale','entries_blocked_by_settlement'])
         self.assertIn('dlmm_pending_swaps 1 (oldest 3.0d)',msg[0]['message'])
+        self.assertIn('ALL entries refused for 5.0d',msg[1]['message'])
         self.assertEqual(c.brief_markers(self.m/'absent',T)['stale'],{})
         # A settlement that records queued_at needs no close journal row.
         Q='Q'*40; f=self.m/'dlmm_settlements'/(Q+'.json')

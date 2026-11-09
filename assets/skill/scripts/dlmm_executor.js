@@ -888,6 +888,45 @@ async function resolveEntryActiveBin(pool, maxDrift = ENTRY_MAX_BIN_DRIFT) {
   return { activeBin: fresh, reanchor: { cached_bin: cached, active_bin: fresh.binId, drift } };
 }
 
+// An exit awaiting settlement holds every new entry, except inventory proved
+// unsellable or uneconomic (deferred swap_no_route / net_recovery_below_floor),
+// and, since 2026-11-09, an inventory proof that cannot complete but whose
+// whole wallet balance of that mint is priced as dust. That last case must be
+// fresh (<= 2h, re-priced on the monitor's 15m retry) and small (<= 1% of the
+// minimum ticket). Unpriced or larger unproven inventory keeps blocking; the
+// dashboard raises entries_blocked_by_settlement for it.
+// Mirrored in cmd/dashboard/collect.py settlement_blocks_entry.
+const SETTLEMENT_UNPROVEN_VALUE_MAX_AGE_S = 2 * 3600;
+const SETTLEMENT_UNPROVEN_VALUE_FLOOR_BPS = 100;
+function settlementBlocksEntry(item, nowSec, minimumEntryLamports) {
+  if (!item || typeof item !== "object" || item.state !== "deferred") return true;
+  if (["swap_no_route", "net_recovery_below_floor"].includes(item.reason)) return false;
+  if (item.reason !== "settlement_inventory_unproven") return true;
+  const value = item.remaining_value_lamports;
+  if (typeof value !== "string" || !/^\d+$/.test(value)) return true;
+  if (!Number.isFinite(item.valued_at) || item.valued_at > nowSec
+      || nowSec - item.valued_at > SETTLEMENT_UNPROVEN_VALUE_MAX_AGE_S) return true;
+  return BigInt(value) * 10000n > BigInt(minimumEntryLamports) * BigInt(SETTLEMENT_UNPROVEN_VALUE_FLOOR_BPS);
+}
+
+// Read-only: the wallet's whole balance of a settlement's mint and a fresh
+// full-balance quote for it. It is an upper bound on the stranded inventory,
+// never a proof of it, and it never authorizes a sale.
+async function settlementDustValue(position, mint) {
+  if (!/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(position)) throw new Error("Invalid settlement position");
+  const marker = JSON.parse(fs.readFileSync(path.join(PROFILE_DIR, "memories", "dlmm_settlements", `${position}.json`), "utf8"));
+  if (marker.position !== position || marker.mint !== mint) throw new Error("Settlement marker mismatch");
+  const raw = await runWithFailover(async (connection) => {
+    const accounts = await connection.getParsedTokenAccountsByOwner(getWallet().publicKey, { mint: new PublicKey(mint) });
+    return accounts.value.reduce((sum, a) => sum + BigInt(a.account.data.parsed.info.tokenAmount.amount), 0n).toString();
+  });
+  const valuedAt = Date.now() / 1000;
+  if (raw === "0") return { success: true, raw, value_lamports: "0", valued_at: valuedAt };
+  const quote = await dustQuoteLamports(mint, raw);
+  return quote.lamports === undefined ? { success: false, raw, verdict: quote.verdict }
+    : { success: true, raw, value_lamports: quote.lamports.toString(), valued_at: valuedAt };
+}
+
 async function deployPosition(poolAddressStr, amountX, amountY, binsBelow, binsAbove, strategyTypeStr = "spot", slippageBps = 1000) {
   if (![amountX, amountY].every((n) => Number.isFinite(n) && n >= 0)
       || amountX + amountY <= 0
@@ -900,11 +939,12 @@ async function deployPosition(poolAddressStr, amountX, amountY, binsBelow, binsA
   const dry = process.env.DRY_RUN === "true";
   await assertRootBudget();
   const settlements = path.join(PROFILE_DIR, "memories", "dlmm_settlements");
+  const minimumEntry = nativeCashPolicy().minimum_entry_lamports;
   if (!dry && fs.existsSync(settlements) && fs.readdirSync(settlements).some(f => {
     if (!f.endsWith(".json")) return false;
     try {
-      const item = JSON.parse(fs.readFileSync(path.join(settlements, f), "utf8"));
-      return item.state !== "deferred" || !["swap_no_route", "net_recovery_below_floor"].includes(item.reason);
+      return settlementBlocksEntry(JSON.parse(fs.readFileSync(path.join(settlements, f), "utf8")),
+        Date.now() / 1000, minimumEntry);
     } catch { return true; }
   })) {
     throw new Error("ENTRY REFUSED: a previous exit is awaiting verified SOL settlement");
@@ -2411,6 +2451,8 @@ async function main() {
       if (!token) throw new Error("Usage: spl-balance <token_mint>");
       const res = await getSplBalance(token);
       console.log(JSON.stringify(res));
+    } else if (command === "settlement-dust-value") {
+      console.log(JSON.stringify(await settlementDustValue(args[1], args[2])));
     } else if (command === "settlement-balance") {
       console.log(JSON.stringify(await settlementInventory(args[1], args[2], getWallet().publicKey.toString())));
     } else if (command === "list-tokens") {
@@ -2459,5 +2501,5 @@ async function main() {
 }
 
 if (require.main === module) main();
-module.exports = { resolveEntryActiveBin, settlementInventory, swapAmountRaw, reclaimEmptyAccounts, rentDeferralReason, liquidateLegacyBags, reconcileStaleMarkersCommand, clearDeployReservation, assertRootBudget, reconcileAccounting, recordSubmission, closePosition, swapToken, confirmSignedTransaction, deployPosition, acquireDeployLock, acquireSwapLock, reconcilePendingSwap,
+module.exports = { resolveEntryActiveBin, settlementInventory, settlementBlocksEntry, settlementDustValue, swapAmountRaw, reclaimEmptyAccounts, rentDeferralReason, liquidateLegacyBags, reconcileStaleMarkersCommand, clearDeployReservation, assertRootBudget, reconcileAccounting, recordSubmission, closePosition, swapToken, confirmSignedTransaction, deployPosition, acquireDeployLock, acquireSwapLock, reconcilePendingSwap,
   assertNoTokenExposure, positionIsEmpty, positionAccountExists, slippageBpsToPercent, settlementRentClose, ordinarySettlementRentClose, tokenAccountCanClose, getPositionRiskMark, candidateBinSnapshot };

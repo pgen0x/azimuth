@@ -1458,8 +1458,40 @@ def queue_settlement(position, emergency_exit=False):
     except (OSError, ValueError) as exc:
         print(f"⚠️ Settlement recording failed for {position}: {exc}")
 
+# An unprovable inventory proof is retried every tick for this long, then
+# deferred onto the 15m backoff with its reason. The executor's entry gate
+# (settlementBlocksEntry) decides whether that deferral may unblock entries;
+# it does only for fresh, small, priced dust.
+SETTLEMENT_UNPROVEN_DEFER_S = 2 * 3600
+SETTLEMENT_SWAP_DEFER_REASONS = ("swap_no_route", "net_recovery_below_floor", "swap_quote_threshold_unavailable")
+
+
+def _write_settlement(path, item):
+    with open(path + ".tmp", "w") as out:
+        json.dump(item, out)
+        out.flush()
+        os.fsync(out.fileno())
+    os.replace(path + ".tmp", path)
+
+
+def _settlement_dust_value(pos, mint):
+    """Wallet-wide token balance priced by a fresh quote (read-only, no tx)."""
+    value, err = run_command_json(
+        f"node {EXECUTOR_PATH} settlement-dust-value {shlex.quote(pos)} {shlex.quote(mint)}", timeout=30)
+    if value and value.get("success") and isinstance(value.get("value_lamports"), str):
+        return {"remaining_raw": value.get("raw"), "remaining_value_lamports": value["value_lamports"],
+                "valued_at": value.get("valued_at")}
+    print(f"⚠️ Settlement dust value unavailable for {pos}: {err or (value or {}).get('verdict')}")
+    return {"remaining_value_lamports": None, "valued_at": None}
+
+
 def settle_pending():
-    """One targeted retry per tick. Markers survive restarts; close is not settlement."""
+    """One targeted retry per tick. Markers survive restarts; close is not settlement.
+
+    state=pending is written only when a swap is about to be sent: it is what
+    the entry gate reads, so a marker that is merely being re-checked must not
+    flip back to blocking (2026-11-07: a 916431-raw dust proof that could never
+    pass held every entry for 30h because each retry rewrote it to pending)."""
     if not os.path.isdir(SETTLEMENT_DIR):
         return
     candidates = []
@@ -1501,26 +1533,42 @@ def settle_pending():
         # The executor may requote <=250,000 lamports at 300 bps. Its extra
         # allowance is at most one base fee; larger ordinary quotes stay tight.
         small_settlement_option = " --small-settlement" if slippage_bps == 100 else ""
-        item.update(last_attempt=time.time(), state="pending")
-        with open(path + ".tmp", "w") as out:
-            json.dump(item, out)
-        os.replace(path + ".tmp", path)
+        prior_state, prior_reason = item.get("state"), item.get("reason")
+        if not isinstance(item.get("queued_at"), (int, float)):
+            item["queued_at"] = time.time()  # legacy marker: its age starts now
+        item["last_attempt"] = time.time()
+        _write_settlement(path, item)
         balance_cmd = f"node {EXECUTOR_PATH} settlement-balance {shlex.quote(pos)} {shlex.quote(mint)}"
         bal, err = run_command_json(balance_cmd)
         if not bal or not bal.get("success") or "amount_raw" not in bal:
+            reason = (bal or {}).get("reason")
+            age_h = (time.time() - item["queued_at"]) / 3600
+            print(f"⚠️ Settlement balance refused for {pos}: {reason or err or 'no response'} "
+                  f"(marker age {age_h:.1f}h, state {item.get('state') or 'new'})")
+            # Only a definite proof refusal defers; an in-flight swap signature
+            # or a transient executor failure keeps retrying every tick.
+            if (reason == "settlement_inventory_unproven" and not bal.get("pending_signatures")
+                    and age_h * 3600 > SETTLEMENT_UNPROVEN_DEFER_S):
+                item.update(state="deferred", reason=reason, **_settlement_dust_value(pos, mint))
+                _write_settlement(path, item)
+                print(f"⚠️ Settlement deferred {pos}: {reason}, remaining value "
+                      f"{item.get('remaining_value_lamports')} lamports (entries unblock only if it is small)")
             return
         if bal["amount_raw"] != "0":
+            item["state"] = "pending"  # a swap is about to be sent
+            _write_settlement(path, item)
             result, err = run_command_json(
                 f"DLMM_SETTLEMENT_POSITION={shlex.quote(pos)} node {EXECUTOR_PATH} swap {shlex.quote(mint)} SOL {shlex.quote('raw:' + bal['amount_raw'])} 15 {slippage_bps} 1{small_settlement_option}", timeout=90)
             if not result or not result.get("success"):
                 reason = (result or {}).get("reason")
-                if reason in ("swap_no_route", "net_recovery_below_floor", "swap_quote_threshold_unavailable") and not result.get("pending"):
+                if reason in SETTLEMENT_SWAP_DEFER_REASONS and not result.get("pending"):
                     item.update(state="deferred", reason=reason, remaining_raw=bal["amount_raw"])
-                    with open(path + ".tmp", "w") as out:
-                        json.dump(item, out)
-                        out.flush()
-                        os.fsync(out.fileno())
-                    os.replace(path + ".tmp", path)
+                    _write_settlement(path, item)
+                elif (prior_state == "deferred" and result and result.get("aborted") is True
+                      and not result.get("pending")):
+                    # Refused before anything was signed: the earlier deferral stands.
+                    item.update(state="deferred", reason=prior_reason)
+                    _write_settlement(path, item)
                 print(f"⚠️ Settlement {item['state']} {pos}: {err or result}")
                 return
             bal, err = run_command_json(balance_cmd)

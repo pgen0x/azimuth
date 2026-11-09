@@ -5,6 +5,7 @@ import io
 import json
 from pathlib import Path
 import tempfile
+import time
 import textwrap
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -324,6 +325,68 @@ def main():
             monitor.settle_pending()
         assert again.call_count == 2
         path.unlink()
+
+    # 2026-11-07: an unprovable dust proof rewrote its marker to pending on every
+    # retry and held all entries for 30h. A refusal is now loud, defers after
+    # SETTLEMENT_UNPROVEN_DEFER_S with a priced remainder, and a deferred retry
+    # never re-blocks entries unless a swap is actually about to be sent.
+    with tempfile.TemporaryDirectory() as tmp, patch.object(monitor, "SETTLEMENT_DIR", tmp), \
+         patch.object(monitor, "get_wallet_address", return_value="wallet"), \
+         patch.object(monitor, "position_live_onchain", return_value=False), \
+         patch.object(monitor, "get_meteora_portfolio_positions", return_value=({}, None)), \
+         patch.object(monitor, "run_command", return_value=("1", "", 0)):
+        path = Path(tmp) / "stuck.json"
+        unproven = ({"success": False, "reason": "settlement_inventory_unproven"}, None)
+        priced = ({"success": True, "raw": "916431", "value_lamports": "66000", "valued_at": 123.0}, None)
+        path.write_text(json.dumps(dict(position="stuck", mint="DUST", last_attempt=0, queued_at=time.time() - 600)))
+        out = io.StringIO()
+        with patch.object(monitor, "run_command_json", side_effect=[unproven]) as run, contextlib.redirect_stdout(out):
+            monitor.settle_pending()
+        assert run.call_count == 1 and "settlement_inventory_unproven" in out.getvalue()
+        item = json.loads(path.read_text())
+        assert "state" not in item  # young: never deferred, never flipped to pending
+        # A swap signature still in flight is never deferred, however old.
+        path.write_text(json.dumps(dict(item, queued_at=time.time() - 3 * 3600)))
+        with patch.object(monitor, "run_command_json", side_effect=[({"success": False, "reason": "settlement_inventory_unproven", "pending_signatures": ["s"]}, None)]):
+            monitor.settle_pending()
+        assert "state" not in json.loads(path.read_text())
+        with patch.object(monitor, "run_command_json", side_effect=[unproven, priced]) as run:
+            monitor.settle_pending()
+        assert "settlement-dust-value stuck DUST" in run.call_args_list[1].args[0]
+        item = json.loads(path.read_text())
+        assert (item["state"], item["reason"], item["remaining_raw"], item["remaining_value_lamports"], item["valued_at"]) == \
+            ("deferred", "settlement_inventory_unproven", "916431", "66000", 123.0)
+        with patch.object(monitor, "run_command_json") as run:  # inside the 15m backoff
+            monitor.settle_pending()
+            run.assert_not_called()
+        # Backoff elapsed, still unproven: re-priced, still deferred, never pending.
+        path.write_text(json.dumps(dict(item, last_attempt=0)))
+        seen = []
+        def balance(cmd, **kw):
+            seen.append(json.loads(path.read_text()).get("state"))
+            return unproven if "settlement-balance" in cmd else (None, "quote unavailable")
+        with patch.object(monitor, "run_command_json", side_effect=balance):
+            monitor.settle_pending()
+        item = json.loads(path.read_text())
+        assert seen == ["deferred", "deferred"] and item["state"] == "deferred"
+        assert item["remaining_value_lamports"] is None  # an unpriced remainder keeps the gate closed
+        # A deferred retry that reaches a swap is pending only while the swap runs;
+        # an executor refusal before signing restores the earlier deferral.
+        path.write_text(json.dumps(dict(item, last_attempt=0)))
+        def swap(cmd, **kw):
+            if "settlement-balance" in cmd:
+                return ({"success": True, "amount_raw": "916431"}, None)
+            assert json.loads(path.read_text())["state"] == "pending"
+            return ({"success": False, "aborted": True, "reason": "swap_route_cooldown_no_route"}, None)
+        with patch.object(monitor, "run_command_json", side_effect=swap):
+            monitor.settle_pending()
+        item = json.loads(path.read_text())
+        assert (item["state"], item["reason"]) == ("deferred", "settlement_inventory_unproven")
+        # An unknown send outcome stays pending: the executor must reconcile it first.
+        path.write_text(json.dumps(dict(item, last_attempt=0)))
+        with patch.object(monitor, "run_command_json", side_effect=[({"success": True, "amount_raw": "916431"}, None), (None, "timeout")]):
+            monitor.settle_pending()
+        assert json.loads(path.read_text())["state"] == "pending"
 
     # Previously deferred dust must not consume the only settlement slot while
     # an executable exit is pending. Keep retry fairness within pending exits,
