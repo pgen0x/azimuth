@@ -1024,6 +1024,15 @@ vm.runInNewContext("const productionExitTransport=confirmExitTransaction;confirm
     fs.writeFileSync(path.join(settlementDir, "position.json"), JSON.stringify(blocked));
     await assert.rejects(deploy(), /awaiting verified SOL settlement/);
   }
+  // A finished one-shot command cannot linger on an open handle: the unref'd
+  // guard ends it with the command's own exit code once the grace has passed.
+  { const exits = []; const realExit = sandbox.process.exit;
+    sandbox.process.exit = code => exits.push(code);
+    sandbox.process.exitCode = 3;
+    sandbox.module.exports.exitAfterResult(5);
+    await new Promise(resolve => setTimeout(resolve, 30));
+    assert.deepEqual(exits, [3]);
+    sandbox.process.exit = realExit; delete sandbox.process.exitCode; }
   const { settlementBlocksEntry } = sandbox.module.exports;
   assert.equal(settlementBlocksEntry({...unproven, remaining_value_lamports:"1000000"}, nowSec, 100000000), false);
   assert.equal(settlementBlocksEntry({...unproven, remaining_value_lamports:"1000001"}, nowSec, 100000000), true);

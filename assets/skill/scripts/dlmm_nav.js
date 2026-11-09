@@ -6,7 +6,7 @@ const {retainedRentEvidence} = require('./dlmm_retained_rent.js');
 const SOL = 'So11111111111111111111111111111111111111112';
 const QUOTE_CACHE_MAX_SLOT_LAG = 2500;
 const TOKEN_PROGRAMS = ['TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA', 'TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb'];
-const read = file => fs.existsSync(file) ? fs.readFileSync(file, 'utf8').split('\n').filter(Boolean).map(JSON.parse) : [];
+const {readRows: read, firstRow} = require('./dlmm_jsonl.js');
 const append = (file, row) => fs.appendFileSync(file, JSON.stringify(row) + '\n', {mode: 0o600});
 const now = () => Math.floor(Date.now()/1000);
 let quoteReadyAt = 0;
@@ -502,8 +502,10 @@ async function collect({dir, wallet, PublicKey, rpc, historyOnly=false, includeR
   const events = new Map(read(path.join(dir,'dlmm_transactions.jsonl')).map(r => [r.signature,r]));
   const cachePath = path.join(dir,'dlmm_wallet_transactions.jsonl');
   const cache = new Map(read(cachePath).map(r => [r.signature,r]));
-  const snapshots = read(path.join(dir,'dlmm_nav.jsonl'));
-  const since = snapshots.length ? snapshots[0].started_at : now()-86400;
+  // Only the first snapshot's start is used here; parsing the whole NAV journal
+  // (hundreds of MB) for it made every history refresh cost half a gigabyte.
+  const firstSnapshot = firstRow(path.join(dir,'dlmm_nav.jsonl'));
+  const since = firstSnapshot ? firstSnapshot.started_at : now()-86400;
   const finalizedHeight=await rpc(c=>c.getBlockHeight('finalized'));
   let before, boundary = false, signatures = [];
   // Bounded pagination; coverage is explicitly incomplete if the bound is hit.

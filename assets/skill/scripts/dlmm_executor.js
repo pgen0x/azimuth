@@ -1745,8 +1745,9 @@ async function settlementInventory(position, mint, wallet) {
       // A null transaction cannot prove expiry. Refresh the same finalized
       // history proof as accounting, instead of waiting for its periodic run.
       const pending = new Set(proof.pending_signatures), now = Math.floor(Date.now()/1000);
-      const events = fs.readFileSync(path.join(PROFILE_DIR, "memories", "dlmm_transactions.jsonl"), "utf8")
-        .split("\n").filter(Boolean).map(JSON.parse).filter(e => pending.has(e.signature)
+      const events = require("./dlmm_jsonl.js").readRows(path.join(PROFILE_DIR, "memories", "dlmm_transactions.jsonl"),
+        e => pending.has(e.signature))
+        .filter(e => pending.has(e.signature)
           && e.kind === "swap" && e.position === position && e.wallet === wallet
           && Number.isSafeInteger(e.ts) && e.ts > 0 && now-e.ts > 120
           && Number.isSafeInteger(e.lastValidBlockHeight) && e.lastValidBlockHeight > 0);
@@ -2262,12 +2263,16 @@ async function candidateBinSnapshot(poolAddress, below = 69, above = 16, fixedAn
 // Read-only reconciliation. A missing transaction remains unknown, never zero.
 async function reconcileAccounting(signatures = null) {
   const dir = path.join(PROFILE_DIR, "memories");
-  const readRows = (name) => {
-    const file = path.join(dir, name);
-    return fs.existsSync(file) ? fs.readFileSync(file, "utf8").split("\n").filter(Boolean).map(JSON.parse) : [];
-  };
-  const events = [...new Map(readRows("dlmm_transactions.jsonl").map(e => [e.signature,e])).values()];
-  const facts = new Map([...readRows("dlmm_transaction_facts.jsonl"), ...readRows("dlmm_wallet_transactions.jsonl")].map(r => [r.signature, r]));
+  const { forEachRow } = require("./dlmm_jsonl.js");
+  const eventsBySignature = new Map();
+  forEachRow(path.join(dir, "dlmm_transactions.jsonl"), e => eventsBySignature.set(e.signature, e));
+  const events = [...eventsBySignature.values()];
+  // Only whether a fact exists and whether it landed is read here, so keep
+  // that, not every fact row (the wallet fact cache is the largest journal read).
+  const facts = new Map();
+  const keepFact = r => facts.set(r.signature, { landed: r.landed });
+  forEachRow(path.join(dir, "dlmm_transaction_facts.jsonl"), keepFact);
+  forEachRow(path.join(dir, "dlmm_wallet_transactions.jsonl"), keepFact);
   let pending = 0;
   for (const event of events) {
     if (signatures && !signatures.has(event.signature)) continue;
@@ -2500,6 +2505,20 @@ async function main() {
   }
 }
 
-if (require.main === module) main();
-module.exports = { resolveEntryActiveBin, settlementInventory, settlementBlocksEntry, settlementDustValue, swapAmountRaw, reclaimEmptyAccounts, rentDeferralReason, liquidateLegacyBags, reconcileStaleMarkersCommand, clearDeployReservation, assertRootBudget, reconcileAccounting, recordSubmission, closePosition, swapToken, confirmSignedTransaction, deployPosition, acquireDeployLock, acquireSwapLock, reconcilePendingSwap,
+// A one-shot command is finished once main() has printed its result, but node
+// only exits when nothing holds its event loop. A leftover handle (an SDK
+// WebSocket reconnect loop, a stray timer) kept a finished command alive while
+// the monitor tick waited on it, and such a process can keep allocating. The
+// unref'd timer never delays a clean exit; it only ends a lingering one after
+// stdout has had time to drain.
+const EXIT_GRACE_MS = 5000;
+function exitAfterResult(grace = EXIT_GRACE_MS) {
+  setTimeout(() => {
+    console.warn(`[EXIT] event loop still busy ${grace}ms after the result; exiting`);
+    process.exit(process.exitCode ?? 0);
+  }, grace).unref();
+}
+
+if (require.main === module) main().then(() => exitAfterResult());
+module.exports = { exitAfterResult, resolveEntryActiveBin, settlementInventory, settlementBlocksEntry, settlementDustValue, swapAmountRaw, reclaimEmptyAccounts, rentDeferralReason, liquidateLegacyBags, reconcileStaleMarkersCommand, clearDeployReservation, assertRootBudget, reconcileAccounting, recordSubmission, closePosition, swapToken, confirmSignedTransaction, deployPosition, acquireDeployLock, acquireSwapLock, reconcilePendingSwap,
   assertNoTokenExposure, positionIsEmpty, positionAccountExists, slippageBpsToPercent, settlementRentClose, ordinarySettlementRentClose, tokenAccountCanClose, getPositionRiskMark, candidateBinSnapshot };
