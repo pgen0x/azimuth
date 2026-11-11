@@ -193,9 +193,53 @@ func TestSetupLiveNeedsPhrase(t *testing.T) {
 	if w.daemon(t)["DRY_RUN"] != "false" || w.prof(t)["DRY_RUN"] != "false" {
 		t.Fatal("confirmed live run did not set DRY_RUN=false")
 	}
-	code, out, _ := w.run(t, "", nil, "--non-interactive", "--skip-tests")
-	if code != 0 || w.daemon(t)["DRY_RUN"] != "true" || !strings.Contains(out, "currently LIVE") {
-		t.Fatal("a run without --live must return to DRY_RUN=true and say so")
+	// An unrelated non-interactive edit must not stop live trading.
+	code, out, e := w.run(t, "", nil, "--non-interactive", "--set", "LONE_MIN_SCORE=60", "--skip-tests")
+	if code != 0 {
+		t.Fatal(e)
+	}
+	if w.daemon(t)["DRY_RUN"] != "false" || w.prof(t)["DRY_RUN"] != "false" || w.daemon(t)["LONE_MIN_SCORE"] != "60" || !strings.Contains(out, "DRY_RUN left unchanged") {
+		t.Fatal("a non-interactive edit without a DRY_RUN flag changed DRY_RUN")
+	}
+	if code, _, _ := w.run(t, "", nil, "--non-interactive", "--simulate-trades", "--live", "--confirm-live", LivePhrase, "--skip-tests"); code != 1 {
+		t.Fatal("--simulate-trades with --live accepted")
+	}
+	if code, _, e := w.run(t, "", nil, "--non-interactive", "--simulate-trades", "--skip-tests"); code != 0 {
+		t.Fatal(e)
+	}
+	if w.daemon(t)["DRY_RUN"] != "true" || w.prof(t)["DRY_RUN"] != "true" {
+		t.Fatal("--simulate-trades did not switch back to dry run")
+	}
+}
+
+func TestSetupFreshConfigDefaultsToDryRun(t *testing.T) {
+	w := newWizardEnv(t)
+	if code, _, e := w.run(t, "", nil, "--non-interactive", "--set", "LONE_MIN_SCORE=60", "--skip-tests"); code != 0 {
+		t.Fatal(e)
+	}
+	if w.daemon(t)["DRY_RUN"] != "true" || w.prof(t)["DRY_RUN"] != "true" {
+		t.Fatal("fresh config must get DRY_RUN=true")
+	}
+}
+
+func TestSetupInteractiveLiveDefaultsToKeep(t *testing.T) {
+	w := newWizardEnv(t)
+	if code, _, e := w.run(t, "", nil, "--non-interactive", "--live", "--confirm-live", LivePhrase, "--skip-tests"); code != 0 {
+		t.Fatal(e)
+	}
+	// Enter at every prompt: modes, "keep live?", wallet, RPC, route, telegram, gates, install, apply.
+	code, out, e := w.run(t, strings.Repeat("\n", 20), [][]byte{{}}, "--skip-tests")
+	if code != 0 {
+		t.Fatalf("%s\n%s", e, out)
+	}
+	if !strings.Contains(out, "Keep live trading? (n switches to dry run) (Y/n)") || w.daemon(t)["DRY_RUN"] != "false" || w.prof(t)["DRY_RUN"] != "false" {
+		t.Fatal("interactive default on a live config must keep it live")
+	}
+	if code, _, e := w.run(t, "\n\n\n\nn\n"+strings.Repeat("\n", 20), [][]byte{{}}, "--skip-tests"); code != 0 {
+		t.Fatal(e)
+	}
+	if w.daemon(t)["DRY_RUN"] != "true" || w.prof(t)["DRY_RUN"] != "true" {
+		t.Fatal("answering n must switch to dry run")
 	}
 }
 
@@ -307,8 +351,10 @@ func TestSetupKeepsExistingWebhookRouteAndSeesLegacyLive(t *testing.T) {
 	if d["DEPLOY_CMD"] != "" || d["AI_HEALTH_CMD"] != "" || d["HERMES_WEBHOOK_SECRET"] != "test-only-secret" {
 		t.Fatal("webhook-only route was changed without being asked")
 	}
-	if !strings.Contains(out, "currently LIVE") || d["DRY_RUN"] != "true" || w.prof(t)["DRY_RUN"] != "true" {
-		t.Fatal("legacy config without DRY_RUN must be recognised as live and set to dry run")
+	_, daemonDry := d["DRY_RUN"]
+	_, profileDry := w.prof(t)["DRY_RUN"]
+	if !strings.Contains(out, "currently LIVE") || daemonDry || profileDry {
+		t.Fatal("legacy config without DRY_RUN must be recognised as live and left unchanged")
 	}
 	if strings.Contains(out, "test-only-secret") {
 		t.Fatal("secret printed")

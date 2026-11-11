@@ -35,7 +35,7 @@ func RunSetupCLI(ctx context.Context, args []string, stdin *os.File, out, errOut
 type setupFlags struct {
 	nonInteractive, dryRun, skipPreflight, skipTests, skipDoctor bool
 	modes, route, wallet, privateKeyFile, rpcURLs, telegram      string
-	replaceWallet, live, install, linger                         bool
+	replaceWallet, live, simulate, install, linger               bool
 	confirmLive                                                  string
 	inst                                                         InstallRequest
 	dashboardPasswordFile, gmgnKeyFile                           string
@@ -99,6 +99,7 @@ func RunSetup(ctx context.Context, args []string, sio SetupIO) int {
 	fs.StringVar(&f.rpcURLs, "rpc-urls", "", "comma-separated Solana RPC URLs")
 	fs.StringVar(&f.telegram, "telegram", "keep", "Telegram reports via `hermes send`: keep, on or off")
 	fs.BoolVar(&f.live, "live", false, "set DRY_RUN=false (needs --confirm-live)")
+	fs.BoolVar(&f.simulate, "simulate-trades", false, "set DRY_RUN=true (switch a live config back to dry run)")
 	fs.StringVar(&f.confirmLive, "confirm-live", "", "the exact phrase: "+LivePhrase)
 	fs.BoolVar(&f.install, "install", false, "run install.sh (systemd user units) after writing config")
 	fs.BoolVar(&f.inst.WithDashboard, "with-dashboard", false, "install.sh --with-dashboard")
@@ -116,7 +117,8 @@ func RunSetup(ctx context.Context, args []string, sio SetupIO) int {
 			fmt.Fprintln(sio.Out, "Usage: azimuth setup [flags]\n\nInteractive by default; re-running edits the existing config and keeps keys it does not own.")
 			fs.SetOutput(sio.Out)
 			fs.PrintDefaults()
-			fmt.Fprintln(sio.Out, "\nDRY_RUN=true is always written unless --live --confirm-live '"+LivePhrase+"' is given.")
+			fmt.Fprintln(sio.Out, "\nDRY_RUN: a new config gets true. An existing value only changes with --simulate-trades (true)")
+			fmt.Fprintln(sio.Out, "or --live --confirm-live '"+LivePhrase+"' (false).")
 			return 0
 		}
 		fmt.Fprintln(sio.Err, "Invalid setup arguments. Use azimuth setup --help.")
@@ -356,15 +358,24 @@ func (w *wizard) modes() error {
 	daemonDry, daemonSet := w.st.Daemon["DRY_RUN"]
 	profileDry := w.st.Profile["DRY_RUN"]
 	currentLive := (daemonSet && daemonDry != "true") || (w.st.ProfileExists && profileDry != "true")
+	if w.f.live && w.f.simulate {
+		return errors.New("--live and --simulate-trades conflict")
+	}
+	// DRY_RUN only changes on an explicit answer or flag. A re-run that edits
+	// something else must never stop (or start) live trading as a side effect.
 	dry := "true"
 	switch {
+	case w.f.simulate:
+		if currentLive {
+			w.say("  --simulate-trades: switching this LIVE config to DRY_RUN=true")
+		}
 	case w.interactive() && currentLive:
-		keep, err := w.askBool("This config is currently LIVE (DRY_RUN is not true). Keep live trading?", false)
+		keep, err := w.askBool("This config is currently LIVE (DRY_RUN is not true). Keep live trading? (n switches to dry run)", true)
 		if err != nil {
 			return err
 		}
 		if keep {
-			w.say("  keeping the current DRY_RUN values unchanged")
+			w.say("  keeping the current DRY_RUN values unchanged (live)")
 			return nil
 		}
 	case w.interactive():
@@ -390,7 +401,8 @@ func (w *wizard) modes() error {
 		}
 		dry = "false"
 	case currentLive:
-		w.say("  ⚠ config is currently LIVE; without --live this run sets DRY_RUN=true")
+		w.say("  config is currently LIVE; DRY_RUN left unchanged (--simulate-trades switches to dry run)")
+		return nil
 	}
 	w.plan.Set(DaemonEnv, "DRY_RUN", dry)
 	w.plan.Set(ProfileEnv, "DRY_RUN", dry)

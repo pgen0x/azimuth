@@ -152,10 +152,12 @@ edits both in place: comments, ordering and keys setup does not own survive.
 
 Safety rules the engine enforces for every front end:
 
-- `DRY_RUN=true` is written unless you type the exact phrase
-  `I UNDERSTAND THIS TRADES REAL FUNDS` (interactive) or pass
-  `--live --confirm-live '<phrase>'`. A non-interactive run without `--live`
-  sets a live config back to `DRY_RUN=true` and says so.
+- A new config gets `DRY_RUN=true`. Going live needs the exact phrase
+  `I UNDERSTAND THIS TRADES REAL FUNDS`, typed interactively or passed as
+  `--live --confirm-live '<phrase>'`. An existing `DRY_RUN` is never changed as
+  a side effect: a non-interactive re-run keeps it unless you pass
+  `--simulate-trades` (back to dry run) or `--live`, and an interactive re-run
+  on a live config asks "Keep live trading?" with keep as the default.
 - Secrets (wallet key, webhook secret, RPC URLs, API keys, dashboard password)
   never appear in output, plan listings or errors; they reach helper processes
   on stdin, never argv.
