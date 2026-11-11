@@ -28,6 +28,9 @@ func main() {
 	if len(os.Args) > 1 && os.Args[1] == "doctor" {
 		os.Exit(setup.RunDoctorCLI(context.Background(), os.Args[2:], os.Stdout, os.Stderr))
 	}
+	if len(os.Args) > 1 && os.Args[1] == "setup" {
+		os.Exit(setup.RunSetupCLI(context.Background(), os.Args[2:], os.Stdin, os.Stdout, os.Stderr))
+	}
 	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
 	if *showVersion {
@@ -35,7 +38,7 @@ func main() {
 		return
 	}
 	if flag.NArg() != 0 {
-		fmt.Fprintln(os.Stderr, "Usage: azimuth [-version] | azimuth doctor [flags]")
+		fmt.Fprintln(os.Stderr, "Usage: azimuth [-version] | azimuth setup [flags] | azimuth doctor [flags]")
 		os.Exit(1)
 	}
 
