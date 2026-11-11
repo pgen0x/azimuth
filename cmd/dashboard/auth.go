@@ -2,33 +2,26 @@ package main
 
 import (
 	"bufio"
-	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
-	"crypto/subtle"
-	"encoding/base64"
-	"encoding/binary"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/pgen0x/azimuth/internal/pwhash"
 )
 
-// Password hashing is PBKDF2-HMAC-SHA256 built on the standard library. The module
-// targets Go 1.22, where crypto/pbkdf2 does not exist, and adding x/crypto (scrypt,
-// argon2id) would raise the module's Go version and dependency set for one call.
-// Format: pbkdf2-sha256:<iterations>:<salt b64url>:<key b64url>. ':' separators keep the
-// value free of '$', so it survives shells and systemd EnvironmentFile unquoted.
+// Password hashing lives in internal/pwhash so `azimuth setup` writes the same
+// format this binary verifies. These names keep the call sites unchanged.
 const (
-	hashScheme     = "pbkdf2-sha256"
-	hashIterations = 600000 // OWASP 2023 recommendation for PBKDF2-HMAC-SHA256
-	minIterations  = 100000
-	maxIterations  = 10000000
+	hashScheme     = pwhash.Scheme
+	hashIterations = pwhash.DefaultIterations
+	minIterations  = pwhash.MinIterations
+	maxIterations  = pwhash.MaxIterations
 	sessionCookie  = "azimuth_session"
 	sessionTTL     = 12 * time.Hour
 	maxSessions    = 32
@@ -36,69 +29,17 @@ const (
 	maxFailures    = 5
 )
 
-func pbkdf2SHA256(password, salt []byte, iterations, keyLen int) []byte {
-	prf := hmac.New(sha256.New, password)
-	out := make([]byte, 0, keyLen)
-	var counter [4]byte
-	for block := uint32(1); len(out) < keyLen; block++ {
-		prf.Reset()
-		prf.Write(salt)
-		binary.BigEndian.PutUint32(counter[:], block)
-		prf.Write(counter[:])
-		u := prf.Sum(nil)
-		t := append([]byte(nil), u...)
-		for i := 1; i < iterations; i++ {
-			prf.Reset()
-			prf.Write(u)
-			u = prf.Sum(u[:0])
-			for j := range t {
-				t[j] ^= u[j]
-			}
-		}
-		out = append(out, t...)
-	}
-	return out[:keyLen]
-}
+type passwordHash = pwhash.Parsed
 
-type passwordHash struct {
-	iterations int
-	salt, key  []byte
+func pbkdf2SHA256(password, salt []byte, iterations, keyLen int) []byte {
+	return pwhash.PBKDF2SHA256(password, salt, iterations, keyLen)
 }
 
 func hashPassword(password string, iterations int) (string, error) {
-	if password == "" {
-		return "", errors.New("empty password")
-	}
-	salt := make([]byte, 16)
-	if _, err := rand.Read(salt); err != nil {
-		return "", err
-	}
-	key := pbkdf2SHA256([]byte(password), salt, iterations, 32)
-	enc := base64.RawURLEncoding
-	return fmt.Sprintf("%s:%d:%s:%s", hashScheme, iterations, enc.EncodeToString(salt), enc.EncodeToString(key)), nil
+	return pwhash.Hash(password, iterations)
 }
 
-func parsePasswordHash(value string) (*passwordHash, error) {
-	parts := strings.Split(strings.TrimSpace(value), ":")
-	if len(parts) != 4 || parts[0] != hashScheme {
-		return nil, errors.New("expected pbkdf2-sha256:<iterations>:<salt>:<key>")
-	}
-	n, err := strconv.Atoi(parts[1])
-	if err != nil || n < minIterations || n > maxIterations {
-		return nil, fmt.Errorf("iterations must be %d..%d", minIterations, maxIterations)
-	}
-	salt, err1 := base64.RawURLEncoding.DecodeString(parts[2])
-	key, err2 := base64.RawURLEncoding.DecodeString(parts[3])
-	if err1 != nil || err2 != nil || len(salt) < 16 || len(key) != 32 {
-		return nil, errors.New("salt or key is malformed")
-	}
-	return &passwordHash{iterations: n, salt: salt, key: key}, nil
-}
-
-func (h *passwordHash) verify(password string) bool {
-	got := pbkdf2SHA256([]byte(password), h.salt, h.iterations, len(h.key))
-	return subtle.ConstantTimeCompare(got, h.key) == 1
-}
+func parsePasswordHash(value string) (*passwordHash, error) { return pwhash.Parse(value) }
 
 // readPassword takes the first stdin line, dropping only the line ending.
 func readPassword(r io.Reader) (string, error) {
@@ -157,7 +98,7 @@ func (a *auth) login(password string) string {
 		return ""
 	}
 	a.verifyMu.Lock()
-	ok := a.hash.verify(password)
+	ok := a.hash.Verify(password)
 	a.verifyMu.Unlock()
 	a.mu.Lock()
 	defer a.mu.Unlock()

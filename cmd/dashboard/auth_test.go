@@ -83,7 +83,7 @@ func TestHashFormatAndVerify(t *testing.T) {
 		t.Fatalf("unexpected hash shape: %s", h)
 	}
 	parsed, err := parsePasswordHash(h)
-	if err != nil || !parsed.verify(testPassword) || parsed.verify(testPassword+" ") || parsed.verify("") {
+	if err != nil || !parsed.Verify(testPassword) || parsed.Verify(testPassword+" ") || parsed.Verify("") {
 		t.Fatal("verify mismatch")
 	}
 	other, _ := hashPassword(testPassword, minIterations)
