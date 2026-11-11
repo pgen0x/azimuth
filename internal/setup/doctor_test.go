@@ -84,7 +84,7 @@ func fixture(t *testing.T) DoctorOptions {
 		if len(args) > 0 && args[0] == "--version" {
 			return CommandResult{Output: "version 30.0.0"}, nil
 		}
-		if len(args) > 0 && args[0] == "-c" {
+		if len(args) > 0 && (args[0] == "-c" || args[0] == "-I") {
 			return CommandResult{}, nil
 		}
 		return CommandResult{}, fmt.Errorf("unexpected command")
@@ -246,6 +246,100 @@ func TestDoctorToolVersionAndCommandDeadline(t *testing.T) {
 	d.ai(ctx)
 	if findCheck(t, d.report, "ai.probe").Status != Fail {
 		t.Fatal("canceled probe passed")
+	}
+}
+
+func TestHermesRuntimeSelection(t *testing.T) {
+	const imports = "import hermes_bootstrap; from hermes_cli.config import load_config; from hermes_cli.runtime_provider import resolve_runtime_provider"
+	for _, tt := range []struct {
+		name       string
+		versions   []string
+		venv       string
+		want       string
+		explicit   bool
+		customBase bool
+		broken     bool
+		status     Status
+	}{
+		{name: "bundled preferred over venv", versions: []string{"3.12.4"}, venv: "venv", want: "3.12.4", status: Pass},
+		{name: "newest numeric version", versions: []string{"3.9.20", "3.10.18", "3.12.9", "3.12.10"}, want: "3.12.10", status: Pass},
+		{name: "venv only warns", venv: "venv", status: Warn},
+		{name: "dot venv only warns", venv: ".venv", status: Warn},
+		{name: "home base override", versions: []string{"3.13.2"}, want: "3.13.2", customBase: true, status: Pass},
+		{name: "broken bundle does not fall back", versions: []string{"3.12.4"}, venv: "venv", want: "3.12.4", broken: true, status: Fail},
+		{name: "explicit interpreter wins", versions: []string{"3.12.4"}, explicit: true, status: Pass},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			opts := fixture(t)
+			base := filepath.Join(opts.HomeDir, ".hermes")
+			t.Setenv("HERMES_HOME_BASE", "")
+			if tt.customBase {
+				base = t.TempDir()
+				t.Setenv("HERMES_HOME_BASE", base)
+			}
+			writePython := func(path string) {
+				t.Helper()
+				if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, []byte("#!/bin/sh\nexit 0\n"), 0700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			want := opts.HermesPython
+			if !tt.explicit {
+				opts.HermesPython = ""
+			}
+			for _, version := range tt.versions {
+				path := filepath.Join(base, "tools", "python-"+version+"-"+runtime.GOOS+"-"+runtime.GOARCH, "bin", "python3")
+				writePython(path)
+				if version == tt.want && !tt.explicit {
+					want = path
+				}
+			}
+			legacy := !tt.explicit && tt.want == ""
+			if tt.venv != "" {
+				path := filepath.Join(opts.HermesRoot, tt.venv, "bin", "python")
+				writePython(path)
+				if legacy {
+					want = path
+				}
+			}
+			run := opts.Run
+			var probed []string
+			opts.Run = func(ctx context.Context, name string, args, env []string) (CommandResult, error) {
+				if len(args) > 0 && (args[0] == "-I" || args[0] == "-c") {
+					probed = append(probed, name)
+					if legacy {
+						if len(args) != 3 || args[0] != "-c" || args[2] != opts.HermesRoot {
+							t.Error("legacy probe lost its source checkout")
+						}
+					} else if len(args) != 3 || args[0] != "-I" || args[1] != "-c" || args[2] != imports {
+						t.Error("bundled probe must use isolated mode and hermes_bootstrap")
+					}
+					if tt.broken {
+						return CommandResult{Code: 1}, errors.New("fixture import failure")
+					}
+					return CommandResult{}, nil
+				}
+				return run(ctx, name, args, env)
+			}
+			d := doctor{opts: opts}
+			d.tools(context.Background())
+			if len(probed) != 1 || probed[0] != want {
+				t.Fatalf("expected exactly the selected runtime to be probed; got %d probes", len(probed))
+			}
+			if d.opts.HermesPython != want {
+				t.Error("architecture check did not receive the selected runtime")
+			}
+			check := findCheck(t, d.report, "hermes.runtime")
+			if check.Status != tt.status {
+				t.Errorf("expected %s, got %s", tt.status, check.Status)
+			}
+			if legacy && !strings.Contains(check.Detail, "legacy venv; AI_HEALTH_CMD should use the bundled runtime") {
+				t.Error("legacy venv warning missing")
+			}
+		})
 	}
 }
 

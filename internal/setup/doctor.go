@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"text/tabwriter"
@@ -197,6 +198,41 @@ func (d *doctor) command(ctx context.Context, timeout time.Duration, name string
 
 var versionPattern = regexp.MustCompile(`(?:^|[^0-9])([0-9]+)\.([0-9]+)(?:\.[0-9]+)?`)
 
+var bundledPythonVersionPattern = regexp.MustCompile(`^python-([0-9]+)\.([0-9]+)\.([0-9]+)-`)
+
+func newestBundledPython(base string) string {
+	paths, _ := filepath.Glob(filepath.Join(base, "tools", "python-*", "bin", "python3"))
+	var newest [3]uint64
+	var selected string
+	for _, path := range paths {
+		name := filepath.Base(filepath.Dir(filepath.Dir(path)))
+		match := bundledPythonVersionPattern.FindStringSubmatch(name)
+		if match == nil {
+			continue
+		}
+		var version [3]uint64
+		valid := true
+		for i := range version {
+			n, err := strconv.ParseUint(match[i+1], 10, 64)
+			if err != nil {
+				valid = false
+				break
+			}
+			version[i] = n
+		}
+		if !valid {
+			continue
+		}
+		if info, err := os.Stat(path); err != nil || !info.Mode().IsRegular() {
+			continue
+		}
+		if selected == "" || slices.Compare(version[:], newest[:]) > 0 {
+			selected, newest = path, version
+		}
+	}
+	return selected
+}
+
 func (d *doctor) tools(ctx context.Context) {
 	for _, name := range []string{"npm", "redis-cli", "git"} {
 		if _, err := d.opts.LookPath(name); err != nil {
@@ -243,32 +279,48 @@ func (d *doctor) tools(ctx context.Context) {
 		d.add("tool.hermes", Pass, "Hermes executable is installed.", "")
 	}
 	python := d.opts.HermesPython
+	legacy := false
 	root := d.opts.HermesRoot
 	if root == "" && hermes != "" {
 		if real, e := filepath.EvalSymlinks(hermes); e == nil {
 			root = filepath.Dir(filepath.Dir(real))
 		}
 	}
+	if python == "" {
+		base := os.Getenv("HERMES_HOME_BASE")
+		if base == "" {
+			base = filepath.Join(d.opts.HomeDir, ".hermes")
+		}
+		python = newestBundledPython(base)
+	}
 	if python == "" && root != "" {
 		for _, venv := range []string{"venv", ".venv"} {
 			p := filepath.Join(root, venv, "bin", "python")
 			if info, e := os.Stat(p); e == nil && info.Mode().IsRegular() {
 				python = p
+				legacy = true
 				break
 			}
 		}
 	}
 	if python == "" {
-		d.add("hermes.runtime", Warn, "Bundled Python runtime was not located.", "Pass --hermes-root or --hermes-python; do not substitute an interpreter without Hermes dependencies.")
+		d.add("hermes.runtime", Warn, "Bundled Python runtime was not located.", "Install Hermes' bundled runtime under HERMES_HOME_BASE/tools or pass --hermes-python.")
 		return
 	}
 	d.opts.HermesPython = python
-	code := "import sys; sys.path.insert(0, sys.argv[1]); import dotenv; from hermes_cli.config import load_config; from hermes_cli.runtime_provider import resolve_runtime_provider"
-	res, err := d.command(ctx, d.opts.Timeout, python, "-c", code, root)
+	code := "import hermes_bootstrap; from hermes_cli.config import load_config; from hermes_cli.runtime_provider import resolve_runtime_provider"
+	args := []string{"-I", "-c", code}
+	if legacy {
+		code = "import sys; sys.path.insert(0, sys.argv[1]); import dotenv; from hermes_cli.config import load_config; from hermes_cli.runtime_provider import resolve_runtime_provider"
+		args = []string{"-c", code, root}
+	}
+	res, err := d.command(ctx, d.opts.Timeout, python, args...)
 	if err != nil || res.Code != 0 {
-		d.add("hermes.runtime", Fail, "Bundled runtime cannot import the AI provider dependencies.", "Install Hermes dependencies in its bundled venv and point AI_HEALTH_CMD at that interpreter.")
+		d.add("hermes.runtime", Fail, "Selected Hermes runtime cannot import the AI provider dependencies.", "Repair Hermes' bundled runtime and point AI_HEALTH_CMD at that interpreter.")
+	} else if legacy {
+		d.add("hermes.runtime", Warn, "legacy venv; AI_HEALTH_CMD should use the bundled runtime", "Install Hermes' bundled runtime under HERMES_HOME_BASE/tools or pass --hermes-python.")
 	} else {
-		d.add("hermes.runtime", Pass, "Bundled runtime imports dotenv and the Hermes provider resolver.", "")
+		d.add("hermes.runtime", Pass, "Selected runtime imports hermes_bootstrap and the Hermes provider resolver.", "")
 	}
 }
 

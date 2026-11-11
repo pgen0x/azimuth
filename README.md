@@ -148,9 +148,15 @@ wallet funding, AI runtime dependencies, user services, the skill symlink,
 resources, and executable architecture. It does not start the scanner, send
 transactions, write configuration, or change services.
 
-Use `--profile /path/to/profile` to check another profile's skill symlink, and
-`--hermes-root /path/to/hermes-agent` or `--hermes-python /path/to/venv/bin/python`
-for its bundled runtime. `--repo` selects the checkout and `--env-file` selects
+Use `--profile /path/to/profile` to check another profile's skill symlink.
+Doctor selects the newest bundled Python version under
+`$HERMES_HOME_BASE/tools/python-*/bin/python3` (`HERMES_HOME_BASE` defaults to
+`~/.hermes`) and checks imports in isolated mode through `hermes_bootstrap`.
+Use `--hermes-python /path/to/bundled/bin/python3` to select an interpreter
+explicitly. If no bundled runtime exists, `--hermes-root /path/to/hermes-agent`
+can locate a legacy `venv` or `.venv`; successful legacy checks report `WARN`
+and recommend using the bundled runtime for `AI_HEALTH_CMD`.
+`--repo` selects the checkout and `--env-file` selects
 the configuration file. Doctor reads literal dotenv assignments without sourcing
 shell code. It does not open wallet key files or profile secrets itself. To
 check wallet funding, put only `SOLANA_PUBLIC_KEY` and `SOLANA_RPC_URLS` in the
