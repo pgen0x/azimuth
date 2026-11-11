@@ -21,7 +21,7 @@ func runDoctorCLI(ctx context.Context, args []string, out, errOut io.Writer, dia
 	flags.StringVar(&opts.RepoDir, "repo", ".", "repository root")
 	flags.StringVar(&opts.EnvFile, "env-file", "", "literal dotenv file (default: <repo>/.env)")
 	flags.StringVar(&opts.ProfileDir, "profile", "", "profile to inspect (default: ~/.hermes/profiles/dlmm; no profile secrets are read)")
-	flags.StringVar(&opts.HermesRoot, "hermes-root", "", "Hermes source checkout (legacy venv fallback)")
+	flags.StringVar(&opts.HermesRoot, "hermes-root", "", "Hermes source checkout (default: <HERMES_HOME_BASE>/hermes-agent)")
 	flags.StringVar(&opts.HermesPython, "hermes-python", "", "Hermes bundled Python executable")
 	flags.DurationVar(&opts.Timeout, "timeout", 5*time.Second, "timeout per command or network check (AI probe uses 65s)")
 	if err := flags.Parse(args); err != nil {

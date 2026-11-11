@@ -152,6 +152,8 @@ Use `--profile /path/to/profile` to check another profile's skill symlink.
 Doctor selects the newest bundled Python version under
 `$HERMES_HOME_BASE/tools/python-*/bin/python3` (`HERMES_HOME_BASE` defaults to
 `~/.hermes`) and checks imports in isolated mode through `hermes_bootstrap`.
+The source tree defaults to `$HERMES_HOME_BASE/hermes-agent`; `--hermes-root`
+overrides it. The import check runs from that directory and adds it to `sys.path`.
 Use `--hermes-python /path/to/bundled/bin/python3` to select an interpreter
 explicitly. If no bundled runtime exists, `--hermes-root /path/to/hermes-agent`
 can locate a legacy `venv` or `.venv`; successful legacy checks report `WARN`

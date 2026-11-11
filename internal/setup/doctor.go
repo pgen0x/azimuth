@@ -71,7 +71,7 @@ type CommandResult struct {
 	Code   int
 	Output string
 }
-type CommandRunner func(context.Context, string, []string, []string) (CommandResult, error)
+type CommandRunner func(ctx context.Context, name string, args, env []string, dir string) (CommandResult, error)
 
 // DoctorOptions names local inputs explicitly. Doctor never reads profile secrets.
 // Run and LookPath allow callers to test against fixtures without host commands.
@@ -191,9 +191,13 @@ func (d *doctor) config() {
 }
 
 func (d *doctor) command(ctx context.Context, timeout time.Duration, name string, args ...string) (CommandResult, error) {
+	return d.commandInDir(ctx, timeout, "", name, args...)
+}
+
+func (d *doctor) commandInDir(ctx context.Context, timeout time.Duration, dir, name string, args ...string) (CommandResult, error) {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	return d.opts.Run(ctx, name, args, []string{"PYTHONDONTWRITEBYTECODE=1"})
+	return d.opts.Run(ctx, name, args, []string{"PYTHONDONTWRITEBYTECODE=1"}, dir)
 }
 
 var versionPattern = regexp.MustCompile(`(?:^|[^0-9])([0-9]+)\.([0-9]+)(?:\.[0-9]+)?`)
@@ -283,17 +287,25 @@ func (d *doctor) tools(ctx context.Context) {
 	}
 	python := d.opts.HermesPython
 	legacy := false
+	base := os.Getenv("HERMES_HOME_BASE")
+	if base == "" {
+		base = filepath.Join(d.opts.HomeDir, ".hermes")
+	}
 	root := d.opts.HermesRoot
-	if root == "" && hermes != "" {
-		if real, e := filepath.EvalSymlinks(hermes); e == nil {
-			root = filepath.Dir(filepath.Dir(real))
+	if root == "" {
+		root = filepath.Join(base, "hermes-agent")
+		if info, err := os.Stat(root); err != nil || !info.IsDir() {
+			if hermes != "" {
+				if real, err := filepath.EvalSymlinks(hermes); err == nil {
+					root = filepath.Dir(filepath.Dir(real))
+				}
+			}
 		}
 	}
+	if absolute, err := filepath.Abs(root); err == nil {
+		root = absolute
+	}
 	if python == "" {
-		base := os.Getenv("HERMES_HOME_BASE")
-		if base == "" {
-			base = filepath.Join(d.opts.HomeDir, ".hermes")
-		}
 		python = newestBundledPython(base)
 	}
 	if python == "" && root != "" {
@@ -310,16 +322,21 @@ func (d *doctor) tools(ctx context.Context) {
 		d.add("hermes.runtime", Warn, "Bundled Python runtime was not located.", "Install Hermes' bundled runtime under HERMES_HOME_BASE/tools or pass --hermes-python.")
 		return
 	}
+	if !filepath.IsAbs(python) && strings.ContainsRune(python, os.PathSeparator) {
+		if absolute, err := filepath.Abs(python); err == nil {
+			python = absolute
+		}
+	}
 	d.opts.HermesPython = python
-	code := "import hermes_bootstrap; from hermes_cli.config import load_config; from hermes_cli.runtime_provider import resolve_runtime_provider"
-	args := []string{"-I", "-c", code}
+	code := "import sys; sys.path.insert(0, sys.argv[1]); import hermes_bootstrap; from hermes_cli.config import load_config; from hermes_cli.runtime_provider import resolve_runtime_provider"
+	args := []string{"-I", "-c", code, root}
 	if legacy {
 		code = "import sys; sys.path.insert(0, sys.argv[1]); import dotenv; from hermes_cli.config import load_config; from hermes_cli.runtime_provider import resolve_runtime_provider"
 		args = []string{"-c", code, root}
 	}
-	res, err := d.command(ctx, d.opts.Timeout, python, args...)
+	res, err := d.commandInDir(ctx, d.opts.Timeout, root, python, args...)
 	if err != nil || res.Code != 0 {
-		d.add("hermes.runtime", Fail, "Selected Hermes runtime cannot import the AI provider dependencies.", "Repair Hermes' bundled runtime and point AI_HEALTH_CMD at that interpreter.")
+		d.add("hermes.runtime", Fail, "Selected Hermes runtime cannot import the AI provider dependencies.", "Check --hermes-root, repair Hermes' bundled runtime, and point AI_HEALTH_CMD at that interpreter.")
 	} else if legacy {
 		d.add("hermes.runtime", Warn, "legacy venv; AI_HEALTH_CMD should use the bundled runtime", "Install Hermes' bundled runtime under HERMES_HOME_BASE/tools or pass --hermes-python.")
 	} else {
@@ -359,8 +376,9 @@ func (b *boundedOutput) Write(p []byte) (int, error) {
 	return n, nil
 }
 
-func runCommand(ctx context.Context, name string, args, extraEnv []string) (CommandResult, error) {
+func runCommand(ctx context.Context, name string, args, extraEnv []string, dir string) (CommandResult, error) {
 	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Dir = dir
 	cmd.Env = append(os.Environ(), extraEnv...)
 	cmd.WaitDelay = time.Second
 	var out boundedOutput

@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -71,7 +72,7 @@ func fixture(t *testing.T) DoctorOptions {
 	write(filepath.Join(root, ".local", "bin", "azimuth-dashboard"), "#!/bin/sh\nexit 0\n")
 	opts := DoctorOptions{RepoDir: root, EnvFile: filepath.Join(root, ".env"), HomeDir: root, ProfileDir: profile, HermesRoot: root, HermesPython: script, Timeout: time.Second}
 	opts.LookPath = func(string) (string, error) { return script, nil }
-	opts.Run = func(_ context.Context, name string, args, env []string) (CommandResult, error) {
+	opts.Run = func(_ context.Context, name string, args, env []string, dir string) (CommandResult, error) {
 		if name == "systemctl" {
 			return CommandResult{Output: "LoadState=loaded\nActiveState=active\nUnitFileState=enabled"}, nil
 		}
@@ -142,11 +143,11 @@ func TestDoctorFixtureAndSecretRedaction(t *testing.T) {
 	fmt.Fprintf(f, "GMGN_API_KEY=%s\nREDISCLI_AUTH=%s\nAI_HEALTH_CMD=probe %s\n", secret, secret, secret)
 	f.Close()
 	run := opts.Run
-	opts.Run = func(ctx context.Context, name string, args, env []string) (CommandResult, error) {
+	opts.Run = func(ctx context.Context, name string, args, env []string, dir string) (CommandResult, error) {
 		if name == "probe" {
 			return CommandResult{Code: 14, Output: secret}, errors.New(secret)
 		}
-		return run(ctx, name, args, env)
+		return run(ctx, name, args, env, dir)
 	}
 	r := Doctor(context.Background(), opts)
 	if c := findCheck(t, r, "ai.probe"); c.Status != Fail || !strings.Contains(c.Detail, "config_error") {
@@ -211,11 +212,11 @@ func TestDoctorDoesNotExecuteDeployOrReport(t *testing.T) {
 	fmt.Fprintln(file, "DEPLOY_CMD=must-not-run-deploy\nREPORT_CMD=must-not-run-report")
 	file.Close()
 	run := opts.Run
-	opts.Run = func(ctx context.Context, name string, args, env []string) (CommandResult, error) {
+	opts.Run = func(ctx context.Context, name string, args, env []string, dir string) (CommandResult, error) {
 		if strings.HasPrefix(name, "must-not-run") {
 			t.Fatal("doctor executed an action command")
 		}
-		return run(ctx, name, args, env)
+		return run(ctx, name, args, env, dir)
 	}
 	Doctor(context.Background(), opts)
 }
@@ -223,14 +224,14 @@ func TestDoctorDoesNotExecuteDeployOrReport(t *testing.T) {
 func TestDoctorToolVersionAndCommandDeadline(t *testing.T) {
 	opts := fixture(t)
 	run := opts.Run
-	opts.Run = func(ctx context.Context, name string, args, env []string) (CommandResult, error) {
+	opts.Run = func(ctx context.Context, name string, args, env []string, dir string) (CommandResult, error) {
 		if _, ok := ctx.Deadline(); !ok {
 			t.Fatal("command has no deadline")
 		}
 		if len(args) > 0 && args[0] == "--version" {
 			return CommandResult{Output: "version 1.0.0"}, nil
 		}
-		return run(ctx, name, args, env)
+		return run(ctx, name, args, env, dir)
 	}
 	r := Doctor(context.Background(), opts)
 	if findCheck(t, r, "tool.python3").Status != Fail || findCheck(t, r, "tool.node").Status != Fail {
@@ -238,7 +239,7 @@ func TestDoctorToolVersionAndCommandDeadline(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	opts.Run = func(ctx context.Context, _ string, _ []string, _ []string) (CommandResult, error) {
+	opts.Run = func(ctx context.Context, _ string, _ []string, _ []string, _ string) (CommandResult, error) {
 		<-ctx.Done()
 		return CommandResult{Code: -1}, ctx.Err()
 	}
@@ -250,7 +251,7 @@ func TestDoctorToolVersionAndCommandDeadline(t *testing.T) {
 }
 
 func TestHermesRuntimeSelection(t *testing.T) {
-	const imports = "import hermes_bootstrap; from hermes_cli.config import load_config; from hermes_cli.runtime_provider import resolve_runtime_provider"
+	const imports = "import sys; sys.path.insert(0, sys.argv[1]); import hermes_bootstrap; from hermes_cli.config import load_config; from hermes_cli.runtime_provider import resolve_runtime_provider"
 	for _, tt := range []struct {
 		name       string
 		versions   []string
@@ -307,22 +308,25 @@ func TestHermesRuntimeSelection(t *testing.T) {
 			}
 			run := opts.Run
 			var probed []string
-			opts.Run = func(ctx context.Context, name string, args, env []string) (CommandResult, error) {
+			opts.Run = func(ctx context.Context, name string, args, env []string, dir string) (CommandResult, error) {
 				if len(args) > 0 && (args[0] == "-I" || args[0] == "-c") {
 					probed = append(probed, name)
 					if legacy {
 						if len(args) != 3 || args[0] != "-c" || args[2] != opts.HermesRoot {
 							t.Error("legacy probe lost its source checkout")
 						}
-					} else if len(args) != 3 || args[0] != "-I" || args[1] != "-c" || args[2] != imports {
+					} else if len(args) != 4 || args[0] != "-I" || args[1] != "-c" || args[2] != imports || args[3] != opts.HermesRoot {
 						t.Error("bundled probe must use isolated mode and hermes_bootstrap")
+					}
+					if dir != opts.HermesRoot {
+						t.Error("runtime probe must run from the source checkout")
 					}
 					if tt.broken {
 						return CommandResult{Code: 1}, errors.New("fixture import failure")
 					}
 					return CommandResult{}, nil
 				}
-				return run(ctx, name, args, env)
+				return run(ctx, name, args, env, dir)
 			}
 			d := doctor{opts: opts}
 			d.tools(context.Background())
@@ -388,11 +392,11 @@ func TestHermesBundledRuntimeBuildsAndSymlinks(t *testing.T) {
 			}
 			run := opts.Run
 			var probed []string
-			opts.Run = func(ctx context.Context, name string, args, env []string) (CommandResult, error) {
+			opts.Run = func(ctx context.Context, name string, args, env []string, dir string) (CommandResult, error) {
 				if len(args) > 0 && args[0] == "-I" {
 					probed = append(probed, name)
 				}
-				return run(ctx, name, args, env)
+				return run(ctx, name, args, env, dir)
 			}
 			d := doctor{opts: opts}
 			d.tools(context.Background())
@@ -401,6 +405,92 @@ func TestHermesBundledRuntimeBuildsAndSymlinks(t *testing.T) {
 			}
 			if findCheck(t, d.report, "hermes.runtime").Status != Pass {
 				t.Fatal("bundled runtime did not pass the import check")
+			}
+		})
+	}
+}
+
+func TestHermesRuntimeSourceRootAndWorkingDirectory(t *testing.T) {
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Fatal("Python 3 is required for the fixture import check")
+	}
+	for _, name := range []string{"default root with regular launcher", "home base override", "explicit root", "launcher symlink fallback", "relative interpreter"} {
+		t.Run(name, func(t *testing.T) {
+			opts := fixture(t)
+			opts.HermesPython = python
+			if name == "relative interpreter" {
+				cwd, err := os.Getwd()
+				if err != nil {
+					t.Fatal(err)
+				}
+				opts.HermesPython, err = filepath.Rel(cwd, python)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			opts.HermesRoot = ""
+			base := filepath.Join(opts.HomeDir, ".hermes")
+			t.Setenv("HERMES_HOME_BASE", "")
+			if name == "home base override" {
+				base = t.TempDir()
+				t.Setenv("HERMES_HOME_BASE", base)
+			}
+			root := filepath.Join(base, "hermes-agent")
+			if name == "explicit root" {
+				if err := os.MkdirAll(root, 0700); err != nil {
+					t.Fatal(err)
+				}
+				root = filepath.Join(opts.HomeDir, "explicit-source")
+				opts.HermesRoot = root
+			} else if name == "launcher symlink fallback" {
+				root = filepath.Join(opts.HomeDir, "fallback-source")
+			}
+			if err := os.MkdirAll(filepath.Join(root, "hermes_cli"), 0700); err != nil {
+				t.Fatal(err)
+			}
+			for file, code := range map[string]string{
+				"hermes_bootstrap.py":            "import os\nfrom pathlib import Path\nassert os.getcwd() == str(Path(__file__).parent)\n",
+				"hermes_cli/__init__.py":         "",
+				"hermes_cli/config.py":           "def load_config(): pass\n",
+				"hermes_cli/runtime_provider.py": "def resolve_runtime_provider(): pass\n",
+				"hermes_cli/main.py":             "",
+			} {
+				if err := os.WriteFile(filepath.Join(root, file), []byte(code), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			launcher := filepath.Join(opts.HomeDir, ".local", "bin", "hermes")
+			if name == "launcher symlink fallback" {
+				if err := os.Symlink(filepath.Join(root, "hermes_cli", "main.py"), launcher); err != nil {
+					t.Fatal(err)
+				}
+			} else if err := os.WriteFile(launcher, []byte("#!/bin/sh\nexit 0\n"), 0700); err != nil {
+				t.Fatal(err)
+			}
+			lookup := opts.LookPath
+			opts.LookPath = func(tool string) (string, error) {
+				if tool == "hermes" {
+					return launcher, nil
+				}
+				return lookup(tool)
+			}
+			run := opts.Run
+			probes := 0
+			opts.Run = func(ctx context.Context, command string, args, env []string, dir string) (CommandResult, error) {
+				if len(args) > 0 && args[0] == "-I" {
+					probes++
+					if len(args) != 4 || args[1] != "-c" || args[3] != root || dir != root {
+						t.Fatal("runtime probe must receive the source root as argv and cwd")
+					}
+					return runCommand(ctx, command, args, env, dir)
+				}
+				return run(ctx, command, args, env, dir)
+			}
+			d := doctor{opts: opts}
+			d.tools(context.Background())
+			if probes != 1 || findCheck(t, d.report, "hermes.runtime").Status != Pass {
+				t.Fatal("fixture Hermes modules could not be imported from the selected source root")
 			}
 		})
 	}
@@ -476,7 +566,7 @@ func TestDoctorRPCFailureAndRedirect(t *testing.T) {
 func TestDoctorToolsServicesAndSkill(t *testing.T) {
 	opts := fixture(t)
 	opts.LookPath = func(string) (string, error) { return "", errors.New("not installed") }
-	opts.Run = func(context.Context, string, []string, []string) (CommandResult, error) {
+	opts.Run = func(context.Context, string, []string, []string, string) (CommandResult, error) {
 		return CommandResult{Code: 1}, errors.New("unavailable")
 	}
 	os.Remove(filepath.Join(opts.ProfileDir, "skills", "solana-dlmm", "scripts"))
