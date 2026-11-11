@@ -41,6 +41,9 @@ CLOSES_PATH = os.path.join(MEMORIES, "dlmm_closes.jsonl")
 # the chain never took). Read as an override, never as a requirement: a position the
 # reconciler has not fetched keeps its mark and is counted as such.
 REALIZED_PATH = os.path.join(MEMORIES, "dlmm_realized.jsonl")
+# Wallet-cash basis per closed position (dlmm_realized.py --cash): close SOL plus
+# the settlement swap's actual proceeds. Shown BESIDE realized, never instead of it.
+CASH_PATH = os.path.join(MEMORIES, "dlmm_realized_cash.jsonl")
 HOLDS_PATH = os.path.join(MEMORIES, "ai_holds.jsonl")
 WEIGHTS_PATH = os.path.join(MEMORIES, "signal_weights.json")
 SOUL_PATH = os.path.join(PROFILE, "SOUL.md")
@@ -55,12 +58,13 @@ LIFT_NOISE_FLOOR = 0.08
 SOLANA_MODES = ("casual", "multiday", "turnover", "pulse")
 
 
-def load_realized():
+def load_realized(path=None):
     """{position: realized record} — empty dict when the reconciler has not run."""
+    path = path or REALIZED_PATH
     out = {}
-    if not os.path.exists(REALIZED_PATH):
+    if not os.path.exists(path):
         return out
-    with open(REALIZED_PATH, encoding="utf-8") as f:
+    with open(path, encoding="utf-8") as f:
         for line in f:
             if not line.strip():
                 continue
@@ -96,12 +100,17 @@ def load_closes():
     # not another trade. Keep legacy rows without a position separately.
     out = list({rec.get("position") or id(rec): rec for rec in out}.values())
     realized = load_realized()
+    cash = load_realized(CASH_PATH)
     for rec in out:
         got = realized.get(rec.get("position"))
         if got:
             rec["pnl_sol"] = got.get("realized_sol")
             rec["pnl_pct"] = got.get("realized_pct")
             rec["pnl_basis"] = "realized"
+            paid = cash.get(rec.get("position")) or {}
+            if paid.get("cash_basis") == "wallet" and paid.get("cash_realized_sol") is not None:
+                rec["cash_realized_sol"] = paid["cash_realized_sol"]
+                rec["swap_gap_sol"] = paid.get("swap_gap_sol")
         else:
             rec["pnl_basis"] = "mark"
     return out
@@ -146,8 +155,12 @@ def section_modes(closes):
     by_mode = collections.defaultdict(list)
     for r in closes:
         by_mode[r.get("mode") or "unknown"].append(r)
-    print("| mode | n | win% | net SOL | mean % | median hold |")
-    print("|---|---|---|---|---|---|")
+    cashed = sum(1 for r in closes if r.get("cash_realized_sol") is not None)
+    print(f"Wallet cash basis: {cashed}/{on_chain} reconciled closes linked to their swap "
+          "proceeds; `cash SOL` sums only those, the rest are unmeasured (not 0). "
+          "`net SOL` stays the datapi realized/mark figure.\n")
+    print("| mode | n | win% | net SOL | cash SOL (linked) | mean % | median hold |")
+    print("|---|---|---|---|---|---|---|")
     for mode in sorted(by_mode, key=lambda m: -len(by_mode[m])):
         rs = by_mode[mode]
         pnl = [float(r["pnl_sol"]) for r in rs]
@@ -155,8 +168,10 @@ def section_modes(closes):
         ages = [float(r.get("age_min") or 0) for r in rs]
         wins = sum(1 for v in pnl if v > 0)
         thin = "" if len(rs) >= MIN_MODE_SAMPLES else " ⚠thin"
+        linked = [float(r["cash_realized_sol"]) for r in rs if r.get("cash_realized_sol") is not None]
+        cash_cell = f"{fmt_sol(sum(linked))} ({len(linked)})" if linked else "unmeasured"
         print(f"| {mode}{thin} | {len(rs)} | {100.0 * wins / len(rs):.0f}% | "
-              f"{fmt_sol(sum(pnl))} | {statistics.mean(pct):+.2f}% | "
+              f"{fmt_sol(sum(pnl))} | {cash_cell} | {statistics.mean(pct):+.2f}% | "
               f"{statistics.median(ages):.0f}m |")
     thin_modes = sorted(m for m, rs in by_mode.items() if len(rs) < MIN_MODE_SAMPLES)
     if thin_modes:
@@ -402,7 +417,7 @@ def refresh_realized():
     if not os.path.exists(script):
         return
     try:
-        subprocess.run([sys.executable, script, "--days", str(WINDOW_DAYS), "--quiet"],
+        subprocess.run([sys.executable, script, "--days", str(WINDOW_DAYS), "--quiet", "--cash"],
                        capture_output=True, text=True, timeout=180)
     except Exception:
         pass

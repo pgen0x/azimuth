@@ -146,6 +146,20 @@ def build_card(hours):
         (f"| Reconciled journal LP PnL | {realized:+.4f} SOL |"
          if reconciled else "| Reconciled journal LP PnL | Unmeasured |"),
     ]
+    # Same closes, wallet-cash basis: close SOL + the settlement swap's actual
+    # proceeds. Only fully linked rows count; the rest are unmeasured, not 0.
+    cashed = [c for c in reconciled if c.get("cash_basis") == "wallet"
+              and c.get("cash_realized_sol") is not None]
+    if cashed:
+        cash_pnl = sum(f(c.get("cash_realized_sol")) for c in cashed)
+        lp_same = sum(f(c.get("pnl_sol")) for c in cashed)
+        gap = sum(f(c.get("swap_gap_sol")) for c in cashed)
+        lines.append(f"| Wallet cash PnL (swap proceeds) | {cash_pnl:+.4f} SOL over {len(cashed)}/"
+                     f"{len(reconciled)} reconciled closes (LP PnL on same closes {lp_same:+.4f}; "
+                     f"swap gap {gap:+.4f}) |")
+    else:
+        lines.append(f"| Wallet cash PnL (swap proceeds) | Unmeasured: 0/{len(reconciled)} reconciled "
+                     "closes linked to their swap (run dlmm_realized.py --cash) |")
     if flows:
         lines += [
             f"| Cached LP PnL / fees / principal change | {api_pnl:+.4f} / {api_fee:+.4f} / {api_pnl - api_fee:+.4f} SOL |",
