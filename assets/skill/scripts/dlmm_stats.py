@@ -13,6 +13,7 @@ Sources (all ground truth, no LLM):
 
 Usage:
   python3 dlmm_stats.py [--hours 24] [--send]
+  python3 dlmm_stats.py --inventory-shadow
 """
 import argparse
 import json
@@ -235,7 +236,14 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--hours", type=int, default=24, help="Lookback window (default 24)")
     ap.add_argument("--send", action="store_true", help="Also deliver the card via `hermes send`")
+    ap.add_argument("--inventory-shadow", action="store_true",
+                    help="Report the shadow inventory-share exit (dlmm_inventory_shadow) and exit")
     cli = ap.parse_args()
+
+    if cli.inventory_shadow:
+        from dlmm_inventory_shadow import report as inventory_shadow_report
+        print(inventory_shadow_report(PROFILE_DIR))
+        return
 
     card = build_card(cli.hours)
     print(card)

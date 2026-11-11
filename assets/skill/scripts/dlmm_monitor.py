@@ -223,6 +223,9 @@ def flush_tick_observers(pending):
             elif kind == 'geometry':
                 from dlmm_geometry_shadow import observe as geometry_observe
                 geometry_observe(PROFILE_DIR, *args)
+            elif kind == 'inventory':
+                from dlmm_inventory_shadow import record as inventory_shadow_record
+                inventory_shadow_record(PROFILE_DIR, *args)
             elif not record_close_bin_observation(*args):
                 print('CLOSE_BIN_OBSERVATION_ERROR unmeasured')
         except Exception as error:
@@ -2569,6 +2572,18 @@ def main():
         if (active_bin is not None and meta.get("mode") == "pulse" and meta.get("strategy") == "sol_bidask"
                 and os.environ.get("DLMM_GEOMETRY_SHADOW", "1") != "0" and len(pending_observers) < 256):
             pending_observers.append(('geometry', (pos_addr, pool, active_bin, time.time())))
+        # Shadow inventory-share exit (dlmm_inventory_shadow): evaluated on this
+        # tick's verified native mark only, queued, and written by
+        # flush_tick_observers. It never sets close_reason.
+        if (native_mark_valid and meta.get("mode") == "pulse" and meta.get("strategy") == "sol_bidask"
+                and len(pending_observers) < 256):
+            try:
+                from dlmm_inventory_shadow import evaluate as inventory_shadow_evaluate
+                inventory_row = inventory_shadow_evaluate(pos_addr, pool, meta, native_mark, time.time())
+                if inventory_row is not None:
+                    pending_observers.append(('inventory', (inventory_row,)))
+            except Exception as error:
+                print('INVENTORY_SHADOW_ERROR ' + type(error).__name__)
 
         # Old peaks can be USD returns. Start a new SOL peak once; never compare
         # a legacy USD high-water mark with a SOL-denominated exit threshold.
