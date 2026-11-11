@@ -71,6 +71,8 @@ nothing is the expected output most days.
 
 ```bash
 go build -o azimuth .              # build the daemon
+./azimuth setup [--dry-run]    # guided config (internal/setup engine); DRY_RUN stays on
+./azimuth doctor               # read-only diagnostics
 go vet ./...                   # vet
 set -a && . ./.env && set +a   # load env (fish: use bass or `env` prefix)
 ./azimuth                          # run (reads config from environment)

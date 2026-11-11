@@ -372,7 +372,8 @@ cat <<DONE
 
 ✅ Install complete.
 
-Next steps:
+Next steps (./azimuth setup --profile $PROFILE automates the wallet, RPC and
+alert lines of 1, the webhook secret of 2, and 5):
   1. Create $PROFILE/.env with:
        SOLANA_PUBLIC_KEY=...
        SOLANA_PRIVATE_KEY=...          # base58, used by dlmm_executor.js
