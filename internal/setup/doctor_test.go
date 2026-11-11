@@ -343,6 +343,69 @@ func TestHermesRuntimeSelection(t *testing.T) {
 	}
 }
 
+func TestHermesBundledRuntimeBuildsAndSymlinks(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		dirs []string
+		want string
+	}{
+		{
+			name: "real bundled layout",
+			dirs: []string{"python-3.14.7+20260901-linux-arm64", "python-3.14.9+20261021-linux-arm64"},
+			want: "python-3.14.9+20261021-linux-arm64",
+		},
+		{
+			name: "numeric build breaks version tie",
+			dirs: []string{"python-3.14.9-linux-arm64", "python-3.14.9+9-linux-arm64", "python-3.14.9+10-linux-arm64"},
+			want: "python-3.14.9+10-linux-arm64",
+		},
+		{
+			name: "version precedes build",
+			dirs: []string{"python-3.14.7+20261022-linux-arm64", "python-3.14.9+20261021-linux-arm64"},
+			want: "python-3.14.9+20261021-linux-arm64",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			opts := fixture(t)
+			opts.HermesPython = ""
+			base := filepath.Join(opts.HomeDir, ".hermes")
+			t.Setenv("HERMES_HOME_BASE", base)
+			for _, dir := range tt.dirs {
+				bin := filepath.Join(base, "tools", dir, "bin")
+				if err := os.MkdirAll(bin, 0700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(bin, "python3.14"), []byte("#!/bin/sh\nexit 0\n"), 0700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink("python3.14", filepath.Join(bin, "python3")); err != nil {
+					t.Fatal(err)
+				}
+			}
+			want := filepath.Join(base, "tools", tt.want, "bin", "python3")
+			if got := newestBundledPython(base); got != want {
+				t.Fatal("wrong bundled runtime selected")
+			}
+			run := opts.Run
+			var probed []string
+			opts.Run = func(ctx context.Context, name string, args, env []string) (CommandResult, error) {
+				if len(args) > 0 && args[0] == "-I" {
+					probed = append(probed, name)
+				}
+				return run(ctx, name, args, env)
+			}
+			d := doctor{opts: opts}
+			d.tools(context.Background())
+			if len(probed) != 1 || probed[0] != want || d.opts.HermesPython != want {
+				t.Fatal("selected symlink was not used by the runtime probe")
+			}
+			if findCheck(t, d.report, "hermes.runtime").Status != Pass {
+				t.Fatal("bundled runtime did not pass the import check")
+			}
+		})
+	}
+}
+
 func TestDoctorRPCReadOnlyAndRedacted(t *testing.T) {
 	pubkey := fakePubkey()
 	var methods []string

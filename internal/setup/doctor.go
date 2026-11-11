@@ -198,11 +198,11 @@ func (d *doctor) command(ctx context.Context, timeout time.Duration, name string
 
 var versionPattern = regexp.MustCompile(`(?:^|[^0-9])([0-9]+)\.([0-9]+)(?:\.[0-9]+)?`)
 
-var bundledPythonVersionPattern = regexp.MustCompile(`^python-([0-9]+)\.([0-9]+)\.([0-9]+)-`)
+var bundledPythonVersionPattern = regexp.MustCompile(`^python-([0-9]+)\.([0-9]+)\.([0-9]+)(?:\+([0-9]+))?-`)
 
 func newestBundledPython(base string) string {
 	paths, _ := filepath.Glob(filepath.Join(base, "tools", "python-*", "bin", "python3"))
-	var newest [3]uint64
+	var newest [4]uint64
 	var selected string
 	for _, path := range paths {
 		name := filepath.Base(filepath.Dir(filepath.Dir(path)))
@@ -210,9 +210,12 @@ func newestBundledPython(base string) string {
 		if match == nil {
 			continue
 		}
-		var version [3]uint64
+		var version [4]uint64
 		valid := true
 		for i := range version {
+			if match[i+1] == "" {
+				continue
+			}
 			n, err := strconv.ParseUint(match[i+1], 10, 64)
 			if err != nil {
 				valid = false
@@ -223,7 +226,7 @@ func newestBundledPython(base string) string {
 		if !valid {
 			continue
 		}
-		if info, err := os.Stat(path); err != nil || !info.Mode().IsRegular() {
+		if info, err := os.Stat(path); err != nil || info.IsDir() {
 			continue
 		}
 		if selected == "" || slices.Compare(version[:], newest[:]) > 0 {
