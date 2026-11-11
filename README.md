@@ -131,6 +131,42 @@ the whole batch.
 - A Solana RPC endpoint (Helius, QuickNode, or the public
   `api.mainnet-beta.solana.com` as a fallback) and a funded wallet.
 
+### Build and diagnose
+
+```bash
+go build -o azimuth .
+cp .env.example .env       # edit routing settings and replace the webhook secret
+chmod 600 .env
+./azimuth doctor
+./azimuth doctor --json    # machine-readable report, same exit codes
+```
+
+Doctor reports `PASS`, `WARN`, or `FAIL` with repair hints. Exit codes are **0**
+for all passes, **1** for any failure, and **2** for warnings without failures.
+It checks configuration, tools, Redis authentication, read-only RPC health and
+wallet funding, AI runtime dependencies, user services, the skill symlink,
+resources, and executable architecture. It does not start the scanner, send
+transactions, write configuration, or change services.
+
+Use `--profile /path/to/profile` to check another profile's skill symlink, and
+`--hermes-root /path/to/hermes-agent` or `--hermes-python /path/to/venv/bin/python`
+for its bundled runtime. `--repo` selects the checkout and `--env-file` selects
+the configuration file. Doctor reads literal dotenv assignments without sourcing
+shell code. It does not open wallet key files or profile secrets itself. To
+check wallet funding, put only `SOLANA_PUBLIC_KEY` and `SOLANA_RPC_URLS` in the
+selected config. Reports omit configured values and numeric balances.
+
+When `AI_HEALTH_CMD` is set, doctor runs that trusted, read-only probe (65-second
+deadline). The probe resolves its own provider credentials; its output is
+suppressed. Exit **14** is a configuration failure, including missing dependencies
+in the selected interpreter, rather than a healthy deterministic fallback.
+Other commands and network checks default to a five-second timeout (`--timeout`).
+
+The shared environment schema and diagnostic engine live in `internal/setup`;
+tests check every documented assignment and default in `.env.example` for drift.
+The `azimuth setup` wizard is planned for Phase 2, and a localhost-only dashboard
+onboarding UI is planned for Phase 3. For now, use the manual installation below.
+
 ### Create a Hermes profile
 
 If you don't have a Hermes profile yet, create a dedicated one for the trading

@@ -16,6 +16,7 @@ import (
 
 	"github.com/pgen0x/azimuth/internal/config"
 	"github.com/pgen0x/azimuth/internal/scanner"
+	"github.com/pgen0x/azimuth/internal/setup"
 )
 
 // Version follows Semantic Versioning (semver.org). Bumped automatically by
@@ -24,11 +25,18 @@ import (
 var Version = "2.15.1" // x-release-please-version
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "doctor" {
+		os.Exit(setup.RunDoctorCLI(context.Background(), os.Args[2:], os.Stdout, os.Stderr))
+	}
 	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
 	if *showVersion {
 		fmt.Println("azimuth " + Version)
 		return
+	}
+	if flag.NArg() != 0 {
+		fmt.Fprintln(os.Stderr, "Usage: azimuth [-version] | azimuth doctor [flags]")
+		os.Exit(1)
 	}
 
 	log.SetFlags(log.LstdFlags | log.LUTC)
