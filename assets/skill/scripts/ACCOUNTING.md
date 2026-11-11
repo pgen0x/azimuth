@@ -117,6 +117,33 @@ The 60-transaction per-pass fetch budget resumes from the durable wallet cache;
 coverage is incomplete until the whole interval has been fetched. Trading during a
 multi-source snapshot invalidates it. Collector services never send transactions.
 
+## Wallet-cash basis per closed position
+
+`dlmm_realized.jsonl` (datapi deposit / withdrawal / fee flows) values a close's
+token side at a price. `dlmm_realized.py --cash` runs `dlmm_realized_cash.py`,
+which joins each closed position to the `claim`/`close`/`swap` signatures the
+executor journaled for it (`dlmm_transactions.jsonl`; settlement swaps carry the
+position) and reads those finalized transactions over read-only RPC
+(`getTransaction`, at most 60 per run). Per position it writes
+`dlmm_realized_cash.jsonl`:
+
+- `cash_close_sol` + `cash_swap_sol` = `cash_out_sol`: wallet SOL from the close
+  and from selling that position's tokens, gross of network fees, excluding the
+  position-account rent refund and wallet token-account rent movements;
+- `cash_realized_sol` = `cash_out_sol` - datapi deposit;
+- `swap_gap_sol` = (withdrawal + fee) - `cash_out_sol` (positive: datapi overstated);
+- `tx_fee_sol`, `position_rent_refund_sol`, `token_account_rent_net_sol`: kept
+  separate, never netted into the figures above.
+
+`cash_basis` is `wallet` only when the close is proven (position account emptied)
+and the landed swaps sold exactly the tokens the position paid out, or it paid out
+none. A partial sale, a sale beyond the position's tokens, or more than one token
+mint is `partial`; no proven close, or tokens with no landed swap, is `unlinked`.
+Those rows carry no cash total: unmeasured, never 0. Failed retries count only
+their fee. `apply_realized()` attaches the cash fields beside `realized_sol`;
+`basis="cash"` opts into the cash figure, and `dlmm_weights.py --cash-basis` does
+the same for the learner. The default basis is unchanged.
+
 ## Post-close cooldowns
 
 The monitor's ordinary and forced-close paths retain their normal cooldown when

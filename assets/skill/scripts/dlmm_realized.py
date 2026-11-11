@@ -82,10 +82,60 @@ def _f(value, default=0.0):
         return default
 
 
-def load_realized(path=REALIZED_PATH, *, as_of=None):
-    """{position_address: record} — the join key every consumer uses."""
+CASH_FIELDS = ("cash_basis", "cash_reason", "cash_out_sol", "cash_realized_sol",
+               "cash_realized_pct", "swap_gap_sol", "cash_close_sol", "cash_swap_sol",
+               "tx_fee_sol", "position_rent_refund_sol", "token_account_rent_net_sol")
+
+
+CASH_FILENAME = "dlmm_realized_cash.jsonl"
+
+
+def cash_path_for(realized_path):
+    """The cash file sits beside the realized file the CALLER resolved (symlink rule)."""
+    return os.path.join(os.path.dirname(realized_path), CASH_FILENAME)
+
+
+def load_cash(path, as_of=None):
+    """{position: wallet-cash record} from dlmm_realized_cash.py; later lines supersede.
+
+    Lives here, not in dlmm_realized_cash.py, so importers that load this file in
+    isolation (the dashboard's alert rules) need no sibling on sys.path."""
     out = {}
     if not os.path.exists(path):
+        return out
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if as_of is not None:
+                stamp = rec.get("fetched_at")
+                if type(stamp) not in (int, float) or not math.isfinite(stamp) or stamp > as_of:
+                    continue
+            if rec.get("position"):
+                out[rec["position"]] = rec
+    return out
+
+
+def load_realized(path=REALIZED_PATH, *, as_of=None, with_cash=False):
+    """{position_address: record} — the join key every consumer uses.
+
+    `with_cash=True` merges the wallet-cash fields (CASH_FIELDS) from the
+    `dlmm_realized_cash.jsonl` beside `path` onto each record. Records without a
+    cash row get no cash fields at all: unmeasured, never 0.0.
+    """
+    out = {}
+    if not os.path.exists(path):
+        return out
+    if with_cash:
+        cash = load_cash(cash_path_for(path), as_of=as_of)
+        for pos, rec in load_realized(path, as_of=as_of).items():
+            got = cash.get(pos)
+            out[pos] = {**rec, **{k: got.get(k) for k in CASH_FIELDS}} if got else rec
         return out
     with open(path, encoding="utf-8") as f:
         for line in f:
@@ -106,7 +156,7 @@ def load_realized(path=REALIZED_PATH, *, as_of=None):
     return out
 
 
-def apply_realized(records, path=None):
+def apply_realized(records, path=None, basis="realized"):
     """Rewrite journal closes in place onto on-chain flows where we have them.
 
     PASS `path` FROM THE CALLER. This module's own REALIZED_PATH is only correct
@@ -122,12 +172,22 @@ def apply_realized(records, path=None):
     so a consumer can tell the two apart. Records with no realized row keep the
     mark and are stamped "mark" — unmeasured, not zero. Mutates and returns the
     same list, so callers can drop it into an existing load path.
+
+    Every joined record also carries the wallet-cash fields (`cash_realized_sol`,
+    `cash_basis`, `swap_gap_sol`, ...) when dlmm_realized_cash.py has measured
+    them, so a consumer can show both figures. `basis="cash"` opts into the
+    wallet-cash figure as `pnl_sol` itself: only a `cash_basis == "wallet"` row
+    is stamped `pnl_basis = "cash"`; a realized row without one becomes
+    `pnl_basis = "cash_unmeasured"` with `pnl_sol = None` — never the datapi
+    figure in disguise, never 0.0.
     """
+    if basis not in ("realized", "cash"):
+        raise ValueError(f"unknown basis {basis!r}")
     # A timeout/re-adoption can journal the same closed position more than once.
     # Keep its latest close; otherwise the scoreboard and learner count its
     # entire lifetime cash flow repeatedly. Unidentified legacy rows stay apart.
     records[:] = list({rec.get("position") or id(rec): rec for rec in records}.values())
-    realized = load_realized(path or REALIZED_PATH)
+    realized = load_realized(path or REALIZED_PATH, with_cash=True)
     for rec in records:
         got = realized.get(rec.get("position"))
         if not got:
@@ -136,6 +196,14 @@ def apply_realized(records, path=None):
         rec["pnl_sol"] = got.get("realized_sol")
         rec["pnl_pct"] = got.get("realized_pct")
         rec["pnl_basis"] = "realized"
+        for key in CASH_FIELDS:
+            if key in got:
+                rec[key] = got[key]
+        if basis == "cash":
+            wallet = got.get("cash_basis") == "wallet" and got.get("cash_realized_sol") is not None
+            rec["pnl_sol"] = got.get("cash_realized_sol") if wallet else None
+            rec["pnl_pct"] = got.get("cash_realized_pct") if wallet else None
+            rec["pnl_basis"] = "cash" if wallet else "cash_unmeasured"
     return records
 
 
@@ -289,6 +357,9 @@ def main():
     ap.add_argument("--quiet", action="store_true")
     ap.add_argument("--if-pending", action="store_true",
                     help="skip the fetch when every close in the window is already reconciled")
+    ap.add_argument("--cash", action="store_true",
+                    help="also join closes to their close/swap txs over read-only RPC and "
+                         "record the wallet-cash basis (dlmm_realized_cash.jsonl)")
     args = ap.parse_args()
 
     if args.if_pending and not args.check and not pending_closes(args.days):
@@ -301,6 +372,13 @@ def main():
             print("❌ no SOLANA_PUBLIC_KEY in profile .env or environment")
             return 1
         backfill(wallet, args.days, quiet=args.quiet)
+        if args.cash:
+            from dlmm_realized_cash import reconcile
+            try:
+                reconcile(REALIZED_PATH, args.days, quiet=args.quiet)
+            except Exception as exc:  # best-effort: the datapi basis already landed
+                if not args.quiet:
+                    print(f"⚠️ cash pass failed ({exc}) — cash basis left unmeasured")
     check(args.days)
     return 0
 

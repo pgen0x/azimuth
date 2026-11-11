@@ -48,6 +48,7 @@ import time
 
 from dlmm_accounting import report, refund_cash_bounds
 from dlmm_cash_sign import cash_sign_upper_bound
+from dlmm_realized import load_realized
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROFILE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(SCRIPT_DIR)))
@@ -57,6 +58,10 @@ REDIS_WEIGHTS_KEY = "sol:dlmm:signal_weights"
 OUTCOME_BASIS = "proved_cash_sign_bounds"
 REFUND_BASIS = "matched_refund_cash_bounds"
 UPPER_ONLY_BASIS = "nonpositive_cash_upper_bound"
+# Opt-in (--cash-basis): one position's close SOL + its settlement swap's actual
+# proceeds - deposit, from dlmm_realized_cash.jsonl. Default stays OUTCOME_BASIS.
+WALLET_CASH_BASIS = "wallet_cash_realized"
+REALIZED_PATH = os.path.join(PROFILE_DIR, "memories", "dlmm_realized.jsonl")
 WEIGHT_SCOPE = "entry_mode"
 MODES = ("casual", "multiday", "turnover", "pulse")
 
@@ -128,7 +133,7 @@ def save_weights(data):
     run_command(f"redis-cli set \"{REDIS_WEIGHTS_KEY}\" '{compact}'")
 
 
-def load_recent_closes():
+def load_recent_closes(cash_basis=False):
     if not os.path.exists(CLOSES_PATH):
         return []
     cutoff = time.time() - WINDOW_DAYS * 86400
@@ -147,6 +152,8 @@ def load_recent_closes():
                 continue
             if rec.get("position"):
                 records[rec["position"]] = rec
+    if cash_basis:
+        return wallet_cash_closes(records)
     ledger = report(PROFILE_DIR)
     chains = {c["root_chain_id"]: c for c in ledger["chains"]}
     eligible = []
@@ -179,12 +186,35 @@ def load_recent_closes():
     return eligible
 
 
+def wallet_cash_closes(records):
+    """Closes whose wallet cash is fully linked; every other close is unmeasured
+    and left out of the learner rather than counted at 0."""
+    # This module's own PROFILE_DIR: it runs as __main__ via the profile path.
+    cash = load_realized(REALIZED_PATH, with_cash=True)
+    eligible = []
+    for position, rec in records.items():
+        got = cash.get(position) or {}
+        if got.get("cash_basis") != "wallet":
+            continue
+        rec = {**rec, "outcome_basis": WALLET_CASH_BASIS,
+               "cash_pnl_lower_sol": got.get("cash_realized_sol"),
+               "cash_pnl_upper_sol": got.get("cash_realized_sol")}
+        if outcome_sol(rec) is not None:
+            eligible.append(rec)
+    return eligible
+
+
 def outcome_sol(rec):
     # Classification only; shared fees and upper-only proofs are not exact PnL.
     lower, upper = rec.get("cash_pnl_lower_sol"), rec.get("cash_pnl_upper_sol")
     if rec.get("outcome_basis") == UPPER_ONLY_BASIS:
         return (float(upper) if lower is None and type(upper) in (int, float)
                 and math.isfinite(upper) and upper <= 0 else None)
+    if rec.get("outcome_basis") == WALLET_CASH_BASIS:
+        # Exact, not a bound: a zero is a measured breakeven and reads as a loss,
+        # the same side the bounded path puts a non-positive upper bound on.
+        return (float(lower) if lower == upper and type(lower) in (int, float)
+                and not isinstance(lower, bool) and math.isfinite(lower) else None)
     if (rec.get("outcome_basis") not in (OUTCOME_BASIS, REFUND_BASIS)
             or any(isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v)
                    for v in (lower, upper)) or lower > upper):
@@ -280,7 +310,7 @@ def mode_weights(recent, previous):
     return result
 
 
-def recalculate(quiet=False):
+def recalculate(quiet=False, cash_basis=False):
     data = load_weights()
     weights = data.get("weights") or {}
     dropped = [name for name in RETIRED_SIGNALS if name in weights]
@@ -289,7 +319,8 @@ def recalculate(quiet=False):
     for name in SIGNAL_NAMES:
         weights.setdefault(name, 1.0)
 
-    recent = load_recent_closes()
+    basis = WALLET_CASH_BASIS if cash_basis else OUTCOME_BASIS
+    recent = load_recent_closes(cash_basis=cash_basis)
     wins = [r for r in recent if outcome_sol(r) > 0]
     losses = [r for r in recent if outcome_sol(r) <= 0]
     if len(recent) < MIN_SAMPLES or not wins or not losses:
@@ -320,7 +351,7 @@ def recalculate(quiet=False):
 
     now = time.time()
     data["weights"] = weights
-    data["outcome_basis"] = OUTCOME_BASIS
+    data["outcome_basis"] = basis
     previous_modes = data.get("by_mode") or {}
     data["by_mode"] = mode_weights(recent, previous_modes)
     data["weight_scope"] = WEIGHT_SCOPE
@@ -339,7 +370,7 @@ def recalculate(quiet=False):
             "window_size": len(recent),
             "wins": len(wins),
             "losses": len(losses),
-            "outcome_basis": OUTCOME_BASIS,
+            "outcome_basis": basis,
             "by_mode": data["by_mode"],
         }
         if dropped:
@@ -364,6 +395,9 @@ def main():
     parser.add_argument("--quiet", action="store_true", help="suppress output (cron mode)")
     parser.add_argument("--force", action="store_true", help="ignore the recalc-interval guard")
     parser.add_argument("--show", action="store_true", help="print current weights and exit")
+    parser.add_argument("--cash-basis", action="store_true",
+                        help="learn from wallet cash (close SOL + swap proceeds) per position "
+                             "instead of the default proved cash-sign bounds")
     cli = parser.parse_args()
 
     if cli.show:
@@ -394,14 +428,15 @@ def main():
     if not cli.force:
         data = load_weights()
         last = data.get("last_recalc_ts") or 0
-        if (data.get("outcome_basis") == OUTCOME_BASIS and data.get("weight_scope") == WEIGHT_SCOPE
+        basis = WALLET_CASH_BASIS if cli.cash_basis else OUTCOME_BASIS
+        if (data.get("outcome_basis") == basis and data.get("weight_scope") == WEIGHT_SCOPE
                 and time.time() - last < RECALC_GUARD_SECS):
             if not cli.quiet:
                 print(f"Recalc guard: last run {int((time.time() - last) / 60)}m ago "
                       f"(interval {RECALC_GUARD_SECS // 3600}h). Use --force to override.")
             return
 
-    recalculate(quiet=cli.quiet)
+    recalculate(quiet=cli.quiet, cash_basis=cli.cash_basis)
 
 
 if __name__ == "__main__":

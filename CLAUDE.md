@@ -491,7 +491,13 @@ one pass per enabled mode per `POLL_INTERVAL`.
   it**: the profile's `skills/solana-dlmm/scripts` is a symlink into this repo and
   Python resolves sys.path[0], so an imported module computes the REPO as its
   profile and every close silently comes back "mark". A position the reconciler has
-  not fetched is unmeasured, never 0.0.
+  not fetched is unmeasured, never 0.0. `realized_sol` still values the token side
+  at the datapi's price, not at what the settlement swap paid: `dlmm_realized.py
+  --cash` (`dlmm_realized_cash.py`) joins each close to its journaled close/swap txs
+  and writes `memories/dlmm_realized_cash.jsonl` (`cash_realized_sol`, `swap_gap_sol`,
+  fees and rent kept separate). Only `cash_basis == "wallet"` rows are measured;
+  `apply_realized(..., basis="cash")` and `dlmm_weights.py --cash-basis` opt in, the
+  default basis is unchanged.
 - **`pnl_pct` is not money.** In `uni_closes.jsonl` it is a percentage against the
   position's *marked* value, so a close that ended holding an unsellable token can
   read +90% while returning almost no quote, leaving behind a token side no venue
