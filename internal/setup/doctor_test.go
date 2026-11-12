@@ -641,3 +641,68 @@ func TestDoctorCLIJSONAndExitCodes(t *testing.T) {
 		}
 	}
 }
+
+func TestHermesScriptsDrift(t *testing.T) {
+	setup := func(t *testing.T, repoFiles, profileFiles map[string]string) DoctorOptions {
+		t.Helper()
+		opts := fixture(t)
+		for dir, files := range map[string]map[string]string{
+			filepath.Join(opts.RepoDir, "assets", "hermes", "scripts"): repoFiles,
+			filepath.Join(opts.ProfileDir, "scripts"):                  profileFiles,
+		} {
+			if err := os.MkdirAll(dir, 0700); err != nil {
+				t.Fatal(err)
+			}
+			for name, content := range files {
+				if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+		return opts
+	}
+	check := func(opts DoctorOptions) Check {
+		return findCheck(t, Doctor(context.Background(), opts), "hermes.scripts.drift")
+	}
+
+	t.Run("identical passes", func(t *testing.T) {
+		files := map[string]string{"a.py": "print(1)\n", "b.sh": "echo hi\n"}
+		if c := check(setup(t, files, files)); c.Status != Pass {
+			t.Fatalf("got %s: %s", c.Status, c.Detail)
+		}
+	})
+	t.Run("differing file warns and names it", func(t *testing.T) {
+		c := check(setup(t, map[string]string{"a.py": "new", "b.sh": "same"}, map[string]string{"a.py": "old", "b.sh": "same"}))
+		if c.Status != Warn || !strings.Contains(c.Detail, "a.py") || strings.Contains(c.Detail, "b.sh") || !strings.Contains(c.Hint, "install.sh") {
+			t.Fatalf("got %+v", c)
+		}
+		if strings.Contains(c.Detail, "new") || strings.Contains(c.Detail, "old") {
+			t.Fatalf("contents leaked: %q", c.Detail)
+		}
+	})
+	t.Run("missing file warns", func(t *testing.T) {
+		c := check(setup(t, map[string]string{"a.py": "x", "b.sh": "y"}, map[string]string{"a.py": "x"}))
+		if c.Status != Warn || !strings.Contains(c.Detail, "missing: b.sh") {
+			t.Fatalf("got %+v", c)
+		}
+	})
+	t.Run("profile token rewrite passes", func(t *testing.T) {
+		opts := setup(t, map[string]string{"a.py": "ROOT = '__PROFILE__/x'\n"}, nil)
+		rewritten := "ROOT = '" + opts.ProfileDir + "/x'\n"
+		if err := os.WriteFile(filepath.Join(opts.ProfileDir, "scripts", "a.py"), []byte(rewritten), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if c := check(opts); c.Status != Pass {
+			t.Fatalf("got %s: %s", c.Status, c.Detail)
+		}
+	})
+	t.Run("skipped without profile dir", func(t *testing.T) {
+		opts := setup(t, map[string]string{"a.py": "x"}, nil)
+		opts.ProfileDir = filepath.Join(opts.RepoDir, "absent")
+		for _, c := range Doctor(context.Background(), opts).Checks {
+			if c.Name == "hermes.scripts.drift" {
+				t.Fatalf("unexpected check %+v", c)
+			}
+		}
+	})
+}

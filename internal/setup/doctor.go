@@ -1,6 +1,7 @@
 package setup
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -129,6 +130,7 @@ func Doctor(ctx context.Context, opts DoctorOptions) Report {
 	d.ai(ctx)
 	d.services(ctx)
 	d.skill()
+	d.hermesScriptsDrift()
 	d.resources()
 	d.binaries()
 	return d.report
@@ -393,4 +395,57 @@ func runCommand(ctx context.Context, name string, args, extraEnv []string, dir s
 		}
 	}
 	return CommandResult{code, string(out.data)}, err
+}
+
+// hermesScriptsDrift compares assets/hermes/scripts with the copies install.sh
+// placed in <profile>/scripts. Those are copied (with __PROFILE__ rewritten),
+// not symlinked, so a merged change does not reach the profile until install.sh
+// is re-run. Skips silently when there is nothing to compare. Never prints
+// file contents.
+func (d *doctor) hermesScriptsDrift() {
+	srcDir := filepath.Join(d.opts.RepoDir, "assets", "hermes", "scripts")
+	if info, err := os.Stat(d.opts.ProfileDir); err != nil || !info.IsDir() {
+		return
+	}
+	entries, err := os.ReadDir(srcDir)
+	if err != nil {
+		return
+	}
+	var drifted, missing []string
+	checked := 0
+	for _, e := range entries {
+		src := filepath.Join(srcDir, e.Name())
+		if info, err := os.Stat(src); err != nil || !info.Mode().IsRegular() {
+			continue // install.sh copies regular files only
+		}
+		want, err := os.ReadFile(src)
+		if err != nil {
+			continue
+		}
+		checked++
+		// Mirror install.sh: sed "s#__PROFILE__#$PROFILE#g".
+		want = bytes.ReplaceAll(want, []byte("__PROFILE__"), []byte(d.opts.ProfileDir))
+		got, err := os.ReadFile(filepath.Join(d.opts.ProfileDir, "scripts", e.Name()))
+		switch {
+		case err != nil:
+			missing = append(missing, e.Name())
+		case !bytes.Equal(got, want):
+			drifted = append(drifted, e.Name())
+		}
+	}
+	if checked == 0 {
+		return
+	}
+	if len(drifted) == 0 && len(missing) == 0 {
+		d.add("hermes.scripts.drift", Pass, "Installed Hermes scripts match the repo.", "")
+		return
+	}
+	var parts []string
+	if len(drifted) > 0 {
+		parts = append(parts, "drifted: "+strings.Join(drifted, ", "))
+	}
+	if len(missing) > 0 {
+		parts = append(parts, "missing: "+strings.Join(missing, ", "))
+	}
+	d.add("hermes.scripts.drift", Warn, "Installed Hermes scripts differ from the repo ("+strings.Join(parts, "; ")+").", "Re-run ./install.sh <profile> (or ./azimuth setup --install).")
 }

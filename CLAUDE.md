@@ -404,7 +404,9 @@ one pass per enabled mode per `POLL_INTERVAL`.
 - `assets/` — copied into a Hermes profile by `install.sh`, which rewrites the
   literal `__PROFILE__` token to the target path. `assets/skill` = solana-dlmm
   skill (Python pipeline/monitor + JS executor); `assets/hermes` = the webhook
-  subscription (agent decision prompt).
+  subscription (agent decision prompt). Hermes scripts are copied, not
+  symlinked: re-run `install.sh` after merging changes under `assets/hermes/`
+  (`azimuth doctor` warns via `hermes.scripts.drift`).
 
 ## Conventions that matter
 
