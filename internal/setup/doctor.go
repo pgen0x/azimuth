@@ -103,6 +103,11 @@ func Doctor(ctx context.Context, opts DoctorOptions) Report {
 	if opts.RepoDir == "" {
 		opts.RepoDir = "."
 	}
+	// Absolute once, so every check compares like with like (profile symlinks
+	// resolve to absolute paths; a relative RepoDir never would).
+	if abs, err := filepath.Abs(opts.RepoDir); err == nil {
+		opts.RepoDir = abs
+	}
 	if opts.EnvFile == "" {
 		opts.EnvFile = filepath.Join(opts.RepoDir, ".env")
 	}

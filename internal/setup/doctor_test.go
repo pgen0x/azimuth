@@ -706,3 +706,36 @@ func TestHermesScriptsDrift(t *testing.T) {
 		}
 	})
 }
+
+func TestDoctorRelativeRepoDirSkillAndDrift(t *testing.T) {
+	opts := fixture(t) // profile skill link is absolute
+	hermes := filepath.Join(opts.RepoDir, "assets", "hermes", "scripts")
+	if err := os.MkdirAll(hermes, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(hermes, "a.py"), []byte("x"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(opts.ProfileDir, "scripts"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(opts.ProfileDir, "scripts", "a.py"), []byte("x"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(wd) })
+	if err := os.Chdir(filepath.Dir(opts.RepoDir)); err != nil {
+		t.Fatal(err)
+	}
+	opts.RepoDir = filepath.Base(opts.RepoDir) // relative
+	opts.EnvFile = ""
+	r := Doctor(context.Background(), opts)
+	for _, name := range []string{"profile.skill", "hermes.scripts.drift"} {
+		if c := findCheck(t, r, name); c.Status != Pass {
+			t.Fatalf("%s: got %s: %s", name, c.Status, c.Detail)
+		}
+	}
+}
