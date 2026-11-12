@@ -732,6 +732,44 @@ def fetch_live_fee_tvl(pool_address, timeframe="24h"):
         print(f"Warning: live fee/TVL fetch failed for {pool_address[:8]}: {e}")
         return None
 
+def _positive_usd(value):
+    """A measured USD amount, or None. A missing or zero TVL is unmeasured, not 0."""
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return number if math.isfinite(number) and number > 0 else None
+
+
+def exit_liquidity_reject_evidence(candidate):
+    """Evidence for an `exit_liquidity_floor` reject row, or None; journaling only.
+
+    Non-None only when predeploy_live_gate_reject's own evidence shows the floor
+    fired. The row keeps the DexScreener depth the gate used next to the Meteora
+    TVL from the signal, because the two sources can disagree. Every other
+    live-gate reason keeps the generic `live_gate` id.
+    """
+    gates = candidate.get("entry_live_gates")
+    if not isinstance(gates, dict):
+        return None
+    liquidity = gates.get("pool_liquidity_usd")
+    floor = gates.get("exit_liquidity_floor_usd")
+    numbers = all(isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+                  for v in (liquidity, floor))
+    if not numbers or not liquidity < floor:
+        return None
+    tvl = _positive_usd(candidate.get("tvl"))
+    return {
+        "dexscreener_liquidity_usd": liquidity,
+        "meteora_tvl_usd": tvl,
+        "meteora_active_tvl_usd": _positive_usd(candidate.get("active_tvl")),
+        "floor_usd": floor,
+        "liq_ratio": liquidity / tvl if tvl is not None else None,
+    }
+
+
 def predeploy_live_gate_reject(candidate, deploy_sol, timeframe):
     """Return a live-gate rejection so batch selection can try the next pool."""
     candidate.pop("entry_live_gates", None)
@@ -1955,6 +1993,12 @@ def main():
             if batch_mode:
                 rejection = predeploy_live_gate_reject(c, deploy_sol, timeframe)
                 if rejection:
+                    evidence = exit_liquidity_reject_evidence(c)
+                    if evidence is not None:
+                        record_pipeline_reject(PROFILE_DIR, mode, "exit_liquidity_floor", c.get("pool"), c.get("base_mint"),
+                                               c.get("sol_is_x"), c.get("name"), extra=evidence)
+                        print(f"Skipping {c['name']} - live gate rejected: {rejection}")
+                        continue
                     record_pipeline_reject(PROFILE_DIR, mode, "live_gate", c.get("pool"), c.get("base_mint"), c.get("sol_is_x"), c.get("name"))
                     print(f"Skipping {c['name']} - live gate rejected: {rejection}")
                     continue
@@ -2014,6 +2058,11 @@ def main():
     if not batch_mode or cli.pool:
         rejection = predeploy_live_gate_reject(winner, deploy_sol, timeframe)
         if rejection:
+            evidence = exit_liquidity_reject_evidence(winner)
+            if evidence is not None:
+                record_pipeline_reject(PROFILE_DIR, mode, "exit_liquidity_floor", winner.get("pool"),
+                                       winner.get("base_mint"), winner.get("sol_is_x"), winner.get("name"),
+                                       extra=evidence)
             print(f"Aborting deploy: live gate rejected: {rejection}")
             sys.exit(0)
 

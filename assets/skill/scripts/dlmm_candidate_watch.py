@@ -14,6 +14,9 @@ REJECT_FILENAME = 'dlmm_pipeline_rejects.jsonl'
 REJECT_GATE = re.compile(r'[a-z0-9_]{1,40}\Z')
 REJECT_NAME_MAX = 64                      # pair labels are short; longer input is truncated
 REJECT_MAX_BYTES = 64 * 1024 * 1024       # journal cap: telemetry stops, the entry path never waits
+REJECT_EXTRA_KEY = re.compile(r'[a-z][a-z0-9_]{0,39}\Z')
+REJECT_EXTRA_MAX = 8
+REJECT_BASE_KEYS = frozenset({'ts', 'pool', 'mode', 'gate', 'name', 'candidate', 'id'})
 MAX_WATCH_POOLS = 64
 MODES = {'casual', 'multiday', 'turnover', 'pulse'}
 SOL_MINT = 'So11111111111111111111111111111111111111112'
@@ -75,7 +78,25 @@ def record_pipeline_candidates(profile, cli):
         return 0
 
 
-def record_pipeline_reject(profile, mode, gate, pool, mint, sol_is_x, name):
+def reject_extra(extra):
+    """Keep only named numeric evidence; unknown or non-finite stays null, never 0."""
+    if not isinstance(extra, dict):
+        return {}
+    clean = {}
+    for key, value in extra.items():
+        if (not isinstance(key, str) or not REJECT_EXTRA_KEY.fullmatch(key)
+                or key in REJECT_BASE_KEYS or len(clean) >= REJECT_EXTRA_MAX):
+            continue
+        try:
+            number = (float(value) if isinstance(value, (int, float)) and not isinstance(value, bool)
+                      else None)
+        except OverflowError:
+            number = None
+        clean[key] = number if number is not None and math.isfinite(number) else None
+    return clean
+
+
+def record_pipeline_reject(profile, mode, gate, pool, mint, sol_is_x, name, extra=None):
     """Opt-in identity for a pipeline `Skipping` line (DLMM_REJECT_IDENTITY=1).
 
     The human `Skipping <pair> - <reason>` line is printed unchanged by the caller,
@@ -84,6 +105,9 @@ def record_pipeline_reject(profile, mode, gate, pool, mint, sol_is_x, name):
     stdout line and one row in memories/dlmm_pipeline_rejects.jsonl. Best effort,
     with no lock wait: regular filesystem I/O can still wait on storage.
     Telemetry must not change an entry decision.
+
+    `extra` adds gate-specific numeric evidence as top-level fields (see
+    reject_extra); identity keys cannot be overwritten.
     """
     if os.environ.get('DLMM_REJECT_IDENTITY') != '1':
         return False
@@ -98,6 +122,7 @@ def record_pipeline_reject(profile, mode, gate, pool, mint, sol_is_x, name):
                    name=name[:REJECT_NAME_MAX] if isinstance(name, str) else None,
                    candidate=dict(base_mint=mint if isinstance(mint, str) and ADDRESS.fullmatch(mint) else None,
                                   sol_is_x=sol_is_x if isinstance(sol_is_x, bool) else None))
+        row.update(reject_extra(extra))
         row['id'] = 'reject:' + hashlib.sha256(json.dumps(row, sort_keys=True).encode()).hexdigest()
         print('REJECT_IDENTITY ' + json.dumps(row, sort_keys=True, allow_nan=False))
         if os.environ.get('DRY_RUN') == 'true':
