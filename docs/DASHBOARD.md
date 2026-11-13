@@ -32,7 +32,7 @@ The unit reads only the three Redis settings through the command, rather than im
 
 ## Sign-in
 
-Every page and every `/api/*` route needs a session. Only `/login`, `/favicon.svg` and `/ui.css` answer
+Every page and every `/api/*` route needs a session. Only `/login`, `/ui.css` and the logo/favicon files (`/favicon.svg`, `/favicon.ico`, `/favicon-32.png`, `/logo.png`, `/logo-64.png`) answer
 without one: HTML routes redirect to `/login`, API routes return `401`.
 
 - The password is checked against `DASHBOARD_PASSWORD_HASH`, a PBKDF2-HMAC-SHA256 hash (600,000 iterations,

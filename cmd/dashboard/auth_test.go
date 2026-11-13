@@ -123,7 +123,8 @@ func TestLoginGateFailsClosed(t *testing.T) {
 	}
 	// Static assets of the login page stay public; nothing else does.
 	s := &server{data: data, auth: newAuth("", false)}
-	for path, kind := range map[string]string{"/favicon.svg": "image/svg+xml", "/ui.css": "text/css; charset=utf-8"} {
+	for path, kind := range map[string]string{"/favicon.svg": "image/svg+xml", "/ui.css": "text/css; charset=utf-8",
+		"/logo.png": "image/png", "/logo-64.png": "image/png", "/favicon-32.png": "image/png", "/favicon.ico": "image/x-icon"} {
 		if w := do(s, "GET", path, nil, nil, nil); w.Code != 200 || w.Header().Get("Content-Type") != kind {
 			t.Fatalf("%s: %d", path, w.Code)
 		}
