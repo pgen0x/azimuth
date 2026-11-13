@@ -1,5 +1,6 @@
 // Read-only wallet coverage and marked NAV. No signing or transaction submission.
 const fs = require('fs');
+const {Buffer} = require('buffer');
 const path = require('path');
 const {cashSignEvidence,cashSignRefresh} = require('./dlmm_cash_sign.js');
 const {retainedRentEvidence} = require('./dlmm_retained_rent.js');
@@ -496,6 +497,22 @@ async function collectRentHistory({dir, wallet, PublicKey, rpc, cache}) {
   result.observed_at=now();
   append(file,result);
 }
+// Complete JSON rows from the last maxBytes of a journal (bounded read, no full scan).
+// The first line is dropped when the window starts mid-row; malformed lines are skipped.
+function tailRows(file, maxBytes) {
+  let fd;
+  try { fd = fs.openSync(file,'r'); } catch (error) { if (error.code==='ENOENT') return []; throw error; }
+  try {
+    const size = fs.fstatSync(fd).size, start = Math.max(0,size-maxBytes), len = size-start;
+    const buf = Buffer.alloc(len);
+    fs.readSync(fd,buf,0,len,start);
+    const lines = buf.toString('utf8').split('\n');
+    if (start>0) lines.shift();
+    const rows = [];
+    for (const line of lines) { if (!line) continue; try { rows.push(JSON.parse(line)); } catch {} }
+    return rows;
+  } finally { fs.closeSync(fd); }
+}
 async function collect({dir, wallet, PublicKey, rpc, historyOnly=false, includeRentHistory=true}) {
   fs.mkdirSync(dir, {recursive:true, mode:0o700});
   const publicKey = new PublicKey(wallet);
@@ -708,10 +725,11 @@ async function collect({dir, wallet, PublicKey, rpc, historyOnly=false, includeR
     fs.writeFileSync(scheduleTemp,JSON.stringify(schedule),{mode:0o600,flag:'wx'});
     fs.renameSync(scheduleTemp,schedulePath);
   } finally { fs.rmSync(scheduleTempDir,{recursive:true,force:true}); }
-  let apiPositions=0;
+  let apiPositions=0, lpReadInvalid=false;
   for (let page=1; page<=100; page++) {
     const data=await json(`https://dlmm.datapi.meteora.ag/portfolio/open?user=${wallet}&page=${page}&pageSize=50`);
     apiPositions=Number(data.totalPositions);
+    if (!Number.isFinite(apiPositions) || !Array.isArray(data.pools)) lpReadInvalid=true;
     for (const pool of data.pools || []) {
       const value=Number(pool.balancesSol), fees=Number(pool.unclaimedFeesSol);
       if (pool.balancesSol==null || pool.unclaimedFeesSol==null || !Number.isFinite(value+fees) || value<0 || fees<0 || pool.updatedAt==null || !Number.isFinite(Number(pool.updatedAt)) || Number(pool.updatedAt)>now()+5 || now()-Number(pool.updatedAt)>180) issues.push(`stale_or_invalid_lp:${pool.poolAddress}`);
@@ -727,6 +745,26 @@ async function collect({dir, wallet, PublicKey, rpc, historyOnly=false, includeR
     if (page===100) issues.push('lp_pagination_incomplete');
   }
   if (apiPositions!==positions.length) issues.push('lp_count_mismatch');
+  // Unmeasured is never 0.0: a failed/empty/inconsistent LP read must not be stored as a
+  // zero mark (it printed a phantom drop on the scoreboard). A real zero needs the API to
+  // answer coherently with no open positions. Uses only signals already read this tick.
+  const lpReasons=[];
+  if (lpReadInvalid) lpReasons.push('lp_read_invalid');
+  for (const code of ['lp_count_mismatch','lp_pagination_incomplete']) if (issues.includes(code)) lpReasons.push(code);
+  if (issues.some(i=>i.startsWith('stale_or_invalid_lp:'))) lpReasons.push('stale_or_invalid_lp');
+  if (positions.length>0 && lpValue===0) lpReasons.push('lp_positions_zero_value');
+  // The API can answer coherently with zero positions while the wallet still holds some
+  // (the 2026-11-13 08:22 row). Cheap local cross-check, no RPC: the previous NAV row had LP
+  // value, the API now reports none, and no close was journaled since that row.
+  if (lpReasons.length===0 && apiPositions===0 && positions.length===0 && lpValue===0) {
+    const prev = tailRows(path.join(dir,'dlmm_nav.jsonl'),4<<20).pop();
+    if (prev && Number.isFinite(prev.lp_mark_sol) && prev.lp_mark_sol>0 && Number.isFinite(prev.ts)) {
+      const closedSince = tailRows(path.join(dir,'dlmm_closes.jsonl'),1<<20)
+        .some(r => r && r.success!==false && Number(r.ts)>prev.ts);
+      if (!closedSince) lpReasons.push('lp_vanished_without_close');
+    }
+  }
+  const lpMeasured=lpReasons.length===0;
   const endSlot=await rpc(c=>c.getSlot('finalized'));
   // A trade during the multi-source snapshot invalidates its combined mark.
   const head=await rpc(c=>c.getSignaturesForAddress(publicKey,{limit:1},'finalized'));
@@ -734,9 +772,10 @@ async function collect({dir, wallet, PublicKey, rpc, historyOnly=false, includeR
   const snapshot={ts:now(),started_at:started,wallet,slot,end_slot:endSlot,coverage_since:since,
     wallet_history_complete:coverage.wallet_history_complete,missing_transactions:missing,
     asset_scope:'native_SOL_SPL_Meteora_LP_and_reserves; NFTs_excluded',
-    native_sol:balance/1e9,spl_mark_sol:tokenValue,lp_mark_sol:lpValue,refundable_rent_sol:rent/1e9,
-    known_asset_subtotal_sol:balance/1e9+tokenValue+lpValue+rent/1e9,
-    nav_sol:issues.length ? null : balance/1e9+tokenValue+lpValue+rent/1e9,
+    native_sol:balance/1e9,spl_mark_sol:tokenValue,lp_mark_sol:lpMeasured ? lpValue : null,refundable_rent_sol:rent/1e9,
+    ...(lpMeasured ? {} : {lp_mark_unmeasured_reason:lpReasons.join(',')}),
+    known_asset_subtotal_sol:lpMeasured ? balance/1e9+tokenValue+lpValue+rent/1e9 : null,
+    nav_sol:(issues.length || !lpMeasured) ? null : balance/1e9+tokenValue+lpValue+rent/1e9,
     valuation_coverage:{token_accounts:tokens.length,measured:tokens.filter(t=>t.mark_sol!==null).length,
       unmeasured:tokens.filter(t=>t.mark_sol===null).length,
       unknown_by_reason:tokens.filter(t=>t.mark_sol===null).reduce((out,t)=>{
