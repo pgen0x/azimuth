@@ -5,6 +5,13 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.17.0](https://github.com/pgen0x/azimuth/compare/v2.16.0...v2.17.0) (2026-11-13)
+
+
+### Features
+
+* **dashboard:** use the Azimuth logo in the header, login page and favicon ([#317](https://github.com/pgen0x/azimuth/issues/317)) ([16850d0](https://github.com/pgen0x/azimuth/commit/16850d056af4a49d2c1add21f63a6033b30bade8))
+
 ## [2.16.0](https://github.com/pgen0x/azimuth/compare/v2.15.1...v2.16.0) (2026-11-13)
 
 
