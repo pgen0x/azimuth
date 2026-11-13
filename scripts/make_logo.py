@@ -17,14 +17,30 @@ Outputs (cmd/dashboard/):
   logo-64.png     64px, transparent (header; shown at 32px, 2x for hi-dpi)
   favicon-32.png  32px on a dark rounded badge (browser tabs may be light)
   favicon.ico     16/32/48 on the same badge
+
+Outputs (docs/assets/, for the GitHub README and repository social preview):
+  logo-dark.png        320px, transparent: the original light strokes, for dark pages
+  logo-light.png       320px, transparent: luminance inverted onto dark slate, for white pages
+  social-preview.png   1280x640 on #0d1117 (upload by hand: Settings > Social preview)
 """
 import sys
 from pathlib import Path
 
 import numpy as np
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFont
 
-OUT = Path(__file__).resolve().parent.parent / "cmd" / "dashboard"
+ROOT = Path(__file__).resolve().parent.parent
+OUT = ROOT / "cmd" / "dashboard"
+DOCS = ROOT / "docs" / "assets"
+README_SIZE = 320   # shown at 160px in the README, 2x for hi-dpi
+GH_DARK = (13, 17, 23)  # #0d1117
+# Light variant: white faces -> dark slate, mid greys stay mid-grey. Linear in luminance,
+# so facet ordering is kept (inverted) and the thin grey rings keep >= ~3:1 on white.
+LIGHT_MAP = ((255.0, 31.0), (110.0, 125.0))
+SLATE_TINT = np.array([-4.0, 0.0, 8.0])  # a cool shift so greys read as slate, not neutral
+TAGLINE = "Concentrated-Liquidity Pool Signal Daemon for AI Agents"  # README title
+FONT_BOLD = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+FONT_REG = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
 LO, HI = 22.0, 90.0   # luminance ramp: <=LO fully transparent, >=HI fully opaque
 PAD = 0.04            # padding per side, fraction of the content box
 BADGE = (22, 24, 27, 255)  # #16181b, the same dark as the legacy mark.svg
@@ -78,7 +94,49 @@ def badge(logo, size):
     return base
 
 
-def save_png(img, path):
+def light_variant(logo):
+    """Same alpha, strokes remapped for a white page."""
+    a = np.asarray(logo).astype(np.float64)
+    lum = a[..., :3] @ np.array([0.2126, 0.7152, 0.0722])
+    (l1, o1), (l2, o2) = LIGHT_MAP
+    target = o2 + (lum - l2) * (o1 - o2) / (l1 - l2)
+    target = np.clip(target, o1, 170.0)
+    # Scale each pixel toward its target luminance, then tint.
+    gain = target / np.maximum(lum, 1.0)
+    rgb = np.clip(a[..., :3] * gain[..., None] + SLATE_TINT, 0, 255)
+    out = np.dstack([rgb, a[..., 3]]).round().astype(np.uint8)
+    return Image.fromarray(out, "RGBA")
+
+
+def social_preview(logo):
+    w, h = 1280, 640
+    canvas = Image.new("RGB", (w, h), GH_DARK)
+    mark = resize(logo, 400)
+    canvas.paste(mark, (110, (h - 400) // 2), mark)
+    d = ImageDraw.Draw(canvas)
+    title = ImageFont.truetype(FONT_BOLD, 104)
+    body = ImageFont.truetype(FONT_REG, 34)
+    x = 560
+    d.text((x, 205), "Azimuth", font=title, fill=(236, 232, 225))
+    d.rectangle((x + 4, 338, x + 84, 342), fill=(217, 154, 78))
+    # Wrap the tagline on a word boundary to fit the right column.
+    words, lines, cur = TAGLINE.split(), [], ""
+    for word in words:
+        trial = (cur + " " + word).strip()
+        if d.textlength(trial, font=body) > w - x - 80 and cur:
+            lines.append(cur)
+            cur = word
+        else:
+            cur = trial
+    lines.append(cur)
+    for i, line in enumerate(lines):
+        d.text((x + 4, 368 + i * 48), line, font=body, fill=(139, 148, 158))
+    return canvas
+
+
+def save_png(img, path, palette=False):
+    if palette:  # 256 colours incl. alpha: visually lossless for flat art, ~3x smaller
+        img = img.quantize(colors=256, method=Image.FASTOCTREE, dither=Image.NONE)
     img.save(path, optimize=True)
     print(f"{path.name}: {path.stat().st_size} bytes")
 
@@ -91,6 +149,11 @@ def main(src):
     save_png(badge(logo, 32), OUT / "favicon-32.png")
     badge(logo, 48).save(OUT / "favicon.ico", sizes=[(16, 16), (32, 32), (48, 48)])
     print(f"favicon.ico: {(OUT / 'favicon.ico').stat().st_size} bytes")
+    DOCS.mkdir(parents=True, exist_ok=True)
+    readme = resize(logo, README_SIZE)
+    save_png(readme, DOCS / "logo-dark.png", palette=True)
+    save_png(light_variant(readme), DOCS / "logo-light.png", palette=True)
+    save_png(social_preview(logo), DOCS / "social-preview.png")
 
 
 if __name__ == "__main__":
