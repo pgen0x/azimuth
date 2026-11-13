@@ -22,7 +22,7 @@ import (
 // Version follows Semantic Versioning (semver.org). Bumped automatically by
 // release-please from conventional commits — see CONTRIBUTING.md. Release
 // builds also override it via -ldflags "-X main.Version=..." (GoReleaser).
-var Version = "2.15.1" // x-release-please-version
+var Version = "2.16.0" // x-release-please-version
 
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "doctor" {
