@@ -161,6 +161,10 @@ async function render(tab, payload, fail=false, extra={}) {
         {component: 'other', label: 'Other', sol: null}]},
     experiments: {status: 'ok', basis: 'Counts only.', geometry_shadow: {entries: 4, report: {status: 'ok', verdict: 'NEED-DATA', closed: 1, treated: 1, pools: 1, days: 1, gate: {min_n: 30, min_pools: 10, min_days: 7}}},
       hold_canary: {arms: {A: 14, B: 12}, closes: 26, first_ts: 1}, active_bin_reanchor: {entries: 27, reanchored: 0, max_drift_bins: null, since: 1}}};
+  // An unmeasured LP mark renders as unmeasured with its reason, never as 0 or a crash.
+  const lpNull = await render('overview', {nav: {native_sol: 1, ts: 1, lp_mark_sol: null, known_asset_subtotal_sol: null, lp_mark_unmeasured_reason: 'lp_count_mismatch'}, services: [], sources: []});
+  assert(lpNull.html.includes('LP capital mark · SOL') && lpNull.html.includes('Unmeasured (lp_count_mismatch)'), 'null LP mark shows unmeasured + reason');
+  assert(!lpNull.html.includes('LP capital mark · SOL</span><strong>0</strong>'), 'null LP mark is never shown as 0');
   const gv = await render('overview', {nav: {}, services: [], sources: []}, false, {growth});
   assert(gv.calls.some(u => u.startsWith('/api/growth?tz=')), 'growth is fetched with the viewer zone');
   assert(gv.html.includes('growth / today') && gv.html.includes('+0.100000'), 'today native delta');

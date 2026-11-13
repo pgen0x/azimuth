@@ -1068,6 +1068,17 @@ class GrowthTests(unittest.TestCase):
     def test_north_star_carries_lp_mark(self):
         self.fixture();ns=c.north_star(self.m,T,2,'UTC')
         self.assertEqual(ns['days'][-1]['lp_mark_sol'],.2)
+    def test_unmeasured_lp_mark_stays_null_everywhere(self):
+        rows(self.m/'dlmm_nav.jsonl',[nsnap(MIDNIGHT-100,100,1.0,lp_mark_sol=.3,known_asset_subtotal_sol=1.3),
+                                      nsnap(T-60,200,1.0,lp_mark_sol=None,known_asset_subtotal_sol=None,
+                                            lp_mark_unmeasured_reason='lp_count_mismatch')])
+        day=c.north_star(self.m,T,0,'UTC')['days'][-1]
+        self.assertIsNone(day['lp_mark_sol']);self.assertIsNone(day['cash_sol']);self.assertIsNone(day['known_sol'])
+        g=c.growth_today(self.m,T,'UTC',runner(''))
+        self.assertIsNone(g['d_lp_mark_sol'])  # unknown, not a -0.3 drop
+        rows(self.m/'dlmm_nav.jsonl',[nsnap(T-DAY,100,1.0,lp_mark_sol=.3,known_asset_subtotal_sol=1.3),
+                                      nsnap(T,200,1.0,lp_mark_sol=None,known_asset_subtotal_sol=None)])
+        self.assertEqual(c.nav_bridge(self.m,T,1)['status'],'unmeasured_snapshots')
     def test_daily_and_brief_carry_growth(self):
         p=self.m/'profile';(p/'memories').mkdir(parents=True);want=self.fixture(m=p/'memories')
         with patch.object(c,'bounded_run',runner('')):

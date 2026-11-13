@@ -85,6 +85,7 @@ jobs:
           node assets/skill/scripts/test_dlmm_nav.js
           node assets/skill/scripts/test_dlmm_jsonl.js
           node assets/skill/scripts/test_dlmm_nav_valuation.js
+          node assets/skill/scripts/test_dlmm_nav_lp_unmeasured.js
           node assets/skill/scripts/test_dlmm_nav_scheduling.js
           node assets/skill/scripts/test_dlmm_retained_rent.js
           node assets/skill/scripts/test_dlmm_exit_bank.js

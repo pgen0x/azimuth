@@ -708,10 +708,11 @@ async function collect({dir, wallet, PublicKey, rpc, historyOnly=false, includeR
     fs.writeFileSync(scheduleTemp,JSON.stringify(schedule),{mode:0o600,flag:'wx'});
     fs.renameSync(scheduleTemp,schedulePath);
   } finally { fs.rmSync(scheduleTempDir,{recursive:true,force:true}); }
-  let apiPositions=0;
+  let apiPositions=0, lpReadInvalid=false;
   for (let page=1; page<=100; page++) {
     const data=await json(`https://dlmm.datapi.meteora.ag/portfolio/open?user=${wallet}&page=${page}&pageSize=50`);
     apiPositions=Number(data.totalPositions);
+    if (!Number.isFinite(apiPositions) || !Array.isArray(data.pools)) lpReadInvalid=true;
     for (const pool of data.pools || []) {
       const value=Number(pool.balancesSol), fees=Number(pool.unclaimedFeesSol);
       if (pool.balancesSol==null || pool.unclaimedFeesSol==null || !Number.isFinite(value+fees) || value<0 || fees<0 || pool.updatedAt==null || !Number.isFinite(Number(pool.updatedAt)) || Number(pool.updatedAt)>now()+5 || now()-Number(pool.updatedAt)>180) issues.push(`stale_or_invalid_lp:${pool.poolAddress}`);
@@ -727,6 +728,15 @@ async function collect({dir, wallet, PublicKey, rpc, historyOnly=false, includeR
     if (page===100) issues.push('lp_pagination_incomplete');
   }
   if (apiPositions!==positions.length) issues.push('lp_count_mismatch');
+  // Unmeasured is never 0.0: a failed/empty/inconsistent LP read must not be stored as a
+  // zero mark (it printed a phantom drop on the scoreboard). A real zero needs the API to
+  // answer coherently with no open positions. Uses only signals already read this tick.
+  const lpReasons=[];
+  if (lpReadInvalid) lpReasons.push('lp_read_invalid');
+  for (const code of ['lp_count_mismatch','lp_pagination_incomplete']) if (issues.includes(code)) lpReasons.push(code);
+  if (issues.some(i=>i.startsWith('stale_or_invalid_lp:'))) lpReasons.push('stale_or_invalid_lp');
+  if (positions.length>0 && lpValue===0) lpReasons.push('lp_positions_zero_value');
+  const lpMeasured=lpReasons.length===0;
   const endSlot=await rpc(c=>c.getSlot('finalized'));
   // A trade during the multi-source snapshot invalidates its combined mark.
   const head=await rpc(c=>c.getSignaturesForAddress(publicKey,{limit:1},'finalized'));
@@ -734,8 +744,9 @@ async function collect({dir, wallet, PublicKey, rpc, historyOnly=false, includeR
   const snapshot={ts:now(),started_at:started,wallet,slot,end_slot:endSlot,coverage_since:since,
     wallet_history_complete:coverage.wallet_history_complete,missing_transactions:missing,
     asset_scope:'native_SOL_SPL_Meteora_LP_and_reserves; NFTs_excluded',
-    native_sol:balance/1e9,spl_mark_sol:tokenValue,lp_mark_sol:lpValue,refundable_rent_sol:rent/1e9,
-    known_asset_subtotal_sol:balance/1e9+tokenValue+lpValue+rent/1e9,
+    native_sol:balance/1e9,spl_mark_sol:tokenValue,lp_mark_sol:lpMeasured ? lpValue : null,refundable_rent_sol:rent/1e9,
+    ...(lpMeasured ? {} : {lp_mark_unmeasured_reason:lpReasons.join(',')}),
+    known_asset_subtotal_sol:lpMeasured ? balance/1e9+tokenValue+lpValue+rent/1e9 : null,
     nav_sol:issues.length ? null : balance/1e9+tokenValue+lpValue+rent/1e9,
     valuation_coverage:{token_accounts:tokens.length,measured:tokens.filter(t=>t.mark_sol!==null).length,
       unmeasured:tokens.filter(t=>t.mark_sol===null).length,
