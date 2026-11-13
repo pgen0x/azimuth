@@ -1,9 +1,9 @@
 <!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>azimuth · sign in</title><link rel="icon" href="/favicon.svg" type="image/svg+xml"><link rel="stylesheet" href="/ui.css"></head>
+<title>azimuth · sign in</title><link rel="icon" href="/favicon.ico" sizes="any"><link rel="icon" href="/favicon-32.png" type="image/png" sizes="32x32"><link rel="stylesheet" href="/ui.css"></head>
 <body><div class="frame bare"><main class="login">
 <section class="p" aria-labelledby="title">
-<div class="brand"><img src="/favicon.svg" alt=""><div><h1 id="title" class="word">azimuth</h1><small class="muted">Operations dashboard · read only · loopback</small></div></div>
+<div class="brand"><img src="/logo-64.png" alt="Azimuth logo" width="32" height="32"><div><h1 id="title" class="word">azimuth</h1><small class="muted">Operations dashboard · read only · loopback</small></div></div>
 {{if .Problem}}<p role="alert" class="note warn">{{.Problem}}</p>
 <p class="muted">Generate a hash with <code>azimuth-dashboard -hash-password</code>, put it in the unit's environment file and restart the dashboard unit. See docs/DASHBOARD_DEPLOY.md.</p>
 {{else}}<form method="post" action="/login">

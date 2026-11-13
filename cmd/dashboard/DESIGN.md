@@ -8,7 +8,7 @@ Source: the product owner's answers (2026-10-29), transcribed. This file is dire
   checking capital, daily results and where SOL went, often for long stretches and at night.
 - **Personality: precision instrument.** Calm, serious, data-dense, like a measuring tool or a professional terminal.
   The accent is reserved for the numbers that matter. Nothing performs; everything reports.
-- **Name / mark:** text wordmark "azimuth" plus a simple geometric compass/bearing SVG icon (also the favicon).
+- **Name / mark:** text wordmark "azimuth" plus a simple geometric compass/bearing SVG icon (also the favicon). The header/login logo and favicon are generated PNG/ICO assets (`scripts/make_logo.py`); `mark.svg` remains as the SVG fallback.
   No photos, no avatars, no illustrations of people.
 
 ## Theme
