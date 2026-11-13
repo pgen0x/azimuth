@@ -5,6 +5,23 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.16.0](https://github.com/pgen0x/azimuth/compare/v2.15.1...v2.16.0) (2026-11-13)
+
+
+### Features
+
+* **doctor:** warn when installed Hermes scripts drift from the repo ([#315](https://github.com/pgen0x/azimuth/issues/315)) ([d70f8c7](https://github.com/pgen0x/azimuth/commit/d70f8c72863b8f5ee8876472f17a0352d149022e))
+* **monitor:** shadow inventory-share exit for pulse sol_bidask ([#313](https://github.com/pgen0x/azimuth/issues/313)) ([024294a](https://github.com/pgen0x/azimuth/commit/024294a966d4b8bd6fec1bb90d6aa3e344319dfc))
+* **pipeline:** journal exit-liquidity-floor live-gate rejects ([#314](https://github.com/pgen0x/azimuth/issues/314)) ([5d1a2ed](https://github.com/pgen0x/azimuth/commit/5d1a2ed2096fdaa34802dc0daef4ff70f84a3c02))
+* **realized:** add wallet-cash basis from close and swap proceeds ([#312](https://github.com/pgen0x/azimuth/issues/312)) ([d2c9084](https://github.com/pgen0x/azimuth/commit/d2c90844709d453a9de4fa68ac13d367f3adb4e0))
+* **setup:** add env schema and read-only doctor ([#309](https://github.com/pgen0x/azimuth/issues/309)) ([2a357c4](https://github.com/pgen0x/azimuth/commit/2a357c482f540a9bf24035724af59866ce88e948))
+* **setup:** azimuth setup wizard (onboarding phase 2) ([#311](https://github.com/pgen0x/azimuth/issues/311)) ([924e0a6](https://github.com/pgen0x/azimuth/commit/924e0a6b99926ae4616cf2fff6282e23579d7c6d))
+
+
+### Bug Fixes
+
+* **nav:** store unmeasured LP mark as null with a reason, not 0 ([#316](https://github.com/pgen0x/azimuth/issues/316)) ([909c00e](https://github.com/pgen0x/azimuth/commit/909c00e0840caec8e9ac87561fce6a7b10f37654))
+
 ## [2.15.1](https://github.com/pgen0x/azimuth/compare/v2.15.0...v2.15.1) (2026-11-09)
 
 
