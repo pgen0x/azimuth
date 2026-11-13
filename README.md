@@ -1,3 +1,10 @@
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/logo-dark.png">
+    <img src="docs/assets/logo-light.png" alt="Azimuth" width="160">
+  </picture>
+</p>
+
 # Azimuth — Concentrated-Liquidity Pool Signal Daemon for AI Agents
 
 [![Version](https://img.shields.io/static/v1?label=version&message=2.17.0&color=informational)](CHANGELOG.md) <!-- x-release-please-version -->
