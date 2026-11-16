@@ -972,10 +972,16 @@ func (s *Scanner) pollMode(ctx context.Context, mp meteora.ModeParams) {
 		log.Printf("scanner[%s]: recent capacity refusal; defer entry scan/AI for %s", mp.Mode, wait.Round(time.Second))
 		return
 	}
-	pools, err := meteora.FetchTopPools(s.cfg.DiscoverURL, mp)
+	pools, shadowPools, err := s.fetchPools(mp)
 	if err != nil {
 		log.Printf("scanner[%s]: fetch error: %v", mp.Mode, err)
 		return
+	}
+	// Logging only: journals near misses from the widened page before the
+	// screen below decides anything. Passers are not near misses, so this
+	// never overlaps with what gets forwarded.
+	for _, p := range shadowPools {
+		s.recordSupplyShadow(p, mp)
 	}
 
 	// Per-poll tally so a quiet cycle logs "scanned N, 0 passed" instead of
@@ -994,9 +1000,6 @@ func (s *Scanner) pollMode(ctx context.Context, mp meteora.ModeParams) {
 		cand, reason := meteora.Screen(p, mp)
 		if reason != "" {
 			rejects[reasonKey(reason)]++ // per-pool detail too noisy; tallied per gate
-			if mp.Mode == "pulse" {
-				s.recordSupplyShadow(p, mp)
-			}
 			continue
 		}
 		screened++

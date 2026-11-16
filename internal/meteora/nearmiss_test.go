@@ -1,6 +1,9 @@
 package meteora
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestNearMissFee(t *testing.T) {
 	const floor = 0.025
@@ -33,5 +36,39 @@ func TestNearMissFee(t *testing.T) {
 	p.FeeActiveTVLRatio = 0.03
 	if _, ok := NearMissFee(p, Turnover, floor); ok {
 		t.Fatal("turnover has no fee/active-TVL gate, so it has no near miss")
+	}
+}
+
+// The supply shadow widens ONLY the query's fee/active-TVL bar, and only
+// downward; Screen keeps the real bar either way.
+func TestBuildFiltersSupplyShadowPrefilter(t *testing.T) {
+	off := buildFilters(Pulse)
+	if !strings.Contains(off, "fee_active_tvl_ratio>=0.050") {
+		t.Fatalf("shadow off must keep the gate's bar: %s", off)
+	}
+	on := Pulse
+	on.PrefilterFeeActiveTVL = 0.025
+	got := buildFilters(on)
+	if !strings.Contains(got, "fee_active_tvl_ratio>=0.025") || strings.Contains(got, "fee_active_tvl_ratio>=0.050") {
+		t.Fatalf("shadow on must push the near-miss floor: %s", got)
+	}
+	if strings.Replace(got, "0.025", "0.050", 1) != off {
+		t.Fatalf("shadow must change only the fee/active-TVL clause\non:  %s\noff: %s", got, off)
+	}
+	above := Pulse
+	above.PrefilterFeeActiveTVL = 0.08
+	if buildFilters(above) != off {
+		t.Fatal("a prefilter above the gate must never tighten the query")
+	}
+	noGate := Turnover
+	noGate.PrefilterFeeActiveTVL = 0.025
+	if strings.Contains(buildFilters(noGate), "fee_active_tvl_ratio") {
+		t.Fatal("a mode without the gate must not gain the clause")
+	}
+	// Screen ignores the prefilter: a 0.03 pool is still rejected.
+	p := pulsePool()
+	p.FeeActiveTVLRatio = 0.03
+	if _, reason := Screen(p, on); !strings.HasPrefix(reason, "fee/active-TVL") {
+		t.Fatalf("Screen must keep the real bar, got %q", reason)
 	}
 }

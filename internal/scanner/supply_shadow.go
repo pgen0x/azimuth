@@ -23,6 +23,45 @@ type supplyShadowRow struct {
 	Mode           string  `json:"mode"`
 }
 
+// supplyShadowOn reports whether mp's cycle feeds the supply shadow.
+func (s *Scanner) supplyShadowOn(mp meteora.ModeParams) bool {
+	return mp.Mode == "pulse" && s.cfg.SupplyShadowPath != "" && s.cfg.PulseNearMissFeeFloor > 0 &&
+		mp.MinFeeActiveTVL > 0 && s.cfg.PulseNearMissFeeFloor < mp.MinFeeActiveTVL
+}
+
+// fetchPools returns the page to screen and the page to journal near misses
+// from. With the shadow off they are the same strict query (shadow nil).
+//
+// With it on, the discovery query's fee/active-TVL bar drops to the near-miss
+// floor: the API applies filter_by BEFORE paging, so the strict query can never
+// return the band the shadow measures. Screen still enforces the real bar, so
+// a widened page that is NOT full holds every strict passer and is screened
+// as-is. A FULL widened page may have been truncated by the sort, pushing out
+// pools the strict query would have returned; then the strict query runs too
+// (one extra request, only on a full page) and ITS page is what gets screened,
+// so live entries are never displaced by the shadow.
+func (s *Scanner) fetchPools(mp meteora.ModeParams) (screen, shadow []meteora.Pool, err error) {
+	if !s.supplyShadowOn(mp) {
+		screen, err = meteora.FetchTopPools(s.cfg.DiscoverURL, mp)
+		return screen, nil, err
+	}
+	widened := mp
+	widened.PrefilterFeeActiveTVL = s.cfg.PulseNearMissFeeFloor
+	shadow, err = meteora.FetchTopPools(s.cfg.DiscoverURL, widened)
+	if err != nil {
+		// The shadow must never cost an entry cycle: fall back to the strict query.
+		log.Printf("supply-shadow: widened %s query failed, screening strict page: %v", mp.Mode, err)
+		screen, err = meteora.FetchTopPools(s.cfg.DiscoverURL, mp)
+		return screen, nil, err
+	}
+	if len(shadow) < meteora.DiscoverPageSize {
+		return shadow, shadow, nil
+	}
+	log.Printf("supply-shadow: widened %s query returned full page (%d); re-fetching strict page for screening", mp.Mode, len(shadow))
+	screen, err = meteora.FetchTopPools(s.cfg.DiscoverURL, mp)
+	return screen, shadow, err
+}
+
 func (s *Scanner) clock() time.Time {
 	if s.now != nil {
 		return s.now()
@@ -32,8 +71,8 @@ func (s *Scanner) clock() time.Time {
 
 // recordSupplyShadow journals a pulse pool that failed ONLY the fee/active-TVL
 // gate with a ratio at or above PULSE_NEARMISS_FEE_FLOOR. It measures whether
-// lowering that bar would add good supply, and is logging only: it is called
-// after the pool was already rejected and never touches dedup, dispatch or the
+// lowering that bar would add good supply, and is logging only: it is fed the
+// widened discovery page (fetchPools) and never touches dedup, dispatch or the
 // pipeline. At most one row per pool per PULSE_SEEN_TTL (in-memory, so a
 // restart may repeat a row — the reader dedups by pool). A write error is
 // logged and swallowed; it must never break the cycle.
