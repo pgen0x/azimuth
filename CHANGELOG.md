@@ -5,6 +5,13 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.18.1](https://github.com/pgen0x/azimuth/compare/v2.18.0...v2.18.1) (2026-11-16)
+
+
+### Bug Fixes
+
+* **scanner:** widen the pulse prefilter so the supply shadow can see near misses ([#323](https://github.com/pgen0x/azimuth/issues/323)) ([0b42ad3](https://github.com/pgen0x/azimuth/commit/0b42ad3a5026e07e3ec8e84bfbfda097440273e4))
+
 ## [2.18.0](https://github.com/pgen0x/azimuth/compare/v2.17.0...v2.18.0) (2026-11-16)
 
 
