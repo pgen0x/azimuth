@@ -484,3 +484,23 @@ func clamp01(x float64) float64 {
 	}
 	return x
 }
+
+// NearMissFee reports whether p failed mp's screen on the fee/active-TVL gate
+// ALONE, with a ratio still at or above floor (same percent units as
+// MinFeeActiveTVL). It re-runs Screen with that one gate disabled, so every
+// other gate keeps exactly one implementation and Screen itself is untouched.
+// A mode without the gate (MinFeeActiveTVL == 0) and a floor <= 0 never
+// report a near miss. Used only by the supply-shadow journal — it never
+// admits a pool.
+func NearMissFee(p Pool, mp ModeParams, floor float64) (float64, bool) {
+	ratio := p.FeeActiveTVLRatio
+	if floor <= 0 || mp.MinFeeActiveTVL <= 0 || ratio >= mp.MinFeeActiveTVL || ratio < floor {
+		return ratio, false
+	}
+	relaxed := mp
+	relaxed.MinFeeActiveTVL = 0
+	if _, reason := Screen(p, relaxed); reason != "" {
+		return ratio, false
+	}
+	return ratio, true
+}

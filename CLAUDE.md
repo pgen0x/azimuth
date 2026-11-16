@@ -131,6 +131,13 @@ self-healing; `systemctl --user enable <unit>` fixes it.
 
 Pipeline is a single loop in `internal/scanner`: `poll ▸ screen ▸ dedup ▸ forward`,
 one pass per enabled mode per `POLL_INTERVAL`.
+Pulse rejects also feed a logging-only **supply shadow** (`supply_shadow.go`):
+a pool that failed ONLY the 5m fee/active-TVL gate (`meteora.NearMissFee`,
+which re-runs `Screen` with that gate off) at a ratio >=
+`PULSE_NEARMISS_FEE_FLOOR` gets one row per pool per `PULSE_SEEN_TTL` in
+`SUPPLY_SHADOW_PATH` (empty = off). It never touches dedup or dispatch; it
+exists to measure whether lowering that bar adds good supply before any gate
+changes.
 
 - `internal/config` — env → `Config`. Only enable-toggles live here; screening
   thresholds live in `internal/meteora`.

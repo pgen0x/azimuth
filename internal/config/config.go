@@ -47,6 +47,13 @@ type Config struct {
 	// Pulse polls a 5m discovery window, so its pools churn even faster than
 	// turnover's; it shares turnover's short re-signal window.
 	PulseSeenTTL time.Duration
+	// SupplyShadowPath is the pulse near-miss journal (one JSON line per pool
+	// per PulseSeenTTL that failed ONLY the 5m fee/active-TVL gate). Logging
+	// only: it never changes which pools are sent. Empty disables it.
+	SupplyShadowPath string
+	// PulseNearMissFeeFloor is the lowest fee/active-TVL ratio (percent, the
+	// gate's own units) a near miss must still clear to be journaled. 0 disables.
+	PulseNearMissFeeFloor float64
 
 	// Screening thresholds per mode are defined in the meteora package;
 	// only the enable toggles live here.
@@ -395,6 +402,8 @@ func loadConfig() Config {
 		TurnoverSeenTTL:       getdur("TURNOVER_SEEN_TTL", 30*time.Minute),
 		CasualSeenTTL:         getdur("CASUAL_SEEN_TTL", 6*time.Hour),
 		PulseSeenTTL:          getdur("PULSE_SEEN_TTL", 2*time.Hour),
+		SupplyShadowPath:      getenv("SUPPLY_SHADOW_PATH", ""),
+		PulseNearMissFeeFloor: getfloat("PULSE_NEARMISS_FEE_FLOOR", 0.025),
 		EnablePulse:           getbool("ENABLE_PULSE", false),
 		EnableCasual:          getbool("ENABLE_CASUAL", true),
 		EnableMultiday:        getbool("ENABLE_MULTIDAY", true),
