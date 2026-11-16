@@ -137,7 +137,12 @@ which re-runs `Screen` with that gate off) at a ratio >=
 `PULSE_NEARMISS_FEE_FLOOR` gets one row per pool per `PULSE_SEEN_TTL` in
 `SUPPLY_SHADOW_PATH` (empty = off). It never touches dedup or dispatch; it
 exists to measure whether lowering that bar adds good supply before any gate
-changes.
+changes. The API applies `filter_by` before paging, so with the shadow on the
+pulse query pushes the near-miss floor instead of 0.05
+(`ModeParams.PrefilterFeeActiveTVL`, query-only — `Screen` keeps 0.05);
+without that the shadow was blind (0 rows, 2026-11-16). A FULL widened page
+(`DiscoverPageSize`) may have sorted strict passers out, so the strict query
+runs too and its page is what gets screened (`scanner.fetchPools`).
 
 - `internal/config` — env → `Config`. Only enable-toggles live here; screening
   thresholds live in `internal/meteora`.

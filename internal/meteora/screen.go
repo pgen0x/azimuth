@@ -34,6 +34,12 @@ type ModeParams struct {
 	// instead of on fee/TVL plus an absolute daily-fee floor.
 	MinFeeActiveTVL float64 // fee/active-TVL floor for the window (percent)
 	MinVolumeUSD    float64 // raw window volume floor (USD)
+	// PrefilterFeeActiveTVL, when > 0 and below MinFeeActiveTVL, is the
+	// fee/active-TVL bar pushed into the discovery query INSTEAD of
+	// MinFeeActiveTVL. Query-only: Screen never reads it, so the local gate
+	// stays at MinFeeActiveTVL. Set by the scanner for the supply shadow, which
+	// needs to see the band below the gate the API would otherwise drop.
+	PrefilterFeeActiveTVL float64
 
 	// Ceilings the daemon used to apply unconditionally. Both are zero-disabled
 	// so a mode can opt out, which means every mode that wants them must set

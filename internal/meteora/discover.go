@@ -91,7 +91,11 @@ func buildFilters(mp ModeParams) string {
 	}
 	// Pulse-mode thresholds. Both fields are verified live as filter_by fields.
 	if mp.MinFeeActiveTVL > 0 {
-		f = append(f, fmt.Sprintf("fee_active_tvl_ratio>=%.3f", mp.MinFeeActiveTVL))
+		bar := mp.MinFeeActiveTVL
+		if mp.PrefilterFeeActiveTVL > 0 && mp.PrefilterFeeActiveTVL < bar {
+			bar = mp.PrefilterFeeActiveTVL
+		}
+		f = append(f, fmt.Sprintf("fee_active_tvl_ratio>=%.3f", bar))
 	}
 	if mp.MinVolumeUSD > 0 {
 		f = append(f, fmt.Sprintf("volume>=%.0f", mp.MinVolumeUSD))
@@ -105,6 +109,11 @@ func buildFilters(mp ModeParams) string {
 	return strings.Join(f, "&&")
 }
 
+// DiscoverPageSize is the discovery query's page_size. A page this full may
+// have been truncated by the API's sort, so callers widening the query can tell
+// when the page no longer holds every pool the strict query would return.
+const DiscoverPageSize = 50
+
 // FetchTopPools pulls the trending pools for a mode, applying the mode's
 // thresholds API-side. Mirrors dlmm_pipeline.fetch_top_pools.
 func FetchTopPools(baseURL string, mp ModeParams) ([]Pool, error) {
@@ -112,8 +121,8 @@ func FetchTopPools(baseURL string, mp ModeParams) ([]Pool, error) {
 	if category == "" {
 		category = "trending"
 	}
-	reqURL := fmt.Sprintf("%s?page_size=50&timeframe=%s&category=%s&filter_by=%s",
-		baseURL, mp.Timeframe, category, url.QueryEscape(buildFilters(mp)))
+	reqURL := fmt.Sprintf("%s?page_size=%d&timeframe=%s&category=%s&filter_by=%s",
+		baseURL, DiscoverPageSize, mp.Timeframe, category, url.QueryEscape(buildFilters(mp)))
 	if mp.SortBy != "" {
 		reqURL += "&sort_by=" + url.QueryEscape(mp.SortBy)
 	}
