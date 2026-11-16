@@ -57,7 +57,7 @@ class ExitLiquidityJournalTests(unittest.TestCase):
     def run_single_signal_abort(self, c, liquidity, other_reason=None):
         """The real non-batch live-gate block of main(), executed on its own."""
         code = self.snippet('    if not batch_mode or cli.pool:\n        rejection = predeploy_live_gate_reject(winner',
-                            '    print(f"\\n🚀 WINNING CANDIDATE')
+                            '    # Pulse liquidity-scaled ticket')
         ns = dict(vars(pipeline), winner=c, deploy_sol=0.1, timeframe='5m', mode='pulse', batch_mode=False,
                   cli=None, PROFILE_DIR=str(self.profile),
                   predeploy_live_gate_reject=lambda cand, sol, tf: gate(cand, liquidity, other_reason=other_reason))
