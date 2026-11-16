@@ -5,6 +5,14 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.18.0](https://github.com/pgen0x/azimuth/compare/v2.17.0...v2.18.0) (2026-11-16)
+
+
+### Features
+
+* **pipeline:** halve pulse tickets on thin or unknown entry liquidity ([#322](https://github.com/pgen0x/azimuth/issues/322)) ([3d2378c](https://github.com/pgen0x/azimuth/commit/3d2378cf1b3459655976716b3c3f5fe29c4b81be))
+* **scanner:** journal pulse fee/active-TVL near misses as supply shadow ([#320](https://github.com/pgen0x/azimuth/issues/320)) ([2ed336a](https://github.com/pgen0x/azimuth/commit/2ed336a9a9969082c01b757579f56af740794c54))
+
 ## [2.17.0](https://github.com/pgen0x/azimuth/compare/v2.16.0...v2.17.0) (2026-11-13)
 
 
