@@ -1042,6 +1042,63 @@ def risk_scaled_ticket(deploy_sol, score, mode):
     return (amount if amount >= minimum else 0.0), multiplier
 
 
+# Pulse tail cut: half ticket when the entry pool is thin. The pulse losses that
+# decide its net (dump / fast-out-underwater exits) concentrate in thin pools,
+# and a smaller ticket shrinks them without skipping the entry. Unknown depth is
+# the risk case, so it is halved too. 0 disables the rule.
+PULSE_LIQ_HALF_USD_DEFAULT = 15000.0
+
+
+def pulse_liq_half_usd():
+    """The threshold from PULSE_LIQ_HALF_USD; malformed or negative uses the default."""
+    raw = os.environ.get("PULSE_LIQ_HALF_USD")
+    if raw is None or raw.strip() == "":
+        return PULSE_LIQ_HALF_USD_DEFAULT
+    try:
+        value = float(raw)
+    except ValueError:
+        return PULSE_LIQ_HALF_USD_DEFAULT
+    return value if math.isfinite(value) and value >= 0 else PULSE_LIQ_HALF_USD_DEFAULT
+
+
+def liquidity_scaled_ticket(deploy_sol, candidate, mode):
+    """Halve a pulse ticket on thin or unknown entry liquidity; never below the minimum.
+
+    Returns (ticket, evidence). evidence is None when the rule does not apply
+    (other modes, or the rule disabled); otherwise it is the journal fields for
+    risk_sizing. Liquidity is the live DexScreener depth of our exact pool that
+    predeploy_live_gate_reject recorded, the same value the exit floor reads.
+    """
+    if mode != "pulse":
+        return deploy_sol, None
+    threshold = pulse_liq_half_usd()
+    if threshold == 0:
+        return deploy_sol, None
+    gates = candidate.get("entry_live_gates")
+    liquidity = gates.get("pool_liquidity_usd") if isinstance(gates, dict) else None
+    if not (isinstance(liquidity, (int, float)) and not isinstance(liquidity, bool)
+            and math.isfinite(liquidity) and liquidity >= 0):
+        liquidity = None
+    scaled = liquidity is None or liquidity < threshold
+    ticket = deploy_sol
+    clamped = False
+    if scaled:
+        minimum = CASH_POLICY['minimum_entry_lamports'] / 1e9
+        ticket = round(deploy_sol * 0.5, 2)
+        if ticket < minimum:
+            # The cut must never turn an entry into a skip.
+            ticket = min(deploy_sol, minimum)
+            clamped = True
+    return ticket, {
+        "liquidity_scaled": scaled,
+        "liquidity_usd": float(liquidity) if liquidity is not None else None,
+        "liq_half_usd": threshold,
+        "liquidity_multiplier": 0.5 if scaled else 1.0,
+        "liquidity_clamped": clamped,
+        "pre_liquidity_ticket_sol": deploy_sol,
+    }
+
+
 def apply_batch_conviction(candidates, mode="multiday"):
     """Deterministic port of the deploy agent's STEP 3 pick heuristics.
 
@@ -2065,6 +2122,22 @@ def main():
                                        extra=evidence)
             print(f"Aborting deploy: live gate rejected: {rejection}")
             sys.exit(0)
+
+    # Pulse liquidity-scaled ticket, on the risk-sized paths only. It runs after
+    # the live gate on purpose: the signal paths only learn the pool's live depth
+    # there. Halving lowers the price impact the gate already accepted.
+    if risk_sizing is not None:
+        liq_ticket, liq_sizing = liquidity_scaled_ticket(deploy_sol, winner, mode)
+        if liq_sizing is not None:
+            if liq_sizing["liquidity_scaled"]:
+                depth = liq_sizing["liquidity_usd"]
+                depth = "unknown" if depth is None else f"${depth:,.0f}"
+                print(f"Liquidity-scaled ticket: {winner['base_symbol']} pool liquidity {depth} "
+                      f"(half below ${liq_sizing['liq_half_usd']:,.0f}) -> {deploy_sol:.2f} -> {liq_ticket:.2f} SOL"
+                      + (" (clamped to minimum)" if liq_sizing["liquidity_clamped"] else ""))
+            deploy_sol = liq_ticket
+            risk_sizing.update(liq_sizing)
+            risk_sizing["accepted_ticket_sol"] = deploy_sol
 
     print(f"\n🚀 WINNING CANDIDATE: {winner['name']} ({winner['pool']})")
 
