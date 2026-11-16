@@ -166,6 +166,10 @@ type Scanner struct {
 	aiProbeOutput    []byte
 	aiProbeErr       error
 	aiProbeTimedOut  bool
+	// nearMissSeen dedups the pulse supply-shadow journal in memory: pool ->
+	// time of its last row. now is the injected clock (nil = time.Now).
+	nearMissSeen map[string]time.Time
+	now          func() time.Time
 }
 
 func (s *Scanner) probeAI(ctx context.Context) ([]byte, error, bool, bool) {
@@ -990,6 +994,9 @@ func (s *Scanner) pollMode(ctx context.Context, mp meteora.ModeParams) {
 		cand, reason := meteora.Screen(p, mp)
 		if reason != "" {
 			rejects[reasonKey(reason)]++ // per-pool detail too noisy; tallied per gate
+			if mp.Mode == "pulse" {
+				s.recordSupplyShadow(p, mp)
+			}
 			continue
 		}
 		screened++
