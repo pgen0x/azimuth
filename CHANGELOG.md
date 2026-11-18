@@ -5,6 +5,13 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.19.0](https://github.com/pgen0x/azimuth/compare/v2.18.1...v2.19.0) (2026-11-18)
+
+
+### Features
+
+* **shadow:** journal fast re-entry after non-loss pulse exits ([#325](https://github.com/pgen0x/azimuth/issues/325)) ([3cf067f](https://github.com/pgen0x/azimuth/commit/3cf067ff5bf20691baae6af35e29c7c37e194041))
+
 ## [2.18.1](https://github.com/pgen0x/azimuth/compare/v2.18.0...v2.18.1) (2026-11-16)
 
 
