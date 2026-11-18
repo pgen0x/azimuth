@@ -21,6 +21,7 @@ from tz_util import local_time_str
 from dlmm_monitor import position_live_onchain, load_soul_dlmm_params as load_exit_params
 from dlmm_weights import ranking_weight_context
 from dlmm_candidate_watch import record_pipeline_candidates, record_pipeline_reject
+from dlmm_reentry_shadow import record_reentry_blocked
 from dlmm_geometry_shadow import record_entry as record_geometry_shadow
 
 CASH_POLICY = json.loads(Path(__file__).with_name('dlmm_cash_policy.json').read_text())
@@ -1862,6 +1863,7 @@ def main():
         c["h6"] = h6
         c["h24"] = h24
         if m5 is not None and m5 < -5.0:
+            record_reentry_blocked(PROFILE_DIR, mode, c, h1=h1)  # logging only
             record_pipeline_reject(PROFILE_DIR, mode, "momentum_m5_dump", c.get("pool"), c.get("base_mint"), c.get("sol_is_x"), c.get("name"))
             print(f"Skipping {c['name']} - dumping {m5:.1f}% in 5m (momentum screen)")
             continue

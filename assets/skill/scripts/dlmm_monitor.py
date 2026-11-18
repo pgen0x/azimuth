@@ -1036,6 +1036,54 @@ def recover_close_intents():
               "the close landed but its process died before writing the row.")
 
 
+_REENTRY_SHADOW_WARNED = False
+
+
+def reentry_shadow_qualifies(close_reason, pnl_pct, active_bin, upper_bin):
+    """True when a close is a NON-LOSS exit the re-entry shadow measures: a
+    pump far above range, an UPSIDE out-of-range (active bin above the upper
+    bin; unknown bins never qualify), any trailing take-profit, or a fast-out
+    dump exit that still closed in profit. Pure: no I/O."""
+    reason = close_reason or ""
+    if reason.startswith(("Pumped far above range", "Trailing")):
+        return True
+    if reason.startswith("Out of Range"):
+        return active_bin is not None and upper_bin is not None and active_bin > upper_bin
+    if reason.startswith("Fast-out dump exit"):
+        return pnl_pct is not None and pnl_pct > 0
+    return False
+
+
+def record_reentry_shadow(pool, meta, close_reason, pnl_pct, closed_at,
+                          active_bin, upper_bin, cooldown_secs):
+    """LOGGING ONLY. Appends one kind:"close" row to
+    memories/dlmm_reentry_shadow.jsonl for a qualifying pulse close, so a
+    shadow evaluator can ask whether a fast re-entry after a non-loss exit
+    would have paid. Called after the close is confirmed and the cooldown is
+    already written; it reads nothing back, makes no network call, never
+    raises and returns nothing the close path uses. REENTRY_SHADOW=0 disables
+    it without a deploy. A write failure is logged once per process."""
+    global _REENTRY_SHADOW_WARNED
+    try:
+        if os.environ.get("REENTRY_SHADOW", "1").strip() == "0":
+            return False
+        if not reentry_shadow_qualifies(close_reason, pnl_pct, active_bin, upper_bin):
+            return False
+        row = dict(kind="close", ts=int(time.time()), pool=pool,
+                   mint=(meta or {}).get("base_mint"), reason=close_reason,
+                   pnl_pct=pnl_pct, closed_at=int(closed_at), active_bin=active_bin,
+                   upper_bin=upper_bin, cooldown_secs=cooldown_secs)
+        path = os.path.join(PROFILE_DIR, "memories", "dlmm_reentry_shadow.jsonl")
+        with open(path, "a") as journal:
+            journal.write(json.dumps(row) + "\n")
+        return True
+    except Exception as exc:  # never let a shadow journal break a close
+        if not _REENTRY_SHADOW_WARNED:
+            _REENTRY_SHADOW_WARNED = True
+            print(f"⚠️ Re-entry shadow journal failed (further failures silent): {exc}")
+        return False
+
+
 def log_close(pool, pair, meta, pos_addr, pnl_pct, realized_sol, fee_per_tvl_24h,
               age_min, reason, txs, dry_run, event="exit", unclaimed_fees_sol=None,
               pnl_basis=None, recovered_from_intent=False):
@@ -3490,6 +3538,11 @@ def main():
                         run_command(f"redis-cli set \"{mint_cd_key}\" \"{close_reason[:120]}\" ex {cooldown_secs}")
                     cd_label = f"{cooldown_secs // 60}m" if cooldown_secs < 3600 else f"{cooldown_secs // 3600}h"
                     print(f"🚫 Re-entry cooldown set for {base_symbol_cd}: {cd_label} (reason: {'dump/momentum' if is_dump_close else 'normal exit'})")
+                    # Logging only: the cooldown above is already written and
+                    # nothing below reads this. See record_reentry_shadow.
+                    if mode_cd == "pulse" and not is_dry_run_stored:
+                        record_reentry_shadow(pool, meta, close_reason, pnl_pct, time.time(),
+                                              active_bin, upper_bin, cooldown_secs)
 
                 # Low-yield exits also cool the POOL itself for 4h (a low-yield
                 # pool cooldown): the symbol cooldown above

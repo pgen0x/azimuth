@@ -143,6 +143,16 @@ pulse query pushes the near-miss floor instead of 0.05
 without that the shadow was blind (0 rows, 2026-11-16). A FULL widened page
 (`DiscoverPageSize`) may have sorted strict passers out, so the strict query
 runs too and its page is what gets screened (`scanner.fetchPools`).
+A second logging-only journal, the **re-entry shadow**
+(`memories/dlmm_reentry_shadow.jsonl`), measures fast re-entry after a NON-loss
+pulse exit. It has three writers, and none of them changes a decision:
+`dlmm_monitor.py` writes `kind:"close"` rows after the cooldown is set (pump
+above range, upside OOR, trailing, fast-out in profit; `REENTRY_SHADOW=0`
+disables it); the daemon writes `kind:"blocked"` rows when a pulse pool passed
+`Screen` and only the cooldown stopped it (`reentry_shadow.go`,
+`REENTRY_SHADOW_PATH`); and `dlmm_pipeline.py` writes `blocked` rows for an
+m5-dump reject within 60m of a close (`dlmm_reentry_shadow.py`), because pulse
+skips the daemon's momentum gate and that check only runs in the pipeline.
 
 - `internal/config` — env → `Config`. Only enable-toggles live here; screening
   thresholds live in `internal/meteora`.
