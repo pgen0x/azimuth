@@ -170,6 +170,11 @@ type Scanner struct {
 	// time of its last row. now is the injected clock (nil = time.Now).
 	nearMissSeen map[string]time.Time
 	now          func() time.Time
+	// reentrySeen dedups the re-entry shadow's "blocked" rows in memory: pool
+	// -> time of its last row (see reentry_shadow.go).
+	reentrySeen map[string]time.Time
+	// cooldownLookup is a test seam; nil means s.seen.CooldownRemaining.
+	cooldownLookup func(ctx context.Context, symbol, mint, pool string) time.Duration
 }
 
 func (s *Scanner) probeAI(ctx context.Context) ([]byte, error, bool, bool) {
@@ -1006,9 +1011,12 @@ func (s *Scanner) pollMode(ctx context.Context, mp meteora.ModeParams) {
 
 		// Check symbol, mint and pool cooldowns before AI dispatch and dedup.
 		// Rejected pools can return as soon as their existing cooldown expires.
-		if cd := s.seen.CooldownRemaining(ctx, cand.BaseSymbol, cand.BaseMint, cand.Pool); cd > 0 {
+		if cd := s.cooldownRemaining(ctx, cand.BaseSymbol, cand.BaseMint, cand.Pool); cd > 0 {
 			cooldownBlocked++
 			recordSolanaReject(mp.Mode, p, cand, "cooldown", cd.String(), nil)
+			if mp.Mode == "pulse" {
+				s.recordReentryBlocked(p, cand, cd) // logging only
+			}
 			log.Printf("scanner[%s]: %s (%s) in re-entry cooldown (%s left)",
 				mp.Mode, cand.BaseSymbol, cand.Pool[:8], cd.Round(time.Minute))
 			continue

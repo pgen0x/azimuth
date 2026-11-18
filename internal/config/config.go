@@ -54,6 +54,11 @@ type Config struct {
 	// PulseNearMissFeeFloor is the lowest fee/active-TVL ratio (percent, the
 	// gate's own units) a near miss must still clear to be journaled. 0 disables.
 	PulseNearMissFeeFloor float64
+	// ReentryShadowPath is the re-entry shadow journal (memories/
+	// dlmm_reentry_shadow.jsonl, shared with dlmm_monitor.py's "close" rows).
+	// The daemon appends a "blocked" row when a pulse pool passed Screen and was
+	// stopped by the re-entry cooldown. Logging only. Empty disables it.
+	ReentryShadowPath string
 
 	// Screening thresholds per mode are defined in the meteora package;
 	// only the enable toggles live here.
@@ -404,6 +409,7 @@ func loadConfig() Config {
 		PulseSeenTTL:          getdur("PULSE_SEEN_TTL", 2*time.Hour),
 		SupplyShadowPath:      getenv("SUPPLY_SHADOW_PATH", ""),
 		PulseNearMissFeeFloor: getfloat("PULSE_NEARMISS_FEE_FLOOR", 0.025),
+		ReentryShadowPath:     getenv("REENTRY_SHADOW_PATH", ""),
 		EnablePulse:           getbool("ENABLE_PULSE", false),
 		EnableCasual:          getbool("ENABLE_CASUAL", true),
 		EnableMultiday:        getbool("ENABLE_MULTIDAY", true),
