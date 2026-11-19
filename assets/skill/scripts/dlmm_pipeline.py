@@ -544,7 +544,30 @@ def record_deploy_verification(profile, position, mode, verified):
         return False
 
 
-def compute_deploy_amount(wallet_sol):
+MAX_TICKET_SOL_DEFAULT = 5.0
+
+
+def max_ticket_sol():
+    """Per-entry ticket ceiling from PULSE_MAX_TICKET_SOL (SOL).
+
+    Unset, malformed, non-finite or <= 0 keeps the historical 5.0 ceiling. Never
+    below the cash-policy minimum, so the cap cannot turn an entry into a skip.
+    It caps every Solana entry ticket, whatever the mode: pulse is the only live
+    mode, and a ceiling that let another mode size past it would defeat it.
+    """
+    raw = os.environ.get("PULSE_MAX_TICKET_SOL")
+    value = MAX_TICKET_SOL_DEFAULT
+    if raw is not None and raw.strip():
+        try:
+            parsed = float(raw)
+        except ValueError:
+            parsed = None
+        if parsed is not None and math.isfinite(parsed) and parsed > 0:
+            value = parsed
+    return max(value, CASH_POLICY['minimum_entry_lamports'] / 1e9)
+
+
+def compute_deploy_amount(wallet_sol, ceil=None):
     reserve = CASH_POLICY['native_reserve_lamports']/1e9
     minimum = CASH_POLICY['minimum_entry_lamports']/1e9
     # Configured transaction allowance covers typical position/ATA rent.
@@ -554,7 +577,9 @@ def compute_deploy_amount(wallet_sol):
         return 0.0
     pct = 0.45
     floor = 0.3
-    ceil = 5.0
+    # The ceiling is applied here, on the base ticket, so the cash check and the
+    # price-impact gate already see the capped size; later steps only shrink it.
+    ceil = max_ticket_sol() if ceil is None else ceil
     deployable = max(0.0, wallet_sol - reserve)
     dynamic = deployable * pct
     if dynamic < floor:
@@ -1504,7 +1529,8 @@ def main():
         print(f"[SKIP] Wallet {sol_balance:.3f} SOL < {entry_floor:.3f} SOL entry minimum including reserve and rent")
         defer_capacity_signals(cli)
         sys.exit(0)
-    deploy_sol = compute_deploy_amount(sol_balance)
+    ticket_cap = max_ticket_sol()
+    deploy_sol = compute_deploy_amount(sol_balance, ceil=ticket_cap)
     # The turnover half-size cap (2026-07-15) was removed 2026-07-28. It was sized
     # against the net-negative 14d journal produced by the OLD balanced_tight entry,
     # which pre-swapped half the deploy into the base token — the losses it capped
@@ -2097,6 +2123,11 @@ def main():
             "wallet_native_sol": sol_balance,
             "entry_route": entry_route_label(cli, batch_mode),
         }
+        # Ticket ceiling (PULSE_MAX_TICKET_SOL). requested_ticket_sol is already
+        # capped; this records whether the cap was what bound it.
+        uncapped_base = compute_deploy_amount(sol_balance, ceil=MAX_TICKET_SOL_DEFAULT)
+        risk_sizing.update(ticket_cap_sol=ticket_cap, uncapped_base_ticket_sol=uncapped_base,
+                           ticket_capped=uncapped_base > ticket_cap)
 
     # 5. Indicators Check (batch mode already ran this inside the pick loop)
     if params.get("INDICATORS_ENABLED") and not batch_mode:
@@ -2139,6 +2170,15 @@ def main():
                       + (" (clamped to minimum)" if liq_sizing["liquidity_clamped"] else ""))
             deploy_sol = liq_ticket
             risk_sizing.update(liq_sizing)
+            risk_sizing["accepted_ticket_sol"] = deploy_sol
+
+    # Final ticket ceiling on every path. The base ticket is already capped, so
+    # this only lowers, never raises: a guard against any later step growing it.
+    if deploy_sol > ticket_cap:
+        print(f"Ticket cap: {deploy_sol:.2f} -> {ticket_cap:.2f} SOL (PULSE_MAX_TICKET_SOL)")
+        deploy_sol = ticket_cap
+        if risk_sizing is not None:
+            risk_sizing["ticket_capped"] = True
             risk_sizing["accepted_ticket_sol"] = deploy_sol
 
     print(f"\n🚀 WINNING CANDIDATE: {winner['name']} ({winner['pool']})")

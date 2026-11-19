@@ -823,6 +823,22 @@ class BriefTests(unittest.TestCase):
         self.assertEqual(t['min_score']['pulse'],{'floor':30.0,'min_score':66.0})
         self.assertEqual(c.entry_funnel(self.p,brief_run(),T,since,0.1)['ticket']['min_score']['pulse']['min_score'],None)
 
+    def test_ticket_ceiling_matches_pipeline(self):
+        scripts=Path(__file__).resolve().parents[2]/'assets/skill/scripts'
+        sys.path.insert(0,str(scripts))
+        try: import dlmm_pipeline as pipeline
+        except Exception as e: self.skipTest('pipeline import unavailable: %r'%e)
+        finally: sys.path.remove(str(scripts))
+        pol=pipeline.CASH_POLICY
+        for raw in ('1.0','0.5','0.05','abc','-1','0','nan',None):
+            env={k:v for k,v in os.environ.items() if k!='PULSE_MAX_TICKET_SOL'}
+            if raw is not None: env['PULSE_MAX_TICKET_SOL']=raw
+            with patch.dict(os.environ,env,clear=True):
+                self.assertEqual(c.ticket_ceiling(pol),pipeline.max_ticket_sol(),raw)
+                for i in range(0,1200,7):
+                    w=i/100
+                    self.assertEqual(c.deploy_ticket(w,pol),pipeline.compute_deploy_amount(w),(raw,w))
+
     def test_ticket_math_matches_pipeline(self):
         scripts=Path(__file__).resolve().parents[2]/'assets/skill/scripts'
         sys.path.insert(0,str(scripts))

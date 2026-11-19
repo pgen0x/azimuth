@@ -108,7 +108,8 @@ class MainCallSiteTests(unittest.TestCase):
 
     def run_block(self, mode, winner, risk_sizing, deploy_sol=0.36):
         ns = {"liquidity_scaled_ticket": pipeline.liquidity_scaled_ticket, "mode": mode,
-              "winner": winner, "risk_sizing": risk_sizing, "deploy_sol": deploy_sol}
+              "winner": winner, "risk_sizing": risk_sizing, "deploy_sol": deploy_sol,
+              "ticket_cap": pipeline.MAX_TICKET_SOL_DEFAULT}
         out = io.StringIO()
         with threshold(None), contextlib.redirect_stdout(out):
             exec(self.snippet, ns)
