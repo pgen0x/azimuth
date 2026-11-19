@@ -5,6 +5,13 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.21.0](https://github.com/pgen0x/azimuth/compare/v2.20.0...v2.21.0) (2026-11-19)
+
+
+### Features
+
+* **shadow:** journal GMGN smart-money inflow on screened pools ([#329](https://github.com/pgen0x/azimuth/issues/329)) ([f09c8cf](https://github.com/pgen0x/azimuth/commit/f09c8cf93cbdfea5b0d1831900208ee01774bb01))
+
 ## [2.20.0](https://github.com/pgen0x/azimuth/compare/v2.19.0...v2.20.0) (2026-11-19)
 
 
