@@ -5,6 +5,13 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.20.0](https://github.com/pgen0x/azimuth/compare/v2.19.0...v2.20.0) (2026-11-19)
+
+
+### Features
+
+* **pipeline:** cap every entry ticket with PULSE_MAX_TICKET_SOL ([#328](https://github.com/pgen0x/azimuth/issues/328)) ([12b2a7d](https://github.com/pgen0x/azimuth/commit/12b2a7db32c62e45f539cb45811690918cba4802))
+
 ## [2.19.0](https://github.com/pgen0x/azimuth/compare/v2.18.1...v2.19.0) (2026-11-18)
 
 
