@@ -74,6 +74,8 @@ its zone.
 | `/api/overview` | Latest persisted NAV, source freshness, unit states, collector timestamp/error |
 | `/api/journal?q=IDENTIFIER&stage=swap&offset=0` | 50 rows/page, case-insensitive filter, exact stage filter, retained-tail match count |
 | `/api/capital?tz=ZONE` | North star per local day over six weeks (cash, known, deltas, unpriced/deferred SPL counts, external-flow delta) and the 14-day NAV bridge |
+| `/api/capital/month?month=YYYY-MM&tz=ZONE` | Capital calendar: one month of north-star days (empty `month` = the current one), plus `first_month` and `current_month` to bound the picker. A day whose last snapshot has an unmeasured cash part takes cash from that day's last measured snapshot and is flagged `cash_fallback` (shown with `*`). Malformed or future months answer 400; months before the data are empty. One bounded collector run (~32 NAV lookups) per zone and month, cached 1 hour (current month: 10 minutes), one run at a time |
+| `/api/price/sol` | Current SOL/USD for the calendar's USD view, from Jupiter's keyless price API (generic User-Agent, no key), cached 5 minutes. Always 200: `status: unavailable` with `usd: null` on failure (retried after a minute), and the page then disables USD. There is no historical price in the NAV journal, so USD is labelled "at current SOL price" |
 | `/api/live?tz=ZONE` | Dust rent ledger and realized PnL by mode and local day since the `-since` cutover |
 | `/api/robinhood?tz=ZONE&n=200` | Robinhood Chain: monitor unit state, scanner toggles, last `n` (1 to 1000) log lines, open positions per the journals, successful closes per quote asset and local day, stranded tokens |
 | `/api/hermes` | Profile/model/fallback configuration, skills, gateway state, recent session metadata |
@@ -92,7 +94,7 @@ per run (a slow run delays the next one; runs never overlap):
 
 Fast plus slow panels carry the same content as a single full collection at the same instant (tested), plus `slow_collected_at`. Collection
 failure retains the previous snapshot or slow panels and exposes an error; a failed slow half is retried on the
-next 60-second tick. Browser activity never invokes NAV collection, accounting runs, blockchain RPC, model/provider probes or Helius Wallet API.
+next 60-second tick. Browser activity never invokes accounting runs, blockchain RPC, model/provider probes or Helius Wallet API. It invokes NAV collection only for a zone's first request and for a calendar month not in the month cache, both bounded as above; its only outbound request is the cached SOL/USD price.
 
 ## Agent brief
 

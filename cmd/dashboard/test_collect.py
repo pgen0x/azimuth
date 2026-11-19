@@ -295,6 +295,40 @@ class CollectorTests(unittest.TestCase):
                 self.assertEqual(days[0]['ts'],base+20);self.assertIsNone(days[1]['d_cash_sol'])
                 rows(f,[snap(base-1,1,1),snap(base,2,2),snap(base+DAY-1,3,3),snap(base+DAY,4,4)])
                 self.assertEqual([x['native_sol'] for x in c.north_star(self.m,base+DAY,2,tz)['days']],[1,3,4])
+    def _month_fixture(self):
+        base=19997*DAY  # 2024-10-01 00:00 UTC
+        unmeasured=dict(snap(base+DAY+20*3600,4,1.5),lp_mark_sol=None,lp_mark_unmeasured_reason='synthetic')
+        rows(self.m/'dlmm_nav.jsonl',[snap(base-3600,1,1.0),snap(base+12*3600,2,1.01),snap(base+DAY+10*3600,3,1.03),unmeasured])
+        return base
+    def test_north_star_month_seeds_first_delta_and_falls_back(self):
+        base=self._month_fixture();now=base+4*DAY+12*3600
+        with frozen_clock():ns=c.north_star_month(self.m,now,'2024-10','UTC')
+        days=ns['days']
+        self.assertEqual([d['day'] for d in days],['2024-10-0%d'%i for i in range(1,6)])  # future days left out
+        self.assertAlmostEqual(days[0]['d_cash_sol'],.01)  # seeded from 30 Sep, which is not returned
+        self.assertTrue(days[1]['cash_fallback']);self.assertEqual(days[1]['cash_ts'],base+DAY+10*3600)
+        self.assertAlmostEqual(days[1]['cash_sol'],1.03);self.assertAlmostEqual(days[1]['d_cash_sol'],.02)
+        self.assertEqual(days[1]['ts'],base+DAY+20*3600)  # the day's own snapshot is still the last row
+        self.assertEqual(days[2]['status'],'no_snapshot');self.assertNotIn('d_cash_sol',days[2])
+        self.assertEqual((ns['month'],ns['first_month'],ns['current_month']),('2024-10','2024-09','2024-10'))
+        # The trailing-window panel keeps its old behaviour: no fallback there.
+        with frozen_clock():old=c.north_star(self.m,now,4,'UTC')['days']
+        self.assertIsNone(old[1]['cash_sol']);self.assertNotIn('cash_fallback',old[1])
+    def test_north_star_month_bounds(self):
+        base=self._month_fixture();now=base+4*DAY
+        with frozen_clock():
+            sep=c.north_star_month(self.m,now,'2024-09','UTC')
+            self.assertEqual([d['day'] for d in sep['days']],['2024-09-30'])  # nothing before the first row
+            for empty in ('2024-08','2024-11','2025-01'):
+                self.assertEqual(c.north_star_month(self.m,now,empty,'UTC')['days'],[],empty)
+        for bad in ('2024-13','2024-1','x',''):
+            with self.assertRaises(ValueError):c.north_star_month(self.m,now,bad,'UTC')
+        self.assertEqual(c.north_star_month(Path(self.tmp.name)/'none',now,'2024-10','UTC')['first_month'],None)
+    def test_north_star_month_zone(self):
+        base=self._month_fixture()
+        # 30 Sep 23:00 UTC is already 1 Oct in Jakarta: the first month there is October.
+        with frozen_clock():ns=c.north_star_month(self.m,base+4*DAY,'2024-10','Asia/Jakarta')
+        self.assertEqual(ns['first_month'],'2024-10');self.assertEqual(ns['days'][0]['day'],'2024-10-01')
     def test_unknown_zone_is_an_unavailable_panel(self):
         self.assertEqual(c.panel(c.north_star,self.m,T,1,'Mars/Olympus')['status'],'unavailable')
     def test_nav_wall_clock_budget_still_stops_a_slow_lookup(self):

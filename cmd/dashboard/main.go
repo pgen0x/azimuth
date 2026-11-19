@@ -88,6 +88,12 @@ type server struct {
 	slowAt         time.Time                                                                                              // when slow was collected; zero = never
 	slowFailure    string
 	runCollector   func(ctx context.Context, mode string, zones []string) ([]byte, error) // nil = python3; tests stub it
+	months         map[string]monthEntry                                                  // capital calendar months, by "tz|YYYY-MM"
+	monthMu        sync.Mutex                                                             // guards months
+	monthRun       sync.Mutex                                                             // one month collection at a time
+	price          priceState
+	fetchPrice     func(ctx context.Context) (float64, error) // nil = fetchSOLPrice; tests stub it
+	now            func() time.Time                           // nil = time.Now
 }
 
 var identifier = regexp.MustCompile(`^[A-Za-z0-9_.:-]{1,150}$`)
@@ -123,7 +129,9 @@ func (s *server) collect(ctx context.Context, mode string, zones []string) (obje
 	run := s.runCollector
 	if run == nil {
 		run = func(ctx context.Context, mode string, zones []string) ([]byte, error) {
-			return collectorCommand(ctx, s.profile, s.state, strconv.FormatInt(s.since, 10), strings.Join(zones, ","), mode).Output()
+			// A mode may carry its own arguments ("month 2026-09"), each its own argv entry.
+			args := append([]string{s.profile, s.state, strconv.FormatInt(s.since, 10), strings.Join(zones, ",")}, strings.Fields(mode)...)
+			return collectorCommand(ctx, args...).Output()
 		}
 	}
 	output, err := run(ctx, mode, zones)
@@ -346,6 +354,15 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.URL.Path == "/api/agent/brief" {
 		s.serveBrief(w, r)
+		return
+	}
+	// Neither needs the cached snapshot: each has its own bounded, cached source.
+	if r.URL.Path == "/api/capital/month" {
+		s.serveMonth(w, r)
+		return
+	}
+	if r.URL.Path == "/api/price/sol" {
+		s.servePrice(w, r)
 		return
 	}
 	s.mu.RLock()

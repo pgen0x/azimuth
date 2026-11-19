@@ -13,7 +13,11 @@ async function render(tab, payload, fail=false, extra={}) {
     if ((fail && name === tab) || (extra.failing || []).includes(name)) return {ok: false, status: 500, text: async () => 'synthetic failure'};
     return {ok: true, status: 200, json: async () => name === tab ? payload : fixtures[name]};
   }, setInterval: fn => intervals.push(fn), module: {exports: {}}};
-  vm.runInNewContext(script + '\nmodule.exports={render,setTab:t=>{tab=t}};', ctx);
+  // Optional storage: an object (kept per viewer) or 'throw' (blocked site data, private window).
+  if (extra.store === 'throw') ctx.localStorage = {getItem() { throw Error('blocked') }, setItem() { throw Error('blocked') }};
+  else if (extra.store) ctx.localStorage = {getItem: k => extra.store[k] ?? null, setItem: (k, v) => { extra.store[k] = String(v) }};
+  vm.runInNewContext(script + '\nmodule.exports={render,setTab:t=>{tab=t},setCalUnit,fmtSOL,fmtUSD,calUnit:()=>calUnit};', ctx);
+  extra.exports = ctx.module.exports;
   await new Promise(resolve => setImmediate(resolve));
   ctx.module.exports.setTab(tab); await ctx.module.exports.render();
   const first = content.innerHTML, before = calls.length;
@@ -49,22 +53,60 @@ async function render(tab, payload, fail=false, extra={}) {
     {day:'2024-10-04',status:'ok',cash_sol:1.003,known_sol:1.21,d_cash_sol:0.003,d_known_sol:0.01},
     {day:'2024-10-05',status:'ok',cash_sol:0.999,known_sol:1.19,d_cash_sol:-0.004,d_known_sol:-0.02},
     {day:'2024-10-06',status:'partial_day',cash_sol:0.999,known_sol:1.19,d_cash_sol:0,d_known_sol:0}];
+  const calDays=[...days.slice(0,4),{...days[4],cash_fallback:true,cash_ts:1728200000}];
+  const month={month:'2024-10',tz:'America/Sao_Paulo',north_star:{month:'2024-10',first_month:'2024-06',current_month:'2024-10',days:calDays}};
   const charted = await render('capital', {tz:'America/Sao_Paulo', tz_fallback:false, north_star:{status:'ok',days},
     nav_bridge:{status:'incomplete_sources',incomplete_sources:['closes'],d_known_sol:-0.01,components:[
-      {component:'network_fees',label:'Network fees',sol:-0.003},{component:'lp_realized',label:'LP realized',sol:null,measured_subtotal_sol:-0.02},{component:'unexplained',label:'Unexplained',sol:null}]}});
+      {component:'network_fees',label:'Network fees',sol:-0.003},{component:'lp_realized',label:'LP realized',sol:null,measured_subtotal_sol:-0.02},{component:'unexplained',label:'Unexplained',sol:null}]}},
+    false, {'capital/month': month, 'price/sol': {status:'ok', usd:150}});
   const h = charted.html;
   assert(h.includes('Unexplained <span class="badge">residual</span>'), 'residual badge keyed by component id');
   assert(h.includes('days in America/Sao_Paulo') && h.includes('4 Oct 2024 (America/Sao_Paulo)'), 'zone named on day labels');
   assert(h.includes('class="cell pos-3"') && h.includes('class="cell neg-3"') && h.includes('class="cell unk"'), 'calendar states');
-  assert(h.includes('+3.00') && h.includes('−4.00') && h.includes('class="cell  today"'), 'signed mSOL values and today marker');
+  // Real SOL with its unit, never silently scaled; flat today; fallback day starred; unmeasured is n/a, not 0.
+  assert(h.includes('>+0.0030<small class="u"> SOL</small><') && h.includes('>−0.0040<small class="u"> SOL</small><') && h.includes('class="cell  today"'), 'signed SOL values with unit and today marker');
+  assert(!/\+3\.00|mSOL/.test(h), 'no unlabelled milli-SOL');
+  assert(h.includes('>0.0000<small class="u"> SOL</small>*<') && h.includes('Cash from an earlier reading'), 'fallback day keeps the * marker');
+  assert(h.includes('<span class="v">n/a</span>') && !/class="cell unk"[^>]*><span class="d">\d+<\/span><span class="v">0/.test(h), 'unmeasured day is n/a');
   assert(/Unmeasured&#10;|Unmeasured\n/.test(h) && h.includes('No NAV snapshot this day'), 'unmeasured tooltip');
+  assert(h.includes('Δ cash +0.0030 SOL · +$0.45 at current SOL price'), 'tooltip carries both units');
+  assert(h.includes('October 2024 total</span> <strong class="down">−0.0010 SOL</strong>') && h.includes('2 days unmeasured, not counted'), 'month total in the header, unmeasured not counted');
+  assert(h.includes('<option value="2024-06">June 2024</option>') && h.includes('<option value="2024-10" selected>') && /id="calnext"[^>]*disabled/.test(h) && !/id="calprev"[^>]*disabled/.test(h), 'month picker spans first to current month');
+  assert(charted.calls.some(u => /^\/api\/capital\/month\?month=&tz=/.test(u)) && charted.calls.includes('/api/price/sol'), 'month and price requested');
+  // USD view: every cell in dollars with sign and unit; header says the price is current, not historical.
+  const usd = await render('capital', {tz:'America/Sao_Paulo', north_star:{days}, nav_bridge:{}}, false,
+    {'capital/month': month, 'price/sol': {status:'ok', usd:150}, store: {'azimuth.calUnit': 'usd'}});
+  assert(usd.html.includes('>+$0.45<') && usd.html.includes('>−$0.60<') && usd.html.includes('USD at current SOL price'), 'USD cells');
+  assert(usd.html.includes('<strong class="down">−$0.15</strong>') && usd.html.includes('data-unit="usd" aria-pressed="true"'), 'USD month total and toggle state');
+  // No price: USD disabled with its reason, SOL still renders, the stored preference is kept.
+  const noPrice = await render('capital', {north_star:{days}, nav_bridge:{}}, false,
+    {'capital/month': month, 'price/sol': {status:'unavailable', usd:null}, store: {'azimuth.calUnit': 'usd'}});
+  assert(/data-unit="usd" aria-pressed="false" title="USD unavailable[^"]*" disabled/.test(noPrice.html) && noPrice.html.includes('>+0.0030<small class="u"> SOL</small><'), 'USD fails soft');
+  // A month that failed to load must not take the rest of the capital tab down.
+  const noMonth = await render('capital', {north_star:{days}, nav_bridge:{}}, false, {failing: ['capital/month', 'price/sol']});
+  assert(noMonth.html.includes('Calendar month could not be loaded') && noMonth.html.includes('capital / balance'), 'month failure is local');
+  // Unit formatting: about four significant decimals in SOL, cents in USD, explicit sign and unit, n/a for null.
+  const fx_ = {}; await render('overview', {services: [], sources: []}, false, fx_); const f = fx_.exports;
+  for (const [v, want] of [[0.012, '+0.0120 SOL'], [-0.0005, '−0.0005 SOL'], [0.00003, '+0.00003 SOL'], [0.3668, '+0.3668 SOL'], [-1.5, '−1.5000 SOL'],
+    [0, '0.0000 SOL'], [-0.0, '0.0000 SOL'], [1e-12, '0.0000 SOL'], [null, 'n/a'], [undefined, 'n/a']]) assert.equal(f.fmtSOL(v), want, String(v));
+  for (const [v, want] of [[0.87, '+$0.87'], [-0.05, '−$0.05'], [0.004, '+$0.004'], [-0.00015, '−$0.0002'], [0.0000004, '+$0.0000004'], [1234.5, '+$1,234.50'], [0, '$0.00'], [null, 'n/a']]) assert.equal(f.fmtUSD(v), want, String(v));
+  // Toggle persistence: stored per viewer, read back on load, and every storage failure is swallowed.
+  const kept = {}; const a = {store: kept}; await render('overview', {services: [], sources: []}, false, a);
+  assert.equal(a.exports.calUnit(), 'sol', 'default unit is SOL'); a.exports.setCalUnit('usd'); assert.equal(kept['azimuth.calUnit'], 'usd');
+  const b = {store: kept}; await render('overview', {services: [], sources: []}, false, b); assert.equal(b.exports.calUnit(), 'usd', 'unit restored');
+  const c = {store: {'azimuth.calUnit': '<script>'}}; await render('overview', {services: [], sources: []}, false, c); assert.equal(c.exports.calUnit(), 'sol', 'unknown stored value ignored');
+  const blocked = {store: 'throw'}; await render('overview', {services: [], sources: []}, false, blocked);
+  assert.equal(blocked.exports.calUnit(), 'sol'); blocked.exports.setCalUnit('usd'); assert.equal(blocked.exports.calUnit(), 'usd', 'blocked storage still toggles for the session');
   assert(h.includes('class="unm"') && (h.match(/class="bar fp"/g)||[]).length===1 && (h.match(/class="bar fn"/g)||[]).length===1, 'delta bars: one gain, one loss, hatched unmeasured');
   assert(h.includes('<div class="val">Unknown</div>') && h.includes('class="seg dn"') && h.includes('Δ known SOL, window total'), 'waterfall unknown and total');
   assert(h.includes('tabindex="0" role="group"') && h.includes('Arrow keys'), 'charts keyboard reachable');
   assert(h.includes('Day (America/Sao_Paulo)'), 'table header names zone');
   const fallback = await render('capital', {tz:'UTC', tz_fallback:true, north_star:{days:[]}, nav_bridge:{}});
   assert(fallback.html.includes('days are shown in UTC') && fallback.html.includes('No measured values in this window yet.'), 'fallback + empty states');
-  assert(fallback.html.includes('No days in the capital history yet.') && fallback.html.includes('The NAV bridge has no components'), 'empty chart states');
+  assert(fallback.html.includes('Calendar month could not be loaded') && fallback.html.includes('The NAV bridge has no components'), 'empty chart states');
+  const emptyMonth = await render('capital', {north_star:{days:[]}, nav_bridge:{}}, false,
+    {'capital/month': {month:'2024-08', north_star:{month:'2024-08', first_month:'2024-08', current_month:'2024-10', days:[]}}});
+  assert(emptyMonth.html.includes('No NAV snapshots in August 2024.') && emptyMonth.html.includes('August 2024 total</span> <strong class="">n/a</strong>') && /id="calprev"[^>]*disabled/.test(emptyMonth.html), 'empty month: n/a total, no older month');
   const live = await render('live', {tz:'Pacific/Pago_Pago', collected_at: 1730606400, live:{dust:{}, realized:{status:'ok',days:{
     '2024-11-01':{pulse:{closes:2,measured:2,unmeasured:0,realized_sol:0.002},turnover:{closes:1,measured:0,unmeasured:1,realized_sol:null}},
     '2024-11-02':{turnover:{closes:1,measured:1,unmeasured:0,realized_sol:-0.001}}}}}});
