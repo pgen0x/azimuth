@@ -5,6 +5,13 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.22.0](https://github.com/pgen0x/azimuth/compare/v2.21.0...v2.22.0) (2026-11-19)
+
+
+### Features
+
+* **dashboard:** month-by-month capital calendar in SOL or USD ([#327](https://github.com/pgen0x/azimuth/issues/327)) ([6d48694](https://github.com/pgen0x/azimuth/commit/6d4869418db27d456c2ac58d986471f739643bb6))
+
 ## [2.21.0](https://github.com/pgen0x/azimuth/compare/v2.20.0...v2.21.0) (2026-11-19)
 
 
