@@ -107,6 +107,7 @@ found"). `loginctl enable-linger $USER` is what keeps them alive across logout.
 | `azimuth-sol-rent` (.timer) | reclaims empty token-account rent every 30m — **signs tx** | `install.sh --with-rent-reclaim-signs-tx` only |
 | `azimuth-sol-{accounting,shadow,candidate-paper,net-experiment,price-path}` (.timer) | research observers; read-only RPC/quotes, local journals only | `install.sh --with-research` (opt-in) |
 | `azimuth-sol-net-research@<name>` (.timer) | frozen paired net research instance | copied by `--with-research`; enable by hand |
+| `azimuth-rh-nav` (.timer) | Robinhood wallet snapshot every 10m (`uni_nav.py` → `memories/uni_nav.jsonl`): public RPC balance reads of the PUBLIC address, no key, no tx | `install.sh --with-rh-nav` (opt-in) |
 | `azimuth-grad-paper` | graduation paper-trader (S1): public GT/Jupiter reads, `memories/grad_paper/` only, no tx | `install.sh --with-paper` (opt-in) |
 | `hermes-gateway-<profile>` | Hermes gateway that receives the webhook, and ticks the profile's cron jobs | Hermes, not this repo |
 

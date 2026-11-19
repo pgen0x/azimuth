@@ -32,6 +32,10 @@ Opt-in flags (each installs and enables only what it names; re-runs are safe):
   --with-research    install + enable the research timers: accounting, shadow,
                      candidate-paper, net-experiment, price-path (no trading).
                      azimuth-sol-net-research@ is copied, never enabled.
+  --with-rh-nav      install + enable azimuth-rh-nav.timer: a read-only Robinhood
+                     wallet snapshot every 10 min (public RPC balance reads of the
+                     PUBLIC address in KRYSTAL_WALLET / UNI_NAV_WALLET; no key, no tx)
+                     into memories/uni_nav.jsonl, for the dashboard's Robinhood NAV.
   --with-paper       install + enable azimuth-grad-paper.service: the graduation
                      paper-trader (experiment S1). Long-running, read-only: public
                      GeckoTerminal/Jupiter reads, journals under memories/grad_paper/.
@@ -45,7 +49,7 @@ USAGE
 }
 
 PROFILE=""
-WITH_DASHBOARD=0 WITH_ALERTS=0 WITH_OPS=0 WITH_RENT_TX=0 WITH_RESEARCH=0 WITH_PAPER=0 NO_BUILD=0
+WITH_DASHBOARD=0 WITH_ALERTS=0 WITH_OPS=0 WITH_RENT_TX=0 WITH_RESEARCH=0 WITH_PAPER=0 WITH_RH_NAV=0 NO_BUILD=0
 while [ $# -gt 0 ]; do
   case "$1" in
     -h|--help) usage; exit 0 ;;
@@ -55,6 +59,7 @@ while [ $# -gt 0 ]; do
     --with-rent-reclaim-signs-tx) WITH_RENT_TX=1 ;;
     --with-research) WITH_RESEARCH=1 ;;
     --with-paper) WITH_PAPER=1 ;;
+    --with-rh-nav) WITH_RH_NAV=1 ;;
     --no-build) NO_BUILD=1 ;;
     -*) echo "unknown flag: $1" >&2; usage >&2; exit 2 ;;
     *)
@@ -244,7 +249,7 @@ echo "→ Rendering optional Solana units into $PROFILE/systemd"
 mkdir -p "$PROFILE/systemd"
 for u in azimuth-sol-accounting azimuth-sol-shadow azimuth-sol-rent azimuth-sol-markers \
   azimuth-sol-net-experiment azimuth-sol-net-research@ azimuth-sol-price-path azimuth-sol-candidate-paper \
-  azimuth-sol-retention azimuth-alerts; do
+  azimuth-sol-retention azimuth-alerts azimuth-rh-nav; do
   sed "s#__PROFILE__#$PROFILE#g" "$REPO/assets/systemd/$u.service" > "$PROFILE/systemd/$u.service"
   cp "$REPO/assets/systemd/$u.timer" "$PROFILE/systemd/$u.timer"
 done
@@ -357,6 +362,11 @@ print("     the timer applies this daily" if rows else "     nothing older than 
     echo "   azimuth-grad-paper: paper trades only; evaluate with"
     echo "     python3 $PROFILE/skills/solana-dlmm/scripts/grad_paper.py --profile $PROFILE --report"
   fi
+  if [ "$WITH_RH_NAV" = 1 ]; then
+    render_unit azimuth-rh-nav.service; render_unit azimuth-rh-nav.timer
+    OPT_ENABLE+=(azimuth-rh-nav.timer)
+    echo "   azimuth-rh-nav: read-only balance reads; needs KRYSTAL_WALLET (the public address) in the profile env file"
+  fi
   if [ "${#OPT_ENABLE[@]}" -gt 0 ]; then
     "$SYSTEMCTL" --user daemon-reload
     "$SYSTEMCTL" --user enable --now "${OPT_ENABLE[@]}"
@@ -371,7 +381,7 @@ print("     the timer applies this daily" if rows else "     nothing older than 
     echo "     (see the header of assets/systemd/azimuth-alerts.service)."
   fi
 else
-  if [ $((WITH_DASHBOARD + WITH_ALERTS + WITH_OPS + WITH_RENT_TX + WITH_RESEARCH + WITH_PAPER)) -gt 0 ]; then
+  if [ $((WITH_DASHBOARD + WITH_ALERTS + WITH_OPS + WITH_RENT_TX + WITH_RESEARCH + WITH_PAPER + WITH_RH_NAV)) -gt 0 ]; then
     echo "   ⚠ no user systemd: the --with-* flags installed nothing. Unit files are in $PROFILE/systemd."
   fi
   echo "   ⚠ no user systemd available — run the loop + daemon yourself:"

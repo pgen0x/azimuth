@@ -140,7 +140,7 @@ func logLines(query string) (int, bool) {
 // robinhoodView copies the cached snapshot section (never mutating it), trims the log to n lines
 // and adds the closes bucketed in the viewer's zone.
 func robinhoodView(data, panels object, n int) object {
-	view := object{"closes": panels["robinhood"]}
+	view := object{"closes": panels["robinhood"], "nav": panels["rh_nav"]}
 	if section, ok := data["robinhood"].(map[string]any); ok {
 		for k, v := range section {
 			view[k] = v

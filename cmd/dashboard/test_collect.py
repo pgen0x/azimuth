@@ -533,6 +533,97 @@ SECRETS += ['tokenId=817 pool=0xabc TOKEN=SYNTHETIC_AFTER_PUBLIC',
             '"mnemonic": "SYNTHETIC_QUOTED_PROSE alpha"']
 LEAKS=('SYNTHETIC','bravo','lima','rpc.example','127.0.0.1')
 
+class RobinhoodMonthTests(unittest.TestCase):
+    """Capital calendar for Robinhood: realized_quote only, per local day and asset; null counted, never 0."""
+    setUp=CollectorTests.setUp
+    tearDown=CollectorTests.tearDown
+    closes=RobinhoodTests.closes
+    def test_realized_quote_only_per_asset_and_day(self):
+        self.closes()
+        d=c.rh_month(self.m,86400*20,'1970-01','UTC')
+        self.assertEqual((d['month'],d['first_month'],d['current_month']),('1970-01','1970-01','1970-01'))
+        day4,day5=d['days']['1970-01-04'],d['days']['1970-01-05']
+        self.assertAlmostEqual(day4['ETH']['realized_quote'],0.006)  # v3 WETH + v4 native ETH; pnl_pct never read
+        self.assertEqual((day4['ETH']['closes'],day4['ETH']['measured']),(2,2))
+        # Day 5: a null figure and a mark row are both unmeasured, counted, never 0; USDG stays apart from ETH.
+        self.assertIsNone(day5['ETH']['realized_quote']);self.assertEqual((day5['ETH']['closes'],day5['ETH']['unmeasured']),(2,2))
+        self.assertEqual((day5['USDG']['realized_quote'],day5['USDG']['measured']),(1.5,1))
+        self.assertNotIn('1970-01-06',d['days'])  # the failed close and the dry run are not closes
+        st=d['stats']
+        self.assertEqual((st['positions'],st['realized_measured']),(5,3))
+        self.assertAlmostEqual(st['win_rate_pct'],200/3)
+        self.assertEqual(st['best_win'],{'ETH':0.01,'USDG':1.5})
+        self.assertIsNone(st['fees'])
+    def test_gas_metered_and_unmetered_counted_apart(self):
+        self.closes()
+        d=c.rh_month(self.m,86400*20,'1970-01','UTC')
+        self.assertAlmostEqual(d['days']['1970-01-04']['gas_eth'],0.003)
+        self.assertIsNone(d['days']['1970-01-05']['gas_eth'])  # no reading is not zero gas
+        self.assertEqual(d['days']['1970-01-05']['gas_unmetered'],3)
+        g=d['stats']['gas'];self.assertAlmostEqual(g['gas_eth'],0.003);self.assertEqual((g['metered'],g['unmetered']),(2,3))
+    def test_unknown_asset_counted_never_summed_and_volume_per_asset(self):
+        rows(self.m/'uni_closes.jsonl',[
+            {'ts':86400*2,'tokenId':'1','success':True,'quote_symbol':'WETH','realized_quote':0.02,'pnl_basis':'realized','age_min':30},
+            {'ts':86400*2+5,'tokenId':'2','success':True,'quote_symbol':'USDG','realized_quote':-0.5,'pnl_basis':'realized','age_min':90},
+            {'ts':86400*2+9,'tokenId':'3','success':True,'quote_symbol':'PEPE','realized_quote':7,'pnl_basis':'realized'}])
+        rows(self.m/'uni_positions.jsonl',[{'tokenId':'1','quoteIn':'0.4','ts':86400},{'tokenId':'2','quoteIn':'25','ts':86400}])
+        d=c.rh_month(self.m,86400*20,'1970-01','UTC')
+        day=d['days']['1970-01-03']
+        self.assertEqual(day['unknown'],1);self.assertEqual(d['stats']['unknown_unit'],1)
+        self.assertEqual((day['ETH']['realized_quote'],day['USDG']['realized_quote']),(0.02,-0.5))
+        self.assertEqual(d['stats']['volume'],{'ETH':0.4,'USDG':25.0})
+        self.assertEqual(d['stats']['avg_hold_min'],60)
+        self.assertAlmostEqual(d['stats']['win_rate_pct'],50.0)  # the unknown-asset row is not a measured result
+    def test_zone_month_bounds_and_empty_journal(self):
+        rows(self.m/'uni_closes.jsonl',[{'ts':86400*31+3600,'tokenId':'1','success':True,'quote_symbol':'WETH','realized_quote':0.1,'pnl_basis':'realized'}])
+        self.assertEqual(list(c.rh_month(self.m,86400*40,'1970-02','UTC')['days']),['1970-02-01'])
+        sp=c.rh_month(self.m,86400*40,'1970-01','America/Sao_Paulo')  # UTC-3: still 31 January
+        self.assertEqual(list(sp['days']),['1970-01-31']);self.assertEqual((sp['first_month'],sp['last_month']),('1970-01','1970-01'))
+        with self.assertRaises(ValueError): c.rh_month(self.m,86400*40,'1970-13','UTC')
+        (self.m/'uni_closes.jsonl').unlink()
+        e=c.rh_month(self.m,86400*40,'1970-01','UTC')
+        self.assertEqual((e['days'],e['first_month'],e['last_month'],e['stats']['positions'],e['stats']['win_rate_pct']),({},None,None,0,None))
+
+class RobinhoodNavTests(unittest.TestCase):
+    """Robinhood wallet NAV from uni_nav.jsonl: last snapshot per local day, per-asset totals, nulls kept."""
+    setUp=CollectorTests.setUp
+    tearDown=CollectorTests.tearDown
+    def snap(self,ts,**kw):
+        r={'ts':ts,'status':'ok','eth':0.5,'weth':0.25,'usdg':10.0,'lp_mark_quote':{'ETH':0.1,'USDG':40.0},'lp_positions':{'ETH':1,'USDG':1},'lp_ghosts':0,'errors':[]}
+        r.update(kw); return r
+    def test_last_snapshot_per_day_totals_and_deltas(self):
+        rows(self.m/'uni_nav.jsonl',[self.snap(86400*1+60,eth=0.4),self.snap(86400*1+3600),  # day 2: last row wins
+                                     self.snap(86400*3+60,eth=0.6,usdg=None,status='partial'),
+                                     self.snap(86400*3+120,status='unavailable',eth=None,weth=None,usdg=None)])
+        d=c.rh_nav(self.m,86400*3+600,'UTC',days=4)
+        by={r['day']:r for r in d['days']}
+        self.assertEqual([r['day'] for r in d['days']],['1970-01-01','1970-01-02','1970-01-03','1970-01-04'])
+        self.assertEqual(by['1970-01-01']['status'],'no_snapshot')
+        self.assertAlmostEqual(by['1970-01-02']['eth_total'],0.85);self.assertEqual(by['1970-01-02']['usdg_total'],50.0)
+        self.assertEqual(by['1970-01-03']['status'],'no_snapshot')  # gap: no delta across it
+        today=by['1970-01-04']
+        self.assertEqual(today['status'],'partial_day');self.assertAlmostEqual(today['eth_total'],0.95)
+        self.assertIsNone(today['usdg_total'])  # an unmeasured part is never 0
+        self.assertIsNone(today['d_eth_total'])  # previous day had no snapshot
+        self.assertEqual(d['latest']['status'],'unavailable');self.assertIsNone(d['latest']['eth_total'])  # latest row is reported as is
+        self.assertEqual(d['snapshots'],4)
+    def test_consecutive_day_delta_and_zone(self):
+        rows(self.m/'uni_nav.jsonl',[self.snap(86400*1+3600),self.snap(86400*2+3600,weth=0.35)])
+        d=c.rh_nav(self.m,86400*2+7200,'UTC',days=2)
+        self.assertAlmostEqual(d['days'][1]['d_eth_total'],0.1);self.assertEqual(d['days'][1]['d_usdg_total'],0.0)
+        sp=c.rh_nav(self.m,86400*2+7200,'America/Sao_Paulo',days=2)  # UTC-3: both snapshots land a day earlier
+        self.assertEqual([r['status'] for r in sp['days']],['ok','partial_day'])
+        self.assertEqual([r['day'] for r in sp['days']],['1970-01-01','1970-01-02'])
+    def test_missing_journal_is_an_empty_state_and_daily_wires_it(self):
+        d=c.rh_nav(self.m,86400*5,'UTC')
+        self.assertEqual((d['status'],d['latest'],d['days']),('missing',None,[]))
+        self.assertIn('--with-rh-nav',d['basis'])
+        prof=self.m/'profile';(prof/'memories').mkdir(parents=True)
+        rows(prof/'memories'/'uni_nav.jsonl',[self.snap(86400*4)])
+        out=c.daily(prof,0,('UTC','Asia/Tokyo'),now=86400*4+60)
+        for tz in ('UTC','Asia/Tokyo'):
+            self.assertEqual(out['by_tz'][tz]['rh_nav']['tz'],tz);self.assertIsNotNone(out['by_tz'][tz]['rh_nav']['latest'])
+
 class RedactionTests(unittest.TestCase):
     setUp=CollectorTests.setUp
     tearDown=CollectorTests.tearDown
