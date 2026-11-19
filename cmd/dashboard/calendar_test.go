@@ -325,3 +325,16 @@ func TestParseJupiterPriceETH(t *testing.T) {
 		t.Fatal("accepted another mint's price")
 	}
 }
+
+func TestRobinhoodViewCarriesWalletNAVPerZone(t *testing.T) {
+	data := object{"robinhood": map[string]any{"logs": []any{"a", "b"}}}
+	panels := object{"robinhood": object{"tz": "Asia/Tokyo"}, "rh_nav": object{"tz": "Asia/Tokyo", "latest": nil}}
+	v := robinhoodView(data, panels, 1)
+	nav, ok := v["nav"].(object)
+	if !ok || nav["tz"] != "Asia/Tokyo" {
+		t.Fatalf("nav panel missing from the Robinhood view: %v", v)
+	}
+	if _, ok := object(robinhoodView(object{}, object{}, 1))["nav"]; !ok {
+		t.Fatal("nav key must exist (null) even without a snapshot panel")
+	}
+}

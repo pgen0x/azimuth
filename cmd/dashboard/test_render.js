@@ -222,7 +222,20 @@ async function render(tab, payload, fail=false, extra={}) {
   const rhEmpty = await render('rh:live', rhEmptyP), rhEmptyO = await render('rh:overview', rhEmptyP), rhEmptyC = await render('rh:capital', rhEmptyP, false, {'robinhood/month': {month: '1970-01', robinhood: {month: '1970-01', first_month: null, current_month: '1970-01', days: {}, stats: {}}}, 'price/eth': {status: 'unavailable', usd: null}});
   assert(rhEmptyO.html.includes('Robinhood modes unknown') && rhEmptyC.html.includes('No ETH closes in this window.'), 'empty robinhood');
   assert(rhEmptyC.html.includes('No Robinhood closes in January 1970.'), 'empty calendar month names the venue source');
-  assert(rhEmptyO.html.includes('robinhood / wallet') && rhEmptyO.html.includes('Pending: there is no Robinhood wallet snapshot journal'), 'NAV pending, not a fake balance');
+  assert(rhEmptyO.html.includes('robinhood / wallet') && rhEmptyO.html.includes('No wallet snapshots yet') && rhEmptyO.html.includes('install.sh --with-rh-nav'), 'no snapshots: an empty state, not a fake balance');
+  assert(rhEmptyC.html.includes('robinhood / balance') && rhEmptyC.html.includes('there is no balance line'), 'balance empty state');
+  // Wallet NAV from uni_nav.jsonl: per-asset totals, never summed; unmeasured parts are n/a, never 0.
+  const navP = {...rhEmptyP, nav: {status: 'ok', source: {status: 'ok'}, basis: 'synthetic basis', latest: {ts: 1, status: 'partial', eth: 0.5, weth: 0.25, usdg: null,
+      lp_mark_quote: {ETH: 0.1, USDG: 40}, lp_positions: {ETH: 1, USDG: 1}, lp_ghosts: 2, errors: ['usdg balance unreadable'], eth_total: 0.85, usdg_total: null},
+    days: [{day: '1970-01-01', status: 'no_snapshot'}, {day: '1970-01-02', status: 'ok', ts: 2, eth_total: 0.8, usdg_total: 50, eth: 0.45, weth: 0.25, lp_eth: 0.1, usdg: 10, lp_usdg: 40, d_eth_total: null},
+           {day: '1970-01-03', status: 'partial_day', ts: 3, eth_total: 0.85, usdg_total: null, eth: 0.5, weth: 0.25, lp_eth: 0.1, usdg: null, lp_usdg: 40, d_eth_total: 0.05}]}};
+  const navO = await render('rh:overview', navP), navC = await render('rh:capital', navP, false, {'robinhood/month': {month: '1970-01', robinhood: {month: '1970-01', days: {}, stats: {}}}, 'price/eth': {status: 'unavailable', usd: null}});
+  assert(navO.html.includes('ETH · wallet + positions</span><strong>0.8500 ETH</strong>') && navO.html.includes('native 0.5000 ETH · WETH 0.2500 ETH · in 1 positions 0.1000 ETH'), 'ETH total with its parts');
+  assert(navO.html.includes('USDG · wallet + positions</span><strong>n/a</strong>') && navO.html.includes('a part is unmeasured, so no total'), 'USDG unmeasured is n/a, never 0');
+  assert(navO.html.includes('Last snapshot partial: usdg balance unreadable') && navO.html.includes('2 journal-open positions hold no liquidity'), 'partial snapshot and ghosts named');
+  assert(navO.html.includes('never added') && !navO.html.includes('No wallet snapshots yet'), 'assets never summed');
+  assert(navC.html.includes('robinhood / balance') && navC.html.includes('ETH · native + WETH + positions') && navC.html.includes('stroke:var(--s1)') && navC.html.includes('stroke:var(--s2)'), 'one line chart per asset');
+  assert(navC.html.includes('No NAV bridge yet') && /class="bar fp"/.test(navC.html), 'daily ETH change bars; NAV bridge named as missing');
   assert(rhEmpty.log.includes('No log lines retained'), 'empty log state');
   const rhFail = await render('rh:live', null, true);
   assert(rhFail.html.includes('Could not load this section'), 'robinhood error state');
