@@ -153,6 +153,16 @@ disables it); the daemon writes `kind:"blocked"` rows when a pulse pool passed
 `REENTRY_SHADOW_PATH`); and `dlmm_pipeline.py` writes `blocked` rows for an
 m5-dump reject within 60m of a close (`dlmm_reentry_shadow.py`), because pulse
 skips the daemon's momentum gate and that check only runs in the pipeline.
+A third, the **smart-inflow shadow** (`smart_inflow_shadow.go`,
+`SMART_INFLOW_SHADOW_PATH`, paper experiment S2), remembers each pool's last
+GMGN `gmgn_smart_wallets` / `gmgn_kol_wallets` reading in memory and journals
+one row (<= 1 per pool per 30m) to `memories/dlmm_smart_inflow_shadow.jsonl`
+when smart rose by >= 2 or KOL by >= 1 since that reading. GMGN is only read
+for pools that passed Screen and dedup, so consecutive readings are one
+re-offer (~`PULSE_SEEN_TTL`) apart, and a baseline older than 6h is dropped.
+Each row also appends a `source:"smart_inflow_shadow"` row to the candidate
+watch journal, which buys only the price-path sampler's 30m window, not the
+24h paper horizon. Unknown counts are never an event.
 
 - `internal/config` — env → `Config`. Only enable-toggles live here; screening
   thresholds live in `internal/meteora`.

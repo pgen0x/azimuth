@@ -173,6 +173,11 @@ type Scanner struct {
 	// reentrySeen dedups the re-entry shadow's "blocked" rows in memory: pool
 	// -> time of its last row (see reentry_shadow.go).
 	reentrySeen map[string]time.Time
+	// smartLast / smartRowAt back the smart-money inflow shadow (see
+	// smart_inflow_shadow.go): last GMGN reading per pool, and the time of each
+	// pool's last journal row for the 30m dedup.
+	smartLast  map[string]smartReading
+	smartRowAt map[string]time.Time
 	// cooldownLookup is a test seam; nil means s.seen.CooldownRemaining.
 	cooldownLookup func(ctx context.Context, symbol, mint, pool string) time.Duration
 }
@@ -1099,6 +1104,7 @@ func (s *Scanner) pollMode(ctx context.Context, mp meteora.ModeParams) {
 				}
 				cand.ApplyGmgn(g)
 				gmgnEnriched++
+				s.recordSmartInflow(mp, p, cand) // logging only
 			}
 		}
 

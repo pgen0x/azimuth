@@ -59,6 +59,11 @@ type Config struct {
 	// The daemon appends a "blocked" row when a pulse pool passed Screen and was
 	// stopped by the re-entry cooldown. Logging only. Empty disables it.
 	ReentryShadowPath string
+	// SmartInflowShadowPath is the smart-money inflow journal (memories/
+	// dlmm_smart_inflow_shadow.jsonl, paper experiment S2): one row when a
+	// pool's GMGN smart-wallet count rose by >= 2, or its KOL count by >= 1,
+	// since the daemon's previous reading of it. Logging only. Empty disables it.
+	SmartInflowShadowPath string
 
 	// Screening thresholds per mode are defined in the meteora package;
 	// only the enable toggles live here.
@@ -410,6 +415,7 @@ func loadConfig() Config {
 		SupplyShadowPath:      getenv("SUPPLY_SHADOW_PATH", ""),
 		PulseNearMissFeeFloor: getfloat("PULSE_NEARMISS_FEE_FLOOR", 0.025),
 		ReentryShadowPath:     getenv("REENTRY_SHADOW_PATH", ""),
+		SmartInflowShadowPath: getenv("SMART_INFLOW_SHADOW_PATH", ""),
 		EnablePulse:           getbool("ENABLE_PULSE", false),
 		EnableCasual:          getbool("ENABLE_CASUAL", true),
 		EnableMultiday:        getbool("ENABLE_MULTIDAY", true),
