@@ -184,18 +184,54 @@ function calGo(m){calPick(m);render()}
 const FLOW_TAG_SOL=1e-4;
 function monthTotal(days,k){let sum=0,n=0,unm=0;for(const r of days){if(isNum(r[k])){sum+=+r[k];n++}else unm++}return {sum:n?sum:null,n,unm}}
 function monthFlows(days){let inn=0,out=0,dc=0,ndc=0;for(const r of days){const x=r.d_external_sol;if(isNum(x)){if(x>0)inn+=+x;else out+=+x}if(isNum(r.d_cash_sol)){dc+=+r.d_cash_sol;ndc++}}return {inn,out,cash:ndc?dc:null}}
-/* Header: the month's trading result is the focal number; flows and gaps sit under it, controls to the right. */
+/* Month statistics for the summary panel, from the same day rows the grid draws. Active = a measured,
+   non-flat trading day; the streak runs back from the latest completed day (today, still moving, is skipped). */
+function monthStats(days,k='d_trading_sol'){
+  const rows=days.filter(r=>isDay(r.day)).sort((a,b)=>a.day<b.day?-1:1),s={green:0,red:0,flat:0,na:0,best:null,worst:null,streak:0,streakEnd:null,cum:[]};
+  let run=0;
+  for(const r of rows){const v=r[k];
+    if(!isNum(v))s.na++;else if(flat(+v))s.flat++;else if(v>0)s.green++;else s.red++;
+    if(isNum(v)){if(!s.best||+v>s.best.v)s.best={day:r.day,v:+v};if(!s.worst||+v<s.worst.v)s.worst={day:r.day,v:+v};run+=+v}
+    s.cum.push({day:r.day,v:run,measured:isNum(v)})}
+  const done=rows.filter(r=>r.status!=='partial_day');
+  for(let i=done.length-1;i>=0;i--){const v=done[i][k];if(isNum(v)&&!flat(+v)&&v>0){s.streak++;if(!s.streakEnd)s.streakEnd=done[i].day}else break}
+  const active=s.green+s.red,tot=monthTotal(rows,k);
+  s.total=tot.sum;s.win=active?Math.round(s.green/active*100):null;s.avg=active&&isNum(tot.sum)?tot.sum/active:null;
+  return s}
+/* Cumulative trading line, inline SVG; a dashed zero line for reference. */
+function sparkline(s,label){
+  const pts=s.cum;if(pts.length<2)return '';
+  const W=240,H=64,P=4,vs=pts.map(p=>p.v),lo=Math.min(0,...vs),hi=Math.max(0,...vs),span=hi-lo||1;
+  const x=i=>P+i*(W-2*P)/(pts.length-1),y=v=>P+(hi-v)/span*(H-2*P),last=pts[pts.length-1].v;
+  const d=pts.map((p,i)=>(i?'L':'M')+x(i).toFixed(1)+' '+y(p.v).toFixed(1)).join('');
+  return `<svg class="spark" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img" aria-label="${esc(label)}"><line x1="${P}" x2="${W-P}" y1="${y(0).toFixed(1)}" y2="${y(0).toFixed(1)}" class="zero"/><path d="${d}" class="${last<0?'dn':'up'}"/></svg>`}
+/* Summary beside the grid: the month's trading result is the focal number, then what it is made of. */
+function calSummary(ns,unit,price){
+  const usdOk=isNum(price.usd)&&price.status==='ok',u=usdOk?unit:'sol',f=v=>fmtUnit(v,u,price.usd),days=ns.days||[];
+  const s=monthStats(days),fl=monthFlows(days),m=ns.month;
+  const flows=[];
+  if(Math.abs(fl.inn)>=FLOW_TAG_SOL)flows.push(['Deposits (excluded)',f(fl.inn)]);
+  if(Math.abs(fl.out)>=FLOW_TAG_SOL)flows.push(['Withdrawals (excluded)',f(fl.out)]);
+  if(flows.length)flows.push(['Cash incl. flows',f(fl.cash)]);
+  const day=p=>p?`${short(p.day)} · ${f(p.v)}`:'n/a';
+  const rows=[['Profit days',num(s.green)],['Loss days',num(s.red)],['Flat days',num(s.flat)],['n/a days',num(s.na)],
+    ['Win days',s.win==null?'n/a':s.win+' %'],['Average per active day',isNum(s.avg)?f(s.avg):'n/a'],
+    ['Best day',day(s.best),s.best&&s.best.v>0?'up':''],['Worst day',day(s.worst),s.worst&&s.worst.v<0?'down':''],
+    ['Profit streak',s.streak?`${s.streak} day${s.streak===1?'':'s'} to ${short(s.streakEnd)}`:'none running']];
+  const dl=list=>`<dl>${list.map(([k,v,c])=>`<dt>${esc(k)}</dt><dd${c?` class="${c}"`:''}>${esc(v)}</dd>`).join('')}</dl>`;
+  const first=s.cum[0],lastP=s.cum[s.cum.length-1];
+  return `<aside class="calsum" aria-label="${esc(monthLabel(m))} summary"><div class="suminner"><div class="sumA"><div class="sumtot"><span class="muted">Trading, ${esc(monthLabel(m))}</span><strong class="${tone(s.total)}">${esc(f(s.total))}</strong></div>`
+    +(flows.length?dl(flows):'')
+    +(s.cum.length>1?`<figure>${sparkline(s,`Cumulative trading across ${monthLabel(m)}, ending at ${f(lastP.v)}`)}<figcaption class="muted">Cumulative trading, ${esc(short(first.day))} to ${esc(short(lastP.day))}</figcaption></figure>`:'')
+    +`</div><div class="sumB">${dl(rows)}</div></div></aside>`}
+function calKey(ns,unit,price){
+  const usdOk=isNum(price.usd)&&price.status==='ok',u=usdOk?unit:'sol',max=Math.max(0,...(ns.days||[]).map(r=>r.d_trading_sol).filter(isNum).map(v=>Math.abs(v)));
+  return `<p class="calkey">Trading change per day, deposits and withdrawals excluded. Green profit, red loss; deeper tint = bigger move, in thirds of the month's largest (${esc(fmtUnit(max,u,price.usd).replace('+',''))}). n/a: unmeasured. *: earlier reading that day. Amber outline: today.</p>`}
+/* Controls above the calendar and its summary: unit, then month. */
 function calHead(ns,unit,price,state=''){
   const usdOk=isNum(price.usd)&&price.status==='ok',u=usdOk?unit:'sol',m=ns.month||'',fm=ns.first_month||'',cm=ns.current_month||m;
-  const days=ns.days||[],tot=monthTotal(days,'d_trading_sol'),fl=monthFlows(days),f=v=>fmtUnit(v,u,price.usd);
   const usdTip=usdOk?`At the current SOL price, $${Number(price.usd).toFixed(2)}`:'USD unavailable: the SOL price could not be fetched. SOL values are unaffected.';
-  const sub=[];
-  if(Math.abs(fl.inn)>=FLOW_TAG_SOL)sub.push(`deposits ${f(fl.inn)}`);
-  if(Math.abs(fl.out)>=FLOW_TAG_SOL)sub.push(`withdrawals ${f(fl.out)}`);
-  if(sub.length)sub[0]=sub[0][0].toUpperCase()+sub[0].slice(1)+' excluded',sub.push(`cash incl. flows ${f(fl.cash)}`);
-  if(tot.unm&&days.length)sub.push(`${tot.unm} day${tot.unm===1?'':'s'} n/a, not counted`);
-  const label=state?'Trading':`Trading, ${monthLabel(m)}`;
-  return `<div class="calhead"><div class="caltot"><span class="muted">${esc(label)}</span><strong class="${state?'':tone(tot.sum)}">${state?'n/a':esc(f(tot.sum))}</strong>${sub.length&&!state?`<span class="muted">${esc(sub.join(' · '))}</span>`:''}</div>`
+  return `<div class="calhead">`
     +`<div class="calctl"><div class="unitsw" role="group" aria-label="Calendar unit"><button type="button" data-unit="sol" aria-pressed="${u==='sol'}">SOL</button><button type="button" data-unit="usd" aria-pressed="${u==='usd'}" title="${esc(usdTip)}"${usdOk?'':' disabled'}>USD</button></div>`
     +`<div class="calnav"><button type="button" id="calprev" aria-label="Previous month"${fm&&m>fm&&!state?'':' disabled'}>‹</button><input type="month" id="calpick" aria-label="Month" value="${esc(state==='empty'?'':m)}"${fm?` min="${esc(fm)}"`:''}${cm?` max="${esc(cm)}"`:''} placeholder="YYYY-MM"><button type="button" id="calnext" aria-label="Next month"${m<cm&&!state?'':' disabled'}>›</button></div></div></div>`}
 /* Empty states name the cause and the way out; none of them is an error. */
@@ -229,8 +265,12 @@ function monthCal(ns,unit,price,state=''){
     const vu=/ SOL$/.test(val)?[val.slice(0,-4),' SOL']:[val,''],vc=fmtCompact(v,u,price.usd);
     const tag=isNum(x)&&Math.abs(x)>=FLOW_TAG_SOL?`<span class="tag"><span class="tw">${x>0?'deposit':'withdrawal'}</span><span class="ts" aria-hidden="true">${x>0?'dep':'wd'}</span> <span class="ta">${esc(fmtUnit(x,u,price.usd).replace(/ SOL$/,''))}</span></span>`:'';
     html+=`<div class="cell${tint}${today?' today':''}${cls==='unk'?' unk':''}" data-tip="${esc(tip)}"><span class="d">${d}</span>${tag}<span class="v ${cls}"><span class="vf">${esc(vu[0])}${vu[1]?`<small class="u">${vu[1]}</small>`:''}${star}</span><span class="vc" aria-hidden="true">${esc(vc+star)}</span></span></div>`}
-  html+='<span></span>'.repeat((7-(lead+len)%7)%7)+'</div></div>';
-  return html+`<p class="calkey">Trading change per day, deposits and withdrawals excluded. Green profit, red loss; deeper tint = bigger move, in thirds of the month's largest (${esc(fmtUnit(max,u,price.usd).replace('+',''))}). n/a: unmeasured. *: earlier reading that day. Amber outline: today.</p>`}
+  return html+'<span></span>'.repeat((7-(lead+len)%7)%7)+'</div></div>'}
+/* Calendar block: grid left, summary right on wide panels (container query), summary below otherwise. */
+function calBlock(ns,unit,price,state=''){
+  const has=!state&&isMonth(ns.month)&&(ns.days||[]).some(r=>isDay(r.day));
+  const grid=chart(`Calendar of daily trading change for ${monthLabel(ns.month)}. Left and right arrows move by day, up and down by week`,()=>monthCal(ns,unit,price,state),7);
+  return `<div class="calbox">`+calHead(ns,unit,price,state)+(has?`<div class="calwrap"><div class="calmain">${grid}</div>${calSummary(ns,unit,price)}</div>${calKey(ns,unit,price)}`:grid)+`</div>`}
 
 /* NAV bridge waterfall: measured components walk the running total; unknown ones are marked and skipped. */
 function waterfall(br){
@@ -331,7 +371,7 @@ html+=grid(panel(4,12,`${head('capital / cash',latest.day?esc(long(latest.day))+
   panel(8,12,head('capital / balance',`one axis, SOL · ${zone}`)+chart('Line chart of cash and known SOL per day',W=>lineChart(rows,[{k:'cash_sol',name:'Cash (native + LP mark + rent)',color:'var(--s1)'},{k:'known_sol',name:'Known (cash + SPL marks)',color:'var(--s2)'}],tipDay,W))),
   panel(12,12,head('capital / daily-delta',`green gains, red losses, hatched unmeasured · ${zone}`)+chart('Bar chart of daily change in cash SOL',W=>deltaBars(rows,'d_cash_sol',tipDelta,W))),
   panel(12,12,head('capital / calendar',`trading per day · ${calUnit==='usd'&&price.status==='ok'?'USD at current SOL price':'SOL'} · ${zone}`)
-    +(cm.error||(!isMonth(cns.month)&&!calPickState)?`<p class="note warn" role="status">Calendar month could not be loaded: ${esc(cm.error||'no month in the response')}</p>`:calHead(cns,calUnit,price,calPickState)+chart(`Calendar of daily trading change for ${monthLabel(cns.month)}. Left and right arrows move by day, up and down by week`,()=>monthCal(cns,calUnit,price,calPickState),7))));
+    +(cm.error||(!isMonth(cns.month)&&!calPickState)?`<p class="note warn" role="status">Calendar month could not be loaded: ${esc(cm.error||'no month in the response')}</p>`:calBlock(cns,calUnit,price,calPickState))));
 html+='<div class="section"><h2>nav bridge</h2><span>what moved known SOL</span></div>';
 let bridge=`<p class="muted" style="margin-top:0">${esc(br.basis)}</p>`;
 if(br.status==='insufficient_snapshots')bridge+='<p class="note warn">Not enough complete NAV snapshots for this window.</p>';

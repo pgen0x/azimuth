@@ -183,6 +183,43 @@ h3.sub{margin:16px 0 0;color:var(--ink-2);font-weight:600;font-size:12.5px}
 .cell.today:is(.pos-3,.neg-3){box-shadow:inset 0 0 0 2px var(--accent),inset 0 0 0 4px var(--bg)}
 .cell.on{box-shadow:inset 0 0 0 2px var(--ink)}
 .calkey{font-size:12px;color:var(--muted);margin:10px 0 0}
+/* Month summary. Beside the grid when the panel is wide enough to keep the grid at its full 820px
+   (container query, so the sidebar width is accounted for); below it otherwise. Same height as the grid
+   when beside it, so the two read as one block. */
+.calbox{container-type:inline-size}
+.calmain .chart{margin:0}
+.calsum{margin:16px 0 0;border:1px solid var(--line);padding:16px;display:flex;min-width:0;container-type:inline-size}
+.suminner{flex:1;display:flex;flex-direction:column;gap:14px;justify-content:space-between;min-width:0}
+.sumA{display:flex;flex-direction:column;gap:14px}
+.sumB{border-top:1px solid var(--line);padding-top:12px}
+/* Beside the grid from ~1060px of panel; the grid gives up a little width (still 5:4) before the summary
+   drops under 300px. The block stops at 1560px so ultrawide screens do not stretch the summary into a strip. */
+@container (min-width:1060px){
+  .calwrap{display:grid;grid-template-columns:minmax(0,820px) minmax(300px,1fr);gap:16px;align-items:stretch;max-width:1560px}
+  .calsum{margin:0}
+}
+/* A wide summary splits in two: result, flows and a taller trend on the left; the day statistics on the right. */
+@container (min-width:520px){
+  .suminner{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:0 24px}
+  .sumB{border-top:0;padding:0 0 0 24px;border-left:1px solid var(--line);display:flex}
+  .sumB dl{flex:1;align-content:space-between;row-gap:10px}
+  /* The trend takes whatever height the grid leaves, so the panel never has an empty lower half. */
+  .sumA figure{flex:1;display:flex;flex-direction:column;min-height:0}
+  .sumA .spark{flex:1;height:auto;min-height:120px}
+}
+.sumtot{display:flex;flex-direction:column;gap:2px}
+.sumtot span{font-size:12px}
+.sumtot strong{font-size:28px;font-weight:600;line-height:1.15}
+.calsum dl{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:6px 12px;margin:0;font-size:12.5px}
+.calsum dl+dl{border-top:1px solid var(--line);padding-top:12px}
+.calsum dt{color:var(--muted)} .calsum dd{margin:0;text-align:right;white-space:nowrap}
+.calsum dd.up{color:var(--pos)} .calsum dd.down{color:var(--neg)}
+.calsum figure{margin:0}
+.spark{display:block;width:100%;height:64px}
+.spark path{fill:none;stroke-width:1.5;vector-effect:non-scaling-stroke;stroke-linejoin:round}
+.spark path.up{stroke:var(--pos)} .spark path.dn{stroke:var(--neg)}
+.spark .zero{stroke:var(--control);stroke-dasharray:3 3;vector-effect:non-scaling-stroke}
+.calsum figcaption{font-size:11.5px;margin-top:4px}
 .wf .row{display:grid;grid-template-columns:minmax(0,38%) minmax(0,1fr) 100px;gap:0 12px;align-items:center;border-bottom:1px solid var(--line);font-size:12.5px;min-height:34px;padding:4px 6px}
 .wf .row:last-child{border-bottom:0}
 .wf .lbl{color:var(--ink-2)} .wf .val{text-align:right;white-space:nowrap}
