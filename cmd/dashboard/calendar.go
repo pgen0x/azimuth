@@ -36,8 +36,10 @@ type monthEntry struct {
 // SOL/USD for the calendar's USD view: one keyless server-side request, cached, fail-soft.
 // The browser never calls a third party (CSP default-src 'self').
 const (
-	solMint      = "So11111111111111111111111111111111111111112"
-	priceURL     = "https://lite-api.jup.ag/price/v3?ids=" + solMint
+	solMint = "So11111111111111111111111111111111111111112"
+	// Wormhole-bridged ETH on Solana: Jupiter's keyless ETH/USD reference for the Robinhood calendar.
+	ethMint      = "7vfCXTUXx5WJV5JADk17DUJ4ksgau7utNKj4b963voxs"
+	priceBase    = "https://lite-api.jup.ag/price/v3?ids="
 	priceTTL     = 5 * time.Minute
 	priceFailTTL = time.Minute
 	priceTimeout = 5 * time.Second
@@ -76,6 +78,18 @@ func parseMonth(query string, now time.Time, loc *time.Location) (string, error)
 }
 
 func (s *server) serveMonth(w http.ResponseWriter, r *http.Request) {
+	s.serveMonthKind(w, r, "month", "north_star")
+}
+
+// serveRobinhoodMonth is the same bounded, cached month read for the Robinhood calendar: realized_quote per
+// local day and quote asset from uni_closes.jsonl (collector mode "rhmonth").
+func (s *server) serveRobinhoodMonth(w http.ResponseWriter, r *http.Request) {
+	s.serveMonthKind(w, r, "rhmonth", "robinhood")
+}
+
+// serveMonthKind runs collector mode `kind` for one month and returns its `key` section. Cached per kind, zone
+// and month; one collection at a time.
+func (s *server) serveMonthKind(w http.ResponseWriter, r *http.Request, kind, key string) {
 	tz, fallback := requestZone(r.URL.Query().Get("tz"))
 	loc, err := time.LoadLocation(tz)
 	if err != nil {
@@ -87,21 +101,22 @@ func (s *server) serveMonth(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	entry, ok := s.cachedMonth(tz+"|"+month, now)
+	cacheKey := kind + "|" + tz + "|" + month
+	entry, ok := s.cachedMonth(cacheKey, now)
 	if !ok {
 		// One collector run at a time: a burst of month clicks must not fan out into processes.
 		s.monthRun.Lock()
-		if entry, ok = s.cachedMonth(tz+"|"+month, now); !ok {
+		if entry, ok = s.cachedMonth(cacheKey, now); !ok {
 			ctx, cancel := context.WithTimeout(r.Context(), monthDeadline)
-			data, cerr := s.collect(ctx, "month "+month, []string{tz})
+			data, cerr := s.collect(ctx, kind+" "+month, []string{tz})
 			cancel()
-			if cerr == nil && data["north_star"] != nil {
+			if cerr == nil && data[key] != nil {
 				ttl := monthPastTTL
 				if month == now.In(loc).Format("2006-01") {
 					ttl = monthCurrentTTL
 				}
 				entry, ok = monthEntry{at: now, ttl: ttl, data: data}, true
-				s.storeMonth(tz+"|"+month, entry)
+				s.storeMonth(cacheKey, entry)
 			}
 		}
 		s.monthRun.Unlock()
@@ -111,7 +126,7 @@ func (s *server) serveMonth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(object{"north_star": entry.data["north_star"], "collected_at": entry.data["collected_at"], "month": month, "tz": tz, "tz_fallback": fallback})
+	json.NewEncoder(w).Encode(object{key: entry.data[key], "collected_at": entry.data["collected_at"], "month": month, "tz": tz, "tz_fallback": fallback})
 }
 
 func (s *server) cachedMonth(key string, now time.Time) (monthEntry, bool) {
@@ -145,15 +160,28 @@ func (s *server) storeMonth(key string, e monthEntry) {
 // servePrice answers 200 in every case: {"usd": n, "status": "ok"} or {"usd": null,
 // "status": "unavailable"}. The calendar disables its USD view on the latter.
 func (s *server) servePrice(w http.ResponseWriter, r *http.Request) {
+	fetch := s.fetchPrice
+	if fetch == nil {
+		fetch = fetchSOLPrice
+	}
+	s.servePriceFor(w, r, &s.price, fetch, "SOL")
+}
+
+// serveETHPrice is the ETH/USD twin for the Robinhood calendar's USD view (WETH and native ETH closes).
+// USDG needs no price: it is taken at $1.
+func (s *server) serveETHPrice(w http.ResponseWriter, r *http.Request) {
+	fetch := s.fetchETHPrice
+	if fetch == nil {
+		fetch = func(ctx context.Context) (float64, error) { return fetchJupiterPrice(ctx, ethMint) }
+	}
+	s.servePriceFor(w, r, &s.ethPrice, fetch, "ETH")
+}
+
+func (s *server) servePriceFor(w http.ResponseWriter, r *http.Request, p *priceState, fetch func(context.Context) (float64, error), asset string) {
 	now := s.clock()
-	p := &s.price
 	p.mu.Lock()
 	fresh := p.usd > 0 && now.Sub(p.at) < priceTTL
 	if !fresh && (p.failAt.IsZero() || now.Sub(p.failAt) >= priceFailTTL) {
-		fetch := s.fetchPrice
-		if fetch == nil {
-			fetch = fetchSOLPrice
-		}
 		ctx, cancel := context.WithTimeout(r.Context(), priceTimeout)
 		usd, err := fetch(ctx)
 		cancel()
@@ -161,10 +189,10 @@ func (s *server) servePrice(w http.ResponseWriter, r *http.Request) {
 			p.usd, p.at, p.err = usd, now, ""
 			fresh = true
 		} else {
-			p.failAt, p.err = now, "SOL/USD price unavailable"
+			p.failAt, p.err = now, asset+"/USD price unavailable"
 		}
 	}
-	value := object{"usd": nil, "status": "unavailable", "error": p.err, "source": "jupiter", "basis": "Current SOL/USD, applied to every day: not a historical price."}
+	value := object{"usd": nil, "status": "unavailable", "error": p.err, "source": "jupiter", "asset": asset, "basis": "Current " + asset + "/USD, applied to every day: not a historical price."}
 	if fresh {
 		value["usd"], value["status"], value["fetched_at"], value["error"] = p.usd, "ok", p.at.Unix(), ""
 	}
@@ -174,8 +202,11 @@ func (s *server) servePrice(w http.ResponseWriter, r *http.Request) {
 }
 
 // fetchSOLPrice reads Jupiter's keyless price endpoint with a generic User-Agent.
-func fetchSOLPrice(ctx context.Context) (float64, error) {
-	req, err := http.NewRequestWithContext(ctx, "GET", priceURL, nil)
+func fetchSOLPrice(ctx context.Context) (float64, error) { return fetchJupiterPrice(ctx, solMint) }
+
+// fetchJupiterPrice reads one mint's USD price from Jupiter's keyless price endpoint.
+func fetchJupiterPrice(ctx context.Context, mint string) (float64, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET", priceBase+mint, nil)
 	if err != nil {
 		return 0, err
 	}
@@ -189,19 +220,21 @@ func fetchSOLPrice(ctx context.Context) (float64, error) {
 	if resp.StatusCode != http.StatusOK {
 		return 0, fmt.Errorf("price status %d", resp.StatusCode)
 	}
-	return parseSOLPrice(io.LimitReader(resp.Body, 64*1024))
+	return parseJupiterPrice(io.LimitReader(resp.Body, 64*1024), mint)
 }
 
-func parseSOLPrice(body io.Reader) (float64, error) {
+func parseSOLPrice(body io.Reader) (float64, error) { return parseJupiterPrice(body, solMint) }
+
+func parseJupiterPrice(body io.Reader, mint string) (float64, error) {
 	var payload map[string]struct {
 		USDPrice float64 `json:"usdPrice"`
 	}
 	if err := json.NewDecoder(body).Decode(&payload); err != nil {
 		return 0, err
 	}
-	usd := payload[solMint].USDPrice
+	usd := payload[mint].USDPrice
 	if !(usd > 0) || math.IsInf(usd, 0) {
-		return 0, errors.New("no SOL price in response")
+		return 0, errors.New("no price in response")
 	}
 	return usd, nil
 }
