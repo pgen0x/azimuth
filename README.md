@@ -572,6 +572,7 @@ installs the named units into `~/.config/systemd/user/` and enables them.
 | `azimuth-sol-net-experiment.timer` | research | `dlmm_net_experiment.py dry-tick` every minute | dry-run exit samples under `~/.local/state/azimuth/optimization/` | off | `--with-research` |
 | `azimuth-sol-price-path.timer` | research | `dlmm_price_path.py` every minute | candidate price paths in `memories/` | off | `--with-research` |
 | `azimuth-sol-net-research@.timer` | research | `dlmm_net_experiment.py dry-tick` per named instance | `~/.local/state/azimuth/optimization/<name>/` | off | copied by `--with-research`, enable `@<name>` by hand |
+| `azimuth-grad-paper` | research | `grad_paper.py`, long-running: graduation paper-trader polling public GeckoTerminal/Jupiter | paper trades in `memories/grad_paper/`; no wallet, no tx | off | `--with-paper` |
 
 Only the rent timer sends transactions, so it has its own flag. `--with-ops`
 installs its files but does not enable it.

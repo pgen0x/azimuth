@@ -81,6 +81,7 @@ jobs:
           python3 assets/skill/scripts/test_dlmm_reconcile.py
           python3 assets/skill/scripts/test_dlmm_profit_acceptance.py
           python3 assets/skill/scripts/test_dlmm_cash_sign.py
+          python3 assets/skill/scripts/test_grad_paper.py
           node assets/skill/scripts/test_dlmm_cash_sign.js
           node assets/skill/scripts/test_dlmm_nav.js
           node assets/skill/scripts/test_dlmm_jsonl.js

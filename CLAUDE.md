@@ -107,12 +107,25 @@ found"). `loginctl enable-linger $USER` is what keeps them alive across logout.
 | `azimuth-sol-rent` (.timer) | reclaims empty token-account rent every 30m — **signs tx** | `install.sh --with-rent-reclaim-signs-tx` only |
 | `azimuth-sol-{accounting,shadow,candidate-paper,net-experiment,price-path}` (.timer) | research observers; read-only RPC/quotes, local journals only | `install.sh --with-research` (opt-in) |
 | `azimuth-sol-net-research@<name>` (.timer) | frozen paired net research instance | copied by `--with-research`; enable by hand |
+| `azimuth-grad-paper` | graduation paper-trader (S1): public GT/Jupiter reads, `memories/grad_paper/` only, no tx | `install.sh --with-paper` (opt-in) |
 | `hermes-gateway-<profile>` | Hermes gateway that receives the webhook, and ticks the profile's cron jobs | Hermes, not this repo |
 
 Every repo unit lives in `assets/systemd/`. Without flags `install.sh` enables
 only the first two (the daemon once `<repo>/.env` exists); every `--with-*`
 flag is opt-in. Units not listed here are **not** this repo's, and `install.sh`
 must never write them.
+
+**Graduation paper-trader** (`assets/skill/scripts/grad_paper.py`, experiment
+S1) is the one long-running research loop. It polls GeckoTerminal `new_pools`
+every 60s, keeps graduations (dex in pumpswap / meteora-damm(-v2) /
+raydium(-cp/-cpmm), SOL quote, reserve >= $5k, sighted within 10m), reads 1m
+candles until T0+3m+24h and closes one PAPER trade per pool (entry first candle
+>= T0+3m, 25% trail, -30% stop, 24h, 8% round trip) in arms `all` and `safety`.
+It shares the host's keyless GT budget with every other GT caller, so it is
+paced at 8 req/min with a 429 cooldown — raise `--gt-rpm` only knowing that.
+With those parameters the trail always sits above the -30% floor (first
+drawdown exits at -25%); the rule is kept literal because it was
+pre-registered. `--report` prints the S1 verdict (mint-clustered bootstrap).
 
 ```bash
 journalctl --user -u azimuth -f          # live tail
