@@ -138,14 +138,13 @@ svg .col.on .bar{filter:brightness(1.2)}
 svg .xh{stroke:var(--ink-2);stroke-width:1}
 svg .fp{fill:var(--pos)} svg .fn{fill:var(--neg)}
 h3.sub{margin:16px 0 0;color:var(--ink-2);font-weight:600;font-size:12.5px}
-/* Capital calendar, after the operator's PnL-calendar reference (revision 5): dashed day grid with a WEEK
-   column, weekday totals under it, a big month PnL, a stat strip. Our tokens and font; contrast is checked
-   against the darkest tint each text can sit on (65% white for the small labels, a lighter red for the
-   loss glyph on grey). The block fills the panel at every width. */
-.calbox{container-type:inline-size;--dash:rgba(255,255,255,.16);--vio:#a78bfa;--neg-on-tint:#ff9a90;
-  /* Dot grid: the operator's reference, kept to this panel. */
-  background-image:radial-gradient(rgba(255,255,255,.05) 1px,transparent 1px);background-size:30px 30px}
+/* Capital calendar (revision 6): the PnL-calendar layout (big month PnL, 7 days + WEEK totals, weekday totals,
+   per-day positions, stat strip) in Azimuth's own language: solid panel hairlines, green/red tints scaled by
+   size, dark bordered total chips with a sign bar, amber only for "PnL" and today. No glow, no texture.
+   Contrast: text on a tint uses ink / ink-2 and lighter sign tones (all >= 4.58:1 at the deepest tint). */
+.calbox{container-type:inline-size;--pos-on-tint:#8ff0bd;--neg-on-tint:#ffb3ab}
 .caps{text-transform:uppercase;letter-spacing:.12em;font-size:10.5px;color:var(--muted)}
+.acc{color:var(--accent)}
 .calhead{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:flex-end;gap:16px 24px;margin:4px 0 18px}
 .calctl{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
 .unitsw{display:inline-flex}
@@ -155,73 +154,75 @@ h3.sub{margin:16px 0 0;color:var(--ink-2);font-weight:600;font-size:12.5px}
 .calnav{display:inline-flex;gap:6px;align-items:center}
 .calnav button{min-width:44px;padding:4px 10px}
 .calnav input{min-width:0;width:12.5em;padding:6px 10px}
-.calbig{display:flex;flex-direction:column;align-items:flex-end;gap:2px;text-align:right;min-width:0}
-.calbig strong{font-size:clamp(36px,5.2vw,72px);font-weight:700;line-height:1;letter-spacing:-.02em;color:#fff;white-space:nowrap}
+.calbig{display:flex;flex-direction:column;align-items:flex-end;gap:4px;text-align:right;min-width:0}
+.calbig strong{font-size:clamp(34px,4.8vw,64px);font-weight:600;line-height:1;letter-spacing:-.02em;color:var(--ink);white-space:nowrap}
+.calbig strong .unit{font-size:.36em;letter-spacing:0;font-weight:500}
 .calbig>span:last-child:not(.caps){font-size:12px;max-width:52ch}
-/* Money: digits in ink, only sign + unit glyph coloured. The header glyph alone carries a soft glow:
-   it is the one focal number on the screen. */
+/* Money: sign coloured, digits ink, unit small and muted. */
 .mv{white-space:nowrap} .mv.na{color:var(--muted)}
-.gl.up{color:var(--pos)} .gl.down{color:var(--neg)} .gl.nil{color:var(--vio)}
-.calbig .gl.up{text-shadow:0 0 22px rgba(76,195,138,.45)} .calbig .gl.down{text-shadow:0 0 22px rgba(242,118,107,.45)}
-/* Grid: 7 days + WEEK. Dashed hairlines, no fills except the tint. */
+.sg.up{color:var(--pos)} .sg.down{color:var(--neg)}
+.unit{color:var(--muted);font-size:.78em;font-weight:400}
+/* Grid: 7 days + WEEK, solid hairlines in the panel line colour (the dashboard's ruled grid). */
 .pnlh,.pnl,.wdrow{display:grid;grid-template-columns:repeat(7,minmax(0,1fr)) minmax(0,1.2fr)}
-.dow{font-size:10px;letter-spacing:.14em;color:var(--muted);padding:0 8px 6px}
-.dow.wkh{border-left:1px dashed var(--dash);padding-left:14px}
-.pnl{border-top:1px dashed var(--dash);border-left:1px dashed var(--dash)}
-.cell{position:relative;height:68px;padding:6px 8px;border-right:1px dashed var(--dash);border-bottom:1px dashed var(--dash);
-  display:grid;grid-template-columns:auto minmax(0,1fr);grid-template-rows:auto 1fr auto;column-gap:6px;background:rgba(255,255,255,.03);outline-offset:-2px;min-width:0}
-.cell .d{font-size:10.5px;color:rgba(255,255,255,.65)}
-.cell .tag{justify-self:end;font-size:9.5px;color:rgba(255,255,255,.65);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}
+.dow{font-size:10.5px;letter-spacing:.12em;color:var(--muted);padding:0 8px 6px}
+.dow.wkh{padding-left:12px}
+.pnl{border-top:1px solid var(--line);border-left:1px solid var(--line)}
+.cell{position:relative;height:68px;padding:6px 8px;border-right:1px solid var(--line);border-bottom:1px solid var(--line);
+  display:grid;grid-template-columns:auto minmax(0,1fr);grid-template-rows:auto 1fr auto;column-gap:6px;background:var(--surface);outline-offset:-2px;min-width:0}
+.cell .d{font-size:10.5px;color:var(--ink-2)}
+.cell .tag{justify-self:end;font-size:9.5px;color:var(--ink-2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}
 .cell .tag .tw{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
-.cell .v{grid-column:1 / -1;grid-row:3;font-size:12.5px;font-weight:600;color:#fff;white-space:nowrap;overflow:hidden}
-.cell .np{grid-column:1 / -1;grid-row:4;font-size:9px;color:rgba(255,255,255,.65);line-height:1.2}
+.cell .v{grid-column:1 / -1;grid-row:3;font-size:12.5px;font-weight:600;color:var(--ink);white-space:nowrap;overflow:hidden}
+.cell .v .unit{color:var(--ink-2)}
+.cell .np{grid-column:1 / -1;grid-row:4;font-size:9.5px;color:var(--ink-2);line-height:1.2}
 .cell .vc{display:none}
-.cell.pos{background:rgba(139,92,246,var(--a))} .cell.neg{background:rgba(126,132,143,var(--a))}
-.cell.neg .gl.down{color:var(--neg-on-tint)}
-.cell.adj{background:none} .cell.adj .d{opacity:.25}
-.cell.unk{background:repeating-linear-gradient(135deg,rgba(255,255,255,.07) 0 1px,transparent 1px 6px)}
+.cell.pos{background:rgba(76,195,138,var(--a))} .cell.neg{background:rgba(242,118,107,var(--a))}
+.cell.pos .sg.up{color:var(--pos-on-tint)} .cell.neg .sg.down{color:var(--neg-on-tint)}
+/* Days outside the month and days with no data yet sit recessed on the page colour. */
+.cell.adj,.cell.nod{background:var(--bg)} .cell.adj .d{color:var(--muted)}
+.cell.unk{background:repeating-linear-gradient(135deg,var(--line) 0 1px,var(--surface) 1px 6px)}
 .cell.unk .v{font-weight:400}
 .cell.today{box-shadow:inset 0 0 0 2px var(--accent)} .cell.today .d{color:var(--accent);font-weight:600}
-.cell.on{box-shadow:inset 0 0 0 2px #fff}
-/* WEEK column: a dot on the dashed separator, a short dashed connector, a light pill with the week total. */
-.wk{display:flex;align-items:center;position:relative;padding-right:6px;min-width:0}
-.wk .dot,.wd .dot{width:6px;height:6px;border-radius:50%;background:#fff;flex:none}
-.wk .dot{margin-left:-3.5px}
-.wk .conn{flex:0 0 10px;border-top:1px dashed var(--dash)}
-.pill{display:inline-flex;flex-direction:column;align-items:flex-start;gap:1px;background:#eef0f6;color:#0a0a0a;border-radius:6px;
-  padding:4px 8px;box-shadow:0 2px 6px rgba(0,0,0,.35);min-width:0;max-width:100%}
-.pill small{font-size:8.5px;letter-spacing:.12em;color:#555b66;text-transform:uppercase;white-space:nowrap}
-.pill b{font-size:12px;font-weight:700;white-space:nowrap;overflow:hidden;max-width:100%}
-.pill .mv{color:#0a0a0a} .pill .gl.up{color:#146c43} .pill .gl.down{color:#b42318} .pill .gl.nil{color:#555b66} .pill .mv.na{color:#555b66}
-.pill .ps{display:none}
-/* Weekday totals: each column drops a dashed line from a dot to its pill. */
-.wd{display:flex;flex-direction:column;align-items:center;min-width:0;padding:0 2px}
-.wd .dot{margin-top:-3.5px}
-.wd .vconn{height:16px;border-left:1px dashed var(--dash)}
-.wd .pill{align-items:center}
-.pillist{display:none}
-/* Footer strip: six measures spread across the width. */
-.calstats{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:12px 16px;border-top:1px solid var(--line);margin-top:18px;padding-top:14px}
-.calstats>div{display:flex;flex-direction:column;gap:4px;min-width:0}
-.calstats b{font-size:17px;font-weight:600;color:#fff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.cell.on{box-shadow:inset 0 0 0 2px var(--ink)}
+/* Totals: dark chips on the panel surface, 1px border, a 2px left bar in the sign's colour. */
+.chip{display:inline-flex;flex-direction:column;gap:2px;min-width:0;max-width:100%;background:var(--surface-2);border:1px solid var(--line);
+  border-left:2px solid var(--control);padding:4px 8px}
+.chip.up{border-left-color:var(--pos)} .chip.down{border-left-color:var(--neg)}
+.chip small{font-size:9.5px;letter-spacing:.12em;color:var(--muted);text-transform:uppercase;white-space:nowrap}
+.chip b{font-size:12px;font-weight:600;color:var(--ink);white-space:nowrap;overflow:hidden;max-width:100%}
+.chip .ps{display:none}
+.wk{display:flex;align-items:center;padding:0 0 0 12px;min-width:0;border-bottom:1px solid transparent}
+.wk .chip{width:100%}
+.wdrow{margin-top:8px;gap:0}
+.wd{padding:0 4px 0 0;min-width:0}
+.wd .chip{width:100%}
+.chiplist{display:none}
+/* Footer strip: six measures, separated by hairlines. */
+.calstats{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));border-top:1px solid var(--line);margin-top:18px;padding-top:14px}
+.calstats>div{display:flex;flex-direction:column;gap:4px;min-width:0;padding:0 14px;border-left:1px solid var(--line)}
+.calstats>div:first-child{border-left:0;padding-left:0}
+.calstats b{font-size:17px;font-weight:600;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .calkey{font-size:12px;color:var(--muted);margin:12px 0 0}
-/* Narrow grids (~95px days): compact values, deposit tag as "dep", short weekday names on the pills. */
+/* Narrow grids (~95px days): compact values without the unit (the header names it), "dep" tag, short weekday names. */
 @container (max-width:900px){
-  .cell .vf{display:none} .cell .vc{display:inline} .cell .tag .ta{display:none}
-  .pill .pl{display:none} .pill .ps{display:inline} .wd .pill{padding:4px 5px}
-  .calstats{grid-template-columns:repeat(3,minmax(0,1fr))}
+  .cell .vf{display:none} .cell .vc{display:inline} .cell .tag .ta,.cell .v .unit{display:none}
+  .chip .pl{display:none} .chip .ps{display:inline} .chip{padding:4px 6px} .chip .unit{display:none}
+  .calstats{grid-template-columns:repeat(3,minmax(0,1fr));row-gap:14px}
+  .calstats>div:nth-child(3n+1){border-left:0;padding-left:0}
 }
-/* Phones: seven columns only; week and weekday totals become two wrapped pill lists under the grid. */
+/* Phones: seven columns only; week and weekday totals become two wrapped chip lists under the grid. */
 @container (max-width:600px){
   .pnlh,.pnl{grid-template-columns:repeat(7,minmax(0,1fr))}
   .wkh,.wk,.wdrow{display:none}
-  .pillist{display:flex;flex-direction:column;gap:8px;margin-top:12px}
-  .pillist>div{display:flex;flex-wrap:wrap;gap:6px}
+  .chiplist{display:flex;flex-direction:column;gap:8px;margin-top:12px}
+  .chiplist>div{display:flex;flex-wrap:wrap;gap:6px}
   .cell{height:56px;padding:4px 3px} .dow{padding:0 3px 6px;letter-spacing:.06em}
-  .cell .v{font-size:9.5px;letter-spacing:-.3px} .cell .cur{display:none} .cell .np{font-size:8.5px}
+  .cell .v{font-size:9.5px;letter-spacing:-.3px} .cell .np{font-size:8.5px}
   .calhead{align-items:stretch} .calctl{width:100%} .calnav{flex:1} .calnav input{flex:1;width:auto}
   .calbig{align-items:flex-start;text-align:left}
   .calstats{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .calstats>div{border-left:0;padding:0}
+  .calstats>div:nth-child(2n){border-left:1px solid var(--line);padding-left:14px}
 }
 .wf .row{display:grid;grid-template-columns:minmax(0,38%) minmax(0,1fr) 100px;gap:0 12px;align-items:center;border-bottom:1px solid var(--line);font-size:12.5px;min-height:34px;padding:4px 6px}
 .wf .row:last-child{border-bottom:0}

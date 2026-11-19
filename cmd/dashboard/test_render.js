@@ -67,8 +67,8 @@ async function render(tab, payload, fail=false, extra={}) {
   assert(h.includes('Unexplained <span class="badge">residual</span>'), 'residual badge keyed by component id');
   assert(h.includes('days in America/Sao_Paulo') && h.includes('4 Oct 2024 (America/Sao_Paulo)'), 'zone named on day labels');
   // Revision 5 grid: dashed cells tinted violet (profit) / grey (loss) by size against the month's largest move.
-  const M = (sign, cls, cur, body) => `<span class="mv"><span class="gl ${cls}"><span class="sg">${sign}</span><span class="cur">${cur}</span></span>${body}</span>`;
-  assert(/class="cell pos" style="--a:0\.22[78]"/.test(h) && h.includes('class="cell neg" style="--a:0.410"') && h.includes('class="cell unk"') && !/pos-[123]|neg-[123]/.test(h), 'calendar tints');
+  const M = (sign, cls, cur, body) => `<span class="mv">${sign ? `<span class="sg ${cls}">${sign}</span>` : ''}${cur === '$' ? '$' + body : body + '<small class="unit"> SOL</small>'}</span>`;
+  assert(h.includes('class="cell pos" style="--a:0.240"') && h.includes('class="cell neg" style="--a:0.300"') && h.includes('class="cell unk"') && !/pos-[123]|neg-[123]/.test(h), 'calendar tints');
   assert(h.includes('<div class="cell adj"><span class="d">30</span></div>') && h.includes('<div class="cell nod"><span class="d">7</span></div>'), 'adjacent-month and no-data days');
   // Money: only sign + unit glyph coloured, real SOL never silently scaled; flat today; fallback starred; n/a is n/a.
   assert(h.includes(`<span class="vf">${M('+', 'up', '◎', '0.0030')}</span>`) && h.includes(`<span class="vf">${M('−', 'down', '◎', '0.0040')}</span>`) && h.includes('class="cell nod today"'), 'signed SOL values with glyph and today marker');
@@ -85,20 +85,21 @@ async function render(tab, payload, fail=false, extra={}) {
   // Positions closed per day, from the closes journal.
   assert(h.includes('<span class="np">3 pos</span>') && h.includes('<span class="np">0 pos</span>') && h.includes('3 positions closed'), 'N pos per day');
   // Header: the month's trading PnL, big; flows listed apart from it.
-  assert(h.includes(`<span class="caps">October 2024 PnL</span><strong>${M('+', 'up', '◎', '0.0011')}</strong>`), 'big month PnL, trading only');
+  assert(h.includes(`<span class="caps">October 2024 <span class="acc">PnL</span></span><strong>${M('+', 'up', '◎', '0.0011')}</strong>`), 'big month PnL, trading only');
   assert(h.includes('deposits +0.5000 SOL excluded · cash incl. flows +0.5111 SOL · 2 days n/a, not counted'), 'flows listed separately');
   // WEEK column and weekday totals (Monday-first). October 2024 starts on a Tuesday: 5 week rows.
   assert(h.includes('<span class="dow wkh">WEEK</span>') && (h.match(/<div class="wk">/g) || []).length === 5, 'WEEK column, one pill per row');
   assert(h.includes(`<small><span class="pl">W1</span><span class="ps" aria-hidden="true">W1</span></small><b>${M('+', 'up', '◎', '0.0011')}</b>`), 'week 1 total');
-  assert(h.includes(`<span class="pl">TUESDAYS</span><span class="ps" aria-hidden="true">TUE</span></small><b>${M('+', 'up', '◎', '0.0021')}</b>`)
-    && h.includes(`<span class="pl">SATURDAYS</span><span class="ps" aria-hidden="true">SAT</span></small><b>${M('−', 'down', '◎', '0.0040')}</b>`)
-    && h.includes('<span class="pl">MONDAYS</span><span class="ps" aria-hidden="true">MON</span></small><b><span class="mv na">n/a</span></b>'), 'weekday totals, n/a when unmeasured');
-  assert(h.includes('<div class="pillist" aria-label="Week and weekday totals">'), 'phone fallback lists exist');
+  assert(h.includes(`<span class="pl">Tuesdays</span><span class="ps" aria-hidden="true">Tue</span></small><b>${M('+', 'up', '◎', '0.0021')}</b>`)
+    && h.includes(`<span class="pl">Saturdays</span><span class="ps" aria-hidden="true">Sat</span></small><b>${M('−', 'down', '◎', '0.0040')}</b>`)
+    && h.includes('<span class="pl">Mondays</span><span class="ps" aria-hidden="true">Mon</span></small><b><span class="mv na">n/a</span></b>'), 'weekday totals, n/a when unmeasured');
+  assert(h.includes('<div class="chiplist" aria-label="Week and weekday totals">'), 'phone fallback lists exist');
   // Footer stat strip from the closes/realized journals; partial measurement is disclosed, unmeasurable is n/a (never a dash).
-  assert(h.includes(`<span class="caps">Volume</span><b>${M('', 'nil', '◎', '2.5000')}</b>`) && h.includes('<span class="caps">Win rate</span><b>60.0<span class="gl nil">%</span></b>'), 'volume and win rate');
+  assert(h.includes(`<span class="caps">Volume</span><b>${M('', 'nil', '◎', '2.5000')}</b>`) && h.includes('<span class="caps">Win rate</span><b>60.0<small class="unit"> %</small></b>'), 'volume and win rate');
   assert(h.includes('title="4 of 5 positions have a measured fee figure"><span class="caps">Fees</span>') && h.includes(`<span class="caps">Best win</span><b>${M('+', 'up', '◎', '0.0040')}</b>`), 'fees and best win');
   assert(h.includes('<span class="caps">Positions</span><b>5</b>') && h.includes('<span class="caps">Avg hold</span><b>2h 15m</b>') && !/—/.test(h), 'positions, hold, no em dash');
   assert(!h.includes('class="calsum"') && !h.includes('class="spark"'), 'summary panel removed');
+  assert(!h.includes('◎') && !/class="(pill|dot|conn|vconn)"/.test(h) && h.includes('<span class="chip up"><small><span class="pl">W1</span>') && h.includes('<span class="chip down"><small><span class="pl">Saturdays</span>') && h.includes('<span class="chip nil"><small><span class="pl">W2</span>'), 'text unit, no glyph; dark chips with sign bar, no pills or connectors');
   // Native month input bounded by the data; arrows disabled at the ends.
   assert(/<input type="month" id="calpick" aria-label="Month" value="2024-10" min="2024-06" max="2024-10"/.test(h) && /id="calnext"[^>]*disabled/.test(h) && !/id="calprev"[^>]*disabled/.test(h) && !h.includes('<select id="calpick"'), 'native month input');
   assert((h.match(/class="calkey"/g) || []).length === 1, 'one key');
