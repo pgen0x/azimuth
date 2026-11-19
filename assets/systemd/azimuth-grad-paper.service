@@ -1,0 +1,23 @@
+# Graduation paper-trader (experiment S1). Read-only by design: it polls public
+# GeckoTerminal / Jupiter endpoints and writes only <profile>/memories/grad_paper/.
+# No wallet, no key, no env file, no transaction. Installed by
+# `install.sh --with-paper` (rewrites __PROFILE__). Evaluate with:
+#   python3 __PROFILE__/skills/solana-dlmm/scripts/grad_paper.py --profile __PROFILE__ --report
+[Unit]
+Description=Azimuth graduation paper-trader (research only, no trades)
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 __PROFILE__/skills/solana-dlmm/scripts/grad_paper.py --profile __PROFILE__
+Restart=on-failure
+RestartSec=30
+MemoryMax=200M
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+UMask=0077
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target
