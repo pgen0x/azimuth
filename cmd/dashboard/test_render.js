@@ -67,7 +67,8 @@ async function render(tab, payload, fail=false, extra={}) {
   assert(h.includes('Unexplained <span class="badge">residual</span>'), 'residual badge keyed by component id');
   assert(h.includes('days in America/Sao_Paulo') && h.includes('4 Oct 2024 (America/Sao_Paulo)'), 'zone named on day labels');
   // No tinted blocks: direction lives on the signed, coloured number; size on a thin bar.
-  assert(!/pos-[123]|neg-[123]/.test(h) && h.includes('class="v up"') && h.includes('class="v down"') && h.includes('class="mag up"') && h.includes('class="cell unk"'), 'calendar states');
+  // Tinted cells (operator's choice): step by thirds of the month's largest trading move.
+  assert(h.includes('class="cell pos-3"') && h.includes('class="cell neg-3"') && h.includes('class="cell pos-2"') && h.includes('class="cell unk"') && !h.includes('class="mag'), 'calendar states');
   // Real SOL with its unit, never silently scaled; flat today; fallback day starred; unmeasured is n/a, not 0.
   assert(h.includes('>+0.0030<small class="u"> SOL</small><') && h.includes('>−0.0040<small class="u"> SOL</small><') && h.includes('class="cell today"'), 'signed SOL values with unit and today marker');
   assert(!/\+3\.00|mSOL/.test(h), 'no unlabelled milli-SOL');

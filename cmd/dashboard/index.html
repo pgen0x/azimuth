@@ -205,31 +205,32 @@ function calEmpty(ns,state){
   if(state==='range'||(fm&&ns.month<fm))return `<p class="note">${esc(monthLabel(ns.month))} has no capital data${fm?`: the NAV journal starts in ${esc(monthLabel(fm))}`:''}${cm&&ns.month>cm?`, and the latest month is ${esc(monthLabel(cm))}`:''}.</p>`;
   return `<p class="note">No NAV snapshots in ${esc(monthLabel(ns.month))}.</p>`}
 /* Month grid (Monday-first). The number is the trading change; its sign and colour say direction, the
-   thin bar under it says size against the month's largest move. Tinted blocks are gone on purpose. */
+   tint depth says size in thirds of the month's largest move (operator's choice, revision 2). */
 function monthCal(ns,unit,price,state=''){
   const usdOk=isNum(price.usd)&&price.status==='ok',u=usdOk?unit:'sol',k='d_trading_sol',m=ns.month;
   if(!isMonth(m)||state)return calEmpty(ns,state||'empty');
   const days=(ns.days||[]).filter(r=>isDay(r.day)),by=Object.fromEntries(days.map(r=>[r.day,r]));
   if(!days.length)return calEmpty(ns,'');
   const max=Math.max(0,...days.map(r=>r[k]).filter(isNum).map(v=>Math.abs(v)));
+  const bin=v=>{const a=Math.abs(v);return a<=max/3?1:a<=2*max/3?2:3};
   const y=+m.slice(0,4),mo=+m.slice(5)-1,start=Date.UTC(y,mo,1)/864e5,len=new Date(Date.UTC(y,mo+1,0)).getUTCDate(),lead=(new Date(start*864e5).getUTCDay()+6)%7;
   const both=v=>usdOk?`${fmtSOL(v)} · ${fmtUSD(+v*price.usd)} at current SOL price`:fmtSOL(v);
   let html=`<div class="cal one"><div class="days">${['Mon','Tue','Wed','Thu','Fri','Sat','Sun'].map(d=>`<span class="dow" aria-hidden="true">${d}</span>`).join('')}${'<span></span>'.repeat(lead)}`;
   for(let d=1;d<=len;d++){const key=dayK(start+d-1),r=by[key];
     if(!r){html+=`<div class="cell out"><span class="d">${d}</span></div>`;continue}
     const v=r[k],x=r.d_external_sol,today=r.status==='partial_day',star=r.cash_fallback?'*':'';
-    let cls='',val='n/a',tip,bar='';
+    let cls='',val='n/a',tip,tint='';
     if(!isNum(v)){cls='unk';tip=`Unmeasured\n${long(key)}\n${r.status==='no_snapshot'?'No NAV snapshot this day':isNum(r.d_cash_sol)?`Deposits and withdrawals unknown, so trading cannot be split out (Δ cash ${fmtSOL(r.d_cash_sol)})`:'No consecutive complete snapshot to diff against'}`}
     else{val=fmtUnit(v,u,price.usd);cls=flat(+v)?'flat':v>0?'up':'down';tip=`Trading ${both(v)}\n${long(key)}`;
-      if(!flat(+v)&&max>0)bar=`<i class="mag ${cls}" style="width:${Math.max(4,Math.round(Math.abs(v)/max*100))}%"></i>`}
+      if(!flat(+v))tint=' '+(v>0?'pos-':'neg-')+bin(v)}
     if(isNum(x)&&!flat(+x))tip+=`\n${x>0?'Deposit':'Withdrawal'} ${fmtSOL(x)} excluded (Δ cash ${fmtSOL(r.d_cash_sol)})`;
     if(star)tip+=`\n* Cash from an earlier reading this day (${date(r.cash_ts)}): the last snapshot had an unmeasured part`;
     if(today)tip+='\nToday, so far';
     const vu=/ SOL$/.test(val)?[val.slice(0,-4),' SOL']:[val,''],vc=fmtCompact(v,u,price.usd);
     const tag=isNum(x)&&Math.abs(x)>=FLOW_TAG_SOL?`<span class="tag"><span class="tw">${x>0?'deposit':'withdrawal'}</span><span class="ts" aria-hidden="true">${x>0?'dep':'wd'}</span> <span class="ta">${esc(fmtUnit(x,u,price.usd).replace(/ SOL$/,''))}</span></span>`:'';
-    html+=`<div class="cell${today?' today':''}${cls==='unk'?' unk':''}" data-tip="${esc(tip)}"><span class="d">${d}</span>${tag}<span class="v ${cls}"><span class="vf">${esc(vu[0])}${vu[1]?`<small class="u">${vu[1]}</small>`:''}${star}</span><span class="vc" aria-hidden="true">${esc(vc+star)}</span></span>${bar}</div>`}
+    html+=`<div class="cell${tint}${today?' today':''}${cls==='unk'?' unk':''}" data-tip="${esc(tip)}"><span class="d">${d}</span>${tag}<span class="v ${cls}"><span class="vf">${esc(vu[0])}${vu[1]?`<small class="u">${vu[1]}</small>`:''}${star}</span><span class="vc" aria-hidden="true">${esc(vc+star)}</span></span></div>`}
   html+='<span></span>'.repeat((7-(lead+len)%7)%7)+'</div></div>';
-  return html+`<p class="calkey">Trading change per day, deposits and withdrawals excluded. Bar length: size against the month's largest move (${esc(fmtUnit(max,u,price.usd).replace('+',''))}). n/a: unmeasured. *: earlier reading that day. Amber outline: today.</p>`}
+  return html+`<p class="calkey">Trading change per day, deposits and withdrawals excluded. Green profit, red loss; deeper tint = bigger move, in thirds of the month's largest (${esc(fmtUnit(max,u,price.usd).replace('+',''))}). n/a: unmeasured. *: earlier reading that day. Amber outline: today.</p>`}
 
 /* NAV bridge waterfall: measured components walk the running total; unknown ones are marked and skipped. */
 function waterfall(br){
