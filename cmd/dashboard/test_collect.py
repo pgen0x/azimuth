@@ -324,6 +324,16 @@ class CollectorTests(unittest.TestCase):
         for bad in ('2024-13','2024-1','x',''):
             with self.assertRaises(ValueError):c.north_star_month(self.m,now,bad,'UTC')
         self.assertEqual(c.north_star_month(Path(self.tmp.name)/'none',now,'2024-10','UTC')['first_month'],None)
+    def test_trading_delta_excludes_external_flows(self):
+        base=19997*DAY
+        rows(self.m/'dlmm_nav.jsonl',[snap(base+3600,1,1.0,external_flow_lamports=0),
+            snap(base+DAY+3600,2,1.51,external_flow_lamports=500_000_000),   # +0.5 deposit, +0.01 trading
+            snap(base+2*DAY+3600,3,1.30,external_flow_lamports=300_000_000), # -0.2 withdrawal, -0.01 trading
+            snap(base+3*DAY+3600,4,1.31)])                                   # flows unmeasured
+        with frozen_clock():days=c.north_star_month(self.m,base+3*DAY+7200,'2024-10','UTC')['days']
+        self.assertAlmostEqual(days[1]['d_external_sol'],.5);self.assertAlmostEqual(days[1]['d_trading_sol'],.01)
+        self.assertAlmostEqual(days[2]['d_external_sol'],-.2);self.assertAlmostEqual(days[2]['d_trading_sol'],-.01)
+        self.assertIsNotNone(days[3]['d_cash_sol']);self.assertIsNone(days[3]['d_trading_sol'])  # never guessed
     def test_north_star_month_zone(self):
         base=self._month_fixture()
         # 30 Sep 23:00 UTC is already 1 Oct in Jakarta: the first month there is October.

@@ -392,6 +392,9 @@ def north_star(memory, now, days=14, tz='UTC', first=None, last=None, fallback=F
             item['d_known_sol']=None if known is None or prev['known_sol'] is None else known-prev['known_sol']
             a,b=prev.get('external_flow_lamports'),item['external_flow_lamports']
             item['d_external_sol']=(b-a)/1e9 if lamports(a,True) and lamports(b,True) else None
+            # Trading change: Δcash with deposits/withdrawals taken out. Unmeasured flows leave it unmeasured.
+            dc,dx=item['d_cash_sol'],item['d_external_sol']
+            item['d_trading_sol']=None if dc is None or dx is None else dc-dx
         out.append(item); prev=item
     return {'tz':tz,'days':out,'status':'partial' if any(incomplete(r['source']) for r in out) else 'ok','basis':'Last snapshot per local day in the viewer time zone, including unknown values. known = native + SPL mark + LP mark + refundable rent. cash = native + LP mark + refundable rent (no SPL marks). Deltas require consecutive days and complete source selection. Large files are searched within fixed read bounds; ordering is checked on every row a lookup reads (binary search, backward scan and one neighbour line on each side of the pick), and only an observed inversion marks a day partial.',
             'caveats':['SPL marks drop out when a quote is deferred or a token is unpriced: known then falls without a trade (phantom loss). cash excludes SPL marks and is immune to that, but also misses real token value.',

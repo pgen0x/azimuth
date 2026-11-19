@@ -7,8 +7,7 @@
   --line:#2b2f34; --grat:rgba(236,232,225,.05); --control:#6b727a;
   --ink:#ece8e1; --ink-2:#b3ada3; --muted:#9a958c;
   --accent:#d99a4e;
-  --pos:#4cc38a; --neg:#f2766b; --zero:#24272b;
-  --pos-1:#1d3a2c; --pos-2:#24614a; --neg-1:#3e2220; --neg-2:#7a3530;
+  --pos:#4cc38a; --neg:#f2766b;
   --s1:#3987e5; --s2:#d55181; --s0:#9a958c;
   --gap:1px; --cols:12; --pad:20px; --side-w:216px;
   /* Owner choice: one monospace face for all UI. System stack keeps it offline. */
@@ -129,7 +128,7 @@ tbody tr:hover{background:#171a1d}
 .legend{display:flex;gap:4px 16px;flex-wrap:wrap;font-size:12px;color:var(--ink-2);margin:4px 0 0}
 .legend i{display:inline-block;width:14px;height:3px;vertical-align:middle;margin-right:6px}
 .legend i.sq{width:10px;height:10px}
-.legend i.hatch,.cell.unk,.wf .unk{background:repeating-linear-gradient(135deg,var(--control) 0 1px,transparent 1px 5px)}
+.legend i.hatch,.wf .unk{background:repeating-linear-gradient(135deg,var(--control) 0 1px,transparent 1px 5px)}
 svg .grid{stroke:var(--line);stroke-width:1}
 svg .base{stroke:var(--control);stroke-width:1}
 svg text{fill:var(--muted);font-size:11px;font-family:inherit}
@@ -139,35 +138,41 @@ svg .col.on .bar{filter:brightness(1.2)}
 svg .xh{stroke:var(--ink-2);stroke-width:1}
 svg .fp{fill:var(--pos)} svg .fn{fill:var(--neg)}
 h3.sub{margin:16px 0 0;color:var(--ink-2);font-weight:600;font-size:12.5px}
-.cal{display:flex;gap:20px;flex-wrap:wrap}
-.month{flex:1 1 300px;min-width:0}
-.month h3{font-size:12.5px;color:var(--ink-2);font-weight:600;margin:0 0 6px}
-.days{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:2px}
-.dow{font-size:11px;color:var(--muted);padding:0 4px 2px}
-.cell{min-height:52px;padding:4px 5px;background:var(--zero);color:var(--ink);font-size:11px;display:flex;flex-direction:column;justify-content:space-between;outline-offset:1px;position:relative}
-.cell .d{color:var(--ink-2)} .cell .v{font-size:11.5px;white-space:nowrap}
-.cell.pos-1{background:var(--pos-1)} .cell.pos-2{background:var(--pos-2)} .cell.pos-3{background:var(--pos);color:var(--bg)}
-.cell.neg-1{background:var(--neg-1)} .cell.neg-2{background:var(--neg-2)} .cell.neg-3{background:var(--neg);color:var(--bg)}
-.cell.pos-3 .d,.cell.neg-3 .d{color:var(--bg)}
-.cell.unk{background-color:var(--surface)} .cell.out{background:none;color:var(--muted)}
-.cell.today{box-shadow:inset 0 0 0 2px var(--accent)}
-.cell.on{box-shadow:inset 0 0 0 2px var(--ink)}
-.cell .sg{display:none}
-.cell .u{font-size:inherit;color:inherit;opacity:.75}
-/* Capital calendar toolbar: unit toggle, month navigation, month total in the selected unit. */
-.calbar{display:flex;flex-wrap:wrap;align-items:center;gap:10px 16px;margin:0 0 12px}
+/* Capital calendar. The 1px gaps show the panel line colour, so the month reads as a ruled ledger in the
+   same hairlines as the panel grid. Cells stay on the panel surface: direction is carried by the signed,
+   coloured number, size by a 2px bar, so no day is a block of colour. */
+.calhead{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:flex-end;gap:12px 24px;margin:4px 0 14px}
+.caltot{display:flex;flex-direction:column;gap:2px;min-width:0}
+.caltot>span:first-child{font-size:12px}
+.caltot strong{font-size:24px;font-weight:600;line-height:1.2}
+.caltot>span:last-child:not(:first-child){font-size:12px;overflow-wrap:anywhere}
+.calctl{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
 .unitsw{display:inline-flex}
-.unitsw button{min-height:36px;padding:6px 14px;border-radius:0}
+.unitsw button{min-height:40px;padding:6px 14px;border-radius:0}
 .unitsw button+button{margin-left:-1px}
 .unitsw button[aria-pressed="true"]{border-color:var(--accent);color:var(--accent);position:relative;z-index:1}
 .calnav{display:inline-flex;gap:6px;align-items:center}
-.calnav button{min-height:36px;min-width:40px;padding:4px 10px}
-.calnav select{min-height:36px;padding:4px 8px}
-.caltotal{margin:0 0 0 auto;white-space:nowrap}
-.caltotal strong{font-size:15px;margin-left:6px}
-.cal.one .month{flex-basis:100%}
-.cal.one .cell{min-height:58px}
-.cal.one .cell .v{font-size:12.5px}
+.calnav button{min-width:44px;padding:4px 10px}
+.calnav input{min-width:0;width:12.5em;padding:6px 10px}
+.days{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:1px;background:var(--line);border:1px solid var(--line)}
+.dow{font-size:11px;color:var(--muted);padding:4px 8px;background:var(--surface)}
+.days>span:not(.dow){background:var(--bg)}
+.cell{min-height:64px;padding:6px 8px 9px;background:var(--surface);color:var(--ink);font-size:11px;display:grid;grid-template-columns:auto minmax(0,1fr);grid-template-rows:auto 1fr;align-items:start;position:relative;outline-offset:-2px}
+.cell .d{color:var(--muted)}
+.cell .tag{justify-self:end;color:var(--muted);font-size:10.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}
+.cell .tag .ts{display:none}
+.cell .v{grid-column:1 / -1;align-self:end;justify-self:end;font-size:13px;font-weight:500;white-space:nowrap}
+.cell .v.up{color:var(--pos)} .cell .v.down{color:var(--neg)} .cell .v.flat{color:var(--ink-2)} .cell .v.unk{color:var(--muted);font-weight:400}
+.cell .u{font-size:11px;font-weight:400;color:var(--muted)}
+.cell .vc{display:none}
+/* Days with no data (before the journal, or still to come) sit recessed on the page colour. */
+.cell.out{background:var(--bg)}
+.cell .mag{position:absolute;left:0;bottom:0;height:2px;opacity:.85}
+.cell .mag.up{background:var(--pos)} .cell .mag.down{background:var(--neg)}
+.cell.unk{background:repeating-linear-gradient(135deg,var(--line) 0 1px,var(--surface) 1px 6px)}
+.cell.today{box-shadow:inset 0 0 0 1px var(--accent)} .cell.today .d{color:var(--accent);font-weight:600}
+.cell.on{box-shadow:inset 0 0 0 2px var(--ink)}
+.calkey{font-size:12px;color:var(--muted);margin:10px 0 0}
 .wf .row{display:grid;grid-template-columns:minmax(0,38%) minmax(0,1fr) 100px;gap:0 12px;align-items:center;border-bottom:1px solid var(--line);font-size:12.5px;min-height:34px;padding:4px 6px}
 .wf .row:last-child{border-bottom:0}
 .wf .lbl{color:var(--ink-2)} .wf .val{text-align:right;white-space:nowrap}
@@ -217,10 +222,13 @@ h3.sub{margin:16px 0 0;color:var(--ink-2);font-weight:600;font-size:12.5px}
   .bar{min-height:56px;gap:8px} #stamp{flex-basis:100%;padding-bottom:8px}
   .p{grid-column:span 12;padding:0 12px 12px} .ph{margin:0 -12px 10px;padding:8px 12px}
   .hero{font-size:30px} .metric strong{font-size:17px}
-  .cell{min-height:44px;padding:3px 4px} .cell .v{display:none} .cell .sg{display:block;font-weight:600}
-  .cal.one .cell{min-height:48px;padding:3px 2px} .cal.one .cell .sg{display:none}
-  .cal.one .cell .v{display:block;font-size:9px;letter-spacing:-.4px;overflow:hidden} .cal.one .cell .u{display:none}
-  .calbar{gap:8px} .caltotal{margin:0;flex-basis:100%;white-space:normal}
+  /* Phone: seven columns of ~45px. The unit moves to the header, the flow tag shrinks to dep/wd. */
+  .cell{min-height:52px;padding:4px 2px 6px} .dow{padding:4px 3px}
+  .cell .v{font-size:9.5px;font-weight:500;letter-spacing:-.3px;overflow:hidden;max-width:100%}
+  .cell .vf{display:none} .cell .vc{display:inline}
+  .cell .tag{font-size:9.5px} .cell .tag .tw,.cell .tag .ta{display:none} .cell .tag .ts{display:inline}
+  .calhead{align-items:stretch} .calctl{width:100%} .calnav{flex:1} .calnav input{flex:1;width:auto}
+  .caltot strong{font-size:21px}
   .wf .row{grid-template-columns:minmax(0,1fr) 92px}
   .wf .trk{grid-column:1 / -1;grid-row:2}
   td,th{padding:6px 7px}
