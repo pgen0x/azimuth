@@ -16,7 +16,7 @@ async function render(tab, payload, fail=false, extra={}) {
   // Optional storage: an object (kept per viewer) or 'throw' (blocked site data, private window).
   if (extra.store === 'throw') ctx.localStorage = {getItem() { throw Error('blocked') }, setItem() { throw Error('blocked') }};
   else if (extra.store) ctx.localStorage = {getItem: k => extra.store[k] ?? null, setItem: (k, v) => { extra.store[k] = String(v) }};
-  vm.runInNewContext(script + '\nmodule.exports={render,setTab:t=>{tab=t},setCalUnit,fmtSOL,fmtUSD,calUnit:()=>calUnit,calPick,fmtCompact,monthStats};', ctx);
+  vm.runInNewContext(script + '\nmodule.exports={render,setTab:t=>{tab=t},setCalUnit,fmtSOL,fmtUSD,calUnit:()=>calUnit,calPick,fmtCompact,money,pnlModel};', ctx);
   extra.content = content;
   extra.exports = ctx.module.exports;
   await new Promise(resolve => setImmediate(resolve));
@@ -58,7 +58,7 @@ async function render(tab, payload, fail=false, extra={}) {
   const tr=(r,x)=>({...r,d_external_sol:x,d_trading_sol:isFinite(r.d_cash_sol)&&x!=null?r.d_cash_sol-x:null});
   const calDays=[tr({day:'2024-10-01',status:'ok',cash_sol:1.5021,d_cash_sol:0.5021},0.5),days[0],
     tr({...days[1],d_cash_sol:0.01},null),tr(days[2],0),tr(days[3],0),{...tr(days[4],0),cash_fallback:true,cash_ts:1728200000}];
-  const month={month:'2024-10',tz:'America/Sao_Paulo',north_star:{month:'2024-10',first_month:'2024-06',current_month:'2024-10',days:calDays}};
+  const month={month:'2024-10',tz:'America/Sao_Paulo',north_star:{month:'2024-10',first_month:'2024-06',current_month:'2024-10',days:calDays,positions:{status:'ok',days:{'2024-10-04':3},positions:5,volume_sol:2.5,volume_measured:5,fees_sol:0.012,fees_measured:4,win_rate_pct:60,realized_measured:5,best_win_sol:0.004,avg_hold_min:135,hold_measured:5}}};
   const charted = await render('capital', {tz:'America/Sao_Paulo', tz_fallback:false, north_star:{status:'ok',days},
     nav_bridge:{status:'incomplete_sources',incomplete_sources:['closes'],d_known_sol:-0.01,components:[
       {component:'network_fees',label:'Network fees',sol:-0.003},{component:'lp_realized',label:'LP realized',sol:null,measured_subtotal_sol:-0.02},{component:'unexplained',label:'Unexplained',sol:null}]}},
@@ -66,43 +66,56 @@ async function render(tab, payload, fail=false, extra={}) {
   const h = charted.html;
   assert(h.includes('Unexplained <span class="badge">residual</span>'), 'residual badge keyed by component id');
   assert(h.includes('days in America/Sao_Paulo') && h.includes('4 Oct 2024 (America/Sao_Paulo)'), 'zone named on day labels');
-  // No tinted blocks: direction lives on the signed, coloured number; size on a thin bar.
-  // Tinted cells (operator's choice): step by thirds of the month's largest trading move.
-  assert(h.includes('class="cell pos-3"') && h.includes('class="cell neg-3"') && h.includes('class="cell pos-2"') && h.includes('class="cell unk"') && !h.includes('class="mag'), 'calendar states');
-  // Real SOL with its unit, never silently scaled; flat today; fallback day starred; unmeasured is n/a, not 0.
-  assert(h.includes('>+0.0030<small class="u"> SOL</small><') && h.includes('>−0.0040<small class="u"> SOL</small><') && h.includes('class="cell today"'), 'signed SOL values with unit and today marker');
+  // Revision 5 grid: dashed cells tinted violet (profit) / grey (loss) by size against the month's largest move.
+  const M = (sign, cls, cur, body) => `<span class="mv"><span class="gl ${cls}"><span class="sg">${sign}</span><span class="cur">${cur}</span></span>${body}</span>`;
+  assert(/class="cell pos" style="--a:0\.22[78]"/.test(h) && h.includes('class="cell neg" style="--a:0.410"') && h.includes('class="cell unk"') && !/pos-[123]|neg-[123]/.test(h), 'calendar tints');
+  assert(h.includes('<div class="cell adj"><span class="d">30</span></div>') && h.includes('<div class="cell nod"><span class="d">7</span></div>'), 'adjacent-month and no-data days');
+  // Money: only sign + unit glyph coloured, real SOL never silently scaled; flat today; fallback starred; n/a is n/a.
+  assert(h.includes(`<span class="vf">${M('+', 'up', '◎', '0.0030')}</span>`) && h.includes(`<span class="vf">${M('−', 'down', '◎', '0.0040')}</span>`) && h.includes('class="cell nod today"'), 'signed SOL values with glyph and today marker');
   assert(!/\+3\.00|mSOL/.test(h), 'no unlabelled milli-SOL');
-  assert(h.includes('>0.0000<small class="u"> SOL</small>*<') && h.includes('Cash from an earlier reading'), 'fallback day keeps the * marker');
-  assert(h.includes('<span class="v unk"><span class="vf">n/a</span><span class="vc" aria-hidden="true">n/a</span></span>') && !/class="cell unk"[^>]*>(?:(?!<\/div>).)*class="v unk">0/.test(h), 'unmeasured day is n/a');
+  assert(h.includes(`<span class="vf">${M('', 'nil', '◎', '0.0000')}*</span>`) && h.includes('Cash from an earlier reading'), 'fallback day keeps the * marker');
+  assert(h.includes('<span class="vf"><span class="mv na">n/a</span></span>') && !/class="cell unk"[^>]*>(?:(?!<\/div>).)*0\.0000/.test(h), 'unmeasured day is n/a');
   assert(/Unmeasured&#10;|Unmeasured\n/.test(h) && h.includes('No NAV snapshot this day'), 'unmeasured tooltip');
   assert(h.includes('Trading +0.0030 SOL · +$0.45 at current SOL price'), 'tooltip carries both units');
   // Deposits are not trading: the cell shows the trading change, tags the flow, and the tooltip reconciles.
-  assert(h.includes('>+0.0021<small class="u"> SOL</small><') && !h.includes('>+0.5021<'), 'deposit day shows trading only');
+  assert(h.includes(`<span class="vf">${M('+', 'up', '◎', '0.0021')}</span>`) && !h.includes('0.5021</span></span>'), 'deposit day shows trading only');
   assert(h.includes('<span class="tw">deposit</span><span class="ts" aria-hidden="true">dep</span> <span class="ta">+0.5000</span>'), 'deposit tag');
   assert(h.includes('Deposit +0.5000 SOL excluded (Δ cash +0.5021 SOL)'), 'tooltip reconciles the flow');
   assert(h.includes('Deposits and withdrawals unknown, so trading cannot be split out (Δ cash +0.0100 SOL)'), 'unknown flows leave trading unmeasured');
-  assert(h.includes('Trading, October 2024</span><strong class="up">+0.0011 SOL</strong>'), 'month total is trading only');
-  // Summary panel beside the grid: flows listed apart from trading, day counts, best/worst, average, streak, sparkline.
-  assert(h.includes('<div class="calwrap"><div class="calmain">') && h.includes('<aside class="calsum" aria-label="October 2024 summary">'), 'summary panel beside the grid');
-  assert(h.includes('<dt>Deposits (excluded)</dt><dd>+0.5000 SOL</dd>') && h.includes('<dt>Cash incl. flows</dt><dd>+0.5111 SOL</dd>'), 'flows listed separately');
-  for (const [k, v] of [['Profit days', '2'], ['Loss days', '1'], ['Flat days', '1'], ['n/a days', '2'], ['Win days', '67 %'],
-    ['Average per active day', '+0.0004 SOL'], ['Profit streak', 'none running']]) assert(h.includes(`<dt>${k}</dt><dd>${v}</dd>`), k);
-  assert(h.includes('<dt>Best day</dt><dd class="up">4 Oct · +0.0030 SOL</dd>') && h.includes('<dt>Worst day</dt><dd class="down">5 Oct · −0.0040 SOL</dd>'), 'best and worst day');
-  assert(/<svg class="spark" viewBox="0 0 240 64"[^>]*role="img" aria-label="Cumulative trading across October 2024, ending at \+0\.0011 SOL">/.test(h) && h.includes('Cumulative trading, 1 Oct to 6 Oct'), 'sparkline');
-  assert((h.match(/class="calkey"/g)||[]).length === 1 && !h.includes('class="caltot"'), 'one key; the big total lives only in the summary');
+  // Positions closed per day, from the closes journal.
+  assert(h.includes('<span class="np">3 pos</span>') && h.includes('<span class="np">0 pos</span>') && h.includes('3 positions closed'), 'N pos per day');
+  // Header: the month's trading PnL, big; flows listed apart from it.
+  assert(h.includes(`<span class="caps">October 2024 PnL</span><strong>${M('+', 'up', '◎', '0.0011')}</strong>`), 'big month PnL, trading only');
+  assert(h.includes('deposits +0.5000 SOL excluded · cash incl. flows +0.5111 SOL · 2 days n/a, not counted'), 'flows listed separately');
+  // WEEK column and weekday totals (Monday-first). October 2024 starts on a Tuesday: 5 week rows.
+  assert(h.includes('<span class="dow wkh">WEEK</span>') && (h.match(/<div class="wk">/g) || []).length === 5, 'WEEK column, one pill per row');
+  assert(h.includes(`<small><span class="pl">W1</span><span class="ps" aria-hidden="true">W1</span></small><b>${M('+', 'up', '◎', '0.0011')}</b>`), 'week 1 total');
+  assert(h.includes(`<span class="pl">TUESDAYS</span><span class="ps" aria-hidden="true">TUE</span></small><b>${M('+', 'up', '◎', '0.0021')}</b>`)
+    && h.includes(`<span class="pl">SATURDAYS</span><span class="ps" aria-hidden="true">SAT</span></small><b>${M('−', 'down', '◎', '0.0040')}</b>`)
+    && h.includes('<span class="pl">MONDAYS</span><span class="ps" aria-hidden="true">MON</span></small><b><span class="mv na">n/a</span></b>'), 'weekday totals, n/a when unmeasured');
+  assert(h.includes('<div class="pillist" aria-label="Week and weekday totals">'), 'phone fallback lists exist');
+  // Footer stat strip from the closes/realized journals; partial measurement is disclosed, unmeasurable is n/a (never a dash).
+  assert(h.includes(`<span class="caps">Volume</span><b>${M('', 'nil', '◎', '2.5000')}</b>`) && h.includes('<span class="caps">Win rate</span><b>60.0<span class="gl nil">%</span></b>'), 'volume and win rate');
+  assert(h.includes('title="4 of 5 positions have a measured fee figure"><span class="caps">Fees</span>') && h.includes(`<span class="caps">Best win</span><b>${M('+', 'up', '◎', '0.0040')}</b>`), 'fees and best win');
+  assert(h.includes('<span class="caps">Positions</span><b>5</b>') && h.includes('<span class="caps">Avg hold</span><b>2h 15m</b>') && !/—/.test(h), 'positions, hold, no em dash');
+  assert(!h.includes('class="calsum"') && !h.includes('class="spark"'), 'summary panel removed');
   // Native month input bounded by the data; arrows disabled at the ends.
   assert(/<input type="month" id="calpick" aria-label="Month" value="2024-10" min="2024-06" max="2024-10"/.test(h) && /id="calnext"[^>]*disabled/.test(h) && !/id="calprev"[^>]*disabled/.test(h) && !h.includes('<select id="calpick"'), 'native month input');
-  assert(h.includes('class="calkey"') && !h.includes('lighter tint'), 'quiet one-line key');
+  assert((h.match(/class="calkey"/g) || []).length === 1, 'one key');
   assert(charted.calls.some(u => /^\/api\/capital\/month\?month=&tz=/.test(u)) && charted.calls.includes('/api/price/sol'), 'month and price requested');
-  // USD view: every cell in dollars with sign and unit; header says the price is current, not historical.
+  // USD view: every money value in dollars; the header says the price is current, not historical.
   const usd = await render('capital', {tz:'America/Sao_Paulo', north_star:{days}, nav_bridge:{}}, false,
     {'capital/month': month, 'price/sol': {status:'ok', usd:150}, store: {'azimuth.calUnit': 'usd'}});
-  assert(usd.html.includes('>+$0.45<') && usd.html.includes('>−$0.60<') && usd.html.includes('USD at current SOL price'), 'USD cells');
-  assert(usd.html.includes('<span class="ta">+$75.00</span>') && usd.html.includes('<dt>Deposits (excluded)</dt><dd>+$75.00</dd>') && /<strong class="up">\+\$0\.1[67]<\/strong>/.test(usd.html) && usd.html.includes('data-unit="usd" aria-pressed="true"'), 'USD flows and toggle state');
+  assert(usd.html.includes(M('+', 'up', '$', '0.45')) && usd.html.includes(M('−', 'down', '$', '0.60')) && usd.html.includes('USD at current SOL price'), 'USD cells');
+  assert(usd.html.includes('<span class="ta">+$75.00</span>') && usd.html.includes('deposits +$75.00 excluded') && usd.html.includes(`<span class="caps">Volume</span><b>${M('', 'nil', '$', '375.00')}</b>`) && usd.html.includes('data-unit="usd" aria-pressed="true"'), 'USD flows, stats and toggle state');
   // No price: USD disabled with its reason, SOL still renders, the stored preference is kept.
   const noPrice = await render('capital', {north_star:{days}, nav_bridge:{}}, false,
     {'capital/month': month, 'price/sol': {status:'unavailable', usd:null}, store: {'azimuth.calUnit': 'usd'}});
-  assert(/data-unit="usd" aria-pressed="false" title="USD unavailable[^"]*" disabled/.test(noPrice.html) && noPrice.html.includes('>+0.0030<small class="u"> SOL</small><'), 'USD fails soft');
+  assert(/data-unit="usd" aria-pressed="false" title="USD unavailable[^"]*" disabled/.test(noPrice.html) && noPrice.html.includes(M('+', 'up', '◎', '0.0030')), 'USD fails soft');
+  // Unreadable position journals: the grid stays, the strip says why.
+  const noPos = await render('capital', {north_star:{days}, nav_bridge:{}}, false,
+    {'capital/month': {...month, north_star: {...month.north_star, positions: {status:'unavailable', collection_error:'Panel evidence could not be read: OSError'}}}});
+  assert(noPos.html.includes('Position statistics unavailable: Panel evidence could not be read: OSError') && !noPos.html.includes('class="np"') && noPos.html.includes('class="pnl"'), 'position stats fail soft');
   // A month that failed to load must not take the rest of the capital tab down.
   const noMonth = await render('capital', {north_star:{days}, nav_bridge:{}}, false, {failing: ['capital/month', 'price/sol']});
   assert(noMonth.html.includes('Calendar month could not be loaded') && noMonth.html.includes('capital / balance'), 'month failure is local');
@@ -111,17 +124,14 @@ async function render(tab, payload, fail=false, extra={}) {
   for (const [v, want] of [[0.012, '+0.0120 SOL'], [-0.0005, '−0.0005 SOL'], [0.00003, '+0.00003 SOL'], [0.3668, '+0.3668 SOL'], [-1.5, '−1.5000 SOL'],
     [0, '0.0000 SOL'], [-0.0, '0.0000 SOL'], [1e-12, '0.0000 SOL'], [null, 'n/a'], [undefined, 'n/a']]) assert.equal(f.fmtSOL(v), want, String(v));
   for (const [v, want] of [[0.87, '+$0.87'], [-0.05, '−$0.05'], [0.004, '+$0.004'], [-0.00015, '−$0.0002'], [0.0000004, '+$0.0000004'], [1234.5, '+$1,234.50'], [0, '$0.00'], [null, 'n/a']]) assert.equal(f.fmtUSD(v), want, String(v));
-  // Phone cells: compact, unit-free, never a fake zero for a real move.
+  // Narrow-grid and phone cells: compact, never a fake zero for a real move.
   for (const [v, u, want] of [[0.0106, 'sol', '+0.0106'], [-0.000002, 'sol', '≈0'], [0, 'sol', '0.0000'], [null, 'sol', 'n/a'],
     [0.0058, 'usd', '+$0.87'], [-0.000002, 'usd', '≈0'], [1.5, 'usd', '+$225.00']]) assert.equal(f.fmtCompact(v, u, 150), want, `${v} ${u}`);
-  assert(h.includes('<span class="vc" aria-hidden="true">+0.0030</span>') && (h.match(/<span class="days">|<div class="days">/g)||[]).length === 1, 'compact phone value rendered');
-  // Streak: consecutive profit days back from the latest completed day; today (partial) is skipped, n/a breaks it.
-  const D = (day, v, status = 'ok') => ({day, status, d_trading_sol: v});
-  const st = f.monthStats([D('2024-10-01', -0.01), D('2024-10-02', null), D('2024-10-03', 0.02), D('2024-10-04', 0.01), D('2024-10-05', 0.03), D('2024-10-06', -0.5, 'partial_day')]);
-  assert.equal(st.streak, 3); assert.equal(st.streakEnd, '2024-10-05'); assert.equal(st.win, 60); assert.equal(st.na, 1);
-  assert.equal(st.worst.day, '2024-10-06'); assert.equal(st.cum.length, 6); assert(Math.abs(st.cum[4].v - 0.05) < 1e-12, 'cumulative skips n/a');
-  const none = f.monthStats([D('2024-10-01', null)]);
-  assert(none.win === null && none.avg === null && none.best === null && none.total === null && none.streak === 0, 'no measured day: everything n/a');
+  assert(h.includes(`<span class="vc" aria-hidden="true">${M('+', 'up', '◎', '0.0030')}</span>`) && f.money(-0.000002, 'sol', 150, {compact: true}) === '<span class="mv">≈0</span>', 'compact value rendered');
+  // Week model: Monday-first rows, weekday sums skip unmeasured days, a week with nothing measured is n/a.
+  const md = f.pnlModel({month: '2024-02', days: [{day: '2024-02-05', d_trading_sol: 0.01}, {day: '2024-02-12', d_trading_sol: -0.02}, {day: '2024-02-13', d_trading_sol: null}]});
+  assert.equal(md.weeks.length, 5); assert.equal(md.weeks[0].days[0].key, '2024-01-29'); assert.equal(md.weeks[0].total, null);
+  assert(Math.abs(md.weekday[0] - -0.01) < 1e-12 && md.weekday[1] === null && Math.abs(md.weeks[2].total - -0.02) < 1e-12 && md.max === 0.02, 'week model');
   // Toggle persistence: stored per viewer, read back on load, and every storage failure is swallowed.
   const kept = {}; const a = {store: kept}; await render('overview', {services: [], sources: []}, false, a);
   assert.equal(a.exports.calUnit(), 'sol', 'default unit is SOL'); a.exports.setCalUnit('usd'); assert.equal(kept['azimuth.calUnit'], 'usd');
@@ -151,7 +161,7 @@ async function render(tab, payload, fail=false, extra={}) {
     assert(/id="calprev"[^>]*disabled/.test(asked()) && /id="calnext"[^>]*disabled/.test(asked()) && !asked().includes('class="calsum"'), m + ' controls');
   }
   assert.equal(pick.exports.calPick('2024-09'), ''); await pick.exports.render();
-  assert(!asked().includes('No month picked') && asked().includes('class="days"'), 'a valid pick leaves the empty state');
+  assert(!asked().includes('No month picked') && asked().includes('class="pnl"'), 'a valid pick leaves the empty state');
   const live = await render('live', {tz:'Pacific/Pago_Pago', collected_at: 1730606400, live:{dust:{}, realized:{status:'ok',days:{
     '2024-11-01':{pulse:{closes:2,measured:2,unmeasured:0,realized_sol:0.002},turnover:{closes:1,measured:0,unmeasured:1,realized_sol:null}},
     '2024-11-02':{turnover:{closes:1,measured:1,unmeasured:0,realized_sol:-0.001}}}}}});

@@ -8,7 +8,6 @@
   --ink:#ece8e1; --ink-2:#b3ada3; --muted:#9a958c;
   --accent:#d99a4e;
   --pos:#4cc38a; --neg:#f2766b;
-  --pos-1:#1d3a2c; --pos-2:#24614a; --neg-1:#3e2220; --neg-2:#7a3530;
   --s1:#3987e5; --s2:#d55181; --s0:#9a958c;
   --gap:1px; --cols:12; --pad:20px; --side-w:216px;
   /* Owner choice: one monospace face for all UI. System stack keeps it offline. */
@@ -139,15 +138,15 @@ svg .col.on .bar{filter:brightness(1.2)}
 svg .xh{stroke:var(--ink-2);stroke-width:1}
 svg .fp{fill:var(--pos)} svg .fn{fill:var(--neg)}
 h3.sub{margin:16px 0 0;color:var(--ink-2);font-weight:600;font-size:12.5px}
-/* Capital calendar. The 1px gaps show the panel line colour, so the month reads as a ruled ledger in the
-   same hairlines as the panel grid. Profit/loss days are tinted in three steps of the month's largest move
-   (operator's choice). Width is capped so cells stay near-square instead of stretching across wide screens. */
-.calhead,.cal.one,.calkey{max-width:820px}
-.calhead{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:flex-end;gap:12px 24px;margin:4px 0 14px}
-.caltot{display:flex;flex-direction:column;gap:2px;min-width:0}
-.caltot>span:first-child{font-size:12px}
-.caltot strong{font-size:24px;font-weight:600;line-height:1.2}
-.caltot>span:last-child:not(:first-child){font-size:12px;overflow-wrap:anywhere}
+/* Capital calendar, after the operator's PnL-calendar reference (revision 5): dashed day grid with a WEEK
+   column, weekday totals under it, a big month PnL, a stat strip. Our tokens and font; contrast is checked
+   against the darkest tint each text can sit on (65% white for the small labels, a lighter red for the
+   loss glyph on grey). The block fills the panel at every width. */
+.calbox{container-type:inline-size;--dash:rgba(255,255,255,.16);--vio:#a78bfa;--neg-on-tint:#ff9a90;
+  /* Dot grid: the operator's reference, kept to this panel. */
+  background-image:radial-gradient(rgba(255,255,255,.05) 1px,transparent 1px);background-size:30px 30px}
+.caps{text-transform:uppercase;letter-spacing:.12em;font-size:10.5px;color:var(--muted)}
+.calhead{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:flex-end;gap:16px 24px;margin:4px 0 18px}
 .calctl{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
 .unitsw{display:inline-flex}
 .unitsw button{min-height:40px;padding:6px 14px;border-radius:0}
@@ -156,70 +155,74 @@ h3.sub{margin:16px 0 0;color:var(--ink-2);font-weight:600;font-size:12.5px}
 .calnav{display:inline-flex;gap:6px;align-items:center}
 .calnav button{min-width:44px;padding:4px 10px}
 .calnav input{min-width:0;width:12.5em;padding:6px 10px}
-.days{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:1px;background:var(--line);border:1px solid var(--line)}
-.dow{font-size:11px;color:var(--muted);padding:4px 8px;background:var(--surface)}
-.days>span:not(.dow){background:var(--bg)}
-.cell{aspect-ratio:5 / 4;min-height:0;padding:6px 8px 8px;column-gap:6px;background:var(--surface);color:var(--ink);font-size:11px;display:grid;grid-template-columns:auto minmax(0,1fr);grid-template-rows:auto 1fr;align-items:start;position:relative;outline-offset:-2px}
-.cell .d{color:var(--muted)}
-.cell .tag{justify-self:end;color:var(--muted);font-size:10.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}
-/* The visible tag is short (dep/wd + amount) so the amount is never cut; the full word stays for screen readers. */
+.calbig{display:flex;flex-direction:column;align-items:flex-end;gap:2px;text-align:right;min-width:0}
+.calbig strong{font-size:clamp(36px,5.2vw,72px);font-weight:700;line-height:1;letter-spacing:-.02em;color:#fff;white-space:nowrap}
+.calbig>span:last-child:not(.caps){font-size:12px;max-width:52ch}
+/* Money: digits in ink, only sign + unit glyph coloured. The header glyph alone carries a soft glow:
+   it is the one focal number on the screen. */
+.mv{white-space:nowrap} .mv.na{color:var(--muted)}
+.gl.up{color:var(--pos)} .gl.down{color:var(--neg)} .gl.nil{color:var(--vio)}
+.calbig .gl.up{text-shadow:0 0 22px rgba(76,195,138,.45)} .calbig .gl.down{text-shadow:0 0 22px rgba(242,118,107,.45)}
+/* Grid: 7 days + WEEK. Dashed hairlines, no fills except the tint. */
+.pnlh,.pnl,.wdrow{display:grid;grid-template-columns:repeat(7,minmax(0,1fr)) minmax(0,1.2fr)}
+.dow{font-size:10px;letter-spacing:.14em;color:var(--muted);padding:0 8px 6px}
+.dow.wkh{border-left:1px dashed var(--dash);padding-left:14px}
+.pnl{border-top:1px dashed var(--dash);border-left:1px dashed var(--dash)}
+.cell{position:relative;height:68px;padding:6px 8px;border-right:1px dashed var(--dash);border-bottom:1px dashed var(--dash);
+  display:grid;grid-template-columns:auto minmax(0,1fr);grid-template-rows:auto 1fr auto;column-gap:6px;background:rgba(255,255,255,.03);outline-offset:-2px;min-width:0}
+.cell .d{font-size:10.5px;color:rgba(255,255,255,.65)}
+.cell .tag{justify-self:end;font-size:9.5px;color:rgba(255,255,255,.65);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}
 .cell .tag .tw{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
-.cell .v{grid-column:1 / -1;align-self:end;justify-self:end;font-size:13px;font-weight:500;white-space:nowrap}
-.cell .v.up{color:var(--pos)} .cell .v.down{color:var(--neg)} .cell .v.flat{color:var(--ink-2)} .cell .v.unk{color:var(--muted);font-weight:400}
-.cell .u{font-size:11px;font-weight:400;color:var(--muted)}
+.cell .v{grid-column:1 / -1;grid-row:3;font-size:12.5px;font-weight:600;color:#fff;white-space:nowrap;overflow:hidden}
+.cell .np{grid-column:1 / -1;grid-row:4;font-size:9px;color:rgba(255,255,255,.65);line-height:1.2}
 .cell .vc{display:none}
-/* Days with no data (before the journal, or still to come) sit recessed on the page colour. */
-.cell.out{background:var(--bg)}
-.cell.unk{background:repeating-linear-gradient(135deg,var(--line) 0 1px,var(--surface) 1px 6px)}
+.cell.pos{background:rgba(139,92,246,var(--a))} .cell.neg{background:rgba(126,132,143,var(--a))}
+.cell.neg .gl.down{color:var(--neg-on-tint)}
+.cell.adj{background:none} .cell.adj .d{opacity:.25}
+.cell.unk{background:repeating-linear-gradient(135deg,rgba(255,255,255,.07) 0 1px,transparent 1px 6px)}
+.cell.unk .v{font-weight:400}
 .cell.today{box-shadow:inset 0 0 0 2px var(--accent)} .cell.today .d{color:var(--accent);font-weight:600}
-/* Tints. Text on a tint is one colour, chosen for AA (antislop contrast check): ink on steps 1-2
-   (>= 5.96:1), page colour on step 3 (>= 6.97:1). Muted greys are never placed on a tint. */
-.cell.pos-1{background:var(--pos-1)} .cell.pos-2{background:var(--pos-2)} .cell.pos-3{background:var(--pos)}
-.cell.neg-1{background:var(--neg-1)} .cell.neg-2{background:var(--neg-2)} .cell.neg-3{background:var(--neg)}
-.cell:is(.pos-1,.pos-2,.neg-1,.neg-2) :is(.d,.v,.u,.tag){color:var(--ink)}
-.cell:is(.pos-3,.neg-3) :is(.d,.v,.u,.tag){color:var(--bg)}
-.cell:is(.pos-1,.pos-2,.pos-3,.neg-1,.neg-2,.neg-3) .u{font-weight:400}
-/* Amber vs a step-3 tint is ~1.1:1, so today there gets a page-colour ring inside the amber one. */
-.cell.today:is(.pos-3,.neg-3){box-shadow:inset 0 0 0 2px var(--accent),inset 0 0 0 4px var(--bg)}
-.cell.on{box-shadow:inset 0 0 0 2px var(--ink)}
-.calkey{font-size:12px;color:var(--muted);margin:10px 0 0}
-/* Month summary. Beside the grid when the panel is wide enough to keep the grid at its full 820px
-   (container query, so the sidebar width is accounted for); below it otherwise. Same height as the grid
-   when beside it, so the two read as one block. */
-.calbox{container-type:inline-size}
-.calmain .chart{margin:0}
-.calsum{margin:16px 0 0;border:1px solid var(--line);padding:16px;display:flex;min-width:0;container-type:inline-size}
-.suminner{flex:1;display:flex;flex-direction:column;gap:14px;justify-content:space-between;min-width:0}
-.sumA{display:flex;flex-direction:column;gap:14px}
-.sumB{border-top:1px solid var(--line);padding-top:12px}
-/* Beside the grid from ~1060px of panel; the grid gives up a little width (still 5:4) before the summary
-   drops under 300px. The block stops at 1560px so ultrawide screens do not stretch the summary into a strip. */
-@container (min-width:1060px){
-  .calwrap{display:grid;grid-template-columns:minmax(0,820px) minmax(300px,1fr);gap:16px;align-items:stretch;max-width:1560px}
-  .calsum{margin:0}
+.cell.on{box-shadow:inset 0 0 0 2px #fff}
+/* WEEK column: a dot on the dashed separator, a short dashed connector, a light pill with the week total. */
+.wk{display:flex;align-items:center;position:relative;padding-right:6px;min-width:0}
+.wk .dot,.wd .dot{width:6px;height:6px;border-radius:50%;background:#fff;flex:none}
+.wk .dot{margin-left:-3.5px}
+.wk .conn{flex:0 0 10px;border-top:1px dashed var(--dash)}
+.pill{display:inline-flex;flex-direction:column;align-items:flex-start;gap:1px;background:#eef0f6;color:#0a0a0a;border-radius:6px;
+  padding:4px 8px;box-shadow:0 2px 6px rgba(0,0,0,.35);min-width:0;max-width:100%}
+.pill small{font-size:8.5px;letter-spacing:.12em;color:#555b66;text-transform:uppercase;white-space:nowrap}
+.pill b{font-size:12px;font-weight:700;white-space:nowrap;overflow:hidden;max-width:100%}
+.pill .mv{color:#0a0a0a} .pill .gl.up{color:#146c43} .pill .gl.down{color:#b42318} .pill .gl.nil{color:#555b66} .pill .mv.na{color:#555b66}
+.pill .ps{display:none}
+/* Weekday totals: each column drops a dashed line from a dot to its pill. */
+.wd{display:flex;flex-direction:column;align-items:center;min-width:0;padding:0 2px}
+.wd .dot{margin-top:-3.5px}
+.wd .vconn{height:16px;border-left:1px dashed var(--dash)}
+.wd .pill{align-items:center}
+.pillist{display:none}
+/* Footer strip: six measures spread across the width. */
+.calstats{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:12px 16px;border-top:1px solid var(--line);margin-top:18px;padding-top:14px}
+.calstats>div{display:flex;flex-direction:column;gap:4px;min-width:0}
+.calstats b{font-size:17px;font-weight:600;color:#fff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.calkey{font-size:12px;color:var(--muted);margin:12px 0 0}
+/* Narrow grids (~95px days): compact values, deposit tag as "dep", short weekday names on the pills. */
+@container (max-width:900px){
+  .cell .vf{display:none} .cell .vc{display:inline} .cell .tag .ta{display:none}
+  .pill .pl{display:none} .pill .ps{display:inline} .wd .pill{padding:4px 5px}
+  .calstats{grid-template-columns:repeat(3,minmax(0,1fr))}
 }
-/* A wide summary splits in two: result, flows and a taller trend on the left; the day statistics on the right. */
-@container (min-width:520px){
-  .suminner{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:0 24px}
-  .sumB{border-top:0;padding:0 0 0 24px;border-left:1px solid var(--line);display:flex}
-  .sumB dl{flex:1;align-content:space-between;row-gap:10px}
-  /* The trend takes whatever height the grid leaves, so the panel never has an empty lower half. */
-  .sumA figure{flex:1;display:flex;flex-direction:column;min-height:0}
-  .sumA .spark{flex:1;height:auto;min-height:120px}
+/* Phones: seven columns only; week and weekday totals become two wrapped pill lists under the grid. */
+@container (max-width:600px){
+  .pnlh,.pnl{grid-template-columns:repeat(7,minmax(0,1fr))}
+  .wkh,.wk,.wdrow{display:none}
+  .pillist{display:flex;flex-direction:column;gap:8px;margin-top:12px}
+  .pillist>div{display:flex;flex-wrap:wrap;gap:6px}
+  .cell{height:56px;padding:4px 3px} .dow{padding:0 3px 6px;letter-spacing:.06em}
+  .cell .v{font-size:9.5px;letter-spacing:-.3px} .cell .cur{display:none} .cell .np{font-size:8.5px}
+  .calhead{align-items:stretch} .calctl{width:100%} .calnav{flex:1} .calnav input{flex:1;width:auto}
+  .calbig{align-items:flex-start;text-align:left}
+  .calstats{grid-template-columns:repeat(2,minmax(0,1fr))}
 }
-.sumtot{display:flex;flex-direction:column;gap:2px}
-.sumtot span{font-size:12px}
-.sumtot strong{font-size:28px;font-weight:600;line-height:1.15}
-.calsum dl{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:6px 12px;margin:0;font-size:12.5px}
-.calsum dl+dl{border-top:1px solid var(--line);padding-top:12px}
-.calsum dt{color:var(--muted)} .calsum dd{margin:0;text-align:right;white-space:nowrap}
-.calsum dd.up{color:var(--pos)} .calsum dd.down{color:var(--neg)}
-.calsum figure{margin:0}
-.spark{display:block;width:100%;height:64px}
-.spark path{fill:none;stroke-width:1.5;vector-effect:non-scaling-stroke;stroke-linejoin:round}
-.spark path.up{stroke:var(--pos)} .spark path.dn{stroke:var(--neg)}
-.spark .zero{stroke:var(--control);stroke-dasharray:3 3;vector-effect:non-scaling-stroke}
-.calsum figcaption{font-size:11.5px;margin-top:4px}
 .wf .row{display:grid;grid-template-columns:minmax(0,38%) minmax(0,1fr) 100px;gap:0 12px;align-items:center;border-bottom:1px solid var(--line);font-size:12.5px;min-height:34px;padding:4px 6px}
 .wf .row:last-child{border-bottom:0}
 .wf .lbl{color:var(--ink-2)} .wf .val{text-align:right;white-space:nowrap}
@@ -269,13 +272,6 @@ h3.sub{margin:16px 0 0;color:var(--ink-2);font-weight:600;font-size:12.5px}
   .bar{min-height:56px;gap:8px} #stamp{flex-basis:100%;padding-bottom:8px}
   .p{grid-column:span 12;padding:0 12px 12px} .ph{margin:0 -12px 10px;padding:8px 12px}
   .hero{font-size:30px} .metric strong{font-size:17px}
-  /* Phone: seven columns of ~45px. The unit moves to the header, the flow tag shrinks to dep/wd. */
-  .cell{aspect-ratio:auto;min-height:52px;padding:4px 2px 6px} .dow{padding:4px 3px}
-  .cell .v{font-size:9.5px;font-weight:500;letter-spacing:-.3px;overflow:hidden;max-width:100%}
-  .cell .vf{display:none} .cell .vc{display:inline}
-  .cell .tag{font-size:9.5px} .cell .tag .ta{display:none}
-  .calhead{align-items:stretch} .calctl{width:100%} .calnav{flex:1} .calnav input{flex:1;width:auto}
-  .caltot strong{font-size:21px}
   .wf .row{grid-template-columns:minmax(0,1fr) 92px}
   .wf .trk{grid-column:1 / -1;grid-row:2}
   td,th{padding:6px 7px}

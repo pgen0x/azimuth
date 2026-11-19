@@ -334,6 +334,29 @@ class CollectorTests(unittest.TestCase):
         self.assertAlmostEqual(days[1]['d_external_sol'],.5);self.assertAlmostEqual(days[1]['d_trading_sol'],.01)
         self.assertAlmostEqual(days[2]['d_external_sol'],-.2);self.assertAlmostEqual(days[2]['d_trading_sol'],-.01)
         self.assertIsNotNone(days[3]['d_cash_sol']);self.assertIsNone(days[3]['d_trading_sol'])  # never guessed
+    def test_month_positions_from_closes_and_realized(self):
+        base=19997*DAY  # 2024-10-01 00:00 UTC
+        rows(self.m/'dlmm_closes.jsonl',[
+            dict(position='p1',ts=base+3600,event='exit',age_min=30,dry_run=False),
+            dict(position='p1',ts=base+7200,event='exit',age_min=90,dry_run=False),   # last row per position wins
+            dict(position='p2',ts=base+DAY+60,age_min=60),
+            dict(position='p3',ts=base+DAY+120,dry_run=True,age_min=5),              # dry run: never counted
+            dict(position='p4',ts=base-60,age_min=10),                                # closed in September
+            dict(position='p5',ts=base+2*DAY,age_min=20)])                            # no realized row yet
+        rows(self.m/'dlmm_realized.jsonl',[
+            dict(position='p1',closed_at=base+7300,deposit_sol=1.0,fee_sol=.01,realized_sol=.02),
+            dict(position='p2',closed_at=base+DAY+100,deposit_sol=.5,fee_sol=.002,realized_sol=-.01),
+            dict(position='p4',closed_at=base-30,deposit_sol=9,realized_sol=9)])
+        with frozen_clock():p=c.month_positions(self.m,c.local_day(base,c.zone('UTC')),c.local_day(base+31*DAY,c.zone('UTC')),'UTC')
+        self.assertEqual(p['positions'],3);self.assertEqual(p['days'],{'2024-10-01':1,'2024-10-02':1,'2024-10-03':1})
+        self.assertAlmostEqual(p['volume_sol'],1.5);self.assertEqual(p['volume_measured'],2)
+        self.assertAlmostEqual(p['fees_sol'],.012);self.assertEqual(p['win_rate_pct'],50);self.assertEqual(p['realized_unmeasured'],1)
+        self.assertAlmostEqual(p['best_win_sol'],.02);self.assertAlmostEqual(p['avg_hold_min'],(90+60+20)/3)
+        # The month view carries it, isolated: a broken journal is an unavailable block, not a failed month.
+        with frozen_clock():ns=c.north_star_month(self.m,base+4*DAY,'2024-10','UTC')
+        self.assertEqual(ns['positions']['positions'],3)
+        with patch.object(c,'month_positions',side_effect=OSError('x')),frozen_clock():
+            self.assertEqual(c.north_star_month(self.m,base+4*DAY,'2024-10','UTC')['positions']['status'],'unavailable')
     def test_north_star_month_zone(self):
         base=self._month_fixture()
         # 30 Sep 23:00 UTC is already 1 Oct in Jakarta: the first month there is October.

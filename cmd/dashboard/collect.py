@@ -432,7 +432,40 @@ def north_star_month(memory, now, month, tz='UTC'):
         ns['days']=[d for d in ns['days'] if d['day']>=since]
         ns['status']='partial' if any(incomplete(d['source']) for d in ns['days']) else 'ok'
     ns.update(month=month,first_month=first_month,current_month=today.isoformat()[:7])
+    ns['positions']=panel(month_positions,memory,start,nxt,tz)
     return ns
+
+def month_positions(memory, start, nxt, tz='UTC'):
+    """Positions closed in [start, nxt) local days: count per day and the month's volume, win rate, fees,
+    best win and average hold. One row per position: its last live exit in dlmm_closes.jsonl (dry runs
+    skipped), joined to dlmm_realized.jsonl on position. Close time is the realized closed_at when known.
+    Money comes only from realized rows; a missing figure is counted as unmeasured, never added as 0."""
+    z=zone(tz); lo,hi=day_start(start,z),day_start(nxt,z)
+    closes,cmeta=read_jsonl(memory/'dlmm_closes.jsonl'); real,rmeta=read_jsonl(memory/'dlmm_realized.jsonl')
+    realized=keyed(real,'position',rmeta); last={}
+    for r in closes:
+        if r.get('event') not in (None,'exit') or r.get('dry_run') is True or not identifier(r.get('position')) or not number(r.get('ts')): continue
+        last[r['position']]=r
+    days={}; n=0; vol=[]; fees=[]; pnl=[]; holds=[]; unmeasured=0
+    for p,r in last.items():
+        z_=realized.get(p) or {}
+        t=z_.get('closed_at') if number(z_.get('closed_at')) else r['ts']
+        if not lo<=t<hi: continue
+        n+=1; day=local_day(t,z).isoformat(); days[day]=days.get(day,0)+1
+        if number(z_.get('deposit_sol')): vol.append(z_['deposit_sol'])
+        if number(z_.get('fee_sol')): fees.append(z_['fee_sol'])
+        if number(z_.get('realized_sol')): pnl.append(z_['realized_sol'])
+        else: unmeasured+=1
+        if number(r.get('age_min')) and r['age_min']>=0: holds.append(r['age_min'])
+    return {'status':'partial' if incomplete(cmeta) or incomplete(rmeta) else 'ok','days':days,'positions':n,
+            'volume_sol':sum(vol) if vol else None,'volume_measured':len(vol),
+            'fees_sol':sum(fees) if fees else None,'fees_measured':len(fees),
+            'win_rate_pct':100*sum(1 for v in pnl if v>0)/len(pnl) if pnl else None,'realized_measured':len(pnl),'realized_unmeasured':unmeasured,
+            'best_win_sol':max(pnl) if pnl and max(pnl)>0 else None,
+            'avg_hold_min':sum(holds)/len(holds) if holds else None,'hold_measured':len(holds),
+            'basis':'Last live exit per position in dlmm_closes.jsonl, closed in the month (local days), joined to dlmm_realized.jsonl. '
+                    'Volume = sum of deposit_sol; fees = sum of fee_sol; win rate = realized_sol > 0 over measured positions; '
+                    'best win = largest positive realized_sol; hold = age_min at close. Unmeasured figures are counted, never 0.'}
 
 _JSONL_MEMO={}
 
