@@ -452,7 +452,8 @@ def main():
     for candidates, override, expected in [([low,high],None,"high"),([low],None,None),([low,high],"low",None)]:
         ns = dict(vars(pipeline), valid_candidates=candidates,
                   cli=argparse.Namespace(pool=override,strategy="sol_bidask"),
-                  batch_mode=True, deploy_sol=.1, sol_balance=.5, mode="turnover", params={}, timeframe="30m")
+                  batch_mode=True, deploy_sol=.1, sol_balance=.5, mode="turnover", params={}, timeframe="30m",
+                  ticket_cap=pipeline.MAX_TICKET_SOL_DEFAULT)
         market_reads=[]
         ns["check_bin_coverage"]=lambda pool,*args: market_reads.append(pool) or {"deployable":True}
         ns["predeploy_live_gate_reject"]=lambda *args: None
@@ -469,6 +470,7 @@ def main():
                 assert (sizing["conviction_floor"], sizing["wallet_native_sol"]) == (30.0, .5)
                 assert (sizing["adjusted_score"], sizing["multiplier"]) == (75, 1.0)
                 assert (sizing["requested_ticket_sol"], sizing["accepted_ticket_sol"]) == (.1, .1)
+                assert (sizing["ticket_cap_sol"], sizing["ticket_capped"]) == (pipeline.MAX_TICKET_SOL_DEFAULT, False)
         assert market_reads == (["high"] if expected else [])
     # Route label: --from-pool is the Hermes agent's pick; a raw record stays from_signal.
     assert pipeline.entry_route_label(argparse.Namespace(from_pool="P"), False) == "hermes_ai"
@@ -492,7 +494,7 @@ def main():
         ns = dict(vars(pipeline), cli=argparse.Namespace(pool=override, strategy="sol_bidask",
                   from_signal=json.dumps(record), from_pool="high" if override else None),
                   batch_mode=False, deploy_sol=ticket, sol_balance=.75,
-                  mode="turnover", params={}, timeframe="30m")
+                  mode="turnover", params={}, timeframe="30m", ticket_cap=pipeline.MAX_TICKET_SOL_DEFAULT)
         market_reads = []
         ns["check_bin_coverage"] = lambda pool,*args: market_reads.append(pool) or {"deployable":True}
         with patch.object(pipeline, "load_signal_weights", return_value={}), \

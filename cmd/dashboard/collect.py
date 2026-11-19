@@ -1325,13 +1325,23 @@ SCORE_BANDS=(('<50',None,50.0),('50-70',50.0,70.0),('>=70',70.0,None))
 ENTRY_GREP=FUNNEL_GREP+r'|Batch reject .* conviction score'
 CASH_POLICY_PATH='skills/solana-dlmm/scripts/dlmm_cash_policy.json'
 
+def ticket_ceiling(policy):
+    """max_ticket_sol() from dlmm_pipeline.py: PULSE_MAX_TICKET_SOL, default 5.0, never below the minimum."""
+    value=5.0
+    raw=os.environ.get('PULSE_MAX_TICKET_SOL')
+    if raw is not None and raw.strip():
+        try: parsed=float(raw)
+        except ValueError: parsed=None
+        if parsed is not None and math.isfinite(parsed) and parsed>0: value=parsed
+    return max(value,policy['minimum_entry_lamports']/1e9)
+
 def deploy_ticket(wallet_sol, policy):
-    """compute_deploy_amount(native) from dlmm_pipeline.py, same policy file."""
+    """compute_deploy_amount(native) from dlmm_pipeline.py, same policy file and ticket ceiling."""
     reserve=policy['native_reserve_lamports']/1e9; minimum=policy['minimum_entry_lamports']/1e9
     if wallet_sol<sum(policy[k] for k in ('native_reserve_lamports','entry_rent_allowance_lamports','minimum_entry_lamports'))/1e9: return 0.0
     dynamic=max(0.0,wallet_sol-reserve)*0.45
     if dynamic<0.3: return minimum
-    return round(min(5.0,dynamic),2)
+    return round(min(ticket_ceiling(policy),dynamic),2)
 
 def risk_ticket(base, score, floor, minimum):
     """risk_scaled_ticket from dlmm_pipeline.py: the ticket a pick of this score is sized to (0 = refused)."""
