@@ -353,18 +353,29 @@ def nav_at(path, t, need=(), tries=50, meta=None):
 # Six weeks of local days for the dashboard's calendar; the NAV bridge keeps its 14-day window.
 CALENDAR_DAYS=41
 
-def north_star(memory, now, days=14, tz='UTC'):
+CASH_PARTS=('native_sol','lp_mark_sol','refundable_rent_sol')
+
+def north_star(memory, now, days=14, tz='UTC', first=None, last=None, fallback=False):
     """Per local day in `tz`: the day's last snapshot. cash = native + LP mark + refundable rent;
-    known = native + SPL mark + LP mark + rent. Unmeasured parts stay null, never 0."""
+    known = native + SPL mark + LP mark + rent. Unmeasured parts stay null, never 0.
+    first/last (local dates) replace the trailing `days` window. With fallback, a day whose last
+    snapshot has an unmeasured cash part takes cash from that day's last measured snapshot
+    (bounded lookup) and is flagged cash_fallback; the source of the day stays the last row's."""
     path=memory/'dlmm_nav.jsonl'; out=[]; prev=None; z=zone(tz)
     today=local_day(now,z)
-    for back in range(days,-1,-1):
-        day=today-timedelta(days=back); end=day_start(day+timedelta(days=1),z)
+    first=today-timedelta(days=days) if first is None else first
+    last=today if last is None else min(last,today)
+    for back in range((last-first).days,-1,-1):
+        day=last-timedelta(days=back); end=day_start(day+timedelta(days=1),z)
         source={}; row=nav_at(path,min(end-1,now),meta=source)
         if row is None or local_day(row['ts'],z)!=day:
             out.append({'day':day.isoformat(),'status':'no_snapshot' if not incomplete(source) else 'unknown','source':source}); prev=None; continue
-        parts=[row.get(k) for k in ('native_sol','lp_mark_sol','refundable_rent_sol')]
-        cash=optional_sum(parts)
+        parts=[row.get(k) for k in CASH_PARTS]
+        cash=optional_sum(parts); cash_ts=None
+        if cash is None and fallback and not incomplete(source):
+            fb=nav_at(path,row['ts'],need=CASH_PARTS,tries=8,meta={})
+            if fb is not None and local_day(fb['ts'],z)==day:
+                cash=optional_sum(fb.get(k) for k in CASH_PARTS); cash_ts=fb['ts']
         known=row.get('known_asset_subtotal_sol') if number(row.get('known_asset_subtotal_sol')) else None
         tokens=row.get('tokens') if isinstance(row.get('tokens'),list) else []
         item={'day':day.isoformat(),'status':'partial_day' if day==today else 'ok',
@@ -374,17 +385,87 @@ def north_star(memory, now, days=14, tz='UTC'):
               'unpriced_tokens':sum(1 for i in row.get('issues') or [] if isinstance(i,str) and i.startswith('unpriced_token:')),
               'quote_deferred_tokens':sum(1 for x in tokens if isinstance(x,dict) and x.get('mark_error')=='quote_budget_deferred'),
               'external_flow_lamports':row.get('external_flow_lamports')}
+        if cash_ts is not None: item.update(cash_fallback=True,cash_ts=cash_ts)
         if incomplete(source): item['status']='partial_source'
         if prev and not incomplete(source) and not incomplete(prev['source']):
             item['d_cash_sol']=None if cash is None or prev['cash_sol'] is None else cash-prev['cash_sol']
             item['d_known_sol']=None if known is None or prev['known_sol'] is None else known-prev['known_sol']
             a,b=prev.get('external_flow_lamports'),item['external_flow_lamports']
             item['d_external_sol']=(b-a)/1e9 if lamports(a,True) and lamports(b,True) else None
+            # Trading change: Δcash with deposits/withdrawals taken out. Unmeasured flows leave it unmeasured.
+            dc,dx=item['d_cash_sol'],item['d_external_sol']
+            item['d_trading_sol']=None if dc is None or dx is None else dc-dx
         out.append(item); prev=item
     return {'tz':tz,'days':out,'status':'partial' if any(incomplete(r['source']) for r in out) else 'ok','basis':'Last snapshot per local day in the viewer time zone, including unknown values. known = native + SPL mark + LP mark + refundable rent. cash = native + LP mark + refundable rent (no SPL marks). Deltas require consecutive days and complete source selection. Large files are searched within fixed read bounds; ordering is checked on every row a lookup reads (binary search, backward scan and one neighbour line on each side of the pick), and only an observed inversion marks a day partial.',
             'caveats':['SPL marks drop out when a quote is deferred or a token is unpriced: known then falls without a trade (phantom loss). cash excludes SPL marks and is immune to that, but also misses real token value.',
                        'External deposits/withdrawals are not netted out of either delta; check d_external_sol before reading a jump as profit.',
                        'Refundable rent is a recoverable reserve, not income; native growth can be recovered principal or rent.']}
+
+MONTH_KEY=re.compile(r'^(\d{4})-(0[1-9]|1[0-2])$')
+
+def nav_first_ts(path):
+    """ts of the journal's first parseable row (one bounded forward read), or None."""
+    meta={'invalid_lines':0,'read_calls':0,'read_bytes':0}
+    try:
+        with open_regular(path) as f:
+            found=_nav_line(f,0,os.fstat(f.fileno()).st_size,meta,time.monotonic()+2)
+            return found[2] if found else None
+    except (NavBudget,OSError): return None
+
+def north_star_month(memory, now, month, tz='UTC'):
+    """One calendar month of north_star days in `tz` (cash fallback on), plus the first month
+    with NAV data so the viewer can bound its picker. The day before the month is read only to
+    seed the first day's delta, then dropped. A future month or one before the data is empty."""
+    found=MONTH_KEY.match(month or '')
+    if not found: raise ValueError('month must be YYYY-MM')
+    z=zone(tz); y,m=int(found.group(1)),int(found.group(2))
+    start=datetime(y,m,1).date(); nxt=datetime(y+(m==12),m%12+1,1).date()
+    first_ts=nav_first_ts(memory/'dlmm_nav.jsonl')
+    first_month=local_day(first_ts,z).isoformat()[:7] if first_ts is not None else None
+    today=local_day(now,z)
+    if start>today or first_month is None or month<first_month:
+        ns={'tz':tz,'days':[],'status':'ok'}
+    else:
+        ns=north_star(memory,now,tz=tz,first=start-timedelta(days=1),last=nxt-timedelta(days=1),fallback=True)
+        # Days before the journal's first row are not gaps in the evidence: leave them out.
+        since=max(start,local_day(first_ts,z)).isoformat()
+        ns['days']=[d for d in ns['days'] if d['day']>=since]
+        ns['status']='partial' if any(incomplete(d['source']) for d in ns['days']) else 'ok'
+    ns.update(month=month,first_month=first_month,current_month=today.isoformat()[:7])
+    ns['positions']=panel(month_positions,memory,start,nxt,tz)
+    return ns
+
+def month_positions(memory, start, nxt, tz='UTC'):
+    """Positions closed in [start, nxt) local days: count per day and the month's volume, win rate, fees,
+    best win and average hold. One row per position: its last live exit in dlmm_closes.jsonl (dry runs
+    skipped), joined to dlmm_realized.jsonl on position. Close time is the realized closed_at when known.
+    Money comes only from realized rows; a missing figure is counted as unmeasured, never added as 0."""
+    z=zone(tz); lo,hi=day_start(start,z),day_start(nxt,z)
+    closes,cmeta=read_jsonl(memory/'dlmm_closes.jsonl'); real,rmeta=read_jsonl(memory/'dlmm_realized.jsonl')
+    realized=keyed(real,'position',rmeta); last={}
+    for r in closes:
+        if r.get('event') not in (None,'exit') or r.get('dry_run') is True or not identifier(r.get('position')) or not number(r.get('ts')): continue
+        last[r['position']]=r
+    days={}; n=0; vol=[]; fees=[]; pnl=[]; holds=[]; unmeasured=0
+    for p,r in last.items():
+        z_=realized.get(p) or {}
+        t=z_.get('closed_at') if number(z_.get('closed_at')) else r['ts']
+        if not lo<=t<hi: continue
+        n+=1; day=local_day(t,z).isoformat(); days[day]=days.get(day,0)+1
+        if number(z_.get('deposit_sol')): vol.append(z_['deposit_sol'])
+        if number(z_.get('fee_sol')): fees.append(z_['fee_sol'])
+        if number(z_.get('realized_sol')): pnl.append(z_['realized_sol'])
+        else: unmeasured+=1
+        if number(r.get('age_min')) and r['age_min']>=0: holds.append(r['age_min'])
+    return {'status':'partial' if incomplete(cmeta) or incomplete(rmeta) else 'ok','days':days,'positions':n,
+            'volume_sol':sum(vol) if vol else None,'volume_measured':len(vol),
+            'fees_sol':sum(fees) if fees else None,'fees_measured':len(fees),
+            'win_rate_pct':100*sum(1 for v in pnl if v>0)/len(pnl) if pnl else None,'realized_measured':len(pnl),'realized_unmeasured':unmeasured,
+            'best_win_sol':max(pnl) if pnl and max(pnl)>0 else None,
+            'avg_hold_min':sum(holds)/len(holds) if holds else None,'hold_measured':len(holds),
+            'basis':'Last live exit per position in dlmm_closes.jsonl, closed in the month (local days), joined to dlmm_realized.jsonl. '
+                    'Volume = sum of deposit_sol; fees = sum of fee_sol; win rate = realized_sol > 0 over measured positions; '
+                    'best win = largest positive realized_sol; hold = age_min at close. Unmeasured figures are counted, never 0.'}
 
 _JSONL_MEMO={}
 
@@ -1956,7 +2037,7 @@ def trace(profile, state, query, days=7, now=None, run=None):
     return out
 
 if __name__=='__main__':
-    # argv: profile state since [zones,comma,separated] [daily | fast | slow | brief hours n | alerts | trace days query].
+    # argv: profile state since [zones,comma,separated] [daily | fast | slow | month YYYY-MM | brief hours n | alerts | trace days query].
     # `daily` refreshes only the day-bucketed panels; `fast` and `slow` are the two halves of the
     # full snapshot (no argument) that the server refreshes on separate periods.
     zones=tuple(sys.argv[4].split(',')) if len(sys.argv)>4 and sys.argv[4] else ('UTC',)
@@ -1966,6 +2047,8 @@ if __name__=='__main__':
     elif len(sys.argv)>7 and sys.argv[5]=='trace':
         out=scrub(trace(Path(sys.argv[1]),Path(sys.argv[2]),sys.argv[7],days=int(sys.argv[6])))
     elif len(sys.argv)>5 and sys.argv[5]=='daily': out=clean(daily(Path(sys.argv[1]),sys.argv[3],zones))
+    elif len(sys.argv)>6 and sys.argv[5]=='month':
+        out=clean({'collected_at':time.time(),'north_star':north_star_month(Path(sys.argv[1])/'memories',time.time(),sys.argv[6],zones[0])})
     elif len(sys.argv)>5 and sys.argv[5]=='fast':
         now=time.time(); out=scrub({'collected_at':now,**fast_panels(Path(sys.argv[1]),Path(sys.argv[2]),sys.argv[3],now)})
     elif len(sys.argv)>5 and sys.argv[5]=='slow': out=scrub(slow_panels(Path(sys.argv[1]),sys.argv[3],zones))

@@ -153,26 +153,130 @@ function growthPanels(d){
       +chart('Bar chart of daily change in native SOL',W=>deltaBars(rows,'d_native_sol',tipD,W,150))+'<p class="muted">Bars below: Δ native per day. External deposits and withdrawals are not netted out.</p>'),
     panel(12,12,head('experiments / live studies','counts only; each study\'s own report decides')+studies+`<p class="muted">${esc(ex.basis||'')}</p>`,'Experiments'))}
 
-/* Calendar heatmap (Monday-first weeks). Unmeasured days are hatched, never zero. */
-function calendar(rows,k){
-  const days=rows.filter(r=>isDay(r.day));
-  if(!days.length)return emptyChart('No days in the capital history yet.');
-  const by=Object.fromEntries(days.map(r=>[r.day,r])),vals=days.map(r=>r[k]).filter(isNum).map(v=>Math.abs(v)),max=Math.max(0,...vals);
-  const bin=v=>{const a=Math.abs(v);return a<=max/3?1:a<=2*max/3?2:3};
-  const first=dayN(days[0].day),last=dayN(days[days.length-1].day);let html='<div class="cal">';
-  const months=[];for(let n=first;n<=last;n++){const m=dayK(n).slice(0,7);if(!months.includes(m))months.push(m)}
-  for(const m of months){const y=+m.slice(0,4),mo=+m.slice(5,7)-1,start=Date.UTC(y,mo,1)/864e5,len=new Date(Date.UTC(y,mo+1,0)).getUTCDate(),lead=(new Date(start*864e5).getUTCDay()+6)%7;
-    html+=`<div class="month"><h3>${MON[mo]} ${y}</h3><div class="days">${['Mon','Tue','Wed','Thu','Fri','Sat','Sun'].map(d=>`<span class="dow" aria-hidden="true">${d}</span>`).join('')}${'<span></span>'.repeat(lead)}`;
-    for(let d=1;d<=len;d++){const key=dayK(start+d-1),r=by[key];
-      if(!r){html+=`<div class="cell out"><span class="d">${d}</span></div>`;continue}
-      const v=r[k],today=r.status==='partial_day'?' today':'';let cls,val,sg,tip;
-      if(!isNum(v)){cls='unk';val='?';sg='?';tip=`Unmeasured\n${long(key)}\n${r.status==='no_snapshot'?'No NAV snapshot this day':'No consecutive complete snapshot to diff against'}`}
-      else if(+v===0){cls='';val='0.00';sg='0';tip=`0 SOL\n${long(key)}`}
-      else{cls=(v>0?'pos-':'neg-')+bin(v);val=(v>0?'+':'−')+Math.abs(v*1000).toFixed(2);sg=v>0?'+':'−';tip=`${fx(v)} SOL\n${long(key)}`}
+/* Capital calendar: one month at a time (any month back to the first NAV row), values in SOL or USD.
+   Every value carries its unit; nothing is scaled silently. Unmeasured days read "n/a", never zero. */
+const store={get:k=>{try{return localStorage.getItem(k)}catch(e){return null}},set:(k,v)=>{try{localStorage.setItem(k,v)}catch(e){}}};
+const MONTH=['January','February','March','April','May','June','July','August','September','October','November','December'];
+const isMonth=m=>/^\d{4}-(0[1-9]|1[0-2])$/.test(m);
+const monthLabel=m=>isMonth(m)?`${MONTH[+m.slice(5)-1]} ${m.slice(0,4)}`:String(m);
+const shiftMonth=(m,n)=>{const i=+m.slice(0,4)*12+(+m.slice(5)-1)+n;return `${Math.floor(i/12)}-${String(i%12+1).padStart(2,'0')}`};
+const flat=v=>Math.abs(v)<5e-10;
+const SIGN=v=>flat(v)?'':v>0?'+':'−';
+/* SOL at about four significant decimals: 0.0120, 0.0005, 0.00003; never fewer than four. */
+const solDp=v=>{const a=Math.abs(v);return a>=1e-4||flat(v)?4:Math.min(9,Math.ceil(-Math.log10(a)))};
+const fmtSOL=(v,unit=true)=>!isNum(v)?'n/a':SIGN(+v)+(flat(+v)?0:Math.abs(+v)).toFixed(solDp(+v))+(unit?' SOL':'');
+/* USD: cents; sub-cent moves keep one significant digit so they never read as $0.00. */
+const fmtUSD=v=>{if(!isNum(v))return 'n/a';v=+v;const a=flat(v)?0:Math.abs(v),dp=a>0&&a<.01?Math.min(8,Math.ceil(-Math.log10(a))):2;return SIGN(v)+'$'+a.toLocaleString('en-US',{minimumFractionDigits:dp,maximumFractionDigits:dp})};
+const fmtUnit=(v,unit,usd)=>unit==='usd'&&isNum(usd)?(isNum(v)?fmtUSD(+v*usd):'n/a'):fmtSOL(v);
+/* Phone cells (~40px): fixed 4 decimals or cents, no unit (the header names it). A non-zero move too small for
+   that reads "≈0", never "0.0000"; the tooltip keeps the exact value. */
+const fmtCompact=(v,unit,usd)=>{if(!isNum(v))return 'n/a';v=+v;const d=unit==='usd'&&isNum(usd),x=d?v*usd:v,e=d?.005:.00005;
+  if(flat(x))return d?'$0.00':'0.0000';if(Math.abs(x)<e)return '≈0';return SIGN(x)+(d?'$':'')+Math.abs(x).toFixed(d?2:4)};
+/* calMonth '' = the current month. calPickState: '' ok, 'empty' (input cleared), 'range' (outside the data). */
+let calMonth='',calPickState='',calBounds={first:null,current:null},calUnit=store.get('azimuth.calUnit')==='usd'?'usd':'sol';
+function setCalUnit(u){calUnit=u==='usd'?'usd':'sol';store.set('azimuth.calUnit',calUnit)}
+/* Month pick from the input or the arrows. Cleared or outside the data: an empty state, no request. */
+function calPick(m){
+  if(!isMonth(m))return calPickState='empty';
+  calMonth=m;return calPickState=calBounds.first&&(m<calBounds.first||m>calBounds.current)?'range':''}
+function calGo(m){calPick(m);render()}
+/* Deposits and withdrawals are not trading: a flow this size or larger gets a visible tag; any flow is still excluded. */
+const FLOW_TAG_SOL=1e-4;
+function monthTotal(days,k){let sum=0,n=0,unm=0;for(const r of days){if(isNum(r[k])){sum+=+r[k];n++}else unm++}return {sum:n?sum:null,n,unm}}
+function monthFlows(days){let inn=0,out=0,dc=0,ndc=0;for(const r of days){const x=r.d_external_sol;if(isNum(x)){if(x>0)inn+=+x;else out+=+x}if(isNum(r.d_cash_sol)){dc+=+r.d_cash_sol;ndc++}}return {inn,out,cash:ndc?dc:null}}
+/* Money: the sign is coloured, digits in ink; SOL is a small muted unit after the number ("+0.0109 SOL"),
+   USD keeps "+$0.87". A compact form (narrow grids) keeps 4 decimals or cents and reads "≈0" for a real
+   move too small to show, never a fake zero. */
+function money(v,unit,usd,{compact=false,signed=true}={}){
+  if(!isNum(v))return '<span class="mv na">n/a</span>';
+  const d=unit==='usd'&&isNum(usd),s=compact?fmtCompact(v,unit,usd):fmtUnit(v,unit,usd);
+  if(s==='≈0')return '<span class="mv">≈0</span>';
+  const sign=signed?SIGN(+v):'',body=s.replace(/^[+−]/,'').replace(/ SOL$/,'');
+  const cls=!signed||flat(+v)?'nil':v>0?'up':'down';
+  return `<span class="mv">${sign?`<span class="sg ${cls}">${sign}</span>`:''}${esc(body)}${d?'':'<small class="unit"> SOL</small>'}</span>`}
+/* The month as weeks (Monday-first, like every other day grid here) with week and weekday totals. */
+function pnlModel(ns,k='d_trading_sol'){
+  const m=ns.month,y=+m.slice(0,4),mo=+m.slice(5)-1,start=Date.UTC(y,mo,1)/864e5,len=new Date(Date.UTC(y,mo+1,0)).getUTCDate();
+  const lead=(new Date(start*864e5).getUTCDay()+6)%7,cells=lead+len,rows=Math.ceil(cells/7),by=Object.fromEntries((ns.days||[]).filter(r=>isDay(r.day)).map(r=>[r.day,r]));
+  const sum=list=>{const v=list.filter(isNum).map(Number);return v.length?v.reduce((a,b)=>a+b,0):null};
+  const weeks=[],weekday=Array.from({length:7},()=>[]);
+  for(let w=0;w<rows;w++){const days=[];
+    for(let c=0;c<7;c++){const n=start-lead+w*7+c,key=dayK(n),inMonth=key.slice(0,7)===m,r=inMonth?by[key]:null;
+      days.push({key,inMonth,r});if(r)weekday[c].push(r[k])}
+    weeks.push({days,total:sum(days.filter(d=>d.r).map(d=>d.r[k]))})}
+  const max=Math.max(0,...(ns.days||[]).map(r=>r[k]).filter(isNum).map(v=>Math.abs(v)));
+  return {weeks,weekday:weekday.map(sum),max,total:monthTotal(ns.days||[],k)}}
+const WD=['Mon','Tue','Wed','Thu','Fri','Sat','Sun'],WDL=['Mondays','Tuesdays','Wednesdays','Thursdays','Fridays','Saturdays','Sundays'];
+/* Header: controls left; the month's trading PnL right, big, with only its glyph coloured. */
+function calHead(ns,unit,price,state=''){
+  const usdOk=isNum(price.usd)&&price.status==='ok',u=usdOk?unit:'sol',m=ns.month||'',fm=ns.first_month||'',cm=ns.current_month||m;
+  const usdTip=usdOk?`At the current SOL price, $${Number(price.usd).toFixed(2)}`:'USD unavailable: the SOL price could not be fetched. SOL values are unaffected.';
+  const days=ns.days||[],tot=monthTotal(days,'d_trading_sol'),fl=monthFlows(days),f=v=>fmtUnit(v,u,price.usd),sub=[];
+  if(Math.abs(fl.inn)>=FLOW_TAG_SOL)sub.push(`deposits ${f(fl.inn)} excluded`);
+  if(Math.abs(fl.out)>=FLOW_TAG_SOL)sub.push(`withdrawals ${f(fl.out)} excluded`);
+  if(sub.length)sub.push(`cash incl. flows ${f(fl.cash)}`);
+  if(tot.unm&&days.length)sub.push(`${tot.unm} day${tot.unm===1?'':'s'} n/a, not counted`);
+  const big=state||!days.length?'':`<div class="calbig"><span class="caps">${esc(monthLabel(m))} <span class="acc">PnL</span></span><strong>${money(tot.sum,u,price.usd)}</strong>${sub.length?`<span class="muted">${esc(sub.join(' · '))}</span>`:''}</div>`;
+  return `<div class="calhead"><div class="calctl"><div class="unitsw" role="group" aria-label="Calendar unit"><button type="button" data-unit="sol" aria-pressed="${u==='sol'}">SOL</button><button type="button" data-unit="usd" aria-pressed="${u==='usd'}" title="${esc(usdTip)}"${usdOk?'':' disabled'}>USD</button></div>`
+    +`<div class="calnav"><button type="button" id="calprev" aria-label="Previous month"${fm&&m>fm&&!state?'':' disabled'}>‹</button><input type="month" id="calpick" aria-label="Month" value="${esc(state==='empty'?'':m)}"${fm?` min="${esc(fm)}"`:''}${cm?` max="${esc(cm)}"`:''} placeholder="YYYY-MM"><button type="button" id="calnext" aria-label="Next month"${m<cm&&!state?'':' disabled'}>›</button></div></div>${big}</div>`}
+/* Empty states name the cause and the way out; none of them is an error. */
+function calEmpty(ns,state){
+  const fm=ns.first_month,cm=ns.current_month,span=fm&&cm?`${monthLabel(fm)} to ${monthLabel(cm)}`:'';
+  if(state==='empty')return `<p class="note">No month picked. Choose one${span?' from '+esc(span):''}.</p>`;
+  if(state==='range'||(fm&&ns.month<fm))return `<p class="note">${esc(monthLabel(ns.month))} has no capital data${fm?`: the NAV journal starts in ${esc(monthLabel(fm))}`:''}${cm&&ns.month>cm?`, and the latest month is ${esc(monthLabel(cm))}`:''}.</p>`;
+  return `<p class="note">No NAV snapshots in ${esc(monthLabel(ns.month))}.</p>`}
+/* Total chip: dark, bordered, with a 2px left bar in the sign's colour; label in muted caps, value in ink. */
+const chip=(label,short,v,u,usd)=>`<span class="chip ${!isNum(v)||flat(+v)?'nil':v>0?'up':'down'}"><small><span class="pl">${esc(label)}</span><span class="ps" aria-hidden="true">${esc(short)}</span></small><b>${money(v,u,usd)}</b></span>`;
+/* Month grid: seven day columns plus a WEEK column of totals. A day's tint deepens with the size of its move
+   against the month's largest: green for profit, red for loss. */
+function monthCal(ns,unit,price,state=''){
+  const usdOk=isNum(price.usd)&&price.status==='ok',u=usdOk?unit:'sol',k='d_trading_sol',m=ns.month;
+  if(!isMonth(m)||state)return calEmpty(ns,state||'empty');
+  if(!(ns.days||[]).some(r=>isDay(r.day)))return calEmpty(ns,'');
+  const md=pnlModel(ns,k),pos=ns.positions&&ns.positions.days?ns.positions.days:null;
+  const both=v=>usdOk?`${fmtSOL(v)} · ${fmtUSD(+v*price.usd)} at current SOL price`:fmtSOL(v);
+  let html=`<div class="pnlh">${WD.map(d=>`<span class="dow">${d.toUpperCase()}</span>`).join('')}<span class="dow wkh">WEEK</span></div><div class="pnl">`;
+  md.weeks.forEach((w,wi)=>{
+    for(const {key,inMonth,r} of w.days){const d=+key.slice(8);
+      if(!inMonth){html+=`<div class="cell adj"><span class="d">${d}</span></div>`;continue}
+      if(!r){html+=`<div class="cell nod"><span class="d">${d}</span></div>`;continue}
+      const v=r[k],x=r.d_external_sol,today=r.status==='partial_day',star=r.cash_fallback?'*':'';
+      let cls='nod',tip,style='';
+      if(!isNum(v)){cls='unk';tip=`Unmeasured\n${long(key)}\n${r.status==='no_snapshot'?'No NAV snapshot this day':isNum(r.d_cash_sol)?`Deposits and withdrawals unknown, so trading cannot be split out (Δ cash ${fmtSOL(r.d_cash_sol)})`:'No consecutive complete snapshot to diff against'}`}
+      else{tip=`Trading ${both(v)}\n${long(key)}`;
+        if(!flat(+v)&&md.max>0){const q=Math.abs(v)/md.max;cls=v>0?'pos':'neg';style=` style="--a:${(.06+.24*q).toFixed(3)}"`}}
+      if(isNum(x)&&!flat(+x))tip+=`\n${x>0?'Deposit':'Withdrawal'} ${fmtSOL(x)} excluded (Δ cash ${fmtSOL(r.d_cash_sol)})`;
+      if(star)tip+=`\n* Cash from an earlier reading this day (${date(r.cash_ts)}): the last snapshot had an unmeasured part`;
+      const np=pos?pos[key]||0:null;
+      if(np!=null)tip+=`\n${np} position${np===1?'':'s'} closed`;
       if(today)tip+='\nToday, so far';
-      html+=`<div class="cell ${cls}${today}" data-tip="${esc(tip)}"><span class="d">${d}</span><span class="v">${esc(val)}</span><span class="sg" aria-hidden="true">${esc(sg)}</span></div>`}
-    html+='</div></div>'}
-  return html+`</div><div class="legend"><span><i class="sq" style="background:var(--neg)"></i>Loss</span><span><i class="sq" style="background:var(--zero)"></i>Zero</span><span><i class="sq" style="background:var(--pos)"></i>Profit (lighter tint = smaller; thirds of the largest move, ${esc(fx(max).replace('+',''))} SOL)</span><span><i class="sq hatch"></i>Unmeasured</span><span><i class="sq" style="box-shadow:inset 0 0 0 2px var(--accent)"></i>Today</span></div>`}
+      const tag=isNum(x)&&Math.abs(x)>=FLOW_TAG_SOL?`<span class="tag"><span class="tw">${x>0?'deposit':'withdrawal'}</span><span class="ts" aria-hidden="true">${x>0?'dep':'wd'}</span> <span class="ta">${esc(fmtUnit(x,u,price.usd).replace(/ SOL$/,''))}</span></span>`:'';
+      html+=`<div class="cell ${cls}${today?' today':''}"${style} data-tip="${esc(tip)}"><span class="d">${d}</span>${tag}`
+        +`<span class="v"><span class="vf">${money(v,u,price.usd)}${star}</span><span class="vc" aria-hidden="true">${money(v,u,price.usd,{compact:true})}${star}</span></span>`
+        +(np!=null?`<span class="np">${np} pos</span>`:'')+`</div>`}
+    html+=`<div class="wk">${chip('W'+(wi+1),'W'+(wi+1),w.total,u,price.usd)}</div>`});
+  html+=`</div><div class="wdrow">${md.weekday.map((v,i)=>`<div class="wd">${chip(WDL[i],WD[i],v,u,price.usd)}</div>`).join('')}<span></span></div>`;
+  // Narrow panels drop the WEEK column and the weekday row; the same totals sit under the grid as two lists.
+  html+=`<div class="chiplist" aria-label="Week and weekday totals"><div>${md.weeks.map((w,i)=>chip('W'+(i+1),'W'+(i+1),w.total,u,price.usd)).join('')}</div><div>${md.weekday.map((v,i)=>chip(WD[i],WD[i],v,u,price.usd)).join('')}</div></div>`;
+  return html}
+/* Footer: the month's positions, from the close and realized journals (same month, same zone). */
+function calStats(ns,unit,price){
+  const usdOk=isNum(price.usd)&&price.status==='ok',u=usdOk?unit:'sol',p=ns.positions||{};
+  if(p.collection_error||p.status==='unavailable')return `<p class="note warn" role="status">Position statistics unavailable: ${esc(p.collection_error||'unreadable journals')}</p>`;
+  const n=p.positions,part=(got,label)=>isNum(n)&&isNum(got)&&got<n?` title="${got} of ${n} positions have a measured ${label}"`:'';
+  const hold=isNum(p.avg_hold_min)?(p.avg_hold_min>=60?`${Math.floor(p.avg_hold_min/60)}h ${Math.round(p.avg_hold_min%60)}m`:`${Math.round(p.avg_hold_min)}m`):'n/a';
+  const pct=isNum(p.win_rate_pct)?`${(+p.win_rate_pct).toFixed(1)}<small class="unit"> %</small>`:'<span class="mv na">n/a</span>';
+  const stats=[['Volume',money(p.volume_sol,u,price.usd,{signed:false}),part(p.volume_measured,'deposit')],['Win rate',pct,part(p.realized_measured,'realized result')],
+    ['Fees',money(p.fees_sol,u,price.usd,{signed:false}),part(p.fees_measured,'fee figure')],['Best win',money(p.best_win_sol,u,price.usd),''],
+    ['Positions',isNum(n)?esc(num(n)):'<span class="mv na">n/a</span>',''],['Avg hold',esc(hold),part(p.hold_measured,'hold time')]];
+  return `<div class="calstats">${stats.map(([k,v,t])=>`<div${t}><span class="caps">${esc(k)}</span><b>${v}</b></div>`).join('')}</div>`}
+function calKey(){
+  return `<p class="calkey">Trading change per day, deposits and withdrawals excluded. Green = profit, red = loss, deeper = bigger against the month's largest move. n/a: unmeasured. *: earlier reading that day. "pos": positions closed that day. Amber outline: today.</p>`}
+/* Calendar block: header, grid with WEEK column, weekday totals, stat strip, key. Fills the panel width. */
+function calBlock(ns,unit,price,state=''){
+  const has=!state&&isMonth(ns.month)&&(ns.days||[]).some(r=>isDay(r.day));
+  const grid=chart(`Calendar of daily trading change for ${monthLabel(ns.month)}. Left and right arrows move by day, up and down by week`,()=>monthCal(ns,unit,price,state),7);
+  return `<div class="calbox">`+calHead(ns,unit,price,state)+grid+(has?calStats(ns,unit,price)+calKey():'')+`</div>`}
 
 /* NAV bridge waterfall: measured components walk the running total; unknown ones are marked and skipped. */
 function waterfall(br){
@@ -256,7 +360,13 @@ html+=grid(panel(12,12,head('ops / entry-funnel',`${esc(ef.status||'unknown')} �
   +`<p class="muted">${esc(ef.basis||'')} ${esc(tk.basis||'')} ${esc(sb.basis||'')}</p>`,'Entry funnel by window, ticket and score band'));
 html+=`<p class="muted">Same data as <code>azimuth-dashboard brief</code> and <a href="/api/agent/brief">/api/agent/brief</a> (<a href="/api/agent/brief?format=text">text</a>).</p>`;
 }
-if(tab==='capital'){const d=await api('capital?'+tzq),ns=d.north_star||{},rows=ns.days||[],br=d.nav_bridge||{};
+if(tab==='capital'){const soft=p=>api(p).then(x=>x||{},e=>({error:e.message}));
+// A cleared or out-of-range pick is an empty state with known bounds: nothing to fetch.
+const idle=calPickState&&calBounds.first?Promise.resolve({month:calMonth,north_star:{month:calMonth,first_month:calBounds.first,current_month:calBounds.current,days:[]}}):null;
+const [d,cm,price]=await Promise.all([api('capital?'+tzq),idle||soft('capital/month?month='+encodeURIComponent(calMonth)+'&'+tzq),soft('price/sol')]),ns=d.north_star||{},rows=ns.days||[],br=d.nav_bridge||{};
+const cns=Object.assign({month:cm.month},cm.north_star||{});
+if(cns.first_month&&cns.current_month)calBounds={first:cns.first_month,current:cns.current_month};
+if(!calPickState&&isMonth(cns.month))calMonth=cns.month;
 html=freshness(d)+zoneNote(d);
 const measured=rows.filter(r=>isNum(r.cash_sol)),latest=measured[measured.length-1]||{},firstM=measured[0]||{};
 const span=isNum(latest.cash_sol)&&isNum(firstM.cash_sol)&&measured.length>1?latest.cash_sol-firstM.cash_sol:null;
@@ -266,7 +376,8 @@ const zone=`days in ${esc(DAY_TZ)}`;
 html+=grid(panel(4,12,`${head('capital / cash',latest.day?esc(long(latest.day))+(latest.status==='partial_day'?', so far':''):'')}<p class="hero">${esc(num(latest.cash_sol))}</p><p><span class="${tone(span)}">${esc(fx(span))}</span> <span class="muted">SOL since ${esc(firstM.day?short(firstM.day):'Unknown')} (${measured.length} snapshot days)</span></p><p class="muted">Known ${esc(num(latest.known_sol))} SOL · rent ${esc(num(latest.refundable_rent_sol))} SOL</p>${coverage('Capital history',ns)}`,'Cash SOL, latest'),
   panel(8,12,head('capital / balance',`one axis, SOL · ${zone}`)+chart('Line chart of cash and known SOL per day',W=>lineChart(rows,[{k:'cash_sol',name:'Cash (native + LP mark + rent)',color:'var(--s1)'},{k:'known_sol',name:'Known (cash + SPL marks)',color:'var(--s2)'}],tipDay,W))),
   panel(12,12,head('capital / daily-delta',`green gains, red losses, hatched unmeasured · ${zone}`)+chart('Bar chart of daily change in cash SOL',W=>deltaBars(rows,'d_cash_sol',tipDelta,W))),
-  panel(12,12,head('capital / calendar',`cells in mSOL (0.001 SOL); hover, tap or focus for exact SOL · ${zone}`)+chart('Calendar of daily change in cash SOL. Left and right arrows move by day, up and down by week',()=>calendar(rows,'d_cash_sol'),7)));
+  panel(12,12,head('capital / calendar',`trading per day · ${calUnit==='usd'&&price.status==='ok'?'USD at current SOL price':'SOL'} · ${zone}`)
+    +(cm.error||(!isMonth(cns.month)&&!calPickState)?`<p class="note warn" role="status">Calendar month could not be loaded: ${esc(cm.error||'no month in the response')}</p>`:calBlock(cns,calUnit,price,calPickState))));
 html+='<div class="section"><h2>nav bridge</h2><span>what moved known SOL</span></div>';
 let bridge=`<p class="muted" style="margin-top:0">${esc(br.basis)}</p>`;
 if(br.status==='insufficient_snapshots')bridge+='<p class="note warn">Not enough complete NAV snapshots for this window.</p>';
@@ -336,6 +447,9 @@ html+=grid(panel(4,12,`${head('redis / positions')}<p class="hero">${esc(num(d.a
 }
 if(req!==request)return;main.innerHTML=html;if(main.classList)main.classList.remove('loading');if(main.setAttribute)main.setAttribute('aria-busy','false');redraw();
 if(tab==='robinhood'){rhLog();const f=$('#rhfilters'),q=$('#rhq'),n=$('#rhn');if(f&&q&&n){f.onsubmit=e=>e.preventDefault();q.oninput=()=>{rhQuery=q.value;rhLog()};n.onchange=()=>{rhN=+n.value;render()};document.querySelectorAll('[data-chip]').forEach(b=>b.onclick=()=>{rhChip=rhChip===b.dataset.chip?'':b.dataset.chip;document.querySelectorAll('[data-chip]').forEach(x=>x.setAttribute('aria-pressed',String(x.dataset.chip===rhChip)));rhLog()})}}
+if(tab==='capital'&&document.querySelectorAll){document.querySelectorAll('[data-unit]').forEach(b=>b.onclick=()=>{if(b.disabled)return;setCalUnit(b.dataset.unit);render()});
+  const pv=$('#calprev'),nx=$('#calnext'),pk=$('#calpick'),base=()=>isMonth(pk.value)?pk.value:calMonth||calBounds.current;
+  if(pv&&pk&&'value' in pk){pv.onclick=()=>calGo(shiftMonth(base(),-1));nx.onclick=()=>calGo(shiftMonth(base(),1));pk.onchange=()=>calGo(pk.value)}}
 if(tab==='journal'){$('#filters').onsubmit=e=>{e.preventDefault();const f=new FormData(e.target);query=f.get('q');stage=f.get('stage');offset=0;render()};$('#prev').onclick=()=>{offset=Math.max(0,offset-50);render()};$('#next').onclick=()=>{offset+=50;render()};document.querySelectorAll('[data-search]').forEach(b=>b.onclick=()=>{query=b.dataset.search;stage='';offset=0;render()})}
 }catch(e){if(req===request){main.innerHTML=`<div class="state" role="alert"><p class="note warn">Could not load this section: ${esc(e.message)}</p><button id="retry">Retry loading</button></div>`;if(main.classList)main.classList.remove('loading');const b=$('#retry');if(b)b.onclick=render}}}
 
