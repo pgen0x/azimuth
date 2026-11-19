@@ -56,6 +56,9 @@ input::placeholder{color:var(--muted)}
 .bar{display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding:0 var(--pad);min-height:60px;border-bottom:1px solid var(--line);color:var(--muted);font-size:12px}
 .crumb{color:var(--ink);font-size:13px;font-weight:600;margin-right:auto}
 .crumb span{color:var(--muted);font-weight:400}
+/* Venue switch: the same segmented control as the calendar unit, so "which book am I reading" uses one vocabulary.
+   Pressed = amber outline and text, the accent's job on this page (current choice), never a fill. */
+.venuesw button{min-height:36px;padding:4px 12px;font-size:12px}
 .frame{flex:1;padding:18px var(--pad) 28px;
   background:linear-gradient(to right,var(--grat) var(--gap),transparent var(--gap)) calc(-1 * var(--gap)) 0/calc((100% + var(--gap)) / var(--cols)) 100% repeat-x content-box,
              linear-gradient(var(--grat),var(--grat)) 0 0/1px 100% no-repeat content-box,
@@ -185,29 +188,30 @@ h3.sub{margin:16px 0 0;color:var(--ink-2);font-weight:600;font-size:12.5px}
 .cell.today{box-shadow:inset 0 0 0 2px var(--accent)} .cell.today .d{color:var(--accent);font-weight:600}
 .cell.on{box-shadow:inset 0 0 0 2px var(--ink)}
 /* Totals: dark chips on the panel surface, 1px border, a 2px left bar in the sign's colour. */
-.chip{display:inline-flex;flex-direction:column;gap:2px;min-width:0;max-width:100%;background:var(--surface-2);border:1px solid var(--line);
+.tchip{display:inline-flex;flex-direction:column;gap:2px;min-width:0;max-width:100%;background:var(--surface-2);border:1px solid var(--line);
   border-left:2px solid var(--control);padding:4px 8px}
-.chip.up{border-left-color:var(--pos)} .chip.down{border-left-color:var(--neg)}
-.chip small{font-size:9.5px;letter-spacing:.12em;color:var(--muted);text-transform:uppercase;white-space:nowrap}
-.chip b{font-size:12px;font-weight:600;color:var(--ink);white-space:nowrap;overflow:hidden;max-width:100%}
-.chip .ps{display:none}
+.tchip.up{border-left-color:var(--pos)} .tchip.down{border-left-color:var(--neg)}
+.tchip small{font-size:9.5px;letter-spacing:.12em;color:var(--muted);text-transform:uppercase;white-space:nowrap}
+.tchip b{font-size:12px;font-weight:600;color:var(--ink);white-space:nowrap;overflow:hidden;max-width:100%}
+.tchip .ps{display:none}
 .wk{display:flex;align-items:center;padding:0 0 0 12px;min-width:0;border-bottom:1px solid transparent}
-.wk .chip{width:100%}
+.wk .tchip{width:100%}
 .wdrow{margin-top:8px;gap:0}
 .wd{padding:0 4px 0 0;min-width:0}
-.wd .chip{width:100%}
+.wd .tchip{width:100%}
 .chiplist{display:none}
 /* Footer strip: six measures, separated by hairlines. */
 .calstats{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));border-top:1px solid var(--line);margin-top:18px;padding-top:14px}
 .calstats>div{display:flex;flex-direction:column;gap:4px;min-width:0;padding:0 14px;border-left:1px solid var(--line)}
 .calstats>div:first-child{border-left:0;padding-left:0}
+.calstats.s7{grid-template-columns:repeat(7,minmax(0,1fr))}
 .calstats b{font-size:17px;font-weight:600;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .calkey{font-size:12px;color:var(--muted);margin:12px 0 0}
 /* Narrow grids (~95px days): compact values without the unit (the header names it), "dep" tag, short weekday names. */
 @container (max-width:900px){
   .cell .vf{display:none} .cell .vc{display:inline} .cell .tag .ta,.cell .v .unit{display:none}
-  .chip .pl{display:none} .chip .ps{display:inline} .chip{padding:4px 6px} .chip .unit{display:none}
-  .calstats{grid-template-columns:repeat(3,minmax(0,1fr));row-gap:14px}
+  .tchip .pl{display:none} .tchip .ps{display:inline} .tchip{padding:4px 6px} .tchip .unit{display:none}
+  .calstats,.calstats.s7{grid-template-columns:repeat(3,minmax(0,1fr));row-gap:14px}
   .calstats>div:nth-child(3n+1){border-left:0;padding-left:0}
 }
 /* Phones: seven columns only; week and weekday totals become two wrapped chip lists under the grid. */
@@ -220,7 +224,7 @@ h3.sub{margin:16px 0 0;color:var(--ink-2);font-weight:600;font-size:12.5px}
   .cell .v{font-size:9.5px;letter-spacing:-.3px} .cell .np{font-size:8.5px}
   .calhead{align-items:stretch} .calctl{width:100%} .calnav{flex:1} .calnav input{flex:1;width:auto}
   .calbig{align-items:flex-start;text-align:left}
-  .calstats{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .calstats,.calstats.s7{grid-template-columns:repeat(2,minmax(0,1fr))}
   .calstats>div{border-left:0;padding:0}
   .calstats>div:nth-child(2n){border-left:1px solid var(--line);padding-left:14px}
 }
@@ -271,6 +275,7 @@ h3.sub{margin:16px 0 0;color:var(--ink-2);font-weight:600;font-size:12.5px}
   .shell .side nav button,.shell .side .foot button{justify-content:flex-start;padding:8px 12px;min-height:44px}
   .only-phone{display:inline-flex} .icon{width:44px;height:44px}
   .bar{min-height:56px;gap:8px} #stamp{flex-basis:100%;padding-bottom:8px}
+  .venuesw button{min-height:44px}
   .p{grid-column:span 12;padding:0 12px 12px} .ph{margin:0 -12px 10px;padding:8px 12px}
   .hero{font-size:30px} .metric strong{font-size:17px}
   .wf .row{grid-template-columns:minmax(0,1fr) 92px}

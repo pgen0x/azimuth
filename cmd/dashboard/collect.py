@@ -1096,6 +1096,58 @@ def rh_closes(memory, tz='UTC', limit=200):
             'days':days, 'closes':table[:limit], 'closes_total':len(table), 'skipped':skipped,
             'basis':'Successful, non-dry-run closes from uni_closes.jsonl. Realized = realized_quote summed over pnl_basis "realized" rows, per quote asset (v3 WETH and v4 native ETH are both ETH; USDG is separate; a missing or unsupported quote asset has no known unit and is never summed). Rows without a realized figure are unmeasured and counted, never 0. pnl_pct is a mark against the marked value and only ranks.'}
 
+def rh_month(memory, now, month, tz='UTC'):
+    """One calendar month of Robinhood closes for the capital calendar, in the viewer's zone. Per local day and
+    quote asset: realized_quote over pnl_basis "realized" rows of successful, non-dry-run closes (a null figure is
+    unmeasured and counted, never 0; an unknown quote asset is counted, never summed), gas_eth (metered and
+    unmetered closes counted apart) and closes. Month stats: volume from the minted quote-in (per asset), win rate
+    on realized > 0 over measured closes, best win per asset, average hold, gas. Fees are not journaled per close.
+    pnl_pct is a mark and is never summed."""
+    found=MONTH_KEY.match(month or '')
+    if not found: raise ValueError('month must be YYYY-MM')
+    z=zone(tz); y,m=int(found.group(1)),int(found.group(2))
+    start=datetime(y,m,1).date(); nxt=datetime(y+(m==12),m%12+1,1).date(); lo,hi=day_start(start,z),day_start(nxt,z)
+    rows,meta=read_jsonl(memory/'uni_closes.jsonl'); minted,_=rh_minted(memory)
+    first=last=None; days={}; vol={'ETH':None,'USDG':None}; vol_n=0; wins=measured_n=0; best={'ETH':None,'USDG':None}
+    holds=[]; gas={'gas_eth':None,'metered':0,'unmetered':0}; n=0; unknown=0
+    for c in rows:
+        if c.get('success') is not True or c.get('dry_run'): continue
+        t=rh_time(c.get('ts'))
+        if t is None: continue
+        first=t if first is None else min(first,t); last=t if last is None else max(last,t)
+        if not lo<=t<hi: continue
+        n+=1; day=local_day(t,z).isoformat()
+        d=days.setdefault(day,{'ETH':{'closes':0,'measured':0,'unmeasured':0,'realized_quote':None},
+                               'USDG':{'closes':0,'measured':0,'unmeasured':0,'realized_quote':None},
+                               'unknown':0,'gas_eth':None,'gas_metered':0,'gas_unmetered':0,'positions':0})
+        d['positions']+=1
+        asset=rh_asset(c.get('quote_symbol')); rq=c.get('realized_quote')
+        ok=asset is not None and c.get('pnl_basis')=='realized' and number(rq)
+        if asset: rh_add(d[asset],ok,rq)
+        else: d['unknown']+=1; unknown+=1
+        if ok:
+            measured_n+=1; wins+=rq>0
+            if rq>0 and (best[asset] is None or rq>best[asset]): best[asset]=rq
+        g=rh_float(c.get('gas_eth'))
+        if g is None: d['gas_unmetered']+=1; gas['unmetered']+=1
+        else:
+            d['gas_metered']+=1; d['gas_eth']=(d['gas_eth'] or 0)+g; gas['metered']+=1; gas['gas_eth']=(gas['gas_eth'] or 0)+g
+        r=minted.get(rh_key(c,'v3')) or {}
+        q=rh_float(r.get('quoteIn') if r.get('quoteIn') is not None else r.get('wethIn'))
+        if asset and q is not None: vol[asset]=(vol[asset] or 0)+q; vol_n+=1
+        if number(c.get('age_min')) and c['age_min']>=0: holds.append(c['age_min'])
+    today=local_day(now,z)
+    return {'tz':tz,'month':month,'first_month':local_day(first,z).isoformat()[:7] if first is not None else None,
+            'last_month':local_day(last,z).isoformat()[:7] if last is not None else None,
+            'current_month':today.isoformat()[:7],'status':'partial' if incomplete(meta) else 'ok','source':meta,'days':days,
+            'stats':{'positions':n,'unknown_unit':unknown,'volume':vol,'volume_measured':vol_n,
+                     'win_rate_pct':100*wins/measured_n if measured_n else None,'realized_measured':measured_n,
+                     'best_win':best,'avg_hold_min':sum(holds)/len(holds) if holds else None,'hold_measured':len(holds),
+                     'gas':gas,'fees':None,'fees_note':'Fees are not journaled per Robinhood close.'},
+            'basis':'Successful, non-dry-run closes in uni_closes.jsonl by close time (local day). Realized = realized_quote on '
+                    'pnl_basis "realized" rows, per quote asset (ETH = v3 WETH + v4 native ETH; USDG apart). Null = unmeasured, '
+                    'counted, never 0. Gas is ETH for every close. Volume = quote in of the minted position.'}
+
 def rh_stranded(memory, minted):
     """Latest line per token wins, so a resolved line retires an earlier open one (the executors' own rule)."""
     pools = {k: r.get('pool') for k, r in minted.items()}  # (protocol, tokenId): ids collide across v3/v4
@@ -2037,7 +2089,7 @@ def trace(profile, state, query, days=7, now=None, run=None):
     return out
 
 if __name__=='__main__':
-    # argv: profile state since [zones,comma,separated] [daily | fast | slow | month YYYY-MM | brief hours n | alerts | trace days query].
+    # argv: profile state since [zones,comma,separated] [daily | fast | slow | month YYYY-MM | rhmonth YYYY-MM | brief hours n | alerts | trace days query].
     # `daily` refreshes only the day-bucketed panels; `fast` and `slow` are the two halves of the
     # full snapshot (no argument) that the server refreshes on separate periods.
     zones=tuple(sys.argv[4].split(',')) if len(sys.argv)>4 and sys.argv[4] else ('UTC',)
@@ -2047,6 +2099,8 @@ if __name__=='__main__':
     elif len(sys.argv)>7 and sys.argv[5]=='trace':
         out=scrub(trace(Path(sys.argv[1]),Path(sys.argv[2]),sys.argv[7],days=int(sys.argv[6])))
     elif len(sys.argv)>5 and sys.argv[5]=='daily': out=clean(daily(Path(sys.argv[1]),sys.argv[3],zones))
+    elif len(sys.argv)>6 and sys.argv[5]=='rhmonth':
+        out=clean({'collected_at':time.time(),'robinhood':rh_month(Path(sys.argv[1])/'memories',time.time(),sys.argv[6],zones[0])})
     elif len(sys.argv)>6 and sys.argv[5]=='month':
         out=clean({'collected_at':time.time(),'north_star':north_star_month(Path(sys.argv[1])/'memories',time.time(),sys.argv[6],zones[0])})
     elif len(sys.argv)>5 and sys.argv[5]=='fast':

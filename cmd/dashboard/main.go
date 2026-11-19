@@ -93,6 +93,8 @@ type server struct {
 	monthRun       sync.Mutex                                                             // one month collection at a time
 	price          priceState
 	fetchPrice     func(ctx context.Context) (float64, error) // nil = fetchSOLPrice; tests stub it
+	ethPrice       priceState
+	fetchETHPrice  func(ctx context.Context) (float64, error) // nil = Jupiter ETH; tests stub it
 	now            func() time.Time                           // nil = time.Now
 }
 
@@ -363,6 +365,14 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.URL.Path == "/api/price/sol" {
 		s.servePrice(w, r)
+		return
+	}
+	if r.URL.Path == "/api/robinhood/month" {
+		s.serveRobinhoodMonth(w, r)
+		return
+	}
+	if r.URL.Path == "/api/price/eth" {
+		s.serveETHPrice(w, r)
 		return
 	}
 	s.mu.RLock()
