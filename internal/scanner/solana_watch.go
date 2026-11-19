@@ -50,19 +50,8 @@ func recordSolanaWatch(mode string, batch []*meteora.Candidate) {
 	if len(data) == 0 {
 		return
 	}
-	file := os.Getenv("SOLANA_CANDIDATE_WATCH_PATH")
-	if file == "" {
-		rejects := os.Getenv("SOLANA_SHADOW_PATH")
-		if rejects == "" {
-			home, err := os.UserHomeDir()
-			if err != nil {
-				return
-			}
-			rejects = filepath.Join(home, ".local/state/azimuth/solana_rejects.jsonl")
-		}
-		file = filepath.Join(filepath.Dir(rejects), "solana_candidate_watch.jsonl")
-	}
-	if os.MkdirAll(filepath.Dir(file), 0700) != nil {
+	file := solanaWatchPath()
+	if file == "" || os.MkdirAll(filepath.Dir(file), 0700) != nil {
 		return
 	}
 	f, err := os.OpenFile(file, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
@@ -75,4 +64,21 @@ func recordSolanaWatch(mode string, batch []*meteora.Candidate) {
 	}
 	defer syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
 	_, _ = f.Write(data)
+}
+
+// solanaWatchPath is the candidate watch journal dlmm_price_path.py reads;
+// empty when no location can be resolved.
+func solanaWatchPath() string {
+	if file := os.Getenv("SOLANA_CANDIDATE_WATCH_PATH"); file != "" {
+		return file
+	}
+	rejects := os.Getenv("SOLANA_SHADOW_PATH")
+	if rejects == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return ""
+		}
+		rejects = filepath.Join(home, ".local/state/azimuth/solana_rejects.jsonl")
+	}
+	return filepath.Join(filepath.Dir(rejects), "solana_candidate_watch.jsonl")
 }
