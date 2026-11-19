@@ -1148,6 +1148,48 @@ def rh_month(memory, now, month, tz='UTC'):
                     'pnl_basis "realized" rows, per quote asset (ETH = v3 WETH + v4 native ETH; USDG apart). Null = unmeasured, '
                     'counted, never 0. Gas is ETH for every close. Volume = quote in of the minted position.'}
 
+def rh_nav_total(r, asset):
+    """Wallet + open-position quote for one asset, or None when any part is unmeasured. ETH = native + WETH."""
+    lp=(r.get('lp_mark_quote') or {}).get(asset)
+    parts=[r.get('eth'),r.get('weth'),lp] if asset=='ETH' else [r.get('usdg'),lp]
+    return sum(parts) if all(number(x) for x in parts) else None
+
+def rh_nav(memory, now, tz='UTC', days=CALENDAR_DAYS):
+    """Robinhood wallet NAV from uni_nav.jsonl (azimuth-rh-nav.timer), per local day in the viewer's zone.
+    Each day keeps its LAST snapshot. Totals per asset (ETH = native + WETH + open-position quote;
+    USDG = USDG + open-position quote) are null when any part is unmeasured, never 0, and the assets are
+    never added together. Day deltas need two consecutive measured days. Position quote is the quote put in
+    at mint for positions still live on chain (a cost basis, not a price mark)."""
+    rows,meta=read_jsonl(memory/'uni_nav.jsonl'); z=zone(tz)
+    rows=[r for r in rows if number(r.get('ts'))]
+    rows.sort(key=lambda r:r['ts'])
+    if not rows:
+        return {'tz':tz,'status':'missing' if meta.get('status')=='missing' else 'partial' if incomplete(meta) else 'ok','source':meta,'latest':None,'days':[],
+                'basis':'No uni_nav.jsonl snapshots yet: enable azimuth-rh-nav.timer (install.sh --with-rh-nav).'}
+    last={}
+    for r in rows:
+        if r.get('status')=='unavailable': continue
+        last[local_day(r['ts'],z)]=r
+    today=local_day(now,z); out=[]; prev=None
+    for i in range(days-1,-1,-1):
+        d=today-timedelta(days=i); r=last.get(d)
+        if r is None:
+            out.append({'day':d.isoformat(),'status':'no_snapshot'}); prev=None; continue
+        e,u=rh_nav_total(r,'ETH'),rh_nav_total(r,'USDG')
+        out.append({'day':d.isoformat(),'status':'partial_day' if d==today else r.get('status','unknown'),'ts':r['ts'],
+                    'eth_total':e,'usdg_total':u,'eth':r.get('eth'),'weth':r.get('weth'),'usdg':r.get('usdg'),
+                    'lp_eth':(r.get('lp_mark_quote') or {}).get('ETH'),'lp_usdg':(r.get('lp_mark_quote') or {}).get('USDG'),
+                    'd_eth_total':e-prev['eth_total'] if prev and number(prev.get('eth_total')) and number(e) else None,
+                    'd_usdg_total':u-prev['usdg_total'] if prev and number(prev.get('usdg_total')) and number(u) else None})
+        prev=out[-1]
+    lt=rows[-1]
+    latest={k:lt.get(k) for k in ('ts','status','eth','weth','usdg','lp_mark_quote','lp_positions','lp_ghosts','lp_unknown_asset','lp_basis','errors')}
+    latest.update(eth_total=rh_nav_total(lt,'ETH'),usdg_total=rh_nav_total(lt,'USDG'))
+    return {'tz':tz,'status':'partial' if incomplete(meta) else 'ok','source':meta,'latest':latest,'days':out,'snapshots':len(rows),
+            'basis':'uni_nav.jsonl, last snapshot per local day. ETH = native + WETH + quote in open positions; USDG (6-decimal '
+                    'Global Dollar only) = USDG + quote in open positions. Position quote is the quote put in at mint for positions '
+                    'still live on chain, a cost basis rather than a price mark. Null = unmeasured, never 0. ETH and USDG are never summed.'}
+
 def rh_stranded(memory, minted):
     """Latest line per token wins, so a resolved line retires an earlier open one (the executors' own rule)."""
     pools = {k: r.get('pool') for k, r in minted.items()}  # (protocol, tokenId): ids collide across v3/v4
@@ -1194,7 +1236,7 @@ def cutover(since, now): return float(since) if since and float(since)>0 else no
 def daily(profile, since, zones, now=None):
     """Day-bucketed panels, once per requested IANA zone."""
     now=now or time.time(); memory=profile/'memories'; since=cutover(since,now)
-    return {'collected_at':now,'by_tz':{tz:{'north_star':panel(north_star,memory,now,CALENDAR_DAYS,tz),'realized':panel(realized_by_mode,memory,since,tz),'robinhood':panel(rh_closes,memory,tz),'growth':panel(growth_today,memory,now,tz)} for tz in zones}}
+    return {'collected_at':now,'by_tz':{tz:{'north_star':panel(north_star,memory,now,CALENDAR_DAYS,tz),'realized':panel(realized_by_mode,memory,since,tz),'robinhood':panel(rh_closes,memory,tz),'rh_nav':panel(rh_nav,memory,now,tz),'growth':panel(growth_today,memory,now,tz)} for tz in zones}}
 
 def recent_entries(folder, limit=100):
     """Newest `limit` *.json entry files by mtime. scandir reuses the directory read for the stat,

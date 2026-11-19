@@ -65,13 +65,23 @@ venue's panels:
 
 | Section | Solana | Robinhood | Status |
 | --- | --- | --- | --- |
-| overview | known SOL, wallet NAV, growth, services, sources | monitor unit + scanner toggles, realized per asset, gas, wallet | wallet balance PENDING: no Robinhood NAV journal yet |
-| capital | cash/known lines, daily delta, calendar, NAV bridge | realized per asset, daily bars per asset, calendar (ETH or USD, net of gas or gross) | NAV bridge and balance lines PENDING (same reason) |
+| overview | known SOL, wallet NAV, growth, services, sources | monitor unit + scanner toggles, realized per asset, gas, wallet (ETH and USDG held, with parts) | done once `azimuth-rh-nav.timer` runs |
+| capital | cash/known lines, daily delta, calendar, NAV bridge | realized per asset, daily bars per asset, balance lines per asset + daily ETH change, calendar (ETH or USD, net of gas or gross) | NAV bridge not built: deposits and withdrawals are not journaled on this venue |
 | live | realized by mode, dust ledger | open positions, closes, stranded tokens, unit log | done |
 | ops | alerts, funnel, health, entry funnel | empty state: Robinhood batches are logged, not journaled | no source |
 | journal | event journal | empty state pointing to the closes table | no source |
 | hermes | Hermes runtime | the same panel (shared) | shared |
 | redis | Solana position keys | empty state: `rh:*` keys are not collected yet | not collected |
+
+Robinhood wallet NAV comes from `memories/uni_nav.jsonl`, written every 10 minutes by the opt-in
+`azimuth-rh-nav.timer` (`install.sh --with-rh-nav`; script `assets/skill/scripts/uni_nav.py`). It is read-only:
+JSON-RPC `eth_getBalance` and ERC-20 `balanceOf` for the PUBLIC address the Robinhood monitor already uses
+(`UNI_NAV_WALLET`, else `KRYSTAL_WALLET`), never a key; the address and RPC URL are never written or printed.
+USDG is the 6-decimal Global Dollar contract only (its `decimals()` is checked each run), so look-alike "USDG"
+tokens are never read. Quote in open positions is the quote put in at mint for journal-open positions that
+still hold liquidity on chain (a cost basis, not a price mark); a journal-open position whose NFT is burned or
+empty is counted as a ghost and not valued. Totals per asset are null when any part is unmeasured, and ETH and
+USDG are never added together.
 
 The old `#robinhood` link opens the Robinhood venue's live section. The Robinhood calendar shows ETH by default
 (ETH-quoted closes; USDG closes are named in the tooltip) and nets gas by default, labelled in the header; USD
