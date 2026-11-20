@@ -1,0 +1,15 @@
+{
+  "_doc": "Fixed pools for lp_majors_paper.py. Addresses resolved via dlmm.datapi.meteora.ag on 2026-11-20 (highest-TVL pool per pair/bin step). Mints are checked against the API on every sample; a mismatch disables the pool.",
+  "pools": [
+    {"label": "SOL-USDC/4", "arm": "A", "address": "5rCf1DM8LjKTw4YqhnoLcngyZYeNnQqztScTogYHAS6", "x_mint": "So11111111111111111111111111111111111111112", "y_mint": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", "sol_usd_anchor": true},
+    {"label": "SOL-USDC/10", "arm": "A", "address": "BGm1tav58oGcsQJehL9WXBFXF7D27vZsKefj4xJKD5Y", "x_mint": "So11111111111111111111111111111111111111112", "y_mint": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"},
+    {"label": "cbBTC-SOL/2", "arm": "A", "address": "HDhWhQCBrSh9xNWmNtsTi86eWj3yCoEiaRodjgNydo1b", "x_mint": "cbbtcf3aa214zXHbiAZQwf4122FBYbraNdFqgw4iMij", "y_mint": "So11111111111111111111111111111111111111112"},
+    {"label": "SOL-HYPE/4", "arm": "A", "address": "6oQ9wVex4mKZti2GsGCfD8FWTMMC9PLQkztRU5cd6MK8", "x_mint": "So11111111111111111111111111111111111111112", "y_mint": "98sMhvDwXj1RQi5c5Mndm3vPe9cBqPrbLaufMXFNMh5g"},
+    {"label": "HYPE-SOL/20", "arm": "A", "address": "81GpCm4d13y8TozYtThabuSCLQN2o3bbrvDogXFPn8sA", "x_mint": "98sMhvDwXj1RQi5c5Mndm3vPe9cBqPrbLaufMXFNMh5g", "y_mint": "So11111111111111111111111111111111111111112"},
+    {"label": "JUP-SOL/80", "arm": "A", "address": "C8Gr6AUuq9hEdSYJzoEpNcdjpojPZwqG5MtQbeouNNwg", "x_mint": "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN", "y_mint": "So11111111111111111111111111111111111111112"},
+    {"label": "NVDAx-USDC/10", "arm": "B", "address": "8Xx3VeN92DsZksHs2nXMiJUcR5JBofqmbXqacoeUTj2g", "x_mint": "Xsc9qvGR1efVDFGLrVsmkzv3qi45LTBjeUKSPmx9qEh", "y_mint": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"},
+    {"label": "SPCX-SOL/10", "arm": "B", "address": "3h9GhSUzozu2eRQ9MCLCeHWYshywm4mqbzPtz2h1zGMF", "x_mint": "SPCXxcqXj6e5dJDVNovHN8744zkbhM2bYudU45BimGb", "y_mint": "So11111111111111111111111111111111111111112"},
+    {"label": "SPCX-USDC/75", "arm": "B", "address": "7nVQtYQipN564E9oBi6yZFGox4WL6CR4zsLyYipqgTWu", "x_mint": "SPCXxcqXj6e5dJDVNovHN8744zkbhM2bYudU45BimGb", "y_mint": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"},
+    {"label": "TTWO-USDC/1", "arm": "B", "address": "8nUqqRckfRdFh5YqiEoZtfPoZWuDfWQWJstuWNT5hHf2", "x_mint": "TTWofwAge91oFhZs7kpQdyrVRkmevgM88xijGvQFbKo", "y_mint": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"}
+  ]
+}

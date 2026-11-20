@@ -35,6 +35,10 @@ Opt-in flags (each installs and enables only what it names; re-runs are safe):
   --with-paper       install + enable azimuth-grad-paper.service: the graduation
                      paper-trader (experiment S1). Long-running, read-only: public
                      GeckoTerminal/Jupiter reads, journals under memories/grad_paper/.
+  --with-lp-paper    install + enable azimuth-lp-paper.service: the LP majors
+                     paper-trader (modelled two-sided DLMM positions in fixed deep
+                     pools). Long-running, read-only: public Meteora datapi reads,
+                     journals under memories/lp_majors_paper/.
   --no-build         skip npm install and both Go builds (re-runs, tests)
   -h, --help         show this help
 
@@ -45,7 +49,7 @@ USAGE
 }
 
 PROFILE=""
-WITH_DASHBOARD=0 WITH_ALERTS=0 WITH_OPS=0 WITH_RENT_TX=0 WITH_RESEARCH=0 WITH_PAPER=0 NO_BUILD=0
+WITH_DASHBOARD=0 WITH_ALERTS=0 WITH_OPS=0 WITH_RENT_TX=0 WITH_RESEARCH=0 WITH_PAPER=0 WITH_LP_PAPER=0 NO_BUILD=0
 while [ $# -gt 0 ]; do
   case "$1" in
     -h|--help) usage; exit 0 ;;
@@ -55,6 +59,7 @@ while [ $# -gt 0 ]; do
     --with-rent-reclaim-signs-tx) WITH_RENT_TX=1 ;;
     --with-research) WITH_RESEARCH=1 ;;
     --with-paper) WITH_PAPER=1 ;;
+    --with-lp-paper) WITH_LP_PAPER=1 ;;
     --no-build) NO_BUILD=1 ;;
     -*) echo "unknown flag: $1" >&2; usage >&2; exit 2 ;;
     *)
@@ -248,7 +253,9 @@ for u in azimuth-sol-accounting azimuth-sol-shadow azimuth-sol-rent azimuth-sol-
   sed "s#__PROFILE__#$PROFILE#g" "$REPO/assets/systemd/$u.service" > "$PROFILE/systemd/$u.service"
   cp "$REPO/assets/systemd/$u.timer" "$PROFILE/systemd/$u.timer"
 done
-sed "s#__PROFILE__#$PROFILE#g" "$REPO/assets/systemd/azimuth-grad-paper.service" > "$PROFILE/systemd/azimuth-grad-paper.service"
+for u in azimuth-grad-paper azimuth-lp-paper; do
+  sed "s#__PROFILE__#$PROFILE#g" "$REPO/assets/systemd/$u.service" > "$PROFILE/systemd/$u.service"
+done
 echo "   to enable one: cp $PROFILE/systemd/<unit>.{service,timer} ~/.config/systemd/user/"
 
 echo "→ Installing user systemd services"
@@ -357,6 +364,12 @@ print("     the timer applies this daily" if rows else "     nothing older than 
     echo "   azimuth-grad-paper: paper trades only; evaluate with"
     echo "     python3 $PROFILE/skills/solana-dlmm/scripts/grad_paper.py --profile $PROFILE --report"
   fi
+  if [ "$WITH_LP_PAPER" = 1 ]; then
+    render_unit azimuth-lp-paper.service
+    OPT_ENABLE+=(azimuth-lp-paper.service)
+    echo "   azimuth-lp-paper: modelled LP positions only; evaluate with"
+    echo "     python3 $PROFILE/skills/solana-dlmm/scripts/lp_majors_paper.py --profile $PROFILE --report"
+  fi
   if [ "${#OPT_ENABLE[@]}" -gt 0 ]; then
     "$SYSTEMCTL" --user daemon-reload
     "$SYSTEMCTL" --user enable --now "${OPT_ENABLE[@]}"
@@ -371,7 +384,7 @@ print("     the timer applies this daily" if rows else "     nothing older than 
     echo "     (see the header of assets/systemd/azimuth-alerts.service)."
   fi
 else
-  if [ $((WITH_DASHBOARD + WITH_ALERTS + WITH_OPS + WITH_RENT_TX + WITH_RESEARCH + WITH_PAPER)) -gt 0 ]; then
+  if [ $((WITH_DASHBOARD + WITH_ALERTS + WITH_OPS + WITH_RENT_TX + WITH_RESEARCH + WITH_PAPER + WITH_LP_PAPER)) -gt 0 ]; then
     echo "   ⚠ no user systemd: the --with-* flags installed nothing. Unit files are in $PROFILE/systemd."
   fi
   echo "   ⚠ no user systemd available — run the loop + daemon yourself:"

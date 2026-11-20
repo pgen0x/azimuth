@@ -108,6 +108,7 @@ found"). `loginctl enable-linger $USER` is what keeps them alive across logout.
 | `azimuth-sol-{accounting,shadow,candidate-paper,net-experiment,price-path}` (.timer) | research observers; read-only RPC/quotes, local journals only | `install.sh --with-research` (opt-in) |
 | `azimuth-sol-net-research@<name>` (.timer) | frozen paired net research instance | copied by `--with-research`; enable by hand |
 | `azimuth-grad-paper` | graduation paper-trader (S1): public GT/Jupiter reads, `memories/grad_paper/` only, no tx | `install.sh --with-paper` (opt-in) |
+| `azimuth-lp-paper` | LP majors paper-trader: modelled two-sided DLMM positions in fixed pools, public Meteora datapi only, `memories/lp_majors_paper/` only, no tx | `install.sh --with-lp-paper` (opt-in) |
 | `hermes-gateway-<profile>` | Hermes gateway that receives the webhook, and ticks the profile's cron jobs | Hermes, not this repo |
 
 Every repo unit lives in `assets/systemd/`. Without flags `install.sh` enables
@@ -126,6 +127,25 @@ paced at 8 req/min with a 429 cooldown — raise `--gt-rpm` only knowing that.
 With those parameters the trail always sits above the -30% floor (first
 drawdown exits at -25%); the rule is kept literal because it was
 pre-registered. `--report` prints the S1 verdict (mint-clustered bootstrap).
+
+**LP majors paper-trader** (`assets/skill/scripts/lp_majors_paper.py`, pools in
+`lp_majors_pools.json`) models two-sided DLMM `spot` positions (+-5% and
++-10%, 0.5 SOL notional) in fixed deep pools: arm A majors (SOL-USDC x2,
+cbBTC-SOL, SOL/HYPE x2, JUP-SOL), arm B tokenized stocks (NVDAx, SPCX x2,
+TTWO), every hour session-tagged open/closed/weekend (NYSE, DST- and
+holiday-aware). It is its own sampler on purpose: the candidate-watch path
+expires candidates after 30m, caps 30/run and 64 pools, and its native reader
+assumes a SOL-quoted memecoin, so reusing it would either starve the shared
+observers or reject SOL-USDC. It reads only Meteora's datapi (one snapshot per
+pool per 5m, 5m OHLCV + 1h fee history per closed hour), never GT or RPC. Fee
+share is pool LP fees x in-range share x our value / pool TVL: there is no
+bin-liquidity endpoint, so width changes markout and re-centers but not fee
+density. Re-center = 2 x tx per 70-bin chunk + half-notional swap. Gotcha: the
+datapi's `volume/history` returns zeros when `start_time` and `end_time` sit in
+the same hour, so queries run through the next bucket. `--report` gives net per
+SOL-day with clustered CIs and the kill/promote verdicts (14d and 300
+position-hours per width before any decision; promote bar = pulse's realized
+SOL per deployed SOL-day from the profile journals).
 
 ```bash
 journalctl --user -u azimuth -f          # live tail
