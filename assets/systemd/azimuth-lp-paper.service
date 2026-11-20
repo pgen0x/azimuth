@@ -1,0 +1,24 @@
+# LP majors paper-trader. Read-only by design: it polls Meteora's public DLMM
+# datapi (pool snapshots every 5m, OHLCV + fee history once per closed hour) and
+# writes only <profile>/memories/lp_majors_paper/. No wallet, no key, no env
+# file, no RPC, no GeckoTerminal, no transaction. Installed by
+# `install.sh --with-lp-paper` (rewrites __PROFILE__). Evaluate with:
+#   python3 __PROFILE__/skills/solana-dlmm/scripts/lp_majors_paper.py --profile __PROFILE__ --report
+[Unit]
+Description=Azimuth LP majors paper-trader (research only, no trades)
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 __PROFILE__/skills/solana-dlmm/scripts/lp_majors_paper.py --profile __PROFILE__
+Restart=on-failure
+RestartSec=30
+MemoryMax=200M
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+UMask=0077
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target
