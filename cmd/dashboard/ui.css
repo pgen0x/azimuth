@@ -56,9 +56,33 @@ input::placeholder{color:var(--muted)}
 .bar{display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding:0 var(--pad);min-height:60px;border-bottom:1px solid var(--line);color:var(--muted);font-size:12px}
 .crumb{color:var(--ink);font-size:13px;font-weight:600;margin-right:auto}
 .crumb span{color:var(--muted);font-weight:400}
-/* Venue switch: the same segmented control as the calendar unit, so "which book am I reading" uses one vocabulary.
-   Pressed = amber outline and text, the accent's job on this page (current choice), never a fill. */
-.venuesw button{min-height:36px;padding:4px 12px;font-size:12px}
+/* Venue selector (operator revision 1): the one control that changes which book every section reads, so it is the
+   header's only filled object. A track with a sliding raised segment (the indicator moves, the labels stay put),
+   each segment naming its venue with an abstract mark in the chain's colour, a status dot + label read from the
+   scanner's own config lines, and today's realized money. Rounded on the operator's request, the rest of the page
+   stays square. Marks are invented shapes, not the chains' logos. */
+:root{--v-sol:#ad8cf5; --v-rh:#c4e64a}
+.venuesel{position:relative;display:grid;grid-template-columns:1fr 1fr;padding:3px;border:1px solid var(--line);border-radius:8px;background:var(--bg);min-width:0}
+.vind{position:absolute;top:3px;bottom:3px;left:3px;width:calc(50% - 3px);border-radius:6px;background:var(--surface-2);box-shadow:inset 0 0 0 1px var(--control);transition:transform .18s cubic-bezier(.3,.7,.4,1)}
+.venuesel[data-active=robinhood] .vind{transform:translateX(100%)}
+.venuesel button{position:relative;z-index:1;display:flex;align-items:center;gap:10px;min-height:44px;padding:5px 14px 5px 10px;border:0;border-radius:6px;background:none;color:var(--muted);text-align:left;min-width:0}
+.venuesel button:hover:not([aria-selected=true]){background:none;color:var(--ink-2)}
+.venuesel button[aria-selected=true]{color:var(--ink)}
+.venuesel button:focus-visible{outline-offset:0}
+.vmark{width:20px;height:20px;flex:none;stroke:none}
+[data-venue=solana] .vmark{fill:var(--v-sol)} [data-venue=robinhood] .vmark{fill:var(--v-rh)}
+.vmark .rib{fill:none;stroke:var(--bg);stroke-width:1.4;stroke-linecap:round}
+.venuesel button:not([aria-selected=true]) .vmark{opacity:.62}
+.vtx{display:flex;flex-direction:column;line-height:1.25;min-width:0}
+.vname{font-size:12.5px;font-weight:600}
+.vstat{display:flex;align-items:center;gap:6px;font-size:11px;color:var(--muted);white-space:nowrap}
+.vdot{width:7px;height:7px;border-radius:50%;flex:none;background:var(--muted)}
+.vdot.s-live{background:var(--pos)} .vdot.s-observe{background:var(--accent)} .vdot.s-down{background:var(--neg)}
+.vdot.s-unknown{background:none;box-shadow:inset 0 0 0 1.5px var(--muted)}
+.vday{margin-left:auto;padding-left:12px;font-size:11px;color:var(--muted);white-space:nowrap;text-align:right}
+.vday .up{color:var(--pos)} .vday .down{color:var(--neg)}
+.vday:empty{display:none}
+@media (max-width:1100px){.vday{display:none}}
 .frame{flex:1;padding:18px var(--pad) 28px;
   background:linear-gradient(to right,var(--grat) var(--gap),transparent var(--gap)) calc(-1 * var(--gap)) 0/calc((100% + var(--gap)) / var(--cols)) 100% repeat-x content-box,
              linear-gradient(var(--grat),var(--grat)) 0 0/1px 100% no-repeat content-box,
@@ -275,7 +299,7 @@ h3.sub{margin:16px 0 0;color:var(--ink-2);font-weight:600;font-size:12.5px}
   .shell .side nav button,.shell .side .foot button{justify-content:flex-start;padding:8px 12px;min-height:44px}
   .only-phone{display:inline-flex} .icon{width:44px;height:44px}
   .bar{min-height:56px;gap:8px} #stamp{flex-basis:100%;padding-bottom:8px}
-  .venuesw button{min-height:44px}
+  .venuesel{flex:1 1 100%;order:3} #stamp{order:4} .venuesel button{padding:5px 8px;gap:8px}
   .p{grid-column:span 12;padding:0 12px 12px} .ph{margin:0 -12px 10px;padding:8px 12px}
   .hero{font-size:30px} .metric strong{font-size:17px}
   .wf .row{grid-template-columns:minmax(0,1fr) 92px}

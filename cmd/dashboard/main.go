@@ -387,7 +387,7 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch r.URL.Path {
 	case "/api/overview":
 		value = object{"collected_at": data["collected_at"], "collection_error": failure, "nav": data["nav"], "services": data["services"], "sources": data["sources"]}
-	case "/api/capital", "/api/live", "/api/robinhood", "/api/growth":
+	case "/api/capital", "/api/live", "/api/robinhood", "/api/growth", "/api/venues":
 		lines, ok := logLines(r.URL.Query().Get("n"))
 		if !ok {
 			http.Error(w, "invalid n: use 1 to 1000", 400)
@@ -406,6 +406,9 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			value = object{"collected_at": data["collected_at"], "north_star": panels["north_star"], "growth": panels["growth"], "experiments": data["experiments"]}
 		} else if r.URL.Path == "/api/robinhood" {
 			value = robinhoodView(data, panels, lines)
+		} else if r.URL.Path == "/api/venues" {
+			// Header venue selector: status from the scanner's own config lines, today's realized per venue.
+			value = object{"collected_at": data["collected_at"], "status": data["venues"], "today": panels["venue_today"]}
 		} else {
 			live := object{"realized": panels["realized"]}
 			if old, ok := data["live"].(map[string]any); ok {

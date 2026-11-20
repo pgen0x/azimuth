@@ -25,7 +25,7 @@
 </aside>
 <div class="scrim" id="scrim"></div>
 <div class="work">
-<header class="bar"><button class="icon only-phone" id="menu" type="button" aria-label="Open menu" aria-expanded="false" aria-controls="side"><svg aria-hidden="true"><use href="#i-menu"/></svg></button><span class="crumb" id="crumb"><span>azimuth / <span id="crumbv">solana</span> / </span>overview</span><div class="unitsw venuesw" role="group" aria-label="Venue"><button type="button" data-venue="solana" aria-pressed="true">Solana</button><button type="button" data-venue="robinhood" aria-pressed="false">Robinhood</button></div><span id="stamp" aria-live="polite">Loading local evidence…</span></header>
+<header class="bar"><button class="icon only-phone" id="menu" type="button" aria-label="Open menu" aria-expanded="false" aria-controls="side"><svg aria-hidden="true"><use href="#i-menu"/></svg></button><span class="crumb" id="crumb"><span>azimuth / <span id="crumbv">solana</span> / </span>overview</span><div class="venuesel" role="tablist" aria-label="Venue" data-active="solana"><span class="vind" aria-hidden="true"></span><button type="button" role="tab" id="vt-solana" data-venue="solana" aria-selected="true" aria-controls="content" tabindex="0"><svg class="vmark" viewBox="0 0 20 20" aria-hidden="true"><rect x="3" y="4" width="10" height="2.6" rx=".6"/><rect x="5" y="8.7" width="10" height="2.6" rx=".6"/><rect x="7" y="13.4" width="10" height="2.6" rx=".6"/></svg><span class="vtx"><span class="vname">Solana</span><span class="vstat"><i class="vdot" aria-hidden="true"></i><span class="vlab">status loading</span></span></span><span class="vday"></span></button><button type="button" role="tab" id="vt-robinhood" data-venue="robinhood" aria-selected="false" aria-controls="content" tabindex="-1"><svg class="vmark" viewBox="0 0 20 20" aria-hidden="true"><path d="M4 16.5C4 9 8.5 4.2 16.5 3.5 15.8 11.5 11 16 4 16.5z"/><path class="rib" d="M4.5 16 12.5 8"/></svg><span class="vtx"><span class="vname">Robinhood</span><span class="vstat"><i class="vdot" aria-hidden="true"></i><span class="vlab">status loading</span></span></span><span class="vday"></span></button></div><span id="stamp" aria-live="polite">Loading local evidence…</span></header>
 <main id="content" class="frame" aria-live="polite" aria-busy="true"><p class="state">Loading local evidence from the collector…</p></main>
 <footer>Local observations, refreshed every 30 seconds. Times are shown in your browser's time zone; daily charts split days in that zone (UTC when it is unavailable). No wallet RPC, inference, Helius calls or trading actions. <a href="/api/overview">JSON API</a></footer>
 </div></div><div id="tip" role="tooltip"></div>
@@ -599,9 +599,32 @@ if(document.addEventListener){
   let resizeTimer;addEventListener('resize',()=>{clearTimeout(resizeTimer);resizeTimer=setTimeout(redraw,150)});
   addEventListener('hashchange',()=>route(location.hash.slice(1)));
 }
+/* Venue selector status. The collector maps the scanner's own config lines and unit states to one of
+   live | observe | down | off | unknown (collect.py venue_state); this only names and colours that answer,
+   and an unread answer is "status unavailable", never a guess. */
+const VENUES=['solana','robinhood'];
+function venueStatus(info,v){const s=info&&info.status&&info.status[v];
+  if(!s||typeof s!=='object'||!['live','observe','down','off','unknown'].includes(s.state))return {state:'unknown',label:'status unavailable',basis:info&&info.error?'Venue status could not be loaded.':'No venue status in the snapshot yet.'};
+  return {state:s.state,label:String(s.label||s.state),basis:String(s.basis||'')}}
+/* Today's realized money per venue, in that venue's own unit; ETH and USDG side by side, never summed. */
+function venueToday(info,v){const t=info&&info.today;if(!t||typeof t!=='object')return '';
+  const amt=(x,unit,dp)=>`<span class="${flat(+x)?'':x>0?'up':'down'}">${SIGN(+x)}${Math.abs(+x).toFixed(dp)} ${unit}</span>`;
+  if(v==='solana'){const x=t.solana&&t.solana.realized_sol;return isNum(x)?amt(x,'SOL',4)+'<span class="sr"> realized</span> today':''}
+  const parts=[['ETH',4],['USDG',2]].map(([a,dp])=>{const r=t.robinhood&&t.robinhood[a];if(!r||!(r.closes>0))return '';return isNum(r.realized)?amt(r.realized,a,dp):`<span>n/a ${a}</span>`}).filter(Boolean);
+  return parts.length?parts.join(' · ')+'<span class="sr"> realized</span> today':t.robinhood?'no closes today':''}
+/* Arrow keys move between the two tabs (selection follows focus); Home/End jump to the ends. */
+function venueKey(key,cur){const i=VENUES.indexOf(cur);if(i<0)return null;
+  if(key==='ArrowRight'||key==='ArrowDown')return VENUES[(i+1)%VENUES.length];
+  if(key==='ArrowLeft'||key==='ArrowUp')return VENUES[(i+VENUES.length-1)%VENUES.length];
+  if(key==='Home')return VENUES[0];if(key==='End')return VENUES[VENUES.length-1];return null}
+let venueInfo=null;
+function paintVenues(){document.querySelectorAll('[data-venue]').forEach(b=>{if(!b.querySelector)return;const v=b.dataset.venue,s=venueStatus(venueInfo,v);
+  const d=b.querySelector('.vdot'),l=b.querySelector('.vlab'),t=b.querySelector('.vday');
+  if(d)d.className='vdot s-'+s.state;if(l)l.textContent=s.label;if(t)t.innerHTML=venueToday(venueInfo,v);b.title=s.basis})}
+async function loadVenues(){try{venueInfo=await api('venues?'+tzq)}catch(e){venueInfo={error:e.message}}paintVenues()}
 /* Venue switch: one per-viewer choice in the header. The calendar month restarts at the venue's latest month. */
 function setVenue(v,draw=true){venue=v==='robinhood'?'robinhood':'solana';store.set('azimuth.venue',venue);calMonth='';calPickState='';calBounds={first:null,current:null};
-  document.querySelectorAll('[data-venue]').forEach(x=>x.setAttribute('aria-pressed',String(x.dataset.venue===venue)));const c=$('#crumbv');if(c)c.textContent=venue;hideTip();if(draw)render()}
+  document.querySelectorAll('[data-venue]').forEach(x=>{const on=x.dataset.venue===venue;x.setAttribute('aria-selected',String(on));x.tabIndex=on?0:-1});const sel=$('.venuesel');if(sel&&sel.dataset)sel.dataset.active=venue;const c=$('#crumbv');if(c)c.textContent=venue;hideTip();if(draw)render()}
 /* Hash = section. The old "#robinhood" section link lands on the Robinhood venue's live section. */
 function route(t){if(t==='robinhood'){setVenue('robinhood',false);setTab('live');return true}
   if(t&&t!==tab&&document.querySelector(`[data-tab="${t}"]`)){setTab(t);return true}return false}
@@ -619,8 +642,11 @@ if(shell&&shell.classList){
   const tz=$('#tzname');if(tz)tz.textContent=VIEW_TZ;
 }
 document.querySelectorAll('[data-tab]').forEach(b=>b.onclick=()=>{if(typeof location!=='undefined'&&location.hash!=='#'+b.dataset.tab)location.hash=b.dataset.tab;setTab(b.dataset.tab)});
-document.querySelectorAll('[data-venue]').forEach(b=>b.onclick=()=>{if(b.dataset.venue!==venue)setVenue(b.dataset.venue)});
+document.querySelectorAll('[data-venue]').forEach(b=>{b.onclick=()=>{if(b.dataset.venue!==venue)setVenue(b.dataset.venue)};
+  b.onkeydown=e=>{const v=venueKey(e.key,b.dataset.venue);if(!v)return;e.preventDefault();if(v!==venue)setVenue(v);const t=$('#vt-'+v);if(t&&t.focus)t.focus()}});
+loadVenues();
 setVenue(venue,false);
 if(!(typeof location!=='undefined'&&location.hash&&route(location.hash.slice(1))))render();
+setInterval(loadVenues,30000);
 setInterval(()=>{const r=venue==='robinhood';if(['overview','ops','redis','capital','live'].includes(tab)&&!(r&&RH_NONE[tab])&&!(r&&document.activeElement&&document.activeElement.id==='rhq'))render()},30000);
 </script></body></html>

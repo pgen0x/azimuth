@@ -428,19 +428,68 @@ class OwnOnlyTests(unittest.TestCase):
     tearDown=CollectorTests.tearDown
 
 KEY='ab'*32  # synthetic 64-hex, shaped like a private key
-def rh_run(active='inactive', start='@1000', toggles='robinhood=false, rh-turnover=true', log=None):
+def rh_run(active='inactive', start='@1000', toggles='robinhood=false, rh-turnover=true', log=None, deploy=None, units=None):
     """Fake bounded_run keyed on argv: systemd state, the scanner start line and unit journals."""
     def run(argv, **kw):
         joined=' '.join(argv); out=''
-        if argv[:2]==['systemctl','--user'] and 'azimuth-rh-monitor.service' in argv:
+        if argv[:2]==['systemctl','--user'] and units is not None and '--property=Id,ActiveState' in argv:
+            out='\n\n'.join('Id=%s\nActiveState=%s' % kv for kv in units.items())
+        elif argv[:2]==['systemctl','--user'] and 'azimuth-rh-monitor.service' in argv:
             out='Id=azimuth-rh-monitor.service\nActiveState=%s\nUnitFileState=disabled\n' % active
         elif argv[:2]==['systemctl','--user']: out=start+'\n'
-        elif 'scanner: started' in joined:
+        elif 'scanner: (' in joined:
             out=json.dumps({'MESSAGE':'scanner: started (interval=1m0s, pulse=true, %s)' % toggles,'__REALTIME_TIMESTAMP':'1000000000'})+'\n'
+            if deploy: out+=json.dumps({'MESSAGE':'scanner: robinhood deploy (%s, strategy=weth_ladder, max_open=3, indicator_gate=true)' % deploy,'__REALTIME_TIMESTAMP':'1000000000'})+'\n'
         elif 'azimuth-rh-monitor.service' in argv:
             out=''.join(json.dumps({'MESSAGE':m,'__REALTIME_TIMESTAMP':str(t*1000000)})+'\n' for t,m in (log or []))
         return SimpleNamespace(stdout=out,stderr='',returncode=0,capture_status='ok')
     return run
+
+class VenueStatusTests(unittest.TestCase):
+    """Header venue status: read from the scanner's config lines and unit states, never inferred."""
+    UP={'azimuth.service':'active','azimuth-sol-monitor.service':'active','azimuth-rh-monitor.service':'active'}
+    def v(self, toggles='pulse=true, robinhood=false, rh-turnover=true', deploy='enabled=false, executor=false, v4executor=false, modes=none', **units):
+        u=dict(self.UP); u.update({k.replace('_','-')+'.service':x for k,x in units.items()})
+        return c.venues(rh_run(toggles=toggles, deploy=deploy, units=u))
+    def test_solana_pulse_live_and_robinhood_observe_only(self):
+        d=self.v()
+        self.assertEqual((d['solana']['state'],d['solana']['label']),('live','pulse live'))
+        self.assertEqual((d['robinhood']['state'],d['robinhood']['label']),('observe','observe-only'))
+        self.assertEqual(d['units']['azimuth.service'],'active')
+    def test_robinhood_live_needs_toggle_executor_and_listed_mode(self):
+        on='enabled=true, executor=true, v4executor=false, modes=fresh,turnover'
+        self.assertEqual(self.v(deploy=on)['robinhood']['state'],'live')
+        self.assertEqual(self.v(deploy='enabled=true, executor=false, v4executor=false, modes=turnover')['robinhood']['state'],'observe')
+        self.assertEqual(self.v(deploy='enabled=true, executor=true, v4executor=false, modes=mature')['robinhood']['state'],'observe')
+        self.assertEqual(self.v(toggles='pulse=true, robinhood=true, rh-turnover=false', deploy='enabled=true, executor=false, v4executor=true, modes=fresh')['robinhood']['state'],'live')
+        d=self.v(deploy=on, azimuth_rh_monitor='inactive')
+        self.assertEqual((d['robinhood']['state'],d['robinhood']['label']),('down','monitor inactive'))
+    def test_off_states(self):
+        d=self.v(toggles='pulse=false, turnover=false, robinhood=false, rh-turnover=false', deploy=None)
+        self.assertEqual((d['solana']['state'],d['solana']['label'],d['robinhood']['state'],d['robinhood']['label']),('off','entries off','off','off'))
+        d=self.v(azimuth='inactive')
+        self.assertEqual((d['solana']['state'],d['robinhood']['label']),('off','daemon stopped'))
+    def test_entries_on_without_monitor_is_down(self):
+        d=self.v(azimuth_sol_monitor='failed')
+        self.assertEqual((d['solana']['state'],d['solana']['label']),('down','monitor failed'))
+    def test_unread_config_is_unknown_never_a_guess(self):
+        self.assertEqual(self.v(deploy=None)['robinhood']['state'],'unknown')  # RH on but no deploy line
+        d=c.venues(rh_run(start='0', units=self.UP))
+        self.assertEqual((d['solana']['state'],d['robinhood']['state']),('unknown','unknown'))
+        d=c.venues(rh_run(units={}))
+        self.assertEqual(d['solana']['label'],'unknown')
+    def test_rh_status_keeps_only_robinhood_flags(self):
+        _,modes=c.rh_status(rh_run(toggles='pulse=true, robinhood=false, rh-turnover=true'))
+        self.assertEqual(modes['flags'],{'robinhood':False,'rh-turnover':True}); self.assertEqual(modes['status'],'ok')
+    def test_venue_today_reads_built_panels(self):
+        now=86400*4+100
+        z={'growth':{'day':'1970-01-05','components':[{'component':'realized_lp','sol':0.02}]},
+           'robinhood':{'days':{'1970-01-05':{'ETH':{'realized_quote':-0.001,'closes':2},'USDG':{'realized_quote':None,'closes':1}}}}}
+        d=c.venue_today(z,now,'UTC')
+        self.assertEqual(d['solana']['realized_sol'],0.02)
+        self.assertEqual(d['robinhood'],{'ETH':{'realized':-0.001,'closes':2},'USDG':{'realized':None,'closes':1}})
+        z['growth']['day']='1970-01-04'  # a stale growth day is not today
+        self.assertIsNone(c.venue_today(z,now,'UTC')['solana']['realized_sol'])
 
 class RobinhoodTests(unittest.TestCase):
     setUp=CollectorTests.setUp

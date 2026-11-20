@@ -8,7 +8,10 @@ async function render(tab, payload, fail=false, extra={}) {
   const content = {innerHTML: ''}, stamp = {textContent: ''}, intervals = [], calls = [];
   const els = {'#content': content, '#stamp': stamp, '#rhlog': {innerHTML: ''}, '#rhcount': {textContent: ''}};
   // extra.absent: selectors missing from the page, so a handler wired for the wrong view throws as in a browser.
-  const document = {querySelector: s => els[s] || ((extra.absent || []).includes(s) ? null : {}), querySelectorAll: () => []};
+  // extra.tabs: fake venue tab buttons (dataset, attributes, child status nodes, focus) for the header selector.
+  const tabs = extra.tabs || [];
+  for (const b of tabs) { els['#vt-' + b.dataset.venue] = b; }
+  const document = {querySelector: s => els[s] || ((extra.absent || []).includes(s) ? null : {}), querySelectorAll: s => s === '[data-venue]' ? tabs : []};
   const fixtures = {ops: {funnel: {}, health: {}, alerts: []}, overview: {nav: {}, services: [], sources: []}, capital: {north_star: {days: []}, nav_bridge: {}},
     live: {live: {}}, journal: {rows: [], total_in_retained_tail: 0}, hermes: {}, redis: {rows: []}, growth: {tz: 'UTC', north_star: {days: []}, growth: {}, experiments: {}}, ...extra};
   const ctx = {document, Date, console, fetch: async url => {
@@ -19,16 +22,16 @@ async function render(tab, payload, fail=false, extra={}) {
   // Optional storage: an object (kept per viewer) or 'throw' (blocked site data, private window).
   if (extra.store === 'throw') ctx.localStorage = {getItem() { throw Error('blocked') }, setItem() { throw Error('blocked') }};
   else if (extra.store) ctx.localStorage = {getItem: k => extra.store[k] ?? null, setItem: (k, v) => { extra.store[k] = String(v) }};
-  vm.runInNewContext(script + '\nmodule.exports={render,setTab:t=>{tab=t},setVenue,venue:()=>venue,setRhUnit,setRhNet,rhDayValue,rhCalNs,setCalUnit,fmtSOL,fmtUSD,calUnit:()=>calUnit,calPick,fmtCompact,money,pnlModel};', ctx);
+  vm.runInNewContext(script + '\nmodule.exports={render,setTab:t=>{tab=t},setVenue,venue:()=>venue,venueStatus,venueToday,venueKey,loadVenues,setRhUnit,setRhNet,rhDayValue,rhCalNs,setCalUnit,fmtSOL,fmtUSD,calUnit:()=>calUnit,calPick,fmtCompact,money,pnlModel};', ctx);
   extra.content = content;
   extra.exports = ctx.module.exports;
   await new Promise(resolve => setImmediate(resolve));
   if (rhTab) ctx.module.exports.setVenue('robinhood', false);
   ctx.module.exports.setTab(rhTab || tab); await ctx.module.exports.render();
-  const first = content.innerHTML, before = calls.length;
+  const first = content.innerHTML, before = calls.filter(u => !u.startsWith('/api/venues')).length;
   intervals.forEach(fn => fn()); await new Promise(resolve => setImmediate(resolve));
   assert(!/NaN|undefined/.test(first), first);
-  return {exports: ctx.module.exports, html: first, stamp: stamp.textContent, timerFetches: calls.length - before, calls, log: els['#rhlog'].innerHTML, count: els['#rhcount'].textContent};
+  return {exports: ctx.module.exports, html: first, stamp: stamp.textContent, timerFetches: calls.filter(u => !u.startsWith('/api/venues')).length - before, calls, log: els['#rhlog'].innerHTML, count: els['#rhcount'].textContent};
 }
 (async () => {
   const warning = 'Local collection failed; last successful snapshot retained';
@@ -357,5 +360,39 @@ async function render(tab, payload, fail=false, extra={}) {
   assert(X.rhDayValue({ETH: {closes: 1, measured: 1, realized_quote: 0.02}}, 'usd', false, null) === null, 'ETH in USD needs a price');
   assert(X.rhDayValue({USDG: {closes: 1, measured: 0, realized_quote: null}}, 'usd', false, 3000) === null, 'unmeasured USDG is null');
   assert(X.rhDayValue({USDG: {closes: 1, measured: 1, realized_quote: 3}}, 'eth', false, 3000) === null, 'no ETH close, gross: n/a in ETH');
+  // Venue selector: status mapping, today's money, keyboard. Fake tab buttons stand in for the header markup.
+  const vtab = v => { const kids = {'.vdot': {className: ''}, '.vlab': {textContent: ''}, '.vday': {innerHTML: ''}}, attrs = {};
+    return {dataset: {venue: v}, attrs, kids, focused: 0, tabIndex: 0, title: '', setAttribute(k, x) { attrs[k] = x }, querySelector: s => kids[s], focus() { this.focused++ }} };
+  const vs = {solana: {state: 'live', label: 'pulse live', basis: 'Scanner start line: pulse=true; azimuth-sol-monitor active.'},
+    robinhood: {state: 'observe', label: 'observe-only', basis: 'deploy enabled=false'}};
+  const tabsA = [vtab('solana'), vtab('robinhood')];
+  const sel = await render('hermes', {profile: 'p', sessions: []}, false, {tabs: tabsA, store: {},
+    venues: {status: vs, today: {solana: {realized_sol: 0.0123}, robinhood: {ETH: {realized: -0.002, closes: 2}, USDG: {realized: null, closes: 0}}}}});
+  const [vSol, vRh] = tabsA;
+  assert(vSol.kids['.vdot'].className === 'vdot s-live' && vSol.kids['.vlab'].textContent === 'pulse live', 'Solana live: green dot + mode label');
+  assert(vRh.kids['.vdot'].className === 'vdot s-observe' && vRh.kids['.vlab'].textContent === 'observe-only', 'Robinhood observe-only: amber dot');
+  assert(vSol.title.includes('pulse=true'), 'the basis is the tooltip');
+  assert(vSol.kids['.vday'].innerHTML.includes('class="up">+0.0123 SOL') && vSol.kids['.vday'].innerHTML.includes('today'), 'Solana today in SOL, signed');
+  assert(vRh.kids['.vday'].innerHTML.includes('class="down">−0.0020 ETH') && !vRh.kids['.vday'].innerHTML.includes('USDG'), 'Robinhood today per asset; an asset with no closes is left out');
+  const ve = sel.exports;
+  for (const [st, want] of [['live', 'live'], ['observe', 'observe'], ['off', 'off'], ['down', 'down'], ['unknown', 'unknown'], ['bogus', 'unknown']])
+    assert(ve.venueStatus({status: {robinhood: {state: st, label: 'x'}}}, 'robinhood').state === want, 'status mapping ' + st);
+  assert(ve.venueStatus(null, 'solana').label === 'status unavailable' && ve.venueStatus({error: 'boom'}, 'solana').basis.includes('could not'), 'no answer is never guessed');
+  assert(ve.venueToday({today: {robinhood: {ETH: {realized: null, closes: 3}}}}, 'robinhood').includes('n/a ETH'), 'unmeasured closes read n/a, never 0');
+  assert(ve.venueToday({today: {solana: {realized_sol: null}}}, 'solana') === '', 'unmeasured Solana today shows nothing');
+  assert(ve.venueToday({today: {robinhood: {ETH: {realized: null, closes: 0}}}}, 'robinhood') === 'no closes today', 'a quiet day says so');
+  assert(ve.venueKey('ArrowRight', 'solana') === 'robinhood' && ve.venueKey('ArrowRight', 'robinhood') === 'solana' && ve.venueKey('ArrowLeft', 'solana') === 'robinhood', 'arrows wrap');
+  assert(ve.venueKey('Home', 'robinhood') === 'solana' && ve.venueKey('End', 'solana') === 'robinhood' && ve.venueKey('Enter', 'solana') === null, 'Home/End; other keys ignored');
+  let prevented = 0;
+  vRh.onkeydown({key: 'ArrowLeft', preventDefault() { prevented++ }});
+  assert(ve.venue() === 'solana' && vSol.focused === 1 && prevented === 1, 'ArrowLeft from Robinhood selects and focuses Solana');
+  vSol.onkeydown({key: 'ArrowRight', preventDefault() { prevented++ }});
+  assert(ve.venue() === 'robinhood' && vRh.focused === 1 && vRh.attrs['aria-selected'] === 'true' && vSol.attrs['aria-selected'] === 'false', 'ArrowRight selects Robinhood');
+  assert(vRh.tabIndex === 0 && vSol.tabIndex === -1, 'roving tabindex: only the selected tab is in the Tab order');
+  vSol.onkeydown({key: 'a', preventDefault() { prevented++ }});
+  assert(prevented === 2 && ve.venue() === 'robinhood', 'other keys pass through');
+  const tabsB = [vtab('solana'), vtab('robinhood')];
+  await render('hermes', {profile: 'p', sessions: []}, false, {tabs: tabsB, failing: ['venues']});
+  assert(tabsB[0].kids['.vdot'].className === 'vdot s-unknown' && tabsB[0].kids['.vlab'].textContent === 'status unavailable', 'failed status fetch: hollow dot, says so');
   console.log('dashboard render: 59 synthetic cases passed, plus venue and Robinhood calendar cases');
 })().catch(error => {console.error(error); process.exitCode = 1;});
