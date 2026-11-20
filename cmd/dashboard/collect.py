@@ -997,6 +997,32 @@ def rh_journal(argv, unit, run):
     rows = [{'time':t, 'unit':unit, 'line':rh_redact(m)} for t, m in rh_messages(out.stdout)]
     return rows, {'unit':unit, 'status':status if status != 'ok' else 'ok' if out.returncode in (0, 1) else 'unavailable', 'lines':len(rows)}
 
+def scanner_config(run):
+    """Both config lines the scanner logs once at startup ("scanner: started (...)" and, when a Robinhood mode is on,
+    "scanner: robinhood deploy (...)"), read from the current azimuth.service run only. Unread = status unknown."""
+    cfg = {'status':'unknown', 'flags':{}, 'deploy':None, 'note':'No scanner start line was found for the current azimuth.service run.'}
+    try:
+        start = run(['systemctl','--user','show','azimuth.service','--timestamp=unix','-p','ActiveEnterTimestamp','--value'], timeout=4).stdout.strip().lstrip('@')
+        if not start.isdigit() or int(start) <= 0:
+            cfg['note'] = 'azimuth.service is not running; its modes are unknown.'
+            return cfg
+        t = int(start)
+        # The scanner logs its config once at startup, so a five-minute window keeps this read cheap.
+        out = run(['journalctl','--user','-u','azimuth.service','--since','@%d' % t,'--until','@%d' % (t+300),'--grep','scanner: (started|robinhood deploy) \\(','-n','4','-o','json','--output-fields=MESSAGE','--no-pager'], timeout=8, cap=256*1024)
+        for _, msg in rh_messages(out.stdout):
+            if 'scanner: started (' in msg:
+                flags = {k: v == 'true' for k, v in re.findall(r'\b([a-z][a-z-]*)=(true|false)\b', msg)}
+                if flags: cfg.update(status='ok', started_at=t, flags=flags, note='From the scanner start line of the current azimuth.service run.')
+            elif 'scanner: robinhood deploy (' in msg:
+                # Fields are ", "-separated; the modes value itself is a bare comma list ("fresh,turnover").
+                inner = msg.split('scanner: robinhood deploy (', 1)[1].rsplit(')', 1)[0]
+                kv = dict(x.split('=', 1) for x in inner.split(', ') if '=' in x)
+                modes = kv.get('modes', '').strip()
+                cfg['deploy'] = {'enabled':kv.get('enabled') == 'true', 'executor':kv.get('executor') == 'true', 'v4executor':kv.get('v4executor') == 'true',
+                                 'modes':[] if modes in ('', 'none') else [m.strip() for m in modes.split(',') if m.strip()]}
+    except OSError: pass
+    return cfg
+
 def rh_status(run):
     """Monitor unit state, and the Robinhood toggles from the scanner's own start line."""
     try:
@@ -1004,20 +1030,59 @@ def rh_status(run):
         unit = dict(l.split('=', 1) for l in out.stdout.splitlines() if '=' in l)
     except OSError: unit = {}
     unit = unit or {'Id':RH_UNIT, 'ActiveState':'unknown'}
-    modes = {'status':'unknown', 'flags':{}, 'note':'No scanner start line was found for the current azimuth.service run.'}
-    try:
-        start = run(['systemctl','--user','show','azimuth.service','--timestamp=unix','-p','ActiveEnterTimestamp','--value'], timeout=4).stdout.strip().lstrip('@')
-        if not start.isdigit() or int(start) <= 0:
-            modes['note'] = 'azimuth.service is not running; its Robinhood modes are unknown.'
-        else:
-            t = int(start)
-            # The scanner logs its toggles once at startup, so a five-minute window keeps this read cheap.
-            out = run(['journalctl','--user','-u','azimuth.service','--since','@%d' % t,'--until','@%d' % (t+300),'--grep','scanner: started','-n','1','-o','json','--output-fields=MESSAGE','--no-pager'], timeout=8, cap=256*1024)
-            for _, msg in rh_messages(out.stdout):
-                flags = {k: v == 'true' for k, v in re.findall(r'\b(robinhood|rh-[a-z-]+)=(true|false)\b', msg)}
-                if flags: modes = {'status':'ok', 'started_at':t, 'flags':flags, 'note':'From the scanner start line of the current azimuth.service run.'}
-    except OSError: pass
+    cfg = scanner_config(run)
+    flags = {k: v for k, v in cfg['flags'].items() if k == 'robinhood' or k.startswith('rh-')}
+    modes = {'status':cfg['status'] if flags or cfg['status'] != 'ok' else 'unknown', 'flags':flags, 'note':cfg['note']}
+    if flags: modes['started_at'] = cfg['started_at']
     return unit, modes
+
+SOL_MODES = ('casual','multiday','turnover','pulse')
+VENUE_UNITS = ('azimuth.service','azimuth-sol-monitor.service',RH_UNIT)
+
+def venue_state(cfg, units):
+    """Header status per venue from the scanner's own config lines and unit states; never inferred.
+    state: live (entries on, exit monitor up) | observe (Robinhood scans but cannot deploy) | down (entries on,
+    exit monitor not active) | off | unknown (config or unit state unread)."""
+    daemon = units.get('azimuth.service')
+    def one(state, label, why): return {'state':state, 'label':label, 'basis':why}
+    if daemon is None or daemon == 'unknown':
+        u = one('unknown', 'unknown', 'azimuth.service state could not be read.'); return {'solana':u, 'robinhood':dict(u)}
+    if daemon != 'active':
+        u = one('off', 'daemon stopped', 'azimuth.service is %s: nothing scans.' % daemon); return {'solana':u, 'robinhood':dict(u)}
+    if cfg.get('status') != 'ok':
+        u = one('unknown', 'unknown', cfg.get('note') or 'Scanner start line not read.'); return {'solana':u, 'robinhood':dict(u)}
+    flags = cfg.get('flags') or {}
+    sol = [m for m in SOL_MODES if flags.get(m)]
+    mon = units.get('azimuth-sol-monitor.service')
+    if not sol: solana = one('off', 'entries off', 'No Solana entry mode is on in the scanner start line.')
+    elif mon != 'active': solana = one('down', 'monitor %s' % (mon or 'unknown'), 'Entry modes %s are on but azimuth-sol-monitor is %s.' % ('+'.join(sol), mon or 'unknown'))
+    else: solana = one('live', '%s live' % '+'.join(sol), 'Scanner start line: %s=true; azimuth-sol-monitor active.' % ', '.join(sol))
+    rh = [k for k, v in flags.items() if v and (k == 'robinhood' or k.startswith('rh-'))]
+    dep = cfg.get('deploy')
+    if not rh: robin = one('off', 'off', 'No Robinhood mode is on in the scanner start line.')
+    elif not isinstance(dep, dict): robin = one('unknown', 'unknown', 'Robinhood modes are on but the scanner deploy line was not read.')
+    else:
+        # Mirrors scanner.go: a batch deploys only with the toggle on, an executor configured and its mode listed.
+        names = {('fresh' if k == 'robinhood' else k[3:]) for k in rh}
+        deploys = dep.get('enabled') and (dep.get('executor') or dep.get('v4executor')) and bool(names & set(dep.get('modes') or []))
+        rmon = units.get(RH_UNIT)
+        if not deploys: robin = one('observe', 'observe-only', 'Modes %s scan; deploy line: enabled=%s, no deploying mode.' % (', '.join(sorted(rh)), str(bool(dep.get('enabled'))).lower()))
+        elif rmon != 'active': robin = one('down', 'monitor %s' % (rmon or 'unknown'), 'Deploy is on but azimuth-rh-monitor is %s.' % (rmon or 'unknown'))
+        else: robin = one('live', 'live', 'Deploy is on for %s; azimuth-rh-monitor active.' % ', '.join(sorted(names & set(dep['modes']))))
+    return {'solana':solana, 'robinhood':robin}
+
+def venues(run=None):
+    run = run or bounded_run
+    units = {}
+    try:
+        out = run(['systemctl','--user','show',*VENUE_UNITS,'--property=Id,ActiveState'], timeout=4)
+        for block in out.stdout.strip().split('\n\n'):
+            kv = dict(l.split('=', 1) for l in block.splitlines() if '=' in l)
+            if kv.get('Id') in VENUE_UNITS: units[kv['Id']] = kv.get('ActiveState') or 'unknown'
+    except OSError: pass
+    out = venue_state(scanner_config(run), units)
+    out['units'] = units
+    return out
 
 def rh_minted(memory):
     minted, sources = {}, []
@@ -1236,7 +1301,23 @@ def cutover(since, now): return float(since) if since and float(since)>0 else no
 def daily(profile, since, zones, now=None):
     """Day-bucketed panels, once per requested IANA zone."""
     now=now or time.time(); memory=profile/'memories'; since=cutover(since,now)
-    return {'collected_at':now,'by_tz':{tz:{'north_star':panel(north_star,memory,now,CALENDAR_DAYS,tz),'realized':panel(realized_by_mode,memory,since,tz),'robinhood':panel(rh_closes,memory,tz),'rh_nav':panel(rh_nav,memory,now,tz),'growth':panel(growth_today,memory,now,tz)} for tz in zones}}
+    by_tz={}
+    for tz in zones:
+        z={'north_star':panel(north_star,memory,now,CALENDAR_DAYS,tz),'realized':panel(realized_by_mode,memory,since,tz),'robinhood':panel(rh_closes,memory,tz),'rh_nav':panel(rh_nav,memory,now,tz),'growth':panel(growth_today,memory,now,tz)}
+        z['venue_today']=panel(venue_today,z,now,tz)
+        by_tz[tz]=z
+    return {'collected_at':now,'by_tz':by_tz}
+
+def venue_today(z, now, tz):
+    """Today's realized money per venue for the header, taken from panels already built for this zone.
+    Solana: realized_lp of today's growth panel (the arbiter). Robinhood: realized_quote per asset of today's closes.
+    Null = unmeasured, never 0; ETH and USDG are never summed."""
+    day=local_day(now,zone(tz)).isoformat()
+    g=z.get('growth') or {}
+    lp=next((c.get('sol') for c in g.get('components') or [] if c.get('component')=='realized_lp'),None) if g.get('day')==day else None
+    rd=((z.get('robinhood') or {}).get('days') or {}).get(day) or {}
+    rh={a:{'realized':(rd.get(a) or {}).get('realized_quote'),'closes':(rd.get(a) or {}).get('closes',0)} for a in ('ETH','USDG')}
+    return {'day':day,'solana':{'realized_sol':lp if number(lp) else None},'robinhood':rh}
 
 def recent_entries(folder, limit=100):
     """Newest `limit` *.json entry files by mtime. scandir reuses the directory read for the stat,
@@ -1355,7 +1436,7 @@ def fast_panels(profile, state, since=None, now=None):
         except (OSError,ValueError): pass
     hermes['gateway'] = next((s for s in services if s.get('Id')=='hermes-gateway.service'), {'ActiveState':'unknown'})
     events.sort(key=lambda e:e.get('time') or 0,reverse=True)
-    return {'nav':nav[-1] if nav else {},'journal':events,'sources':sources,'hermes':hermes,'services':services}
+    return {'nav':nav[-1] if nav else {},'journal':events,'sources':sources,'hermes':hermes,'services':services,'venues':panel(venues)}
 
 # Agent brief: one compact, read-only status read for an orchestrating agent (CLI `brief` and /api/agent/brief).
 # Every figure keeps its basis; marks are labeled as marks and a missing source is reported, never zero.
