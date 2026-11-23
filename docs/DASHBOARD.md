@@ -74,6 +74,11 @@ the current `azimuth.service` run and the unit states, never a guess:
 | off (grey) | no entry mode, or the daemon stopped | no Robinhood mode, or the daemon stopped |
 | unknown (hollow) | start line or unit state unread | same, or Robinhood on with no deploy line |
 
+Snapshot freshness sits at the bottom of the sidebar (inside the drawer on phones), not in the header: a dot and the
+snapshot's age, with the full time, zone and last-fetch result in its tooltip and accessible name. Green while the
+snapshot is younger than two collection periods (120s), amber up to 10 minutes, red past that or when the last fetch
+failed. The same "Observed" line is repeated in the page footer.
+
 On Robinhood, each section shows that venue's panels:
 
 | Section | Solana | Robinhood | Status |

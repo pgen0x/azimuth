@@ -22,7 +22,7 @@ async function render(tab, payload, fail=false, extra={}) {
   // Optional storage: an object (kept per viewer) or 'throw' (blocked site data, private window).
   if (extra.store === 'throw') ctx.localStorage = {getItem() { throw Error('blocked') }, setItem() { throw Error('blocked') }};
   else if (extra.store) ctx.localStorage = {getItem: k => extra.store[k] ?? null, setItem: (k, v) => { extra.store[k] = String(v) }};
-  vm.runInNewContext(script + '\nmodule.exports={render,setTab:t=>{tab=t},setVenue,venue:()=>venue,venueStatus,venueToday,venueKey,loadVenues,setRhUnit,setRhNet,rhDayValue,rhCalNs,setCalUnit,fmtSOL,fmtUSD,calUnit:()=>calUnit,calPick,fmtCompact,money,pnlModel};', ctx);
+  vm.runInNewContext(script + '\nmodule.exports={render,freshState,shortAge,setTab:t=>{tab=t},setVenue,venue:()=>venue,venueStatus,venueToday,venueKey,loadVenues,setRhUnit,setRhNet,rhDayValue,rhCalNs,setCalUnit,fmtSOL,fmtUSD,calUnit:()=>calUnit,calPick,fmtCompact,money,pnlModel};', ctx);
   extra.content = content;
   extra.exports = ctx.module.exports;
   await new Promise(resolve => setImmediate(resolve));
@@ -394,5 +394,9 @@ async function render(tab, payload, fail=false, extra={}) {
   const tabsB = [vtab('solana'), vtab('robinhood')];
   await render('hermes', {profile: 'p', sessions: []}, false, {tabs: tabsB, failing: ['venues']});
   assert(tabsB[0].kids['.vdot'].className === 'vdot s-unknown' && tabsB[0].kids['.vlab'].textContent === 'status unavailable', 'failed status fetch: hollow dot, says so');
+  // Freshness: staleness colour thresholds (snapshot every 60s: green < 120s, amber < 10m, red after or on fetch error).
+  for (const [ageS, err, want] of [[0, null, 'ok'], [119, null, 'ok'], [120, null, 'warn'], [599, null, 'warn'], [600, null, 'bad'], [5, 'boom', 'bad'], [null, null, 'wait']])
+    assert(sel.exports.freshState(ageS, err) === want, `freshState(${ageS},${err})`);
+  assert(sel.exports.shortAge(30) === '<1m' && sel.exports.shortAge(61) === '1m' && sel.exports.shortAge(7300) === '2h' && sel.exports.shortAge(90000) === '1d' && sel.exports.shortAge(null) === '…', 'compact age');
   console.log('dashboard render: 59 synthetic cases passed, plus venue and Robinhood calendar cases');
 })().catch(error => {console.error(error); process.exitCode = 1;});
