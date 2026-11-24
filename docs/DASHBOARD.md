@@ -57,6 +57,55 @@ without one: HTML routes redirect to `/login`, API routes return `401`.
 
 The unit drop-in that supplies the hash is in [DASHBOARD_DEPLOY.md](DASHBOARD_DEPLOY.md#password-hash).
 
+## Venues
+
+A venue selector in the header (a two-tab `tablist`: arrow keys, Home/End) picks the venue for every section; the
+choice is kept per viewer in `localStorage` (`azimuth.venue`) and the page works when storage is blocked. Each tab shows
+the venue's official logo (unmodified files in `cmd/dashboard/assets/venues/`, served only to a signed-in session;
+sources and the trademark notice are in its `NOTICE.md`), the venue's status and, on wide screens, today's realized money in that venue's unit (Solana: `realized_lp` of the
+growth panel; Robinhood: `realized_quote` per asset, ETH and USDG apart, n/a when a close is unmeasured). Status comes
+from `/api/venues`, which reads the scanner's own startup lines (`scanner: started`, `scanner: robinhood deploy`) of
+the current `azimuth.service` run and the unit states, never a guess:
+
+| State | Solana | Robinhood |
+|---|---|---|
+| live (green) | an entry mode is on and `azimuth-sol-monitor` is active; label names the modes (`pulse live`) | deploy enabled, an executor configured and an enabled mode listed in the deploy modes, `azimuth-rh-monitor` active |
+| observe-only (amber) | n/a | a Robinhood mode scans but cannot deploy |
+| down (red) | entry mode on, exit monitor not active | would deploy, exit monitor not active |
+| off (grey) | no entry mode, or the daemon stopped | no Robinhood mode, or the daemon stopped |
+| unknown (hollow) | start line or unit state unread | same, or Robinhood on with no deploy line |
+
+Snapshot freshness sits at the bottom of the sidebar (inside the drawer on phones), not in the header: a dot and the
+snapshot's age, with the full time, zone and last-fetch result in its tooltip and accessible name. Green while the
+snapshot is younger than two collection periods (120s), amber up to 10 minutes, red past that or when the last fetch
+failed. The same "Observed" line is repeated in the page footer.
+
+On Robinhood, each section shows that venue's panels:
+
+| Section | Solana | Robinhood | Status |
+| --- | --- | --- | --- |
+| overview | known SOL, wallet NAV, growth, services, sources | monitor unit + scanner toggles, realized per asset, gas, wallet (ETH and USDG held, with parts) | done once `azimuth-rh-nav.timer` runs |
+| capital | cash/known lines, daily delta, calendar, NAV bridge | realized per asset, daily bars per asset, balance lines per asset + daily ETH change, calendar (ETH or USD, net of gas or gross) | NAV bridge not built: deposits and withdrawals are not journaled on this venue |
+| live | realized by mode, dust ledger | open positions, closes, stranded tokens, unit log | done |
+| ops | alerts, funnel, health, entry funnel | empty state: Robinhood batches are logged, not journaled | no source |
+| journal | event journal | empty state pointing to the closes table | no source |
+| hermes | Hermes runtime | the same panel (shared) | shared |
+| redis | Solana position keys | empty state: `rh:*` keys are not collected yet | not collected |
+
+Robinhood wallet NAV comes from `memories/uni_nav.jsonl`, written every 10 minutes by the opt-in
+`azimuth-rh-nav.timer` (`install.sh --with-rh-nav`; script `assets/skill/scripts/uni_nav.py`). It is read-only:
+JSON-RPC `eth_getBalance` and ERC-20 `balanceOf` for the PUBLIC address the Robinhood monitor already uses
+(`UNI_NAV_WALLET`, else `KRYSTAL_WALLET`), never a key; the address and RPC URL are never written or printed.
+USDG is the 6-decimal Global Dollar contract only (its `decimals()` is checked each run), so look-alike "USDG"
+tokens are never read. Quote in open positions is the quote put in at mint for journal-open positions that
+still hold liquidity on chain (a cost basis, not a price mark); a journal-open position whose NFT is burned or
+empty is counted as a ghost and not valued. Totals per asset are null when any part is unmeasured, and ETH and
+USDG are never added together.
+
+The old `#robinhood` link opens the Robinhood venue's live section. The Robinhood calendar shows ETH by default
+(ETH-quoted closes; USDG closes are named in the tooltip) and nets gas by default, labelled in the header; USD
+adds USDG at $1 to ETH at the current ETH price, which is not a historical price.
+
 ## Time zones
 
 The API carries UTC epochs only. Daily series (`/api/capital` north star and calendar, `/api/robinhood` closes, `/api/live` realized per
@@ -77,7 +126,10 @@ its zone.
 | `/api/capital/month?month=YYYY-MM&tz=ZONE` | Capital calendar: one month of north-star days (empty `month` = the current one), plus `first_month` and `current_month` to bound the picker. Each day also carries `d_trading_sol` = `d_cash_sol` minus `d_external_sol` (deposits/withdrawals), null when either is unmeasured; the calendar shows trading, tags flows of 0.0001 SOL or more, and lists them apart from the trading total. The response also carries `positions`: positions closed per local day plus the month's volume (sum of deposit_sol), win rate (realized_sol > 0 over measured), fees (fee_sol), best win and average hold, from the last live exit per position in `dlmm_closes.jsonl` joined to `dlmm_realized.jsonl`; unmeasured figures are counted, never 0. A day whose last snapshot has an unmeasured cash part takes cash from that day's last measured snapshot and is flagged `cash_fallback` (shown with `*`). Malformed or future months answer 400; months before the data are empty. One bounded collector run (~32 NAV lookups) per zone and month, cached 1 hour (current month: 10 minutes), one run at a time |
 | `/api/price/sol` | Current SOL/USD for the calendar's USD view, from Jupiter's keyless price API (generic User-Agent, no key), cached 5 minutes. Always 200: `status: unavailable` with `usd: null` on failure (retried after a minute), and the page then disables USD. There is no historical price in the NAV journal, so USD is labelled "at current SOL price" |
 | `/api/live?tz=ZONE` | Dust rent ledger and realized PnL by mode and local day since the `-since` cutover |
+| `/api/venues?tz=ZONE` | Header venue selector: per-venue `state` / `label` / `basis` from the scanner config lines and unit states, and today's realized money per venue in the viewer zone |
 | `/api/robinhood?tz=ZONE&n=200` | Robinhood Chain: monitor unit state, scanner toggles, last `n` (1 to 1000) log lines, open positions per the journals, successful closes per quote asset and local day, stranded tokens |
+| `/api/robinhood/month?month=YYYY-MM&tz=ZONE` | Robinhood capital calendar: per local day and quote asset (ETH = v3 WETH + v4 native ETH; USDG apart), `realized_quote` over successful, non-dry-run closes with `pnl_basis == "realized"` (a null figure is unmeasured and counted, never 0; an unknown quote asset is counted, never summed; `pnl_pct` is never read), `gas_eth` with metered and unmetered closes counted apart, and closes per day. Month stats: volume (minted quote in, per asset), win rate (realized > 0 over measured), best win per asset, average hold, gas. Fees are not journaled per close and come back null. `first_month` / `last_month` bound the picker; an empty current month lands on `last_month`. Same bounds, cache and one-run-at-a-time rule as `/api/capital/month`, cached separately |
+| `/api/price/eth` | Current ETH/USD for the Robinhood calendar's USD view, from the same keyless Jupiter endpoint (bridged ETH mint), same fail-soft cache as `/api/price/sol` and independent of it. USDG is taken at $1, so USDG-only days convert without a price |
 | `/api/hermes` | Profile/model/fallback configuration, skills, gateway state, recent session metadata |
 | `/api/redis` | Timestamped fixed capacity keys, position tracking sample, cooldown and dedup TTLs |
 | `/api/agent/brief?hours=12&n=10&tz=ZONE&funnel_since=RFC3339&format=text` | Agent brief (see below): wallet, open positions, recent closes, entry funnel, health, alerts. JSON by default, the CLI's text with `format=text` |

@@ -202,3 +202,139 @@ func TestParseSOLPrice(t *testing.T) {
 		}
 	}
 }
+
+// rhMonthServer answers Robinhood month collections; it fails the test if the Solana month mode is asked for.
+func rhMonthServer(t *testing.T, now time.Time) (*server, *[]string) {
+	calls := []string{}
+	s := &server{now: func() time.Time { return now }}
+	s.runCollector = func(_ context.Context, mode string, zones []string) ([]byte, error) {
+		calls = append(calls, mode+"@"+strings.Join(zones, ","))
+		if strings.HasPrefix(mode, "month ") {
+			return []byte(`{"collected_at":1,"north_star":{"month":"` + strings.TrimPrefix(mode, "month ") + `","days":[]}}`), nil
+		}
+		month := strings.TrimPrefix(mode, "rhmonth ")
+		days := `{}`
+		if month == "2026-08" {
+			// One measured ETH day and one wholly unmeasured day: null must reach the client as null, never 0.
+			days = `{"2026-08-03":{"ETH":{"closes":1,"measured":1,"unmeasured":0,"realized_quote":0.01},"gas_eth":0.001},` +
+				`"2026-08-04":{"ETH":{"closes":1,"measured":0,"unmeasured":1,"realized_quote":null},"gas_eth":null}}`
+		}
+		return []byte(`{"collected_at":1,"robinhood":{"month":"` + month + `","first_month":"2026-07","days":` + days + `}}`), nil
+	}
+	return s, &calls
+}
+
+func TestRobinhoodMonthEndpoint(t *testing.T) {
+	now := time.Date(2026, 11, 19, 12, 0, 0, 0, time.UTC)
+	s, calls := rhMonthServer(t, now)
+	for _, tc := range []struct {
+		path   string
+		status int
+		want   string
+	}{
+		{"/api/robinhood/month", 200, `"month":"2026-11"`},
+		{"/api/robinhood/month?month=2026-08&tz=Asia/Jakarta", 200, `"realized_quote":null`},
+		{"/api/robinhood/month?month=2026-06", 200, `"days":{}`}, // before the first close: empty, not an error
+		{"/api/robinhood/month?month=2026-13", 400, "invalid month"},
+		{"/api/robinhood/month?month=2026-12", 400, "out of range"},
+		{"/api/robinhood/month?month=../2026-08", 400, "invalid month"},
+	} {
+		w := get(t, s, tc.path)
+		if w.Code != tc.status || !strings.Contains(w.Body.String(), tc.want) {
+			t.Fatalf("%s: %d %s", tc.path, w.Code, w.Body.String())
+		}
+		if tc.status == 200 && strings.Contains(w.Body.String(), `"north_star"`) {
+			t.Fatalf("%s leaked the Solana section: %s", tc.path, w.Body.String())
+		}
+	}
+	want := []string{"rhmonth 2026-11@UTC", "rhmonth 2026-08@Asia/Jakarta", "rhmonth 2026-06@UTC"}
+	if strings.Join(*calls, ";") != strings.Join(want, ";") {
+		t.Fatalf("collector calls %v", *calls)
+	}
+	// The cache is per venue: the same month and zone on the Solana route is its own collection.
+	get(t, s, "/api/robinhood/month?month=2026-08&tz=Asia/Jakarta")
+	get(t, s, "/api/capital/month?month=2026-08&tz=Asia/Jakarta")
+	if len(*calls) != 4 || (*calls)[3] != "month 2026-08@Asia/Jakarta" {
+		t.Fatalf("per-kind cache: %v", *calls)
+	}
+}
+
+func TestRobinhoodMonthEmptyAndFailure(t *testing.T) {
+	now := time.Date(2026, 11, 19, 0, 0, 0, 0, time.UTC)
+	s := &server{now: func() time.Time { return now }}
+	s.runCollector = func(context.Context, string, []string) ([]byte, error) {
+		return []byte(`{"collected_at":1,"robinhood":{"month":"2026-11","first_month":null,"days":{}}}`), nil
+	}
+	if w := get(t, s, "/api/robinhood/month"); w.Code != 200 || !strings.Contains(w.Body.String(), `"first_month":null`) {
+		t.Fatalf("empty journal: %d %s", w.Code, w.Body.String())
+	}
+	f, _ := monthServer(t, now, true)
+	if w := get(t, f, "/api/robinhood/month?month=2026-09"); w.Code != 503 {
+		t.Fatalf("collector failure: %d %s", w.Code, w.Body.String())
+	}
+	if len(f.months) != 0 {
+		t.Fatal("a failed collection must not be cached")
+	}
+	r := httptest.NewRequest("GET", "/api/robinhood/month", nil)
+	r.Host = "localhost"
+	w := httptest.NewRecorder()
+	f.ServeHTTP(w, r)
+	if w.Code != 401 {
+		t.Fatalf("unauthenticated month: %d", w.Code)
+	}
+}
+
+func TestETHPriceFailsSoftApartFromSOL(t *testing.T) {
+	now := time.Date(2026, 11, 19, 0, 0, 0, 0, time.UTC)
+	eth, sol := 0, 0
+	s := &server{now: func() time.Time { return now }}
+	s.fetchPrice = func(context.Context) (float64, error) { sol++; return 150, nil }
+	s.fetchETHPrice = func(context.Context) (float64, error) { eth++; return 0, errors.New("network down") }
+	read := func(path string) object {
+		w := get(t, s, path)
+		if w.Code != 200 {
+			t.Fatalf("%s must answer 200: %d", path, w.Code)
+		}
+		var v object
+		json.Unmarshal(w.Body.Bytes(), &v)
+		return v
+	}
+	if v := read("/api/price/eth"); v["status"] != "unavailable" || v["usd"] != nil || v["asset"] != "ETH" {
+		t.Fatalf("fail-soft: %v", v)
+	}
+	if v := read("/api/price/sol"); v["status"] != "ok" || v["usd"] != 150.0 || v["asset"] != "SOL" {
+		t.Fatalf("an ETH failure must not touch the SOL price: %v", v)
+	}
+	read("/api/price/eth")
+	if eth != 1 || sol != 1 {
+		t.Fatalf("each price backs off and caches on its own: eth %d sol %d", eth, sol)
+	}
+	s.fetchETHPrice = func(context.Context) (float64, error) { eth++; return 3012.5, nil }
+	now = now.Add(priceFailTTL)
+	if v := read("/api/price/eth"); v["status"] != "ok" || v["usd"] != 3012.5 {
+		t.Fatalf("recovered: %v", v)
+	}
+}
+
+func TestParseJupiterPriceETH(t *testing.T) {
+	if v, err := parseJupiterPrice(strings.NewReader(`{"`+ethMint+`":{"usdPrice":3012.5}}`), ethMint); err != nil || v != 3012.5 {
+		t.Fatalf("%v %v", v, err)
+	}
+	// The SOL entry is not an ETH price.
+	if _, err := parseJupiterPrice(strings.NewReader(`{"`+solMint+`":{"usdPrice":150}}`), ethMint); err == nil {
+		t.Fatal("accepted another mint's price")
+	}
+}
+
+func TestRobinhoodViewCarriesWalletNAVPerZone(t *testing.T) {
+	data := object{"robinhood": map[string]any{"logs": []any{"a", "b"}}}
+	panels := object{"robinhood": object{"tz": "Asia/Tokyo"}, "rh_nav": object{"tz": "Asia/Tokyo", "latest": nil}}
+	v := robinhoodView(data, panels, 1)
+	nav, ok := v["nav"].(object)
+	if !ok || nav["tz"] != "Asia/Tokyo" {
+		t.Fatalf("nav panel missing from the Robinhood view: %v", v)
+	}
+	if _, ok := object(robinhoodView(object{}, object{}, 1))["nav"]; !ok {
+		t.Fatal("nav key must exist (null) even without a snapshot panel")
+	}
+}

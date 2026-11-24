@@ -3,36 +3,43 @@
 const fs = require('node:fs'), vm = require('node:vm'), assert = require('node:assert/strict'), {execFileSync} = require('node:child_process');
 const script = fs.readFileSync(__dirname + '/index.html', 'utf8').match(/<script>([\s\S]*?)<\/script>/)[1];
 async function render(tab, payload, fail=false, extra={}) {
+  // 'rh:<section>' renders that section on the Robinhood venue; its payload is the /api/robinhood answer.
+  const rhTab = tab.startsWith('rh:') ? tab.slice(3) : null, own = rhTab ? 'robinhood' : tab;
   const content = {innerHTML: ''}, stamp = {textContent: ''}, intervals = [], calls = [];
   const els = {'#content': content, '#stamp': stamp, '#rhlog': {innerHTML: ''}, '#rhcount': {textContent: ''}};
-  const document = {querySelector: s => els[s] || {}, querySelectorAll: () => []};
+  // extra.absent: selectors missing from the page, so a handler wired for the wrong view throws as in a browser.
+  // extra.tabs: fake venue tab buttons (dataset, attributes, child status nodes, focus) for the header selector.
+  const tabs = extra.tabs || [];
+  for (const b of tabs) { els['#vt-' + b.dataset.venue] = b; }
+  const document = {querySelector: s => els[s] || ((extra.absent || []).includes(s) ? null : {}), querySelectorAll: s => s === '[data-venue]' ? tabs : []};
   const fixtures = {ops: {funnel: {}, health: {}, alerts: []}, overview: {nav: {}, services: [], sources: []}, capital: {north_star: {days: []}, nav_bridge: {}},
     live: {live: {}}, journal: {rows: [], total_in_retained_tail: 0}, hermes: {}, redis: {rows: []}, growth: {tz: 'UTC', north_star: {days: []}, growth: {}, experiments: {}}, ...extra};
   const ctx = {document, Date, console, fetch: async url => {
     calls.push(url); const name = {'agent/brief': 'ops'}[url.replace('/api/', '').split('?')[0]] || url.replace('/api/', '').split('?')[0];
-    if ((fail && name === tab) || (extra.failing || []).includes(name)) return {ok: false, status: 500, text: async () => 'synthetic failure'};
-    return {ok: true, status: 200, json: async () => name === tab ? payload : fixtures[name]};
+    if ((fail && name === own) || (extra.failing || []).includes(name)) return {ok: false, status: 500, text: async () => 'synthetic failure'};
+    return {ok: true, status: 200, json: async () => name === own ? payload : fixtures[name]};
   }, setInterval: fn => intervals.push(fn), module: {exports: {}}};
   // Optional storage: an object (kept per viewer) or 'throw' (blocked site data, private window).
   if (extra.store === 'throw') ctx.localStorage = {getItem() { throw Error('blocked') }, setItem() { throw Error('blocked') }};
   else if (extra.store) ctx.localStorage = {getItem: k => extra.store[k] ?? null, setItem: (k, v) => { extra.store[k] = String(v) }};
-  vm.runInNewContext(script + '\nmodule.exports={render,setTab:t=>{tab=t},setCalUnit,fmtSOL,fmtUSD,calUnit:()=>calUnit,calPick,fmtCompact,money,pnlModel};', ctx);
+  vm.runInNewContext(script + '\nmodule.exports={render,freshState,shortAge,setTab:t=>{tab=t},setVenue,venue:()=>venue,venueStatus,venueToday,venueKey,loadVenues,setRhUnit,setRhNet,rhDayValue,rhCalNs,setCalUnit,fmtSOL,fmtUSD,calUnit:()=>calUnit,calPick,fmtCompact,money,pnlModel};', ctx);
   extra.content = content;
   extra.exports = ctx.module.exports;
   await new Promise(resolve => setImmediate(resolve));
-  ctx.module.exports.setTab(tab); await ctx.module.exports.render();
-  const first = content.innerHTML, before = calls.length;
+  if (rhTab) ctx.module.exports.setVenue('robinhood', false);
+  ctx.module.exports.setTab(rhTab || tab); await ctx.module.exports.render();
+  const first = content.innerHTML, before = calls.filter(u => !u.startsWith('/api/venues')).length;
   intervals.forEach(fn => fn()); await new Promise(resolve => setImmediate(resolve));
   assert(!/NaN|undefined/.test(first), first);
-  return {html: first, stamp: stamp.textContent, timerFetches: calls.length - before, calls, log: els['#rhlog'].innerHTML, count: els['#rhcount'].textContent};
+  return {exports: ctx.module.exports, html: first, stamp: stamp.textContent, timerFetches: calls.filter(u => !u.startsWith('/api/venues')).length - before, calls, log: els['#rhlog'].innerHTML, count: els['#rhcount'].textContent};
 }
 (async () => {
   const warning = 'Local collection failed; last successful snapshot retained';
-  for (const tab of ['capital', 'live', 'robinhood', 'journal', 'hermes', 'redis', 'overview', 'ops']) {
+  for (const tab of ['capital', 'live', 'rh:overview', 'rh:capital', 'rh:live', 'journal', 'hermes', 'redis', 'overview', 'ops']) {
     const r = await render(tab, {collected_at: 123, collection_error: warning, rows: [], total_in_retained_tail: 0, services: [], sources: []});
     assert(r.html.includes(warning) && r.html.includes('role="alert"'), tab);
     assert(r.stamp.includes('Observed') && !r.stamp.endsWith('Unknown'), tab);
-    if (tab === 'capital' || tab === 'live') assert(r.timerFetches > 0, tab);
+    if (['capital', 'live', 'rh:capital', 'rh:live'].includes(tab)) assert(r.timerFetches > 0, tab);
   }
   const r = await render('live', {live: {dust: {status: 'unavailable', fee_lamports: null,
     forfeited_quote_lamports: null, errors: [{reason: '<img src=x onerror=alert(1)>', count: 1}]},
@@ -99,7 +106,7 @@ async function render(tab, payload, fail=false, extra={}) {
   assert(h.includes('title="4 of 5 positions have a measured fee figure"><span class="caps">Fees</span>') && h.includes(`<span class="caps">Best win</span><b>${M('+', 'up', '◎', '0.0040')}</b>`), 'fees and best win');
   assert(h.includes('<span class="caps">Positions</span><b>5</b>') && h.includes('<span class="caps">Avg hold</span><b>2h 15m</b>') && !/—/.test(h), 'positions, hold, no em dash');
   assert(!h.includes('class="calsum"') && !h.includes('class="spark"'), 'summary panel removed');
-  assert(!h.includes('◎') && !/class="(pill|dot|conn|vconn)"/.test(h) && h.includes('<span class="chip up"><small><span class="pl">W1</span>') && h.includes('<span class="chip down"><small><span class="pl">Saturdays</span>') && h.includes('<span class="chip nil"><small><span class="pl">W2</span>'), 'text unit, no glyph; dark chips with sign bar, no pills or connectors');
+  assert(!h.includes('◎') && !/class="(pill|dot|conn|vconn)"/.test(h) && h.includes('<span class="tchip up"><small><span class="pl">W1</span>') && h.includes('<span class="tchip down"><small><span class="pl">Saturdays</span>') && h.includes('<span class="tchip nil"><small><span class="pl">W2</span>'), 'text unit, no glyph; dark chips with sign bar, no pills or connectors');
   // Native month input bounded by the data; arrows disabled at the ends.
   assert(/<input type="month" id="calpick" aria-label="Month" value="2024-10" min="2024-06" max="2024-10"/.test(h) && /id="calnext"[^>]*disabled/.test(h) && !/id="calprev"[^>]*disabled/.test(h) && !h.includes('<select id="calpick"'), 'native month input');
   assert((h.match(/class="calkey"/g) || []).length === 1, 'one key');
@@ -186,7 +193,7 @@ async function render(tab, payload, fail=false, extra={}) {
   assert(!/evaluation/i.test(ov.html), 'no evaluation section');
   // Robinhood: inactive monitor still shows history; money per asset; unmeasured and mark rows never read as money.
   const KEY = 'ab'.repeat(32);
-  const rh = await render('robinhood', {collected_at: 200000, tz: 'UTC', monitor_active: false,
+  const rhPayload = {collected_at: 200000, tz: 'UTC', monitor_active: false,
     unit: {Id: 'azimuth-rh-monitor.service', ActiveState: 'inactive', SubState: 'dead', UnitFileState: 'disabled'},
     modes: {status: 'ok', started_at: 1000, flags: {robinhood: false, 'rh-turnover': true}},
     logs: [{time: 300, unit: 'azimuth-rh-monitor.service', line: 'turnover re-center ok'}, {time: 200, unit: 'azimuth.service', line: 'scanner[rh-turnover]: gas spike <b>'}],
@@ -196,25 +203,44 @@ async function render(tab, payload, fail=false, extra={}) {
       totals: {ETH: {closes: 2, measured: 1, unmeasured: 1, realized_quote: 0.01, mark_flagged: 1}, USDG: {closes: 1, measured: 0, unmeasured: 1, realized_quote: null, mark_flagged: 0}, unknown: {closes: 2, measured: 0, unmeasured: 2, realized_quote: null, mark_flagged: 0}},
       days: {'1970-01-02': {ETH: {closes: 2, measured: 1, unmeasured: 1, realized_quote: 0.01}}, '1970-01-03': {USDG: {closes: 1, measured: 0, unmeasured: 1, realized_quote: null}}},
       closes: [{time: 90000, reason: 'fill', asset: 'ETH', realized_quote: null, pnl_basis: 'mark', mark_flagged: true, pnl_pct: 90, age_min: 30, gas_eth: null},
-               {time: 86500, reason: 'turnover re-center', asset: 'ETH', realized_quote: 0.01, pnl_basis: 'realized', mark_flagged: false, pnl_pct: 2, age_min: 5, gas_eth: 0.001, gas_txs: 3}]}});
+               {time: 86500, reason: 'turnover re-center', asset: 'ETH', realized_quote: 0.01, pnl_basis: 'realized', mark_flagged: false, pnl_pct: 2, age_min: 5, gas_eth: 0.001, gas_txs: 3}]}};
+  // The venue's sections split the one payload: status and money on overview, charts on capital, tables on live.
+  const rh = await render('rh:live', rhPayload), rhO = await render('rh:overview', rhPayload), rhC = await render('rh:capital', rhPayload, false, {'robinhood/month': {month: '1970-01', robinhood: {month: '1970-01', first_month: '1970-01', current_month: '1970-01', days: {}, stats: {}}}, 'price/eth': {status: 'unavailable', usd: null}});
+  const rhAll = rhO.html + rhC.html + rh.html;
   assert(rh.calls.some(u => /^\/api\/robinhood\?tz=.+&n=200$/.test(u)), 'viewer zone and default log length requested');
-  assert(rh.html.includes('Monitor inactive') && rh.html.includes('weth_below'), 'inactive monitor keeps history');
-  assert(rh.html.includes('Realized · USDG</span><strong>Unknown</strong>'), 'wholly unmeasured USDG is Unknown, not 0');
-  assert(rh.html.includes('+0.010000') && rh.html.includes('mark: value left behind') && rh.html.includes('Unmeasured'), 'mark row is flagged, not money');
-  assert(rh.html.includes('>−0.003000<') && rh.html.includes('1 unmetered'), 'gas is a cost, unmetered counted');
-  assert(rh.html.includes('No USDG') === false && /hatch|url\(#h/.test(rh.html), 'unmeasured day hatched');
-  assert(rh.html.includes('position-public-token') && rh.html.includes('stranded-public-token'), 'public token address aliases survive credential masking');
-  assert(rh.html.includes('107037025008') && rh.html.includes('raw units'), 'stranded amount labelled raw');
-  assert(!rh.html.includes(KEY), 'no key-shaped data');
+  assert(rhAll.includes('Monitor inactive') && rhAll.includes('weth_below'), 'inactive monitor keeps history');
+  assert(rhAll.includes('Realized · USDG</span><strong>Unknown</strong>'), 'wholly unmeasured USDG is Unknown, not 0');
+  assert(rhAll.includes('+0.010000') && rhAll.includes('mark: value left behind') && rhAll.includes('Unmeasured'), 'mark row is flagged, not money');
+  assert(rhAll.includes('>−0.003000<') && rhAll.includes('1 unmetered'), 'gas is a cost, unmetered counted');
+  assert(rhAll.includes('No USDG') === false && /hatch|url\(#h/.test(rhC.html), 'unmeasured day hatched');
+  assert(rhAll.includes('position-public-token') && rhAll.includes('stranded-public-token'), 'public token address aliases survive credential masking');
+  assert(rhAll.includes('107037025008') && rhAll.includes('raw units'), 'stranded amount labelled raw');
+  assert(!rhAll.includes(KEY), 'no key-shaped data');
   assert(rh.log.includes('turnover re-center ok') && rh.log.includes('&lt;b&gt;') && !rh.log.includes('<b>'), 'log escaped');
   assert(rh.count.startsWith('2 of 2'), 'log count');
-  assert(rh.html.includes('Realized · unknown unit · never summed</span><strong>Unknown</strong>'), 'unknown unit never summed');
-  assert(rh.html.includes('Stranded evidence: partial'), 'stranded source coverage shown, a refused source is not an empty inventory');
+  assert(rhAll.includes('Realized · unknown unit · never summed</span><strong>Unknown</strong>'), 'unknown unit never summed');
+  assert(rhAll.includes('Stranded evidence: partial'), 'stranded source coverage shown, a refused source is not an empty inventory');
   assert(rh.timerFetches > 0, 'robinhood refreshes on the timer');
-  const rhEmpty = await render('robinhood', {collected_at: 1, unit: {}, modes: {status: 'unknown', flags: {}, note: 'azimuth.service is not running'}, logs: [], positions: [], stranded: {}, closes: {totals: {}, days: {}, closes: []}});
-  assert(rhEmpty.html.includes('Robinhood modes unknown') && rhEmpty.html.includes('No ETH closes in this window.'), 'empty robinhood');
+  const rhEmptyP = {collected_at: 1, unit: {}, modes: {status: 'unknown', flags: {}, note: 'azimuth.service is not running'}, logs: [], positions: [], stranded: {}, closes: {totals: {}, days: {}, closes: []}};
+  const rhEmpty = await render('rh:live', rhEmptyP), rhEmptyO = await render('rh:overview', rhEmptyP), rhEmptyC = await render('rh:capital', rhEmptyP, false, {'robinhood/month': {month: '1970-01', robinhood: {month: '1970-01', first_month: null, current_month: '1970-01', days: {}, stats: {}}}, 'price/eth': {status: 'unavailable', usd: null}});
+  assert(rhEmptyO.html.includes('Robinhood modes unknown') && rhEmptyC.html.includes('No ETH closes in this window.'), 'empty robinhood');
+  assert(rhEmptyC.html.includes('No Robinhood closes in January 1970.'), 'empty calendar month names the venue source');
+  assert(rhEmptyO.html.includes('robinhood / wallet') && rhEmptyO.html.includes('No wallet snapshots yet') && rhEmptyO.html.includes('install.sh --with-rh-nav'), 'no snapshots: an empty state, not a fake balance');
+  assert(rhEmptyC.html.includes('robinhood / balance') && rhEmptyC.html.includes('there is no balance line'), 'balance empty state');
+  // Wallet NAV from uni_nav.jsonl: per-asset totals, never summed; unmeasured parts are n/a, never 0.
+  const navP = {...rhEmptyP, nav: {status: 'ok', source: {status: 'ok'}, basis: 'synthetic basis', latest: {ts: 1, status: 'partial', eth: 0.5, weth: 0.25, usdg: null,
+      lp_mark_quote: {ETH: 0.1, USDG: 40}, lp_positions: {ETH: 1, USDG: 1}, lp_ghosts: 2, errors: ['usdg balance unreadable'], eth_total: 0.85, usdg_total: null},
+    days: [{day: '1970-01-01', status: 'no_snapshot'}, {day: '1970-01-02', status: 'ok', ts: 2, eth_total: 0.8, usdg_total: 50, eth: 0.45, weth: 0.25, lp_eth: 0.1, usdg: 10, lp_usdg: 40, d_eth_total: null},
+           {day: '1970-01-03', status: 'partial_day', ts: 3, eth_total: 0.85, usdg_total: null, eth: 0.5, weth: 0.25, lp_eth: 0.1, usdg: null, lp_usdg: 40, d_eth_total: 0.05}]}};
+  const navO = await render('rh:overview', navP), navC = await render('rh:capital', navP, false, {'robinhood/month': {month: '1970-01', robinhood: {month: '1970-01', days: {}, stats: {}}}, 'price/eth': {status: 'unavailable', usd: null}});
+  assert(navO.html.includes('ETH · wallet + positions</span><strong>0.8500 ETH</strong>') && navO.html.includes('native 0.5000 ETH · WETH 0.2500 ETH · in 1 positions 0.1000 ETH'), 'ETH total with its parts');
+  assert(navO.html.includes('USDG · wallet + positions</span><strong>n/a</strong>') && navO.html.includes('a part is unmeasured, so no total'), 'USDG unmeasured is n/a, never 0');
+  assert(navO.html.includes('Last snapshot partial: usdg balance unreadable') && navO.html.includes('2 journal-open positions hold no liquidity'), 'partial snapshot and ghosts named');
+  assert(navO.html.includes('never added') && !navO.html.includes('No wallet snapshots yet'), 'assets never summed');
+  assert(navC.html.includes('robinhood / balance') && navC.html.includes('ETH · native + WETH + positions') && navC.html.includes('stroke:var(--s1)') && navC.html.includes('stroke:var(--s2)'), 'one line chart per asset');
+  assert(navC.html.includes('No NAV bridge yet') && /class="bar fp"/.test(navC.html), 'daily ETH change bars; NAV bridge named as missing');
   assert(rhEmpty.log.includes('No log lines retained'), 'empty log state');
-  const rhFail = await render('robinhood', null, true);
+  const rhFail = await render('rh:live', null, true);
   assert(rhFail.html.includes('Could not load this section'), 'robinhood error state');
   // Ops: funnel, health and alerts from the agent brief; unknown stays Unknown, red flags are announced.
   const ops = await render('ops', {collected_at: 1000, alerts: [{code: 'disk_low', message: 'disk free 9.0% < 15% <b>'}],
@@ -275,5 +301,102 @@ async function render(tab, payload, fail=false, extra={}) {
   assert(ovFail.html.includes('overview / known') && ovFail.html.includes('Growth data unavailable: synthetic failure'), 'a growth failure never blanks the overview');
   const ovEmpty = await render('overview', {nav: {}, services: [], sources: []});
   assert(ovEmpty.html.includes('No measured days in this window yet') && ovEmpty.html.includes('report unavailable'), 'empty growth states');
-  console.log('dashboard render: 59 synthetic cases passed');
+  // Venue switch: a per-viewer choice kept in storage; blocked storage still renders; sections with no Robinhood
+  // source say so and never fetch (or show) Solana evidence.
+  const vstore = {};
+  const sol = await render('capital', {north_star: {days: []}, nav_bridge: {}}, false, {store: vstore, 'capital/month': {month: '2024-10', north_star: {month: '2024-10', days: []}}});
+  assert(sol.exports.venue() === 'solana', 'Solana is the default venue');
+  sol.exports.setVenue('robinhood', false);
+  assert(vstore['azimuth.venue'] === 'robinhood' && sol.exports.venue() === 'robinhood', 'venue persisted per viewer');
+  const rhBlocked = await render('rh:overview', rhEmptyP, false, {store: 'throw'});
+  assert(rhBlocked.html.includes('robinhood / status'), 'blocked storage still switches venue');
+  for (const sec of ['ops', 'journal', 'redis']) {
+    const none = await render('rh:' + sec, rhEmptyP, false, {absent: ['#filters', '#prev', '#next']});
+    assert(none.html.includes(`robinhood / ${sec}`) && none.html.includes('no Robinhood source'), sec + ' empty state');
+    assert(!none.html.includes('Could not load this section'), sec + ' wires no Solana handlers');
+    assert(!none.calls.some(u => /\/api\/(agent\/brief|journal|redis)/.test(u)), sec + ' fetches no Solana evidence');
+  }
+  const rhHermes = await render('hermes', {profile: 'p', sessions: []}, false, {store: {'azimuth.venue': 'robinhood'}});
+  assert(rhHermes.exports.venue() === 'robinhood' && rhHermes.html.includes('hermes / runtime'), 'hermes is shared by both venues');
+  // Robinhood calendar: realized_quote per day, ETH and USDG apart, gas netted by default and labelled.
+  const rhMonth = {month: '2026-08', robinhood: {month: '2026-08', first_month: '2026-07', current_month: '2026-09', status: 'ok', days: {
+      '2026-08-03': {ETH: {closes: 2, measured: 2, unmeasured: 0, realized_quote: 0.01}, gas_eth: 0.001, gas_metered: 2, gas_unmetered: 0, positions: 2},
+      '2026-08-04': {USDG: {closes: 1, measured: 1, unmeasured: 0, realized_quote: 5}, gas_eth: 0.0005, gas_metered: 1, gas_unmetered: 0, positions: 1},
+      '2026-08-05': {ETH: {closes: 1, measured: 0, unmeasured: 1, realized_quote: null}, gas_eth: null, gas_metered: 0, gas_unmetered: 1, positions: 1},
+      '2026-08-06': {ETH: {closes: 2, measured: 1, unmeasured: 1, realized_quote: -0.002}, unknown: 1, gas_eth: null, gas_metered: 0, gas_unmetered: 3, positions: 3}},
+    stats: {positions: 7, volume: {ETH: 0.5, USDG: 100}, volume_measured: 6, win_rate_pct: 66.67, realized_measured: 3, best_win: {ETH: 0.01, USDG: 5},
+      avg_hold_min: 90, hold_measured: 7, gas: {gas_eth: 0.0015, metered: 3, unmetered: 4}, fees: null, fees_note: 'Fees are not journaled per Robinhood close.'}}};
+  const E = (sign, cls, body) => `<span class="mv">${sign ? `<span class="sg ${cls}">${sign}</span>` : ''}${body}<small class="unit"> ETH</small></span>`;
+  const U = (sign, cls, body) => `<span class="mv">${sign ? `<span class="sg ${cls}">${sign}</span>` : ''}$${body}</span>`;
+  const rcal = await render('rh:capital', rhEmptyP, false, {store: {}, 'robinhood/month': rhMonth, 'price/eth': {status: 'ok', usd: 3000}});
+  const ch = rcal.html;
+  assert(rcal.calls.some(u => /^\/api\/robinhood\/month\?month=&tz=/.test(u)) && rcal.calls.includes('/api/price/eth'), 'month and ETH price fetched');
+  assert(ch.includes(`<span class="vf">${E('+', 'up', '0.0090')}</span>`), 'ETH day net of gas');
+  assert(ch.includes(`<span class="vf">${E('−', 'down', '0.0005')}</span>`) && ch.includes('USDG: +5.0000 USDG (1 / 1 closes measured), not in the ETH view'), 'USDG-only day in ETH view carries only gas, USDG named');
+  assert(/class="cell unk"[^>]*data-tip="n\/a in this view/.test(ch), 'wholly unmeasured ETH day is n/a, never 0');
+  assert(ch.includes(`${E('−', 'down', '0.0020')}?</span>`) && ch.includes('1 close with an unknown quote asset, never summed'), 'partial day marked ?, unknown asset counted');
+  assert(ch.includes('net of gas (−0.0015 ETH)') && ch.includes('4 closes without a gas reading') && ch.includes('1 USDG close not in the ETH view'), 'header names gas basis and exclusions');
+  assert(ch.includes('data-gas="net" aria-pressed="true"') && ch.includes('data-unit="eth" aria-pressed="true"'), 'defaults: ETH, net of gas');
+  assert(ch.includes('<span class="caps">Gas paid</span><b><span class="mv">0.0015<small class="unit"> ETH</small></span></b>') && ch.includes('title="Fees are not journaled per Robinhood close."><span class="caps">Fees</span><b><span class="mv na">n/a</span>'), 'gas footer stat; fees n/a with reason');
+  assert(ch.includes('class="calstats s7"') && ch.includes('<span class="caps">Win rate</span><b>66.7<small class="unit"> %</small>') && ch.includes('<span class="caps">Avg hold</span><b>1h 30m</b>'), 'seven footer stats');
+  assert(ch.includes('<span class="np">3 pos</span>') && /min="2026-07" max="2026-09"/.test(ch), 'N pos and month bounds from the first close');
+  assert(!/pnl_pct|NaN/.test(ch), 'mark % never summed');
+  // USD, gross: ETH at the current price plus USDG at $1. Without a price a USDG-only day still converts.
+  const usdStore = {'azimuth.rhUnit': 'usd', 'azimuth.rhGas': 'gross'};
+  const rusd = await render('rh:capital', rhEmptyP, false, {store: usdStore, 'robinhood/month': rhMonth, 'price/eth': {status: 'ok', usd: 3000}});
+  assert(rusd.html.includes(`<span class="vf">${U('+', 'up', '30.00')}</span>`) && rusd.html.includes(`<span class="vf">${U('+', 'up', '5.00')}</span>`), 'USD: ETH x price, USDG at $1');
+  assert(rusd.html.includes('gross, gas not subtracted') && rusd.html.includes('data-gas="gross" aria-pressed="true"'), 'gross labelled');
+  assert(rusd.html.includes(`<span class="caps">Volume</span><b>${U('', 'nil', '1,600.00')}</b>`), 'USD volume mixes assets only after conversion');
+  const rnop = await render('rh:capital', rhEmptyP, false, {store: {...usdStore}, 'robinhood/month': rhMonth, 'price/eth': {status: 'unavailable', usd: null}});
+  assert(rnop.html.includes(`<span class="vf">${U('+', 'up', '5.00')}</span>`) && rnop.html.includes('ETH price unavailable'), 'USDG-only day works without a price');
+  assert(/class="cell unk"[^>]*data-tip="n\/a in this view/.test(rnop.html), 'ETH day without a price is n/a');
+  const dormant = await render('rh:capital', rhEmptyP, false, {'robinhood/month': {month: '2026-11', robinhood: {month: '2026-11', first_month: '2026-07', last_month: '2026-08', current_month: '2026-11', days: {}, stats: {}}}, 'price/eth': {status: 'ok', usd: 3000}});
+  assert(dormant.calls.some(u => u.startsWith('/api/robinhood/month?month=2026-08&')), 'an empty current month lands on the latest month with closes');
+  // Pure day math.
+  const X = rcal.exports;
+  assert(X.rhDayValue({ETH: {closes: 1, measured: 1, realized_quote: 0.02}, gas_eth: 0.005}, 'eth', true, null) === 0.015, 'net ETH');
+  assert(X.rhDayValue({ETH: {closes: 1, measured: 1, realized_quote: 0.02}, gas_eth: 0.005}, 'eth', false, null) === 0.02, 'gross ETH');
+  assert(X.rhDayValue({USDG: {closes: 1, measured: 1, realized_quote: 3}}, 'usd', false, null) === 3, 'USDG-only USD needs no price');
+  assert(X.rhDayValue({ETH: {closes: 1, measured: 1, realized_quote: 0.02}}, 'usd', false, null) === null, 'ETH in USD needs a price');
+  assert(X.rhDayValue({USDG: {closes: 1, measured: 0, realized_quote: null}}, 'usd', false, 3000) === null, 'unmeasured USDG is null');
+  assert(X.rhDayValue({USDG: {closes: 1, measured: 1, realized_quote: 3}}, 'eth', false, 3000) === null, 'no ETH close, gross: n/a in ETH');
+  // Venue selector: status mapping, today's money, keyboard. Fake tab buttons stand in for the header markup.
+  const vtab = v => { const kids = {'.vdot': {className: ''}, '.vlab': {textContent: ''}, '.vday': {innerHTML: ''}}, attrs = {};
+    return {dataset: {venue: v}, attrs, kids, focused: 0, tabIndex: 0, title: '', setAttribute(k, x) { attrs[k] = x }, querySelector: s => kids[s], focus() { this.focused++ }} };
+  const vs = {solana: {state: 'live', label: 'pulse live', basis: 'Scanner start line: pulse=true; azimuth-sol-monitor active.'},
+    robinhood: {state: 'observe', label: 'observe-only', basis: 'deploy enabled=false'}};
+  const tabsA = [vtab('solana'), vtab('robinhood')];
+  const sel = await render('hermes', {profile: 'p', sessions: []}, false, {tabs: tabsA, store: {},
+    venues: {status: vs, today: {solana: {realized_sol: 0.0123}, robinhood: {ETH: {realized: -0.002, closes: 2}, USDG: {realized: null, closes: 0}}}}});
+  const [vSol, vRh] = tabsA;
+  assert(vSol.kids['.vdot'].className === 'vdot s-live' && vSol.kids['.vlab'].textContent === 'pulse live', 'Solana live: green dot + mode label');
+  assert(vRh.kids['.vdot'].className === 'vdot s-observe' && vRh.kids['.vlab'].textContent === 'observe-only', 'Robinhood observe-only: amber dot');
+  assert(vSol.title.includes('pulse=true'), 'the basis is the tooltip');
+  assert(vSol.kids['.vday'].innerHTML.includes('class="up">+0.0123 SOL') && vSol.kids['.vday'].innerHTML.includes('today'), 'Solana today in SOL, signed');
+  assert(vRh.kids['.vday'].innerHTML.includes('class="down">−0.0020 ETH') && !vRh.kids['.vday'].innerHTML.includes('USDG'), 'Robinhood today per asset; an asset with no closes is left out');
+  const ve = sel.exports;
+  for (const [st, want] of [['live', 'live'], ['observe', 'observe'], ['off', 'off'], ['down', 'down'], ['unknown', 'unknown'], ['bogus', 'unknown']])
+    assert(ve.venueStatus({status: {robinhood: {state: st, label: 'x'}}}, 'robinhood').state === want, 'status mapping ' + st);
+  assert(ve.venueStatus(null, 'solana').label === 'status unavailable' && ve.venueStatus({error: 'boom'}, 'solana').basis.includes('could not'), 'no answer is never guessed');
+  assert(ve.venueToday({today: {robinhood: {ETH: {realized: null, closes: 3}}}}, 'robinhood').includes('n/a ETH'), 'unmeasured closes read n/a, never 0');
+  assert(ve.venueToday({today: {solana: {realized_sol: null}}}, 'solana') === '', 'unmeasured Solana today shows nothing');
+  assert(ve.venueToday({today: {robinhood: {ETH: {realized: null, closes: 0}}}}, 'robinhood') === 'no closes today', 'a quiet day says so');
+  assert(ve.venueKey('ArrowRight', 'solana') === 'robinhood' && ve.venueKey('ArrowRight', 'robinhood') === 'solana' && ve.venueKey('ArrowLeft', 'solana') === 'robinhood', 'arrows wrap');
+  assert(ve.venueKey('Home', 'robinhood') === 'solana' && ve.venueKey('End', 'solana') === 'robinhood' && ve.venueKey('Enter', 'solana') === null, 'Home/End; other keys ignored');
+  let prevented = 0;
+  vRh.onkeydown({key: 'ArrowLeft', preventDefault() { prevented++ }});
+  assert(ve.venue() === 'solana' && vSol.focused === 1 && prevented === 1, 'ArrowLeft from Robinhood selects and focuses Solana');
+  vSol.onkeydown({key: 'ArrowRight', preventDefault() { prevented++ }});
+  assert(ve.venue() === 'robinhood' && vRh.focused === 1 && vRh.attrs['aria-selected'] === 'true' && vSol.attrs['aria-selected'] === 'false', 'ArrowRight selects Robinhood');
+  assert(vRh.tabIndex === 0 && vSol.tabIndex === -1, 'roving tabindex: only the selected tab is in the Tab order');
+  vSol.onkeydown({key: 'a', preventDefault() { prevented++ }});
+  assert(prevented === 2 && ve.venue() === 'robinhood', 'other keys pass through');
+  const tabsB = [vtab('solana'), vtab('robinhood')];
+  await render('hermes', {profile: 'p', sessions: []}, false, {tabs: tabsB, failing: ['venues']});
+  assert(tabsB[0].kids['.vdot'].className === 'vdot s-unknown' && tabsB[0].kids['.vlab'].textContent === 'status unavailable', 'failed status fetch: hollow dot, says so');
+  // Freshness: staleness colour thresholds (snapshot every 60s: green < 120s, amber < 10m, red after or on fetch error).
+  for (const [ageS, err, want] of [[0, null, 'ok'], [119, null, 'ok'], [120, null, 'warn'], [599, null, 'warn'], [600, null, 'bad'], [5, 'boom', 'bad'], [null, null, 'wait']])
+    assert(sel.exports.freshState(ageS, err) === want, `freshState(${ageS},${err})`);
+  assert(sel.exports.shortAge(30) === '<1m' && sel.exports.shortAge(61) === '1m' && sel.exports.shortAge(7300) === '2h' && sel.exports.shortAge(90000) === '1d' && sel.exports.shortAge(null) === '…', 'compact age');
+  console.log('dashboard render: 59 synthetic cases passed, plus venue and Robinhood calendar cases');
 })().catch(error => {console.error(error); process.exitCode = 1;});

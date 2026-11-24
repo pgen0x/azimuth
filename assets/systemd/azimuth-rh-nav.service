@@ -1,0 +1,10 @@
+# Optional. install.sh renders __PROFILE__ into <profile>/systemd/; `--with-rh-nav` installs and enables it.
+# Read-only: public JSON-RPC balance reads of the Robinhood wallet's PUBLIC address (no key, no tx).
+[Unit]
+Description=Azimuth Robinhood wallet snapshot (read-only) into memories/uni_nav.jsonl
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 __PROFILE__/skills/solana-dlmm/scripts/uni_nav.py --profile __PROFILE__
+TimeoutStartSec=120
+UMask=0077

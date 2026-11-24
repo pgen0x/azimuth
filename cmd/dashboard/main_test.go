@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"net/http/httptest"
 	"os"
@@ -12,7 +14,7 @@ import (
 )
 
 func TestReadOnlyCachedAPI(t *testing.T) {
-	s := &server{data: object{"live": object{"dust": object{"runs": 3}}, "experiments": object{"hold_canary": object{"closes": 2}}, "by_tz": object{"UTC": object{"north_star": object{"days": []any{}}, "growth": object{"d_native_sol": 0.25}}}, "nav": object{"nav_sol": nil, "native_sol": 0.0}, "journal": []any{object{"stage": "swap", "evidence": object{"signature": "proof-1"}}, object{"stage": "gate", "evidence": object{"pool": "pool-2"}}}}}
+	s := &server{data: object{"live": object{"dust": object{"runs": 3}}, "experiments": object{"hold_canary": object{"closes": 2}}, "by_tz": object{"UTC": object{"north_star": object{"days": []any{}}, "growth": object{"d_native_sol": 0.25}, "venue_today": object{"day": "1970-01-01"}}}, "venues": object{"solana": object{"state": "live", "label": "pulse live"}}, "nav": object{"nav_sol": nil, "native_sol": 0.0}, "journal": []any{object{"stage": "swap", "evidence": object{"signature": "proof-1"}}, object{"stage": "gate", "evidence": object{"pool": "pool-2"}}}}}
 	cookie := signIn(t, s)
 	for _, tc := range []struct {
 		method, path, host string
@@ -32,6 +34,8 @@ func TestReadOnlyCachedAPI(t *testing.T) {
 		{"GET", "/api/growth", "localhost", 200, `"growth":{"d_native_sol":0.25}`},
 		{"GET", "/api/growth", "localhost", 200, `"experiments":{"hold_canary":{"closes":2}}`},
 		{"GET", "/api/growth?tz=Mars/Olympus", "localhost", 200, `"tz_fallback":true`},
+		{"GET", "/api/venues", "localhost", 200, `"status":{"solana":{"label":"pulse live","state":"live"}}`},
+		{"GET", "/api/venues", "localhost", 200, `"today":{"day":"1970-01-01"}`},
 	} {
 		r := httptest.NewRequest(tc.method, tc.path, nil)
 		r.Host = tc.host
@@ -281,7 +285,7 @@ func TestEveryPanelRetainsCollectionFailure(t *testing.T) {
 func TestCapitalLiveLocalReadOnlyMatrix(t *testing.T) {
 	s := &server{data: object{"collected_at": 123}}
 	cookie := signIn(t, s)
-	for _, path := range []string{"/api/capital", "/api/live", "/api/robinhood", "/api/growth"} {
+	for _, path := range []string{"/api/capital", "/api/live", "/api/robinhood", "/api/growth", "/api/venues"} {
 		for _, host := range []string{"localhost", "127.0.0.1:8787", "[::1]:8787", "attacker.invalid", "192.0.2.1:8787"} {
 			for _, method := range []string{"GET", "HEAD", "POST", "PUT", "DELETE", "PATCH"} {
 				r := httptest.NewRequest(method, path, nil)
@@ -354,5 +358,31 @@ func TestCollectorCommandPastArgLimit(t *testing.T) {
 	out, err := collectorCommand(context.Background(), t.TempDir(), t.TempDir(), "0", "UTC", "alerts").Output()
 	if err != nil || !strings.Contains(string(out), `"alerts"`) {
 		t.Fatalf("collector over stdin: %v %s", err, out)
+	}
+}
+
+// The venue logos are the publishers' files byte for byte (hashes recorded in
+// assets/venues/NOTICE.md) and, like the page that shows them, need a session.
+func TestVenueLogosOfficialAndSignedIn(t *testing.T) {
+	s := &server{data: object{}}
+	cookie := signIn(t, s)
+	for path, sum := range map[string]string{
+		"/assets/venues/solana.svg":    "ccdc416707911112da5933a6ed9f60ce1f819333e70447a5701bc012d6865f51",
+		"/assets/venues/robinhood.svg": "0ae4d1f6e2a933ba375c44527d17d7f81d419c2fce7e92a56cc8d3975612c584",
+	} {
+		r := httptest.NewRequest("GET", path, nil)
+		r.Host = "localhost"
+		w := httptest.NewRecorder()
+		s.ServeHTTP(w, r)
+		if w.Code != 303 {
+			t.Fatalf("%s without session: %d", path, w.Code)
+		}
+		r.AddCookie(cookie)
+		w = httptest.NewRecorder()
+		s.ServeHTTP(w, r)
+		got := sha256.Sum256(w.Body.Bytes())
+		if w.Code != 200 || w.Header().Get("Content-Type") != "image/svg+xml" || hex.EncodeToString(got[:]) != sum {
+			t.Fatalf("%s: %d %s sha256 %x", path, w.Code, w.Header().Get("Content-Type"), got)
+		}
 	}
 }
