@@ -14,6 +14,7 @@ Sources (all ground truth, no LLM):
 Usage:
   python3 dlmm_stats.py [--hours 24] [--send]
   python3 dlmm_stats.py --inventory-shadow
+  python3 dlmm_stats.py --bot-band [--since YYYY-MM-DD]
 """
 import argparse
 import json
@@ -238,7 +239,16 @@ def main():
     ap.add_argument("--send", action="store_true", help="Also deliver the card via `hermes send`")
     ap.add_argument("--inventory-shadow", action="store_true",
                     help="Report the shadow inventory-share exit (dlmm_inventory_shadow) and exit")
+    ap.add_argument("--bot-band", action="store_true",
+                    help="Report pulse closes by entry bot-holder band (<25 / 25-30 / >=30) with the "
+                         "PULSE_MAX_BOT_HOLDERS_PCT kill-rule verdict, and exit")
+    ap.add_argument("--since", help="With --bot-band: only closes on or after this UTC date (YYYY-MM-DD)")
     cli = ap.parse_args()
+
+    if cli.bot_band:
+        from dlmm_bot_band import report as bot_band_report
+        print(bot_band_report(PROFILE_DIR, cli.since, apply_realized))
+        return
 
     if cli.inventory_shadow:
         from dlmm_inventory_shadow import report as inventory_shadow_report
