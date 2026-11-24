@@ -5,6 +5,13 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.25.0](https://github.com/pgen0x/azimuth/compare/v2.24.0...v2.25.0) (2026-11-24)
+
+
+### Features
+
+* **scanner:** configurable pulse bot-holder bar with band journal and kill-rule report ([#338](https://github.com/pgen0x/azimuth/issues/338)) ([6242c9d](https://github.com/pgen0x/azimuth/commit/6242c9deab1f491f1d6035bd466f7881ace421bf))
+
 ## [2.24.0](https://github.com/pgen0x/azimuth/compare/v2.23.0...v2.24.0) (2026-11-24)
 
 
