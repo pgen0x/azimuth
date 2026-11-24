@@ -61,7 +61,8 @@ The unit drop-in that supplies the hash is in [DASHBOARD_DEPLOY.md](DASHBOARD_DE
 
 A venue selector in the header (a two-tab `tablist`: arrow keys, Home/End) picks the venue for every section; the
 choice is kept per viewer in `localStorage` (`azimuth.venue`) and the page works when storage is blocked. Each tab shows
-the venue's status and, on wide screens, today's realized money in that venue's unit (Solana: `realized_lp` of the
+the venue's official logo (unmodified files in `cmd/dashboard/assets/venues/`, served only to a signed-in session;
+sources and the trademark notice are in its `NOTICE.md`), the venue's status and, on wide screens, today's realized money in that venue's unit (Solana: `realized_lp` of the
 growth panel; Robinhood: `realized_quote` per asset, ETH and USDG apart, n/a when a close is unmeasured). Status comes
 from `/api/venues`, which reads the scanner's own startup lines (`scanner: started`, `scanner: robinhood deploy`) of
 the current `azimuth.service` run and the unit states, never a guess:

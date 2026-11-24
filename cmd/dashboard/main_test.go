@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"net/http/httptest"
 	"os"
@@ -356,5 +358,31 @@ func TestCollectorCommandPastArgLimit(t *testing.T) {
 	out, err := collectorCommand(context.Background(), t.TempDir(), t.TempDir(), "0", "UTC", "alerts").Output()
 	if err != nil || !strings.Contains(string(out), `"alerts"`) {
 		t.Fatalf("collector over stdin: %v %s", err, out)
+	}
+}
+
+// The venue logos are the publishers' files byte for byte (hashes recorded in
+// assets/venues/NOTICE.md) and, like the page that shows them, need a session.
+func TestVenueLogosOfficialAndSignedIn(t *testing.T) {
+	s := &server{data: object{}}
+	cookie := signIn(t, s)
+	for path, sum := range map[string]string{
+		"/assets/venues/solana.svg":    "ccdc416707911112da5933a6ed9f60ce1f819333e70447a5701bc012d6865f51",
+		"/assets/venues/robinhood.svg": "0ae4d1f6e2a933ba375c44527d17d7f81d419c2fce7e92a56cc8d3975612c584",
+	} {
+		r := httptest.NewRequest("GET", path, nil)
+		r.Host = "localhost"
+		w := httptest.NewRecorder()
+		s.ServeHTTP(w, r)
+		if w.Code != 303 {
+			t.Fatalf("%s without session: %d", path, w.Code)
+		}
+		r.AddCookie(cookie)
+		w = httptest.NewRecorder()
+		s.ServeHTTP(w, r)
+		got := sha256.Sum256(w.Body.Bytes())
+		if w.Code != 200 || w.Header().Get("Content-Type") != "image/svg+xml" || hex.EncodeToString(got[:]) != sum {
+			t.Fatalf("%s: %d %s sha256 %x", path, w.Code, w.Header().Get("Content-Type"), got)
+		}
 	}
 }
