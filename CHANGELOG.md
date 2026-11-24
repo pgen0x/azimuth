@@ -5,6 +5,13 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.24.0](https://github.com/pgen0x/azimuth/compare/v2.23.0...v2.24.0) (2026-11-24)
+
+
+### Features
+
+* **dashboard:** Solana | Robinhood venue switch with a Robinhood calendar ([#334](https://github.com/pgen0x/azimuth/issues/334)) ([f14fccf](https://github.com/pgen0x/azimuth/commit/f14fccf712c5b7210b5a745439c278a9cbc123c2))
+
 ## [2.23.0](https://github.com/pgen0x/azimuth/compare/v2.22.0...v2.23.0) (2026-11-20)
 
 
