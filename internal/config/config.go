@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/pgen0x/azimuth/internal/meteora"
 	"github.com/pgen0x/azimuth/internal/robinhood"
 )
 
@@ -54,6 +55,10 @@ type Config struct {
 	// PulseNearMissFeeFloor is the lowest fee/active-TVL ratio (percent, the
 	// gate's own units) a near miss must still clear to be journaled. 0 disables.
 	PulseNearMissFeeFloor float64
+	// PulseMaxBotHoldersPct is pulse's Jupiter bot-holder bar (percent): the
+	// audit gate rejects a pulse candidate above it. Unset, malformed or out of
+	// range (<= 0 or > 100) keeps 25. Other modes keep their own bar.
+	PulseMaxBotHoldersPct float64
 	// ReentryShadowPath is the re-entry shadow journal (memories/
 	// dlmm_reentry_shadow.jsonl, shared with dlmm_monitor.py's "close" rows).
 	// The daemon appends a "blocked" row when a pulse pool passed Screen and was
@@ -358,6 +363,15 @@ func getfloat(key string, def float64) float64 {
 	return f
 }
 
+// getBotHoldersBar parses a bot-holder bar; anything outside (0, 100] keeps
+// meteora.DefaultPulseMaxBotHoldersPct.
+func getBotHoldersBar(key string) float64 {
+	if v := getfloat(key, meteora.DefaultPulseMaxBotHoldersPct); meteora.ValidBotHoldersBar(v) {
+		return v
+	}
+	return meteora.DefaultPulseMaxBotHoldersPct
+}
+
 func getdur(key string, def time.Duration) time.Duration {
 	v := os.Getenv(key)
 	if v == "" {
@@ -414,6 +428,7 @@ func loadConfig() Config {
 		PulseSeenTTL:          getdur("PULSE_SEEN_TTL", 2*time.Hour),
 		SupplyShadowPath:      getenv("SUPPLY_SHADOW_PATH", ""),
 		PulseNearMissFeeFloor: getfloat("PULSE_NEARMISS_FEE_FLOOR", 0.025),
+		PulseMaxBotHoldersPct: getBotHoldersBar("PULSE_MAX_BOT_HOLDERS_PCT"),
 		ReentryShadowPath:     getenv("REENTRY_SHADOW_PATH", ""),
 		SmartInflowShadowPath: getenv("SMART_INFLOW_SHADOW_PATH", ""),
 		EnablePulse:           getbool("ENABLE_PULSE", false),

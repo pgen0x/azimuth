@@ -217,7 +217,17 @@ watch journal, which buys only the price-path sampler's 30m window, not the
     one silently opts out — set them explicitly.
   - `momentum.go` — best-effort DexScreener downtrend gate (fail-open).
   - `audit.go` — best-effort Jupiter token-audit gate (fail-open): hard-rejects
-    >30% bot holders, enriches signals with bot % + global fees paid.
+    >30% bot holders, enriches signals with bot % + global fees paid. Pulse
+    has its own bar, `PULSE_MAX_BOT_HOLDERS_PCT` (default 25; invalid or
+    outside (0, 100] keeps 25, logged as `scanner: pulse audit bar`). The bar
+    rides on each pulse candidate as `pulse_bot_bar_pct`, so the pipeline's
+    `bots-15` penalty (20% for every other mode) applies to pulse only above
+    the daemon's bar even when the agent runs the pipeline under another env.
+    Pulse entries journal `signal.audit.{bot_pct,bot_band,bot_bar_pct}` onto
+    the close row (`dlmm_bot_band.py`); `dlmm_stats.py --bot-band --since
+    <date>` judges a raised bar's 25-30 band by its kill rule (>= 15 realized
+    closes; revert if band realized < 0, the pool-clustered CI upper bound of
+    the mean < 0, or any single close below -0.03 SOL).
   - `pvp.go` — best-effort same-symbol rival detection (fail-open, advisory):
     flags candidates whose ticker is contested by an established token with
     its own live DLMM pool (`is_pvp` + rival stats); never rejects.

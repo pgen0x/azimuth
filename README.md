@@ -544,7 +544,8 @@ All daemon config is via environment (see `.env.example`):
 | `ROBINHOOD_MAX_OPEN_POSITIONS` | Position cap for the venue, counted in ladders (funded pools) across all modes |
 | `ROBINHOOD_MAX_PER_TOKEN` | How many of those slots one underlying may hold (default 1, 0 disables) |
 | `ENABLE_MOMENTUM_GATE` | DexScreener downtrend filter (fails open) |
-| `ENABLE_AUDIT_GATE` | Jupiter token-audit gate: rejects >30% bot holders, ships bot % + global fees in the signal (fails open) |
+| `ENABLE_AUDIT_GATE` | Jupiter token-audit gate: rejects >30% bot holders (pulse: above `PULSE_MAX_BOT_HOLDERS_PCT`), ships bot % + global fees in the signal (fails open) |
+| `PULSE_MAX_BOT_HOLDERS_PCT` | Pulse bot-holder bar for the audit gate and the pipeline's bots penalty (default 25; invalid or outside (0, 100] keeps 25). `dlmm_stats.py --bot-band` reports the 25-30 band against its kill rule |
 | `ENABLE_PVP_CHECK` | same-symbol rival detection: flags candidates contested by an established token with its own live DLMM pool — advisory `is_pvp` + rival stats, never rejects (fails open) |
 | `LONE_MIN_SCORE` | Conviction floor for single-candidate batches (degen score 0–100, default 50, 0 disables) |
 

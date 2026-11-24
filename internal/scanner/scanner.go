@@ -284,6 +284,12 @@ func (s *Scanner) Run(ctx context.Context) {
 		s.cfg.PollInterval, s.cfg.EnableCasual, s.cfg.EnableMultiday, s.cfg.EnableTurnover, s.cfg.EnablePulse,
 		s.cfg.EnableMomentumGate, s.cfg.EnableRobinhood, s.cfg.EnableRobinhoodMature, s.cfg.EnableRobinhoodLadder,
 		s.cfg.EnableRobinhoodStockLadder, s.cfg.EnableRobinhoodPulseLadder, s.cfg.EnableRobinhoodTurnover)
+	if s.cfg.EnablePulse {
+		// Separate line on purpose: the dashboard parses `scanner: started` as
+		// name=bool pairs. This is the operator's only confirmation of the env.
+		log.Printf("scanner: pulse audit bar (bot_holders_max=%g%%, audit_gate=%v)",
+			s.cfg.PulseMaxBotHoldersPct, s.cfg.EnableAuditGate)
+	}
 	if s.cfg.EnableRobinhood || s.cfg.EnableRobinhoodMature || s.cfg.EnableRobinhoodLadder ||
 		s.cfg.EnableRobinhoodStockLadder || s.cfg.EnableRobinhoodPulseLadder ||
 		s.cfg.EnableRobinhoodTurnover {
@@ -1074,10 +1080,17 @@ func (s *Scanner) pollMode(ctx context.Context, mp meteora.ModeParams) {
 		// Jupiter audit gate (best-effort, fail-open, same seen semantics as
 		// momentum). Hard-rejects bot-farmed tokens; otherwise enriches the
 		// candidate with bot % / global fees so the agent judges with the
-		// audit on-screen instead of re-fetching it.
+		// audit on-screen instead of re-fetching it. A pulse candidate also
+		// carries the bar itself, so the pipeline's bots penalty
+		// (dlmm_bot_band.py) uses this process's PULSE_MAX_BOT_HOLDERS_PCT
+		// even when the agent runs the pipeline under another environment.
+		if mp.Mode == "pulse" && meteora.ValidBotHoldersBar(s.cfg.PulseMaxBotHoldersPct) {
+			bar := s.cfg.PulseMaxBotHoldersPct
+			cand.PulseBotBarPct = &bar
+		}
 		if s.cfg.EnableAuditGate {
 			if a, ok := meteora.FetchAudit(cand.BaseMint); ok {
-				if r := meteora.AuditReject(a, mp.Mode); r != "" {
+				if r := meteora.AuditReject(a, mp.Mode, s.cfg.PulseMaxBotHoldersPct); r != "" {
 					auditRejected++
 					recordSolanaReject(mp.Mode, p, cand, "audit", r, a)
 					log.Printf("scanner[%s]: %s (%s) rejected on audit: %s", mp.Mode, cand.BaseSymbol, cand.Pool[:8], r)

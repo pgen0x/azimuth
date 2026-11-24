@@ -21,9 +21,16 @@ const jupAssetSearchURL = "https://datapi.jup.ag/v1/assets/search"
 // to the agent prompt, where the value is visible next to the decision.
 const (
 	maxBotHoldersPct = 30.0
-	// Pulse cap is provisional: 30d marks worsen above 25%; verify matched cash before relaxing.
-	maxPulseBotHoldersPct = 25.0
+	// DefaultPulseMaxBotHoldersPct is pulse's bar when PULSE_MAX_BOT_HOLDERS_PCT
+	// is unset or invalid. An install may raise it; the band journal
+	// (dlmm_bot_band.py) and its kill rule decide whether a raised bar stays.
+	DefaultPulseMaxBotHoldersPct = 25.0
 )
+
+// ValidBotHoldersBar reports whether pct is a usable bar: finite, > 0, <= 100.
+func ValidBotHoldersBar(pct float64) bool {
+	return pct > 0 && pct <= 100 // NaN fails both comparisons
+}
 
 // AuditInfo is the subset of the Jupiter asset audit the screen uses.
 // Pointers distinguish "absent from the API" (nil, fail-open) from zero.
@@ -92,17 +99,22 @@ func FetchAudit(mint string) (*AuditInfo, bool) {
 }
 
 // AuditReject returns a non-empty reason when the audit hard-fails a token.
-// nil fields pass (fail-open).
-func AuditReject(a *AuditInfo, mode string) string {
+// nil fields pass (fail-open). pulseBar is pulse's bot-holder ceiling
+// (Config.PulseMaxBotHoldersPct); an invalid one falls back to the default.
+// Every other mode keeps the shared 30% ceiling.
+func AuditReject(a *AuditInfo, mode string, pulseBar float64) string {
 	if a == nil {
 		return ""
 	}
 	limit := maxBotHoldersPct
 	if mode == "pulse" {
-		limit = maxPulseBotHoldersPct
+		limit = DefaultPulseMaxBotHoldersPct
+		if ValidBotHoldersBar(pulseBar) {
+			limit = pulseBar
+		}
 	}
 	if a.BotHoldersPct != nil && *a.BotHoldersPct > limit {
-		return fmt.Sprintf("bot holders %.1f%% > %.0f%%", *a.BotHoldersPct, limit)
+		return fmt.Sprintf("bot holders %.1f%% > %g%%", *a.BotHoldersPct, limit)
 	}
 	return ""
 }

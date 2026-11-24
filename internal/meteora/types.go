@@ -125,6 +125,10 @@ type Candidate struct {
 	// agent must treat missing as unknown, not zero.
 	BotHoldersPct *float64 `json:"bot_holders_pct,omitempty"`
 	GlobalFeesSOL *float64 `json:"global_fees_sol,omitempty"`
+	// PulseBotBarPct is the bot-holder bar the audit gate applied (pulse only),
+	// so the pipeline's bots penalty uses the daemon's number. Absent on
+	// other modes.
+	PulseBotBarPct *float64 `json:"pulse_bot_bar_pct,omitempty"`
 
 	// Deployer wallet from the Jupiter asset record. The pipeline checks it
 	// against the TTL'd sol:dlmm:blocklist:dev:<wallet> Redis key before any

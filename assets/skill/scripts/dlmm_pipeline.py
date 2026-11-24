@@ -23,6 +23,7 @@ from dlmm_weights import ranking_weight_context
 from dlmm_candidate_watch import record_pipeline_candidates, record_pipeline_reject
 from dlmm_reentry_shadow import record_reentry_blocked
 from dlmm_geometry_shadow import record_entry as record_geometry_shadow
+from dlmm_bot_band import bots_penalty, audit_tag as bot_audit_tag
 
 CASH_POLICY = json.loads(Path(__file__).with_name('dlmm_cash_policy.json').read_text())
 if (type(CASH_POLICY.get('version')) is not int or CASH_POLICY['version'] != 1
@@ -1200,7 +1201,10 @@ def apply_batch_conviction(candidates, mode="multiday"):
         # Quality penalties from the agent prompt.
         if float(c.get("mcap") or 0) > 5_000_000:
             adj -= 15; notes.append("mcap>5M-15")
-        if float(c.get("bot_holders_pct") or 0) > 20:
+        # Above 20% bots for every mode but pulse; pulse penalizes only above its
+        # audit bar (PULSE_MAX_BOT_HOLDERS_PCT, carried on the candidate as
+        # pulse_bot_bar_pct). See dlmm_bot_band.py.
+        if bots_penalty(c, mode):
             adj -= 15; notes.append("bots-15")
         # New signals distinguish proved cash from marks. Legacy signals carried
         # marks under prior_net_pnl_sol; retain their conservative loss penalty.
@@ -2350,6 +2354,10 @@ def main():
                              "volume_tvl_ratio", "swap_count", "unique_traders",
                              "bot_holders_pct", "global_fees_sol", "bin_step",
                              "entry_live_gates") if winner.get(key) is not None})
+    if mode == "pulse":
+        # Bot-holder band of this entry, for the PULSE_MAX_BOT_HOLDERS_PCT kill
+        # rule (dlmm_stats.py --bot-band). The monitor copies `signal` onto the close.
+        entry_context["signal"]["audit"] = bot_audit_tag(winner)
     context_env = "DLMM_ENTRY_CONTEXT=" + shlex.quote(json.dumps(entry_context))
     deploy_cmd = f"{context_env} node {EXECUTOR_PATH} deploy {winner['pool']} {amount_x} {amount_y} {bins_below} {bins_above} {strategy_type} {slippage_bps}"
     print(f"Running deploy: {deploy_cmd}")

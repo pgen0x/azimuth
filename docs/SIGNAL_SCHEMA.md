@@ -115,6 +115,7 @@ Every element of `payload` is one candidate pool with these fields:
 | `active_tvl` / `volume_active_tvl_ratio` / `unique_lps` / `positions_created` | the Degen Score inputs, exposed so the agent sees *why* a score is high or low |
 | `unverified` | the API reported `is_verified: false` and the mode allowed it through anyway (turnover only — casual/multiday still hard-reject). `score` already carries a ×0.85 haircut, so no further penalty is needed; treat it as a tie-break signal against an equally strong verified pool. **Absent** = verified or unknown, never unverified |
 | `bot_holders_pct` / `global_fees_sol` | Jupiter audit enrichment (audit gate). **May be absent** — absent means the audit fetch failed (fail-open); treat as unknown, never as zero |
+| `pulse_bot_bar_pct` | Pulse only: the bot-holder bar the audit gate applied (`PULSE_MAX_BOT_HOLDERS_PCT`, default 25). The pipeline's `bots-15` penalty applies to pulse only above it. Absent on other modes |
 | `dev` | deployer wallet address from the Jupiter asset record. The pipeline hard-skips devs holding a `sol:dlmm:blocklist:dev:<wallet>` Redis key and stores the value in position metadata so a rug close blocklists the dev for `DEV_BLOCKLIST_TTL_DAYS` (default 30d). **May be absent** — unknown deployer (fail-open) |
 | `prior_closes` / `prior_net_pnl_sol` | pool memory summary from the monitor's close journal (`sol:dlmm:history:pool:<pool>`, last 10 closes / 30d), extended by accounting's proved recovered closes (finalized closes with no journal row; they carry no LP mark). **May be absent** — absent means no history (or non-Redis dedup backend), not a clean record. Negative net PnL = this pool cost us before |
 | `prior_mark_pnl_sol` / `prior_cash_lower_sol` / `prior_cash_upper_sol` / `prior_pnl_basis` | how to read the pool memory. `prior_pnl_basis` is one of: `pre_swap_mark_only` (only the journal mark, an estimate), `matched_refund_cash` (`prior_net_pnl_sol` is verified wallet cash incl. matched refunds and fees), `matched_refund_cash_bounds` (verified cash interval `[prior_cash_lower_sol, prior_cash_upper_sol]`), `nonpositive_cash_upper_bound` (only an upper bound ≤ 0 is proved: a non-win, lower bound unknown). Missing values are unknown, never zero; intervals are never summed across pools |
@@ -147,7 +148,7 @@ Only pools passing **all** of these are emitted:
   entire population; the holder/organic/concentration/authority/GMGN/audit
   gates carry the rug risk instead)
 - (if enabled) not dumping: 5m > −5%, 1h > −15%, 6h > −12%, 24h > −25%
-- (if enabled) Jupiter audit: bot holders ≤ 30% (fail-open when the audit is unavailable)
+- (if enabled) Jupiter audit: bot holders ≤ 30%; pulse ≤ `PULSE_MAX_BOT_HOLDERS_PCT` (default 25) (fail-open when the audit is unavailable)
 - lone-candidate conviction gate: a cycle producing exactly one fresh pool only
   emits it when `score ≥ LONE_MIN_SCORE` (default 50) — a weak solo candidate is
   held back (and un-deduped) so it can compete inside a future, richer batch
