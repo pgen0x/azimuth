@@ -86,6 +86,7 @@ jobs:
           python3 assets/skill/scripts/test_grad_paper.py
           python3 assets/skill/scripts/test_s2_eval.py
           python3 assets/skill/scripts/test_lp_majors_paper.py
+          python3 assets/skill/scripts/test_dlmm_bin_liquidity.py
           node assets/skill/scripts/test_dlmm_cash_sign.js
           node assets/skill/scripts/test_dlmm_nav.js
           node assets/skill/scripts/test_dlmm_jsonl.js
