@@ -197,6 +197,15 @@ re-offer (~`PULSE_SEEN_TTL`) apart, and a baseline older than 6h is dropped.
 Each row also appends a `source:"smart_inflow_shadow"` row to the candidate
 watch journal, which buys only the price-path sampler's 30m window, not the
 24h paper horizon. Unknown counts are never an event.
+Its evaluator is offline, `assets/skill/scripts/s2_eval.py`: it pulls GeckoTerminal
+5m OHLCV per pool-UTC-day (<= 6 req/min, cached under `memories/s2_ohlcv/`,
+a finished day fetched once), applies the pre-registered rule (enter at the row,
+trail 25%, stop -25%, 24h, 2% cost, `grad_paper.simulate`) to the inflow rows and
+to same-period pulse screen passes from the watch journal (inflow pool/times
+excluded, one per pool per 2h), and prints stats, a pool-clustered CI, the paired
+difference and the registry verdict. Guards drop non-SOL quotes, dust entry
+prints and UPWARD >10x candles (fake spikes inflate the trail exit); downward
+moves are never filtered, because a rug is a real loss. `--report` is cache-only.
 
 - `internal/config` — env → `Config`. Only enable-toggles live here; screening
   thresholds live in `internal/meteora`.
