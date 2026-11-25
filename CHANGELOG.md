@@ -5,6 +5,14 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.26.0](https://github.com/pgen0x/azimuth/compare/v2.25.0...v2.26.0) (2026-11-25)
+
+
+### Features
+
+* **research:** add offline S2 smart-inflow evaluator with paired baseline ([#340](https://github.com/pgen0x/azimuth/issues/340)) ([d9f117b](https://github.com/pgen0x/azimuth/commit/d9f117b764cc592b6390b319ef7e7db53176c910))
+* **research:** bin-level fee share for the LP majors paper trade ([#342](https://github.com/pgen0x/azimuth/issues/342)) ([7629a4d](https://github.com/pgen0x/azimuth/commit/7629a4d64c0be088c633916d4efd57992baaa159))
+
 ## [2.25.0](https://github.com/pgen0x/azimuth/compare/v2.24.0...v2.25.0) (2026-11-24)
 
 
