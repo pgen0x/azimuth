@@ -1,0 +1,14 @@
+# Optional. install.sh renders __PROFILE__ into <profile>/systemd/; `--with-risk-guard` installs and enables it.
+# Wallet drawdown guard: reads memories/dlmm_nav.jsonl, writes ~/.local/state/azimuth/risk_pause.json
+# when equity is RISK_MAX_DRAWDOWN (default 0.30) below its flow-adjusted high-water mark. No key, no tx.
+# Run `dlmm_risk_guard.py --profile __PROFILE__ --init-hwm current` once before enabling it: with no
+# mark it pauses new entries (fail closed). A second profile: add another --profile.
+[Unit]
+Description=Azimuth wallet drawdown guard (pauses new entries; exits never paused)
+After=azimuth-sol-accounting.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 __PROFILE__/skills/solana-dlmm/scripts/dlmm_risk_guard.py --profile __PROFILE__
+TimeoutStartSec=120
+UMask=0077

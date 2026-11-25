@@ -108,6 +108,7 @@ found"). `loginctl enable-linger $USER` is what keeps them alive across logout.
 | `azimuth-sol-{accounting,shadow,candidate-paper,net-experiment,price-path}` (.timer) | research observers; read-only RPC/quotes, local journals only | `install.sh --with-research` (opt-in) |
 | `azimuth-sol-net-research@<name>` (.timer) | frozen paired net research instance | copied by `--with-research`; enable by hand |
 | `azimuth-rh-nav` (.timer) | Robinhood wallet snapshot every 10m (`uni_nav.py` → `memories/uni_nav.jsonl`): public RPC balance reads of the PUBLIC address, no key, no tx | `install.sh --with-rh-nav` (opt-in) |
+| `azimuth-risk-guard` (.timer) | wallet drawdown guard every 10m (`dlmm_risk_guard.py`): flow-adjusted equity from `dlmm_nav.jsonl` vs its high-water mark; at `RISK_MAX_DRAWDOWN` (default 30%) or 12h blind it writes `~/.local/state/azimuth/risk_pause.json`, which `deployPosition` honours (new mints only, exits never). No key, no tx. `--init-hwm` once before enabling; `--resume --note` by hand only | `install.sh --with-risk-guard` (opt-in) |
 | `azimuth-grad-paper` | graduation paper-trader (S1): public GT/Jupiter reads, `memories/grad_paper/` only, no tx | `install.sh --with-paper` (opt-in) |
 | `azimuth-lp-paper` | LP majors paper-trader: modelled two-sided DLMM positions in fixed pools, public Meteora datapi + keyless public RPC bin reads, `memories/lp_majors_paper/` only, no tx | `install.sh --with-lp-paper` (opt-in) |
 | `hermes-gateway-<profile>` | Hermes gateway that receives the webhook, and ticks the profile's cron jobs | Hermes, not this repo |
@@ -600,6 +601,17 @@ moves are never filtered, because a rug is a real loss. `--report` is cache-only
   only. The same trap sits in third-party position trackers, whose net worth
   counts zero-market dust rows — including impostor tokens that spell their symbol
   like a real quote asset — at a stale print.
+- **The drawdown pause is a file, read at one choke point.** `dlmm_risk_guard.py`
+  (timer) writes `risk_pause.json`; `assertNotRiskPaused()` in `deployPosition` is
+  the only reader that blocks, so pulse, AI-agent and re-center mints all stop
+  while no exit path is touched. Missing file = not paused; corrupt or unreadable
+  = refuse. Drawdown is measured on `known_asset_subtotal_sol` (not `nav_sol`,
+  which one unquotable dust token nulls) against a FLOW-NEUTRAL mark: the guard
+  stores `hwm_adj = max(E - F)` with `F` the cumulative `external_flow_lamports`,
+  and compares `E` with `hwm_adj + F`. A deposit moves both, so it neither trips
+  the guard nor raises the mark; the literal `1 - adj/hwm` is wrong whenever `F`
+  is non-zero. A changed NAV basis (wallet or `coverage_since`) pauses, because
+  `F` restarted. Resume is manual and resets the mark.
 - **A one-sided rung settles in quote.** `--no-swap-out` exists in both executors
   but the monitor never passes it: the re-list that kept filled bags was retired
   2026-08-13 (see the note by `ASK_BAG_STOP_PCT`). Closes that ended in quote

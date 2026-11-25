@@ -18,7 +18,7 @@ func (d *doctor) services(ctx context.Context) {
 		name    string
 		running bool
 	}{{"azimuth.service", true}, {"azimuth-sol-monitor.service", true}, {"azimuth-rh-monitor.service", false}}
-	for _, optional := range []string{"azimuth-dashboard.service", "azimuth-alerts.timer", "azimuth-sol-markers.timer", "azimuth-sol-retention.timer", "azimuth-sol-rent.timer", "azimuth-sol-accounting.timer", "azimuth-sol-shadow.timer", "azimuth-sol-candidate-paper.timer", "azimuth-sol-net-experiment.timer", "azimuth-sol-price-path.timer"} {
+	for _, optional := range []string{"azimuth-dashboard.service", "azimuth-alerts.timer", "azimuth-sol-markers.timer", "azimuth-sol-retention.timer", "azimuth-sol-rent.timer", "azimuth-sol-accounting.timer", "azimuth-sol-shadow.timer", "azimuth-sol-candidate-paper.timer", "azimuth-sol-net-experiment.timer", "azimuth-sol-price-path.timer", "azimuth-risk-guard.timer"} {
 		// Opt-in units are checked when installed; absence is expected.
 		if _, err := os.Stat(filepath.Join(d.opts.HomeDir, ".config", "systemd", "user", optional)); err == nil {
 			units = append(units, struct {

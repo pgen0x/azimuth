@@ -1452,6 +1452,29 @@ def defer_capacity_signals(cli, wallet=True):
         print(f"Warning: capacity retry scheduling failed: {err}")
 
 
+def risk_pause_refusal(path=None):
+    """The executor's risk-pause rule, read early. Missing file = not paused;
+    unreadable or corrupt = refuse (fail closed), same as the executor."""
+    path = path or os.environ.get("AZIMUTH_RISK_PAUSE_FILE") or os.path.join(
+        os.path.expanduser("~"), ".local", "state", "azimuth", "risk_pause.json")
+    try:
+        with open(path, encoding="utf-8") as f:
+            state = json.load(f)
+    except FileNotFoundError:
+        return None
+    except OSError as e:
+        return f"ENTRY REFUSED: risk pause file unreadable ({e.__class__.__name__})"
+    except ValueError:
+        return "ENTRY REFUSED: risk pause file corrupt"
+    if not isinstance(state, dict) or not isinstance(state.get("paused"), bool):
+        return "ENTRY REFUSED: risk pause file corrupt"
+    if not state["paused"]:
+        return None
+    dd = state.get("dd")
+    dd_txt = f"{dd * 100:.1f}%" if type(dd) in (int, float) and math.isfinite(dd) else "n/a"
+    return f"ENTRY REFUSED: risk pause (dd={dd_txt}; {state.get('reason') or 'no reason recorded'})"
+
+
 def main():
     import argparse
     parser = argparse.ArgumentParser()
@@ -1521,6 +1544,14 @@ def main():
         if active_count >= max_positions:
             print(f"Aborting: Max {mode} positions reached ({active_count}/{max_positions})")
             defer_capacity_signals(cli, wallet=False)
+            sys.exit(0)
+        # Early copy of the executor's deploy check (assertNotRiskPaused): skip the
+        # quotes, swaps and gates of an entry the executor would refuse anyway.
+        # balanced_tight's pre-entry swap runs before the deploy, so this one also
+        # keeps a pause from stranding a token bag.
+        refusal = risk_pause_refusal()
+        if refusal:
+            print(refusal)
             sys.exit(0)
     else:
         active_count = get_active_positions_count_for_mode(mode)

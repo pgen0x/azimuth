@@ -14,7 +14,7 @@ import (
 )
 
 func TestReadOnlyCachedAPI(t *testing.T) {
-	s := &server{data: object{"live": object{"dust": object{"runs": 3}}, "experiments": object{"hold_canary": object{"closes": 2}}, "by_tz": object{"UTC": object{"north_star": object{"days": []any{}}, "growth": object{"d_native_sol": 0.25}, "venue_today": object{"day": "1970-01-01"}}}, "venues": object{"solana": object{"state": "live", "label": "pulse live"}}, "nav": object{"nav_sol": nil, "native_sol": 0.0}, "journal": []any{object{"stage": "swap", "evidence": object{"signature": "proof-1"}}, object{"stage": "gate", "evidence": object{"pool": "pool-2"}}}}}
+	s := &server{data: object{"live": object{"dust": object{"runs": 3}}, "experiments": object{"hold_canary": object{"closes": 2}}, "by_tz": object{"UTC": object{"north_star": object{"days": []any{}}, "growth": object{"d_native_sol": 0.25}, "venue_today": object{"day": "1970-01-01"}}}, "venues": object{"solana": object{"state": "live", "label": "pulse live"}}, "risk": object{"state": "paused"}, "nav": object{"nav_sol": nil, "native_sol": 0.0}, "journal": []any{object{"stage": "swap", "evidence": object{"signature": "proof-1"}}, object{"stage": "gate", "evidence": object{"pool": "pool-2"}}}}}
 	cookie := signIn(t, s)
 	for _, tc := range []struct {
 		method, path, host string
@@ -22,6 +22,7 @@ func TestReadOnlyCachedAPI(t *testing.T) {
 		want               string
 	}{
 		{"GET", "/api/overview", "localhost", 200, `"nav_sol":null`},
+		{"GET", "/api/overview", "localhost", 200, `"risk":{"state":"paused"}`},
 		{"GET", "/api/journal?q=proof-1&stage=swap", "127.0.0.1:8787", 200, `"total_in_retained_tail":1`},
 		{"GET", "/api/journal?offset=999", "localhost", 200, `"rows":[]`},
 		{"GET", "/api/journal?offset=-1", "localhost", 400, "invalid offset"},
