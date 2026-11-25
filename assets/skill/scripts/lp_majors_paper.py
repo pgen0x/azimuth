@@ -2,7 +2,8 @@
 
 Research only. It reads Meteora's public datapi and writes
 <profile>/memories/lp_majors_paper/{samples,hours,summary}.jsonl plus a state
-file. No wallet, no key, no env file, no transaction, no RPC, no GeckoTerminal.
+file. No wallet, no key, no env file, no transaction, no GeckoTerminal. The only
+RPC use is a keyless public-endpoint read of bin arrays (v2, below).
 
 Arms (fixed pools, `lp_majors_pools.json`, mint identity checked every sample):
   A  majors: SOL-USDC (two bin steps), cbBTC-SOL, SOL/HYPE (two pools), JUP-SOL
@@ -26,9 +27,15 @@ Position model (RULE_VERSION 1), per pool and per width (+-5% and +-10%):
   * fees = pool LP fees for the hour (fees - protocol_fees, USD)
            x in-range share of the hour (5m candle high/low overlap)
            x our value / pool TVL (TVL from the nearest 5m sample)
-    The TVL share assumes the pool's liquidity sits inside our range. That is
-    conservative for a pool spread wider than us and generous for one packed
-    tighter than us; there is no bin-level read (see PENDING in the PR).
+    v2: our value / pool TVL is replaced, where possible, by a BIN-LEVEL share
+    (`fee_basis: "bin"`): once per pool per clock hour the bin arrays within
+    +-21% of price are read over keyless public Solana RPC (getMultipleAccounts,
+    PDAs derived locally, no key), and for each 5m candle our liquidity in the
+    bins it traded through is divided by all liquidity there (pool + ours),
+    volume-weighted over the hour (dlmm_bin_liquidity.bin_fee_share). Narrow
+    widths put more value per bin and so earn more per in-range hour. When the
+    RPC read fails or is older than 2h the hour falls back to the v1 TVL share
+    (`fee_basis: "tvl"`); both figures are journaled (fee_sol_bin, fee_sol_tvl).
   * notional 0.5 SOL at every open. An hour that ends out of range re-centers:
     2 x tx cost (close + open, one tx per 70-bin chunk) + swapping half the
     notional at the pool base fee + 5 bp slip. The first open pays the open
@@ -61,8 +68,11 @@ from zoneinfo import ZoneInfo
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from grad_paper import Gate, append, cluster_bootstrap, http_json, read_rows, rotate  # noqa: E402
+from dlmm_bin_liquidity import PUBLIC_RPC, BinReader, bin_fee_share, bin_id_for  # noqa: E402
 
-RULE_VERSION = 1
+RULE_VERSION = 2          # v2 (2026-11-25): fee share from bin liquidity where RPC answers;
+                          # positions, markout, costs and verdict rules are unchanged from v1
+REPORT_VERSIONS = (1, 2)  # v1 rows are fee_basis "tvl" by construction
 API = "https://dlmm.datapi.meteora.ag/pools"
 USER_AGENT = "Mozilla/5.0 (compatible; research-client)"
 WSOL = "So11111111111111111111111111111111111111112"
@@ -81,6 +91,10 @@ MAX_BACKLOG_H = 72        # longer outages skip ahead; the skipped move lands as
 SNAPSHOT_KEEP_S = 96 * 3600
 TVL_NEAR_S = 6 * 3600
 RPM = 30
+RPC_RPM = 20              # keyless public RPC: ~2 calls per pool per hour
+BIN_SNAPSHOT_MAX_AGE_S = 2 * 3600
+BIN_ATTEMPTS_PER_HOUR = 3
+BIN_REPORT_MIN_HOURS = 24
 ROTATE_BYTES = 16 * 1024 * 1024
 ROTATE_KEEP = 12
 
@@ -248,15 +262,29 @@ def open_cost_sol(base_fee_pct, notional_sol, tx_cost_sol, txs):
 
 
 def step_hour(pos, p_start, candles, lp_fees_usd, tvl_usd, y_usd, sol_usd,
-              base_fee_pct, notional_sol=NOTIONAL_SOL, tx_cost_sol=TX_COST_SOL):
-    """Advance one position by one hour. Returns (row, position_for_next_hour)."""
+              base_fee_pct, notional_sol=NOTIONAL_SOL, tx_cost_sol=TX_COST_SOL, bins=None):
+    """Advance one position by one hour. Returns (row, position_for_next_hour).
+
+    `bins` = {"liq": <BinReader.liquidity result>, "dec_x", "dec_y"} switches the
+    fee share to bin level; without it (or if it cannot cover the hour) the TVL
+    share is used."""
     p_end = candles[-1]["close"] if candles else p_start
     frac = in_range_fraction(candles, pos.lo, pos.hi)
     if frac is None:  # no trade printed: price sat at p_start all hour
         frac = 1.0 if pos.in_range(p_start) else 0.0
     value_usd = pos.value(p_start) * y_usd
     share = value_usd / tvl_usd if tvl_usd and tvl_usd > 0 else 0.0
-    fee_sol = max(0.0, lp_fees_usd) * frac * share / sol_usd
+    fee_tvl = max(0.0, lp_fees_usd) * frac * share / sol_usd
+    fee_bin, bin_share = None, None
+    if bins:
+        step = pos.bin_step_bps
+        center = bin_id_for(pos.p0, step, bins["dec_x"], bins["dec_y"])
+        per_bin = pos.value(p_start) / (2 * pos.k + 1)
+        bin_share = bin_fee_share(candles, bins["liq"], center - pos.k, center + pos.k, per_bin,
+                                  step, bins["dec_x"], bins["dec_y"], p_start)
+        if bin_share is not None:
+            fee_bin = max(0.0, lp_fees_usd) * bin_share / sol_usd
+    fee_sol = fee_bin if fee_bin is not None else fee_tvl
     markout_sol = (pos.markout(p_end) - pos.markout(p_start)) * y_usd / sol_usd
     cost_sol, nxt, recentered = 0.0, pos, False
     if not pos.in_range(p_end):
@@ -267,6 +295,8 @@ def step_hour(pos, p_start, candles, lp_fees_usd, tvl_usd, y_usd, sol_usd,
     row = {
         "price_start": p_start, "price_end": p_end, "lo": pos.lo, "hi": pos.hi,
         "in_range_frac": round(frac, 6), "liq_share": share,
+        "fee_basis": "bin" if fee_bin is not None else "tvl", "bin_share": bin_share,
+        "fee_sol_tvl": fee_tvl, "fee_sol_bin": fee_bin,
         "fee_sol": fee_sol, "markout_sol": markout_sol, "cost_sol": cost_sol,
         "net_sol": fee_sol + markout_sol - cost_sol, "recentered": recentered,
     }
@@ -287,7 +317,8 @@ def y_usd_for(pool, price, sol_usd):
 
 class Collector:
     def __init__(self, profile, pools=None, clock=time.time, sleep=time.sleep, opener=None,
-                 rpm=RPM, notional_sol=NOTIONAL_SOL, tx_cost_sol=TX_COST_SOL):
+                 rpm=RPM, notional_sol=NOTIONAL_SOL, tx_cost_sol=TX_COST_SOL,
+                 rpc_url=PUBLIC_RPC, rpc_opener=None):
         self.dir = Path(profile) / "memories" / "lp_majors_paper"
         self.samples_path = self.dir / "samples.jsonl"
         self.hours_path = self.dir / "hours.jsonl"
@@ -297,6 +328,11 @@ class Collector:
         self.clock, self.sleep = clock, sleep
         self.opener = opener
         self.gate = Gate(rpm, clock=clock, sleep=sleep)
+        rpc_gate = Gate(RPC_RPM, clock=clock, sleep=sleep)
+        self.bin_reader = (BinReader(rpc_gate, rpc_url, opener=rpc_opener) if rpc_opener
+                           else BinReader(rpc_gate, rpc_url)) if rpc_url else None
+        self.bin_snaps = {p["address"]: [] for p in self.pools}
+        self.bin_tries = {}
         self.notional_sol, self.tx_cost_sol = notional_sol, tx_cost_sol
         self.snaps = {p["address"]: [] for p in self.pools}
         self.disabled = {}
@@ -308,7 +344,8 @@ class Collector:
     @staticmethod
     def _fresh_counters():
         return {"samples": 0, "sample_failures": 0, "hours": 0, "fetch_failures": 0,
-                "skipped_hours": 0, "identity_mismatch": 0}
+                "skipped_hours": 0, "identity_mismatch": 0, "bin_reads": 0, "bin_failures": 0,
+                "hours_bin": 0, "hours_tvl": 0}
 
     # --- io
     def get(self, url):
@@ -355,13 +392,56 @@ class Collector:
                        bin_step=cfg.get("bin_step"), base_fee_pct=cfg.get("base_fee_pct"),
                        dynamic_fee_pct=data.get("dynamic_fee_pct"),
                        fees_1h=(data.get("fees") or {}).get("1h"),
-                       volume_1h=(data.get("volume") or {}).get("1h"))
+                       volume_1h=(data.get("volume") or {}).get("1h"),
+                       dec_x=data["token_x"].get("decimals"), dec_y=data["token_y"].get("decimals"))
             self.counters["samples"] += 1
             append(self.samples_path, row)
             snaps = self.snaps[addr]
             snaps.append(row)
             while snaps and snaps[0]["ts"] < now - SNAPSHOT_KEEP_S:
                 snaps.pop(0)
+            self.read_bins(addr, row, now)
+
+    def read_bins(self, addr, row, now):
+        """One bin-liquidity read per pool per clock hour (up to 3 tries)."""
+        if self.bin_reader is None:
+            return
+        hour = hour_floor(now)
+        snaps = self.bin_snaps[addr]
+        if snaps and snaps[-1]["hour"] == hour:
+            return
+        tries = self.bin_tries.get((addr, hour), 0)
+        if tries >= BIN_ATTEMPTS_PER_HOUR:
+            return
+        self.bin_tries = {k: v for k, v in self.bin_tries.items() if k[1] >= hour - 3600}
+        self.bin_tries[(addr, hour)] = tries + 1
+        try:
+            price, step = float(row["price"]), int(row["bin_step"])
+            dec_x, dec_y = int(row["dec_x"]), int(row["dec_y"])
+        except (KeyError, TypeError, ValueError):
+            return
+        liq = self.bin_reader.liquidity(addr, price, step, dec_x, dec_y)
+        status = {"ts": round(now, 3), "pool": addr, "kind": "bins"}
+        if liq is None:
+            self.counters["bin_failures"] += 1
+            append(self.samples_path, dict(status, status="unavailable"))
+            return
+        self.counters["bin_reads"] += 1
+        snaps.append({"ts": now, "hour": hour, "liq": liq, "dec_x": dec_x, "dec_y": dec_y, "bin_step": step})
+        del snaps[:-6]
+        near = sum(v for b, v in liq["liq"].items() if abs(b - liq["center"]) <= 2)
+        append(self.samples_path, dict(status, status="ok", center=liq["center"], bins=len(liq["liq"]),
+                                       liq_y_active5=near, liq_y_total=sum(liq["liq"].values())))
+
+    def bins_for(self, addr, hour, bin_step):
+        """The bin snapshot read during `hour`, else the nearest within 2h."""
+        snaps = [s for s in self.bin_snaps.get(addr, []) if s["bin_step"] == bin_step]
+        if not snaps:
+            return None
+        best = min(snaps, key=lambda s: (s["hour"] != hour, abs(s["ts"] - (hour + 1800))))
+        if best["hour"] != hour and abs(best["ts"] - (hour + 1800)) > BIN_SNAPSHOT_MAX_AGE_S:
+            return None
+        return best
 
     def tvl_for(self, addr, hour):
         snaps = [s for s in self.snaps.get(addr, []) if s.get("tvl")]
@@ -419,7 +499,8 @@ class Collector:
                 ts = int(c["timestamp"])
                 candles.setdefault(hour_floor(ts), []).append(
                     {"ts": ts, "open": float(c["open"]), "high": float(c["high"]),
-                     "low": float(c["low"]), "close": float(c["close"])})
+                     "low": float(c["low"]), "close": float(c["close"]),
+                     "volume": float(c.get("volume") or 0.0)})
             except (KeyError, TypeError, ValueError):
                 continue
         fees = {}
@@ -454,6 +535,8 @@ class Collector:
         base_fee = snap.get("base_fee_pct") or 0.0
         session = session_tag(hour)
         gap = is_gap_hour(hour)
+        bsnap = self.bins_for(addr, hour, bin_step)
+        bins = {"liq": bsnap["liq"], "dec_x": bsnap["dec_x"], "dec_y": bsnap["dec_y"]} if bsnap else None
         starts = {}
         for width in WIDTHS:
             st = self.state["positions"].get(f"{addr}:{width}")
@@ -472,7 +555,10 @@ class Collector:
                 pos = Position.from_state(st["pos"])
             y_usd_end = y_usd_for(pool, candles[-1]["close"] if candles else p_start, sol_usd)
             row, nxt = step_hour(pos, p_start, candles, lp_fees_usd or 0.0, tvl, y_usd_end, sol_usd,
-                                 base_fee, self.notional_sol, self.tx_cost_sol)
+                                 base_fee, self.notional_sol, self.tx_cost_sol, bins=bins)
+            if bsnap:
+                row["bin_age_s"] = round(abs(bsnap["ts"] - (hour + 1800)))
+            self.counters["hours_" + row["fee_basis"]] += 1
             if opened:
                 c0 = open_cost_sol(base_fee, self.notional_sol, self.tx_cost_sol, txs=tx_chunks(2 * pos.k + 1))
                 row["cost_sol"] += c0
@@ -586,47 +672,87 @@ def verdict(s, arm, pulse):
     return "HOLD (lower CI > 0 but mean <= pulse)"
 
 
-def report(profile, out=print, now=None, pulse_override=None):
-    memories = Path(profile) / "memories"
-    rows = [r for r in read_rows(memories / "lp_majors_paper" / "hours.jsonl", with_archives=True)
-            if r.get("rule_version") == RULE_VERSION and r.get("notional_sol")]
-    now = time.time() if now is None else now
-    if pulse_override is not None:
-        pulse, pulse_n = pulse_override, None
-    else:
-        pulse, pulse_n = pulse_per_sol_day(memories, now)
-    out(f"LP majors paper (rule v{RULE_VERSION}); units: SOL per SOL-day, modelled, not realized")
-    out(f"pulse bar: {'unmeasured' if pulse is None else f'{pulse:+.5f}'}"
-        + (f" (n={pulse_n} closes, {PULSE_WINDOW_D}d)" if pulse_n is not None else " (override)"))
-    if not rows:
-        out("no evaluated hours yet")
-        return {}
-    fmt = lambda v: "   n/a  " if v is None else f"{v:+.5f}"  # noqa: E731
-    head = f"{'group':<26}{'n':>6}{'days':>6}{'net':>10}{'ci_lo':>10}{'ci_hi':>10}{'fee':>10}{'markout':>10}{'cost':>10}{'inrng':>7}{'rec':>5}"
-    results = {}
-    for level, keyf, cluster in (
-            ("arm", lambda r: (r["arm"], r["width"]), lambda r: r["pool"]),
-            ("pool", lambda r: (r["arm"], r["label"], r["width"]),
-             lambda r: datetime.fromtimestamp(r["hour"], timezone.utc).strftime("%Y-%m-%d"))):
+def _fmt(v):
+    return "   n/a  " if v is None else f"{v:+.5f}"
+
+
+_HEAD = (f"{'group':<26}{'n':>6}{'days':>6}{'net':>10}{'ci_lo':>10}{'ci_hi':>10}{'fee':>10}"
+         f"{'markout':>10}{'cost':>10}{'inrng':>7}{'rec':>5}")
+
+
+def _line(name, s):
+    return (f"{name:<26}{s['n']:>6}{s['days']:>6.1f}{_fmt(s['mean']):>10}{_fmt(s['lo']):>10}{_fmt(s['hi']):>10}"
+            f"{_fmt(s['fee']):>10}{_fmt(s['markout']):>10}{_fmt(s['cost']):>10}{s['in_range']:>7.2f}"
+            f"{s['recenters']:>5}")
+
+
+def _day(r):
+    return datetime.fromtimestamp(r["hour"], timezone.utc).strftime("%Y-%m-%d")
+
+
+def _name(key):
+    head = "/".join(str(k) for k in key[:-1])
+    return (head + " " if head else "all pools ") + f"±{key[-1]:.0%}"
+
+
+def _table(rows, out, results, tag, levels, pulse=None):
+    for level, keyf, cluster in levels:
         out("")
-        out(f"by {level} x width (CI clusters: {'pools' if level == 'arm' else 'UTC days'})")
-        out(head + "  verdict")
+        title = "width" if level == "width" else f"{level} x width"
+        out(f"{tag}by {title} (CI clusters: {'pools' if level != 'pool' else 'UTC days'})")
+        out(_HEAD + ("  verdict" if pulse is not False else ""))
         groups = {}
         for r in rows:
             groups.setdefault(keyf(r), []).append(r)
         for key in sorted(groups):
             s = summarize(groups[key], cluster)
-            v = verdict(s, key[0], pulse)
-            results[(level,) + key] = dict(s, verdict=v)
-            name = "/".join(str(k) for k in key[:-1]) + f" ±{key[-1]:.0%}"
-            out(f"{name:<26}{s['n']:>6}{s['days']:>6.1f}{fmt(s['mean']):>10}{fmt(s['lo']):>10}{fmt(s['hi']):>10}"
-                f"{fmt(s['fee']):>10}{fmt(s['markout']):>10}{fmt(s['cost']):>10}{s['in_range']:>7.2f}"
-                f"{s['recenters']:>5}  {v}")
+            if pulse is False:
+                results[(tag + level,) + key] = s
+                out(_line(_name(key), s))
+            else:
+                arm = key[0] if level != "width" else None
+                v = verdict(s, arm, pulse)
+                results[(tag + level,) + key] = dict(s, verdict=v)
+                out(_line(_name(key), s) + f"  {v}")
+
+
+LEVELS = (
+    ("width", lambda r: (r["width"],), lambda r: r["pool"]),
+    ("arm", lambda r: (r["arm"], r["width"]), lambda r: r["pool"]),
+    ("pool", lambda r: (r["arm"], r["label"], r["width"]), _day),
+)
+
+
+def report(profile, out=print, now=None, pulse_override=None):
+    memories = Path(profile) / "memories"
+    rows = [r for r in read_rows(memories / "lp_majors_paper" / "hours.jsonl", with_archives=True)
+            if r.get("rule_version") in REPORT_VERSIONS and r.get("notional_sol")]
+    for r in rows:
+        r.setdefault("fee_basis", "tvl")
+    now = time.time() if now is None else now
+    if pulse_override is not None:
+        pulse, pulse_n = pulse_override, None
+    else:
+        pulse, pulse_n = pulse_per_sol_day(memories, now)
+    out(f"LP majors paper (rule v{RULE_VERSION}: fee model updated to bin-level share where RPC "
+        f"answered, TVL share otherwise; kill/promote rules unchanged); units: SOL per SOL-day, "
+        f"modelled, not realized")
+    out(f"pulse bar: {'unmeasured' if pulse is None else f'{pulse:+.5f}'}"
+        + (f" (n={pulse_n} closes, {PULSE_WINDOW_D}d)" if pulse_n is not None else " (override)"))
+    if not rows:
+        out("no evaluated hours yet")
+        return {}
+    basis = {}
+    for r in rows:
+        basis[r["fee_basis"]] = basis.get(r["fee_basis"], 0) + 1
+    out("fee basis (position-hours): " + ", ".join(f"{k} {v}" for k, v in sorted(basis.items())))
+    results = {}
+    _table(rows, out, results, "", LEVELS, pulse)
     b = [r for r in rows if r["arm"] == "B"]
     if b:
         out("")
         out("arm B by session (gap = first open hour after a closure)")
-        out(head)
+        out(_HEAD)
         slices = {}
         for r in b:
             tag = "open-gap" if r["session"] == "open" and r.get("gap_hour") else r["session"]
@@ -634,9 +760,28 @@ def report(profile, out=print, now=None, pulse_override=None):
         for key in sorted(slices):
             s = summarize(slices[key], lambda r: r["pool"])
             results[("session",) + key] = s
-            out(f"{key[0] + f' ±{key[1]:.0%}':<26}{s['n']:>6}{s['days']:>6.1f}{fmt(s['mean']):>10}"
-                f"{fmt(s['lo']):>10}{fmt(s['hi']):>10}{fmt(s['fee']):>10}{fmt(s['markout']):>10}"
-                f"{fmt(s['cost']):>10}{s['in_range']:>7.2f}{s['recenters']:>5}")
+            out(_line(key[0] + f" ±{key[1]:.0%}", s))
+    binrows = [r for r in rows if r["fee_basis"] == "bin"]
+    if len(binrows) >= BIN_REPORT_MIN_HOURS:
+        out("")
+        out(f"--- bin-basis hours only ({len(binrows)}; informational, verdicts above are binding) ---")
+        _table(binrows, out, results, "bin:", LEVELS, pulse=False)
+        out("")
+        out("same-hour fee per SOL-day, bin vs tvl share (rows with both)")
+        out(f"{'group':<26}{'n':>6}{'fee_bin':>11}{'fee_tvl':>11}{'bin/tvl':>9}")
+        groups = {}
+        for r in binrows:
+            if r.get("fee_sol_bin") is not None and r.get("fee_sol_tvl") is not None:
+                groups.setdefault((r["arm"], r["label"], r["width"]), []).append(r)
+        for key in sorted(groups):
+            g = groups[key]
+            fb = statistics.fmean(r["fee_sol_bin"] / r["notional_sol"] * 24 for r in g)
+            ft = statistics.fmean(r["fee_sol_tvl"] / r["notional_sol"] * 24 for r in g)
+            results[("fee_compare",) + key] = {"n": len(g), "fee_bin": fb, "fee_tvl": ft}
+            ratio = f"{fb / ft:9.2f}" if ft > 0 else "      n/a"
+            out(f"{_name(key):<26}{len(g):>6}{fb:>+11.5f}{ft:>+11.5f}{ratio}")
+    elif binrows:
+        out(f"\nbin-basis hours: {len(binrows)} (< {BIN_REPORT_MIN_HOURS}, separate tables withheld)")
     return results
 
 
@@ -648,6 +793,8 @@ def main(argv=None):
     ap.add_argument("--rpm", type=float, default=RPM, help="datapi requests per minute (max 60)")
     ap.add_argument("--notional-sol", type=float, default=NOTIONAL_SOL)
     ap.add_argument("--tx-cost-sol", type=float, default=TX_COST_SOL)
+    ap.add_argument("--rpc-url", default=PUBLIC_RPC,
+                    help="keyless Solana RPC for bin reads; empty string disables (TVL share only)")
     ap.add_argument("--pulse-per-sol-day", type=float, default=None,
                     help="override the pulse bar instead of reading the profile journals")
     a = ap.parse_args(argv)
@@ -655,12 +802,13 @@ def main(argv=None):
         report(a.profile, pulse_override=a.pulse_per_sol_day)
         return 0
     col = Collector(a.profile, rpm=min(max(a.rpm, 1.0), 60.0),
-                    notional_sol=a.notional_sol, tx_cost_sol=a.tx_cost_sol)
+                    notional_sol=a.notional_sol, tx_cost_sol=a.tx_cost_sol, rpc_url=a.rpc_url)
     if a.once:
         col.restore()
         col.step()
         col.save_state()
-        log(json.dumps(dict(col.counters, requests=col.gate.requests)))
+        log(json.dumps(dict(col.counters, requests=col.gate.requests,
+                            rpc_calls=col.bin_reader.calls if col.bin_reader else 0)))
         return 0
     col.run()
     return 0

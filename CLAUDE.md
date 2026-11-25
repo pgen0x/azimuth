@@ -109,7 +109,7 @@ found"). `loginctl enable-linger $USER` is what keeps them alive across logout.
 | `azimuth-sol-net-research@<name>` (.timer) | frozen paired net research instance | copied by `--with-research`; enable by hand |
 | `azimuth-rh-nav` (.timer) | Robinhood wallet snapshot every 10m (`uni_nav.py` → `memories/uni_nav.jsonl`): public RPC balance reads of the PUBLIC address, no key, no tx | `install.sh --with-rh-nav` (opt-in) |
 | `azimuth-grad-paper` | graduation paper-trader (S1): public GT/Jupiter reads, `memories/grad_paper/` only, no tx | `install.sh --with-paper` (opt-in) |
-| `azimuth-lp-paper` | LP majors paper-trader: modelled two-sided DLMM positions in fixed pools, public Meteora datapi only, `memories/lp_majors_paper/` only, no tx | `install.sh --with-lp-paper` (opt-in) |
+| `azimuth-lp-paper` | LP majors paper-trader: modelled two-sided DLMM positions in fixed pools, public Meteora datapi + keyless public RPC bin reads, `memories/lp_majors_paper/` only, no tx | `install.sh --with-lp-paper` (opt-in) |
 | `hermes-gateway-<profile>` | Hermes gateway that receives the webhook, and ticks the profile's cron jobs | Hermes, not this repo |
 
 Every repo unit lives in `assets/systemd/`. Without flags `install.sh` enables
@@ -139,9 +139,13 @@ expires candidates after 30m, caps 30/run and 64 pools, and its native reader
 assumes a SOL-quoted memecoin, so reusing it would either starve the shared
 observers or reject SOL-USDC. It reads only Meteora's datapi (one snapshot per
 pool per 5m, 5m OHLCV + 1h fee history per closed hour), never GT or RPC. Fee
-share is pool LP fees x in-range share x our value / pool TVL: there is no
-bin-liquidity endpoint, so width changes markout and re-centers but not fee
-density. Re-center = 2 x tx per 70-bin chunk + half-notional swap. Gotcha: the
+share (rule v2, 2026-11-25) is BIN-LEVEL where possible: once per pool per hour
+`dlmm_bin_liquidity.py` reads the bin arrays within +-21% over keyless public
+RPC (PDAs derived locally, layout-decoded, no key, no SDK), and each 5m candle
+pays us our liquidity over all liquidity in the bins it traded through
+(volume-weighted). A failed or >2h-old read falls back to the v1 share (pool
+LP fees x in-range share x our value / pool TVL, which cannot tell widths
+apart); each row says which in `fee_basis` and journals both figures. Re-center = 2 x tx per 70-bin chunk + half-notional swap. Gotcha: the
 datapi's `volume/history` returns zeros when `start_time` and `end_time` sit in
 the same hour, so queries run through the next bucket. `--report` gives net per
 SOL-day with clustered CIs and the kill/promote verdicts (14d and 300

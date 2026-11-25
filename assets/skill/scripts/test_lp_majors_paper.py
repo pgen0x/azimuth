@@ -6,7 +6,46 @@ import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 
+import base64
+
+import dlmm_bin_liquidity as bl
 import lp_majors_paper as lp
+
+ANCHOR = bl.b58encode(bytes([7]) * 32)  # valid base58 pool ids: bin-array PDAs need them
+STOCK = bl.b58encode(bytes([9]) * 32)
+
+
+class FakeRPC:
+    def __init__(self, arrays, fail=False):
+        self.arrays, self.fail = arrays, fail
+
+    def __call__(self, req, timeout):
+        raise OSError("rpc down")
+
+
+class MultiPoolRPC:
+    """getMultipleAccounts over synthetic arrays keyed (pool, index); slot -> (x, y)."""
+
+    def __init__(self, arrays):
+        self.lookup = {bl.bin_array_key(pool, i): (pool, i, amounts) for (pool, i), amounts in arrays.items()}
+
+    def __call__(self, req, timeout):
+        keys = json.loads(req.data)["params"][0]
+        value = []
+        for k in keys:
+            hit = self.lookup.get(k)
+            if hit is None:
+                value.append(None)
+                continue
+            pool, i, amounts = hit
+            data = bytearray(bl.ARRAY_LEN)
+            data[8:16] = i.to_bytes(8, "little", signed=True)
+            data[24:56] = bl.b58decode(pool).rjust(32, b"\0")
+            for slot, (ax, ay) in amounts.items():
+                off = bl.HEADER + slot * bl.BIN_SIZE
+                data[off:off + 16] = ax.to_bytes(8, "little") + ay.to_bytes(8, "little")
+            value.append({"owner": bl.PROGRAM, "data": [base64.b64encode(bytes(data)).decode(), "base64"]})
+        return io.BytesIO(json.dumps({"result": {"value": value}}).encode())
 
 HOUR = 1_795_140_000  # 2026-11-20T02:00Z, a Friday, 21:00 ET Thursday
 
@@ -135,23 +174,24 @@ class FakeClock:
 
 
 POOLS = [
-    {"label": "SOL-USDC/4", "arm": "A", "address": "ANCHOR", "x_mint": lp.WSOL, "y_mint": lp.USDC,
+    {"label": "SOL-USDC/4", "arm": "A", "address": ANCHOR, "x_mint": lp.WSOL, "y_mint": lp.USDC,
      "sol_usd_anchor": True},
-    {"label": "STK-USDC/10", "arm": "B", "address": "STOCK", "x_mint": "STKmint", "y_mint": lp.USDC},
+    {"label": "STK-USDC/10", "arm": "B", "address": STOCK, "x_mint": "STKmint", "y_mint": lp.USDC},
 ]
 
 
 class FakeAPI:
-    def __init__(self, x_mint_override=None):
+    def __init__(self, x_mint_override=None, decimals=False):
         self.urls = []
         self.x_override = x_mint_override
+        self.decimals = decimals
 
     def __call__(self, req, timeout):
         url = req.full_url
         self.urls.append(url)
         addr = url.split("/pools/")[1].split("/")[0].split("?")[0]
         pool = next(p for p in POOLS if p["address"] == addr)
-        price = 100.0 if addr == "ANCHOR" else 20.0
+        price = 100.0 if addr == ANCHOR else 20.0
         if "/ohlcv" in url:
             body = {"data": [{"timestamp": HOUR + 300 * i, "open": price, "high": price * 1.002,
                               "low": price * 0.998, "close": price} for i in range(12)]}
@@ -159,20 +199,53 @@ class FakeAPI:
             body = {"data": [{"timestamp": HOUR, "fees": 110.0, "protocol_fees": 10.0},
                              {"timestamp": HOUR + 3600, "fees": 1.0, "protocol_fees": 0.0}]}
         else:
-            x = self.x_override if (self.x_override and addr == "STOCK") else pool["x_mint"]
-            body = {"token_x": {"address": x, "price": price}, "token_y": {"address": pool["y_mint"], "price": 1.0},
-                    "pool_config": {"bin_step": 4 if addr == "ANCHOR" else 10, "base_fee_pct": 0.04},
+            x = self.x_override if (self.x_override and addr == STOCK) else pool["x_mint"]
+            dec = {"decimals": 0} if self.decimals else {}
+            body = {"token_x": dict({"address": x, "price": price}, **dec),
+                    "token_y": dict({"address": pool["y_mint"], "price": 1.0}, **dec),
+                    "pool_config": {"bin_step": 4 if addr == ANCHOR else 10, "base_fee_pct": 0.04},
                     "current_price": price, "tvl": 1_000_000.0, "dynamic_fee_pct": 0.0,
                     "fees": {"1h": 100.0}, "volume": {"1h": 1.0}}
         return io.BytesIO(json.dumps(body).encode())
 
 
 class CollectorTests(unittest.TestCase):
-    def make(self, api):
+    def make(self, api, rpc=None):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         clk = FakeClock(HOUR + 3600 + lp.EVAL_GRACE_S + 30)
-        return lp.Collector(self.tmp.name, pools=POOLS, clock=clk, sleep=clk.sleep, opener=api, rpm=600)
+        return lp.Collector(self.tmp.name, pools=POOLS, clock=clk, sleep=clk.sleep, opener=api, rpm=600,
+                            rpc_opener=rpc or FakeRPC({}, fail=True))
+
+    def test_bin_basis_when_rpc_answers_and_narrow_beats_wide(self):
+        # bin step 4 / 10, decimals 0: give every bin around both pools' prices 1000 of liquidity
+        arrays = {}
+        for pool, px, step in ((ANCHOR, 100.0, 4), (STOCK, 20.0, 10)):
+            center = bl.bin_id_for(px, step, 0, 0)
+            for i in range((center - 700) // 70, (center + 700) // 70 + 1):
+                arrays[(pool, i)] = {j: (0, 1000) for j in range(70)}
+        col = self.make(FakeAPI(decimals=True), rpc=MultiPoolRPC(arrays))
+        col.step()
+        rows = list(lp.read_rows(col.hours_path))
+        self.assertEqual({r["fee_basis"] for r in rows}, {"bin"})
+        self.assertEqual(col.counters["hours_bin"], 4)
+        for pool in (ANCHOR, STOCK):
+            narrow, wide = (next(r for r in rows if r["pool"] == pool and r["width"] == w) for w in lp.WIDTHS)
+            self.assertGreater(narrow["fee_sol"], wide["fee_sol"])
+            self.assertAlmostEqual(narrow["fee_sol_tvl"], wide["fee_sol_tvl"])  # TVL basis cannot tell them apart
+            self.assertEqual(narrow["fee_sol"], narrow["fee_sol_bin"])
+
+    def test_rpc_failure_falls_back_to_tvl_share(self):
+        col = self.make(FakeAPI(decimals=True))
+        col.step()
+        rows = list(lp.read_rows(col.hours_path))
+        self.assertEqual({r["fee_basis"] for r in rows}, {"tvl"})
+        self.assertTrue(all(r["fee_sol"] == r["fee_sol_tvl"] and r["fee_sol_bin"] is None for r in rows))
+        self.assertEqual(col.counters["bin_failures"], len(POOLS))
+        col.sample()  # retried, but at most BIN_ATTEMPTS_PER_HOUR times per pool-hour
+        col.sample()
+        col.sample()
+        self.assertEqual(col.counters["bin_failures"], len(POOLS) * lp.BIN_ATTEMPTS_PER_HOUR)
 
     def test_one_cycle_samples_and_evaluates_every_width(self):
         api = FakeAPI()
@@ -186,7 +259,7 @@ class CollectorTests(unittest.TestCase):
         self.assertEqual({r["session"] for r in stock}, {"closed"})
         self.assertTrue(all("geckoterminal" not in u for u in api.urls))
         self.assertTrue(all(f"end_time={HOUR + 3600}" in u for u in api.urls if "start_time" in u))
-        anchor = next(r for r in rows if r["pool"] == "ANCHOR" and r["width"] == 0.05)
+        anchor = next(r for r in rows if r["pool"] == ANCHOR and r["width"] == 0.05)
         share = (0.5 * 100.0) / 1_000_000.0
         self.assertAlmostEqual(anchor["fee_sol"], 100.0 * share / 100.0)
         self.assertTrue(anchor["opened"])
@@ -199,8 +272,8 @@ class CollectorTests(unittest.TestCase):
         col.save_state()
         again = lp.Collector(self.tmp.name, pools=POOLS, clock=col.clock, sleep=col.sleep, opener=api, rpm=600)
         again.restore()
-        self.assertEqual(again.state["next_hour"]["ANCHOR"], HOUR + 3600)
-        self.assertTrue(again.snaps["ANCHOR"])
+        self.assertEqual(again.state["next_hour"][ANCHOR], HOUR + 3600)
+        self.assertTrue(again.snaps[ANCHOR])
         again.clock.t += 3600
         again.step()
         later = [r for r in lp.read_rows(again.hours_path) if r["hour"] == HOUR + 3600]
@@ -210,8 +283,8 @@ class CollectorTests(unittest.TestCase):
     def test_mint_mismatch_disables_the_pool(self):
         col = self.make(FakeAPI(x_mint_override="IMPOSTOR"))
         col.step()
-        self.assertEqual(col.disabled, {"STOCK": "identity_mismatch"})
-        self.assertTrue(all(r["pool"] == "ANCHOR" for r in lp.read_rows(col.hours_path)))
+        self.assertEqual(col.disabled, {STOCK: "identity_mismatch"})
+        self.assertTrue(all(r["pool"] == ANCHOR for r in lp.read_rows(col.hours_path)))
 
     def test_day_roll_writes_summary_and_rotates(self):
         col = self.make(FakeAPI())
@@ -285,6 +358,30 @@ class VerdictTests(unittest.TestCase):
             res = lp.report(d, out=out.append, now=HOUR + 86400)
             self.assertIn(("arm", "A", 0.05), res)
             self.assertTrue(any("pulse bar: +0.02000" in line for line in out))
+
+
+class BinReportTests(unittest.TestCase):
+    def test_v1_rows_count_as_tvl_and_bin_tables_need_24_hours(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "memories" / "lp_majors_paper" / "hours.jsonl"
+            for r in hour_rows(5, lambda i: 0.0001):
+                lp.append(path, dict(r, rule_version=1))
+            for r in hour_rows(23, lambda i: 0.0002, start=HOUR + 10 * 3600):
+                lp.append(path, dict(r, rule_version=2, fee_basis="bin", fee_sol_bin=2e-5, fee_sol_tvl=1e-5))
+            out = []
+            lp.report(d, out=out.append, now=HOUR, pulse_override=0.0)
+            text = "\n".join(out)
+            self.assertIn("fee basis (position-hours): bin 23, tvl 5", text)
+            self.assertIn("rule v2", text)
+            self.assertIn("separate tables withheld", text)
+            lp.append(path, dict(hour_rows(1, lambda i: 0.0002)[0], rule_version=2, fee_basis="bin",
+                                 fee_sol_bin=2e-5, fee_sol_tvl=1e-5))
+            out = []
+            res = lp.report(d, out=out.append, now=HOUR, pulse_override=0.0)
+            self.assertTrue(any("bin-basis hours only (24" in line for line in out))
+            cmp = res[("fee_compare", "A", "p1", 0.05)]
+            self.assertAlmostEqual(cmp["fee_bin"] / cmp["fee_tvl"], 2.0)
+            self.assertIn(("width", 0.05), res)
 
 
 if __name__ == "__main__":

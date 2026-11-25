@@ -1,7 +1,8 @@
 # LP majors paper-trader. Read-only by design: it polls Meteora's public DLMM
 # datapi (pool snapshots every 5m, OHLCV + fee history once per closed hour) and
 # writes only <profile>/memories/lp_majors_paper/. No wallet, no key, no env
-# file, no RPC, no GeckoTerminal, no transaction. Installed by
+# file, no GeckoTerminal, no transaction. Bin liquidity comes from a keyless public
+# Solana RPC (getMultipleAccounts, ~2 calls per pool per hour). Installed by
 # `install.sh --with-lp-paper` (rewrites __PROFILE__). Evaluate with:
 #   python3 __PROFILE__/skills/solana-dlmm/scripts/lp_majors_paper.py --profile __PROFILE__ --report
 [Unit]
