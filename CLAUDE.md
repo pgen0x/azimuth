@@ -524,6 +524,19 @@ moves are never filtered, because a rug is a real loss. `--report` is cache-only
   deployer ban. Eleven such bans starved Solana of every entry for 12h on
   2026-08-14 while those same pools traded green. Pinned by
   `internal/meteora/momentum_test.go`.
+- **A sign is not a loss.** The pipeline's pool-cash streak gate
+  (`dlmm_pool_cash_gate.py`, reject `pool_cash_two_negative`) counts a close
+  only when its proved cash upper bound is at or below
+  `-max(0.002 SOL, 0.5% of deposit)` (deposit = the position's
+  `dlmm_realized` `deposit_sol`, carried on the proof as `deposit_lamports`;
+  absent means the absolute floor), and a streak blocks for 7d after the newer
+  loss. Until 2026-11-26 any negative sign counted, so closes that returned
+  their deposit minus a tx fee banned pools, and because a blocked pool gets
+  no new closes the ban lasted the whole 30d journal window. Entries the old
+  rule would have refused carry `signal.pool_cash_gate.v0_would_block`;
+  `dlmm_stats.py --two-neg` judges them (revert on any close < -0.03 SOL, or
+  after >= 15 closes when the mean and its pool-clustered CI upper bound are
+  both < 0). The `pool_cash_upper_bound` branch is unchanged.
 - **Redis TTL is per-key on purpose.** `SetNX` per pool gives each an independent
   rolling `SEEN_TTL`. The old `SAdd`+`Expire` refreshed the whole set's TTL every
   write so pools were deduped forever — see the comment in `store.go`; don't

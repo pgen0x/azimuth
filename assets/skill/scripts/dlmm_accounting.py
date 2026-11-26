@@ -424,12 +424,19 @@ def report(profile, as_of=None):
             c["token_deltas_raw"][mint] = c["token_deltas_raw"].get(mint, 0) + int(amount)
 
     for c in chains.values():
+        deposits = []
         for position in sorted(c["positions"]):
             lp = realized.get(position)
             if lp is not None and lp.get("realized_sol") is not None:
                 c["lp_pnl_sol"] += lp["realized_sol"]
             else:
                 c["lp_unmeasured_positions"].append(position)
+            deposit = (lp or {}).get("deposit_sol")
+            deposits.append(deposit if type(deposit) in (int, float) and math.isfinite(deposit) and deposit > 0 else None)
+        # The on-chain deposit (dlmm_realized deposit_sol), used only to scale the
+        # pool-cash two-loss materiality floor. Unknown for any position = None.
+        c["deposit_lamports"] = (round(sum(deposits) * 1e9)
+                                 if deposits and None not in deposits else None)
         c["wallets"] = sorted(c["wallets"])
         if len(c["wallets"]) != 1 or not c["wallets"][0]:
             c["reasons"].append("wallet_identity_unverified")
@@ -705,8 +712,10 @@ def recent_position_cash_losses(journal, ledger, as_of):
         bounds = refund_cash_bounds(group, chains, {root})
         if bounds is None or bounds[1] >= 0:
             return []
+        deposit = chain.get("deposit_lamports")
         proofs.append(dict(position=position, root=root, ts=row["ts"],
-                           cash_upper_lamports=bounds[1]))
+                           cash_upper_lamports=bounds[1],
+                           deposit_lamports=deposit if type(deposit) is int and deposit > 0 else None))
     if len({p["root"] for p in proofs}) != 2:
         return []
     return proofs

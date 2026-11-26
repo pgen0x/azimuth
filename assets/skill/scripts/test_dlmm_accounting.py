@@ -35,6 +35,15 @@ with TemporaryDirectory() as root:
     c, = result["chains"]
     assert c["positions"] == ["child", "root"]
     assert c["lp_pnl_sol"] == -0.01
+    assert c["deposit_lamports"] is None  # no deposit_sol on any position: unknown, never 0
+    write("dlmm_realized.jsonl", [dict(position="root", realized_sol=0.01, deposit_sol=0.2),
+                                 dict(position="child", realized_sol=-0.02, deposit_sol=0.1)])
+    assert report(root)["chains"][0]["deposit_lamports"] == 300000000
+    write("dlmm_realized.jsonl", [dict(position="root", realized_sol=0.01, deposit_sol=0.2),
+                                 dict(position="child", realized_sol=-0.02)])
+    assert report(root)["chains"][0]["deposit_lamports"] is None  # one unmeasured leg
+    write("dlmm_realized.jsonl", [dict(position="root", realized_sol=0.01),
+                                 dict(position="child", realized_sol=-0.02)])
     assert c["wallet_delta_lamports"] == -10007000  # fees already inside wallet delta
     assert c["network_fee_lamports"] == 18000  # failed transactions still cost fees
     assert c["pending_signatures"] == ["pending"]
