@@ -618,7 +618,7 @@ The alerts process reads these from its own environment, so set them with an
 `Environment=` line in a drop-in (`systemctl --user edit azimuth-alerts.service`).
 Without `-send-cmd` the messages only go to the unit's journal; to deliver them
 over Telegram, restate `ExecStart` in the same drop-in with
-`-send-cmd "%h/.local/bin/hermes send -t telegram"` (the unit header has the
+`-send-cmd "%h/.local/bin/hermes -p <profile> send -t telegram"` (the unit header has the
 exact lines). Alerts never trade or stop anything.
 
 ### Rent reclaim, markers, retention

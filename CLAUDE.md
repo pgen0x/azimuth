@@ -489,7 +489,8 @@ moves are never filtered, because a rug is a real loss. `--report` is cache-only
 - `internal/deploy` — direct-deploy runner: execs `DEPLOY_CMD` with
   `--from-batch <payload> --mode <mode>` per batch, parses the pipeline's
   `🚀 DEPLOYED` / `🧪 DRY RUN DEPLOY` stdout markers, and pipes a condensed
-  outcome to `REPORT_CMD` (e.g. `hermes send -t telegram`). Execution failure
+  outcome to `REPORT_CMD` (e.g. `hermes -p <profile> send -t telegram`; bare `hermes send` reads the
+  default Hermes home, which has no messaging target on a profile install). Execution failure
   unmarks the batch for retry; a deterministic REJECT does not.
 - `assets/` — copied into a Hermes profile by `install.sh`, which rewrites the
   literal `__PROFILE__` token to the target path. `assets/skill` = solana-dlmm

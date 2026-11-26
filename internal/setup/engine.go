@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -810,14 +811,33 @@ func (e *Engine) TestAI(ctx context.Context, probe []string) Check {
 	return Check{"ai.probe", Pass, "AI probe succeeded.", ""}
 }
 
-// ReportCommand is the REPORT_CMD setup writes for Telegram delivery.
-const ReportCommand = "hermes send -t telegram"
+// hermesProfileName is the `hermes -p` name for a profile directory: its basename when it sits in a
+// `profiles/` directory (~/.hermes/profiles/<name>), else "" (the default Hermes home). Mirrors
+// dlmm_alerts.hermes_profile. Bare `hermes send` reads the default home, which on a profile-based
+// install has no messaging target, so every report would fail.
+var hermesProfileRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
+
+func hermesProfileName(profileDir string) string {
+	clean := filepath.Clean(profileDir)
+	if filepath.Base(filepath.Dir(clean)) == "profiles" && hermesProfileRe.MatchString(filepath.Base(clean)) {
+		return filepath.Base(clean)
+	}
+	return ""
+}
+
+// ReportCommandFor is the REPORT_CMD setup writes for Telegram delivery from this profile.
+func ReportCommandFor(profileDir string) string {
+	if name := hermesProfileName(profileDir); name != "" {
+		return "hermes -p " + name + " send -t telegram"
+	}
+	return "hermes send -t telegram"
+}
 
 // TestTelegram sends one test message through the same command the daemon uses.
 func (e *Engine) TestTelegram(ctx context.Context) Check {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	args := strings.Fields(ReportCommand)
+	args := strings.Fields(ReportCommandFor(e.opts.ProfileDir))
 	res, err := e.opts.Exec(ctx, ExecRequest{Name: args[0], Args: args[1:], Stdin: []byte("azimuth setup: test message. Trade reports will arrive here.\n")})
 	if err != nil || res.Code != 0 {
 		return Check{"telegram", Fail, "Test message was not sent.", "Configure Telegram in Hermes (hermes gateway setup), then re-run setup."}

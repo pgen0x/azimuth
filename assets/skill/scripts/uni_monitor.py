@@ -1754,10 +1754,14 @@ def alert(text):
     if not target:
         return
     try:
-        subprocess.run(["hermes", "send", "-t", target, "-m", text, "-q"],
-                       timeout=30, capture_output=True)
-    except Exception:
-        pass
+        from dlmm_alerts import hermes_send_argv
+        result = subprocess.run(hermes_send_argv(PROFILE_DIR) + ["-t", target, "-m", text, "-q"],
+                                timeout=30, capture_output=True)
+        if result.returncode != 0:
+            detail = (result.stderr or b"").decode("utf-8", "replace").strip()[-200:]
+            print(f"monitor: alert SEND FAILED (exit {result.returncode}): {detail}", file=sys.stderr)
+    except Exception as e:
+        print(f"monitor: alert SEND FAILED ({e.__class__.__name__})", file=sys.stderr)
 
 
 def render_card(rows):

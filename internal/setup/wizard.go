@@ -664,7 +664,7 @@ func (w *wizard) telegram() error {
 	if _, err := w.e.opts.LookPath("hermes"); err != nil {
 		w.say("  ⚠ hermes is not on PATH; reports fail until Hermes is installed with Telegram configured")
 	}
-	w.plan.Set(DaemonEnv, "REPORT_CMD", ReportCommand)
+	w.plan.Set(DaemonEnv, "REPORT_CMD", ReportCommandFor(w.e.opts.ProfileDir))
 	w.plan.Set(ProfileEnv, "DLMM_ALERT_TARGET", "telegram")
 	if w.tests && !w.f.dryRun {
 		c := w.e.TestTelegram(w.ctx)

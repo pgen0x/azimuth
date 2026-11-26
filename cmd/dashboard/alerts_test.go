@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -134,19 +135,42 @@ func TestAlertsRunSendAndRetry(t *testing.T) {
 	state := filepath.Join(t.TempDir(), "s", "alerts.json")
 	disk := []alert{{"disk_low", "disk_low", "disk free 9%"}}
 	code, _, errs, sent := runAlerts(t, state, disk, nil, errors.New("down"), t0, "-send-cmd", "x")
-	if code != 0 || len(sent) != 1 || !strings.Contains(errs, "send failed") {
+	if code != 0 || len(sent) != 1 || !strings.Contains(errs, "alerts: SEND FAILED (1 consecutive") {
 		t.Fatalf("send failure must log and exit 0: %d %q", code, errs)
 	}
-	if _, err := os.Stat(state); err == nil {
-		t.Fatal("state saved after a failed send; the alert would be lost")
+	if st, err := loadAlertState(state); err != nil || len(st.Alerts) != 0 || st.SendFailures != 1 || st.LastSendError == "" {
+		t.Fatalf("a failed send records only the failure, never the alert (or it would be lost): %+v %v", st, err)
 	}
 	_, _, _, sent = runAlerts(t, state, disk, nil, nil, t0.Add(10*time.Minute), "-send-cmd", "x")
 	if len(sent) != 1 || !strings.Contains(sent[0], "! disk_low: disk free 9%") {
 		t.Fatalf("retry: %q", sent)
 	}
+	if st, _ := loadAlertState(state); st.SendFailures != 0 || st.LastSendError != "" {
+		t.Fatalf("a delivered send must reset the failure counter: %+v", st)
+	}
 	_, _, _, sent = runAlerts(t, state, disk, nil, nil, t0.Add(20*time.Minute), "-send-cmd", "x")
 	if len(sent) != 0 {
 		t.Fatalf("standing alert resent: %q", sent)
+	}
+}
+
+func TestAlertsRunFailsLoudAfterConsecutiveSendFailures(t *testing.T) {
+	state := filepath.Join(t.TempDir(), "alerts.json")
+	disk := []alert{{"disk_low", "disk_low", "disk free 9%"}}
+	for i := 1; i <= alertSendFailLimit+1; i++ {
+		code, _, errs, sent := runAlerts(t, state, disk, nil, errors.New("Platform 'telegram' is not configured"), t0.Add(time.Duration(i)*10*time.Minute), "-send-cmd", "x")
+		want := 0
+		if i >= alertSendFailLimit {
+			want = 1
+		}
+		if code != want || len(sent) != 1 || !strings.Contains(errs, fmt.Sprintf("SEND FAILED (%d consecutive", i)) {
+			t.Fatalf("run %d: code=%d (want %d) errs=%q", i, code, want, errs)
+		}
+	}
+	// The transport comes back: the queued alert goes out, the counter resets, the run is green again.
+	code, _, _, sent := runAlerts(t, state, disk, nil, nil, t0.Add(time.Hour), "-send-cmd", "x")
+	if st, _ := loadAlertState(state); code != 0 || len(sent) != 1 || st.SendFailures != 0 || st.Alerts["disk_low"] == nil {
+		t.Fatalf("recovery: code=%d sent=%q state=%+v", code, sent, st)
 	}
 }
 

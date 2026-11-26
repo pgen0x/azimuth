@@ -43,7 +43,16 @@ type alertRecord struct {
 
 type alertState struct {
 	Alerts map[string]*alertRecord `json:"alerts"`
+	// SendFailures counts consecutive failed sends; a success resets it. At alertSendFailLimit the run
+	// exits 1 so the unit shows as failed (dashboard failed_units) instead of staying silently green.
+	SendFailures   int    `json:"send_failures,omitempty"`
+	LastSendError  string `json:"last_send_error,omitempty"`
+	LastSendFailed int64  `json:"last_send_failed,omitempty"`
 }
+
+// alertSendFailLimit consecutive send failures turn the timer's run red. Below it a failure is one
+// clear SEND FAILED journal line and the run stays green, so one transient outage is not a page.
+const alertSendFailLimit = 3
 
 // infoCodes are reported but are not red flags.
 var infoCodes = map[string]bool{"no_deploy_12h": true}
@@ -238,8 +247,9 @@ type alertDeps struct {
 	send    func(ctx context.Context, sendCmd, text string) error
 }
 
-// alertsMain is the subcommand. Every runtime failure (collector, state, send) exits 0 and is logged to
-// stderr, i.e. the journal: the timer must stay green. Only bad usage exits non-zero.
+// alertsMain is the subcommand. Runtime failures (collector, state, send) are logged to stderr, i.e. the
+// journal, and exit 0, with one exception: alertSendFailLimit consecutive send failures exit 1 so a dead
+// transport is visible as a failed unit. Bad usage exits 2.
 func alertsMain(args []string, stdout, stderr io.Writer) int {
 	return alertsRun(args, stdout, stderr, alertDeps{time.Now, runAlertCollector, sendAlert})
 }
@@ -250,7 +260,7 @@ func alertsRun(args []string, stdout, stderr io.Writer, deps alertDeps) int {
 	fs.SetOutput(stderr)
 	profile := fs.String("profile", filepath.Join(home, ".hermes/profiles/dlmm"), "Hermes profile directory")
 	stateFile := fs.String("state-file", filepath.Join(home, ".local/state/azimuth/alerts.json"), "dedup state file")
-	sendCmd := fs.String("send-cmd", "", "command that receives the message on stdin, e.g. \"hermes send -t telegram\"; empty prints it")
+	sendCmd := fs.String("send-cmd", "", "command that receives the message on stdin, e.g. \"hermes -p <profile> send -t telegram\"; empty prints it")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -283,10 +293,22 @@ func alertsRun(args []string, stdout, stderr io.Writer, deps alertDeps) int {
 		if strings.TrimSpace(*sendCmd) == "" {
 			fmt.Fprintln(stdout, text)
 		} else if err := deps.send(ctx, *sendCmd, text); err != nil {
-			// State stays unsaved, so the next run sends this message again.
-			fmt.Fprintln(stderr, "alerts: send failed, will retry next run:", err)
+			// The alert diff stays unsaved, so the next run sends this message again; only the failure
+			// counter is recorded, on top of the state as it was before this run.
+			prior, _ := loadAlertState(*stateFile)
+			prior.SendFailures++
+			prior.LastSendError = clip(err.Error(), 200)
+			prior.LastSendFailed = now.Unix()
+			if serr := saveAlertState(*stateFile, prior); serr != nil {
+				fmt.Fprintln(stderr, "alerts: state not saved:", serr)
+			}
+			fmt.Fprintf(stderr, "alerts: SEND FAILED (%d consecutive; will retry next run): %v\n", prior.SendFailures, err)
+			if prior.SendFailures >= alertSendFailLimit {
+				return 1
+			}
 			return 0
 		}
+		st.SendFailures, st.LastSendError, st.LastSendFailed = 0, "", 0
 	}
 	if err := saveAlertState(*stateFile, st); err != nil {
 		fmt.Fprintln(stderr, "alerts: state not saved:", err)

@@ -33,7 +33,7 @@ Pause (fail closed) when any of:
     (the flow sum restarted, so adj is no longer comparable);
     no high-water mark yet (run --init-hwm at deploy), or an unreadable mark file.
     Each pause and blind episode alerts once, through the profile's alert outbox
-    (dlmm_alerts.py; flushed by the monitor loop with `hermes send`).
+    (dlmm_alerts.py; flushed by the monitor loop with `hermes -p <profile> send`).
 
 Resume is manual only: `--resume --note "..."` journals who and why, clears the
 pause and resets the mark to the current adj equity (otherwise it re-trips at once).

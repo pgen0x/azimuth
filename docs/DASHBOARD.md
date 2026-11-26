@@ -180,7 +180,7 @@ The brief's alert rules, run unattended so a red flag reaches the operator witho
 
 ```bash
 azimuth-dashboard alerts -profile ~/.hermes/profiles/<profile>                     # print new/cleared alerts
-azimuth-dashboard alerts -profile ... -send-cmd "hermes send -t telegram"           # pipe them to a sender
+azimuth-dashboard alerts -profile ... -send-cmd "hermes -p <profile> send -t telegram"  # pipe them to a sender
 ```
 
 It runs only the panels its rules read (health, last deploy, markers, realized losses; under a second). Differences from the
@@ -205,8 +205,12 @@ brief: MemAvailable alerts below **800 MB** (the OOM line, not the brief's 1200 
 - **Blind runs never clear.** If the collector fails, or any section is unavailable, alerts missing from that
   run keep their state; `collector_failed` is raised instead.
 - **Sending.** The plain-text message (at most 1000 characters) is piped on stdin to `-send-cmd`, split on
-  whitespace like `REPORT_CMD`. Empty prints it. A send failure is logged to stderr, leaves the state unsaved so
-  the next run retries, and exits 0 so the timer stays green; only bad flags exit non-zero.
+  whitespace like `REPORT_CMD`. Empty prints it. The command must name the Hermes profile
+  (`hermes -p <profile> send -t telegram`): bare `hermes send` reads the default Hermes home, which has no
+  messaging target on a profile-based install. A send failure prints `alerts: SEND FAILED (<n> consecutive …)`,
+  records only the failure count in the state file (the alert itself stays unsaved, so the next run retries it)
+  and exits 0; the third consecutive failure exits 1 so the unit shows as failed. A delivered send resets the
+  count. Bad flags exit 2.
 - **Timer.** `assets/systemd/azimuth-alerts.{service,timer}` (every 10 min) are rendered into
   `<profile>/systemd/` by `install.sh` and never enabled by it. Copy both to `~/.config/systemd/user/`, add the
   `-send-cmd` drop-in shown in the service file, then `systemctl --user enable --now azimuth-alerts.timer`.

@@ -20,6 +20,7 @@ import argparse
 import json
 import os
 import subprocess
+import sys
 import time
 
 from dlmm_realized import apply_realized, load_realized
@@ -221,8 +222,12 @@ def send_card(text):
         with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as tf:
             tf.write(text)
             path = tf.name
-        subprocess.run(["hermes", "send", "-t", target, "-f", path, "-q"],
-                       timeout=30, capture_output=True)
+        from dlmm_alerts import hermes_send_argv
+        result = subprocess.run(hermes_send_argv(PROFILE_DIR) + ["-t", target, "-f", path, "-q"],
+                                timeout=30, capture_output=True)
+        if result.returncode != 0:
+            detail = (result.stderr or b"").decode("utf-8", "replace").strip()[-200:]
+            print(f"⚠️ Scoreboard SEND FAILED (exit {result.returncode}): {detail}", file=sys.stderr)
     except Exception as e:
         print(f"⚠️ Scoreboard delivery failed (non-fatal): {e}")
     finally:

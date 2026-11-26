@@ -435,3 +435,19 @@ func TestSubscriptionScriptKeepsRealSecret(t *testing.T) {
 		t.Fatal("operator secret overwritten")
 	}
 }
+
+func TestReportCommandNamesTheHermesProfile(t *testing.T) {
+	for dir, want := range map[string]string{
+		"/home/u/.hermes/profiles/example":   "hermes -p example send -t telegram",
+		"/home/u/.hermes/profiles/example/":  "hermes -p example send -t telegram",
+		"/home/u/.hermes/profiles/a.b_c-1":   "hermes -p a.b_c-1 send -t telegram",
+		"/home/u/.hermes":                    "hermes send -t telegram",
+		"/srv/profile":                       "hermes send -t telegram",
+		"/home/u/.hermes/profiles/bad name":  "hermes send -t telegram",
+		"/home/u/.hermes/profiles/-flaglike": "hermes send -t telegram",
+	} {
+		if got := ReportCommandFor(dir); got != want {
+			t.Errorf("ReportCommandFor(%q) = %q, want %q", dir, got, want)
+		}
+	}
+}

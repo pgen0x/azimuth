@@ -311,7 +311,7 @@ type Config struct {
 	// can take a couple of minutes on congested RPC).
 	DeployTimeout time.Duration
 	// ReportCmd, when set in direct-deploy mode, receives a short outcome
-	// report on stdin after each run — e.g. `hermes send -t telegram` (no LLM,
+	// report on stdin after each run — e.g. `hermes -p <profile> send -t telegram` (no LLM,
 	// reuses the gateway's bot credentials). Empty = log only.
 	ReportCmd string
 	// ReportRejects also delivers REJECT outcomes to ReportCmd. Off by default:

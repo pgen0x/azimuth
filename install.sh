@@ -80,6 +80,20 @@ while [ $# -gt 0 ]; do
   shift
 done
 PROFILE="${PROFILE:-$HOME/.hermes/profiles/dlmm}"
+# `hermes send` must name the profile: bare `hermes send` reads the DEFAULT Hermes home, which on
+# a profile-based install has no messaging target, so every alert failed silently. The name is
+# HERMES_PROFILE when set, else the profile dir's basename when it sits in a profiles/ directory
+# (same rule as dlmm_alerts.hermes_profile and setup's ReportCommandFor).
+HERMES_PROFILE_NAME="${HERMES_PROFILE:-}"
+if [ -z "$HERMES_PROFILE_NAME" ] && [ "$(basename "$(dirname "$PROFILE")")" = profiles ]; then
+  HERMES_PROFILE_NAME="$(basename "$PROFILE")"
+fi
+case "$HERMES_PROFILE_NAME" in
+  "") HERMES_SEND="hermes send" ;;
+  [A-Za-z0-9]*) case "$HERMES_PROFILE_NAME" in *[!A-Za-z0-9._-]*) echo "invalid Hermes profile name: $HERMES_PROFILE_NAME" >&2; exit 2 ;; esac
+     HERMES_SEND="hermes -p $HERMES_PROFILE_NAME send" ;;
+  *) echo "invalid Hermes profile name: $HERMES_PROFILE_NAME" >&2; exit 2 ;;
+esac
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SYSTEMCTL="${SYSTEMCTL:-systemctl}"
 
@@ -261,7 +275,7 @@ mkdir -p "$PROFILE/systemd"
 for u in azimuth-sol-accounting azimuth-sol-shadow azimuth-sol-rent azimuth-sol-markers \
   azimuth-sol-net-experiment azimuth-sol-net-research@ azimuth-sol-price-path azimuth-sol-candidate-paper \
   azimuth-sol-retention azimuth-alerts azimuth-rh-nav azimuth-risk-guard; do
-  sed "s#__PROFILE__#$PROFILE#g" "$REPO/assets/systemd/$u.service" > "$PROFILE/systemd/$u.service"
+  sed -e "s#__PROFILE__#$PROFILE#g" -e "s#__HERMES_SEND__#$HERMES_SEND#g" "$REPO/assets/systemd/$u.service" > "$PROFILE/systemd/$u.service"
   cp "$REPO/assets/systemd/$u.timer" "$PROFILE/systemd/$u.timer"
 done
 for u in azimuth-grad-paper azimuth-lp-paper; do
@@ -311,7 +325,7 @@ if command -v "$SYSTEMCTL" >/dev/null 2>&1 && "$SYSTEMCTL" --user show-environme
   # Opt-in units. Only files from assets/systemd are written, with the same
   # __PROFILE__ / __REPO__ rewrite as above; %h is left for systemd.
   render_unit() {
-    sed -e "s#__PROFILE__#$PROFILE#g" -e "s#__REPO__#$REPO#g" \
+    sed -e "s#__PROFILE__#$PROFILE#g" -e "s#__REPO__#$REPO#g" -e "s#__HERMES_SEND__#$HERMES_SEND#g" \
       "$REPO/assets/systemd/$1" > "$UNIT_DIR/$1"
   }
   OPT_ENABLE=()
@@ -402,8 +416,8 @@ print("     the timer applies this daily" if rows else "     nothing older than 
     echo "     (docs/DASHBOARD_DEPLOY.md#password-hash). Status text: azimuth-dashboard brief"
   fi
   if [ "$WITH_ALERTS" = 1 ]; then
-    echo "   alerts print to their journal only. To deliver them, add a drop-in with -send-cmd"
-    echo "     (see the header of assets/systemd/azimuth-alerts.service)."
+    echo "   alerts print to their journal only. To deliver them, add a drop-in with"
+    echo "     -send-cmd \"%h/.local/bin/$HERMES_SEND -t telegram\" (see the unit's header)."
   fi
 else
   if [ $((WITH_DASHBOARD + WITH_ALERTS + WITH_OPS + WITH_RENT_TX + WITH_RESEARCH + WITH_PAPER + WITH_LP_PAPER + WITH_RH_NAV + WITH_RISK_GUARD)) -gt 0 ]; then
@@ -425,7 +439,7 @@ alert lines of 1, the webhook secret of 2, and 5):
        SOLANA_PRIVATE_KEY=...          # base58, used by dlmm_executor.js
        SOLANA_RPC_URLS=...             # comma-separated, tried in order with failover
                                         # (defaults to public mainnet-beta RPC if unset)
-       DLMM_ALERT_TARGET=telegram      # instant trade alerts via \`hermes send\`
+       DLMM_ALERT_TARGET=telegram      # instant trade alerts via \`$HERMES_SEND\`
                                         # ("platform" or "platform:chat_id"; empty disables)
        DLMM_TZ=UTC                     # report times + daily buckets (any IANA name, e.g. Europe/Berlin; empty = UTC)
        DLMM_STATS_HOUR=09              # daily scoreboard send hour in DLMM_TZ (00-23)
