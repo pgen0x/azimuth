@@ -5,6 +5,18 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.27.0](https://github.com/pgen0x/azimuth/compare/v2.26.0...v2.27.0) (2026-11-26)
+
+
+### Features
+
+* **risk:** wallet drawdown guard that pauses new Solana entries ([#343](https://github.com/pgen0x/azimuth/issues/343)) ([96b074d](https://github.com/pgen0x/azimuth/commit/96b074d8de44e23f10ff7d8a2ecd3486a2ef8df0))
+
+
+### Bug Fixes
+
+* **settlement:** stop a no-route dust remainder from blocking every entry ([#344](https://github.com/pgen0x/azimuth/issues/344)) ([1494e97](https://github.com/pgen0x/azimuth/commit/1494e9733f5aae0a70808a9444e7df6190a5add8))
+
 ## [2.26.0](https://github.com/pgen0x/azimuth/compare/v2.25.0...v2.26.0) (2026-11-25)
 
 
