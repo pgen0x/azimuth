@@ -1634,6 +1634,22 @@ def main():
         except SignalRecordError as e:
             print(f"Aborting: {e}")
             sys.exit(1)
+        # The record must be one the daemon actually delivered: a model that retypes the JSON
+        # drops keys, mangles the pool address and shifts numbers, and gates must never run
+        # on those values. Resolve it to the delivery journal's exact record; a pool that was
+        # not delivered aborts. DLMM_FROM_SIGNAL_UNVERIFIED=1 is the manual/operator escape.
+        try:
+            delivered = load_delivered_record(signal_record.get("pool", ""), mode)
+        except SignalRecordError as e:
+            if os.environ.get("DLMM_FROM_SIGNAL_UNVERIFIED") != "1":
+                print(f"Aborting: --from-signal pool not in a delivered {mode} signal ({e}); use --from-pool")
+                sys.exit(1)
+            print(f"⚠️ DLMM_FROM_SIGNAL_UNVERIFIED=1: using an undelivered --from-signal record ({e})")
+        else:
+            drift = sorted(k for k in set(delivered) | set(signal_record) if signal_record.get(k) != delivered.get(k))
+            if drift:
+                print(f"Signal record drift from delivery journal ignored: {', '.join(drift[:8])}")
+            signal_record = delivered  # gates always see the daemon's exact record
         required = ("pool", "name", "base_mint", "base_symbol", "tvl", "volatility", "score")
         missing = [k for k in required if k not in signal_record]
         if missing:

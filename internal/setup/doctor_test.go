@@ -739,3 +739,53 @@ func TestDoctorRelativeRepoDirSkillAndDrift(t *testing.T) {
 		}
 	}
 }
+
+func TestHermesWebhookDrift(t *testing.T) {
+	write := func(t *testing.T, path, prompt string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+			t.Fatal(err)
+		}
+		raw, _ := json.Marshal(map[string]any{"dlmm-signal": map[string]any{"prompt": prompt, "secret": "s"}})
+		if err := os.WriteFile(path, raw, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	find := func(opts DoctorOptions) *Check {
+		for _, c := range Doctor(context.Background(), opts).Checks {
+			if c.Name == "hermes.webhook.drift" {
+				c := c
+				return &c
+			}
+		}
+		return nil
+	}
+	setup := func(t *testing.T, profilePrompt, rootPrompt string) DoctorOptions {
+		opts := fixture(t)
+		root := t.TempDir()
+		t.Setenv("HERMES_HOME", root)
+		if profilePrompt != "" {
+			write(t, filepath.Join(opts.ProfileDir, "webhook_subscriptions.json"), profilePrompt)
+		}
+		if rootPrompt != "" {
+			write(t, filepath.Join(root, "webhook_subscriptions.json"), rootPrompt)
+		}
+		return opts
+	}
+	if c := find(setup(t, "STEP 5 --from-pool", "STEP 5 --from-pool")); c == nil || c.Status != Pass {
+		t.Fatalf("matching prompts: %+v", c)
+	}
+	c := find(setup(t, "STEP 5 --from-pool", "STEP 5 old fallback"))
+	if c == nil || c.Status != Warn || !strings.Contains(c.Hint, "install.sh") {
+		t.Fatalf("drifted prompts must warn: %+v", c)
+	}
+	if strings.Contains(c.Detail, "fallback") || strings.Contains(c.Detail, "STEP") {
+		t.Fatalf("prompt text leaked: %q", c.Detail)
+	}
+	if c := find(setup(t, "STEP 5", "")); c != nil {
+		t.Fatalf("absent root file must skip: %+v", c)
+	}
+	if c := find(setup(t, "", "STEP 5")); c != nil {
+		t.Fatalf("absent profile file must skip: %+v", c)
+	}
+}

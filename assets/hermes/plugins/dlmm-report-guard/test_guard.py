@@ -44,6 +44,15 @@ with tempfile.TemporaryDirectory() as tmp:
     assert guard.transform(fabricated, session_id="other") is None
     assert guard.transform(fabricated, session_id="route") is None
     assert guard.transform("❌ REJECTED — momentum screen", **ids) is None
+    # Positive claims only, case-sensitive: an unreceipted deploy claim or tx link is withheld...
+    for claim in ["✅ DEPLOYED (pulse) pos X", "🧪 DRY RUN DEPLOY WASTED-SOL",
+                  "see https://solscan.io/tx/" + "5" * 64]:
+        assert "report withheld" in guard.transform(claim, **ids), claim
+    # ...while reject cards and other negations pass through untouched.
+    for clean in ["❌ REJECTED downtrend_h6: 6h -14.7%, nothing deployed", "no DEPLOYED header",
+                  "Pipeline refused entry: not deployed.", "Deployment not performed (settlement)",
+                  "deployed nothing", "solscan.io/tx/ link pending"]:
+        assert guard.transform(clean, **ids) is None, clean
     assert guard.transform("[SILENT]", **ids) is None
     for command in ["echo " + str(script), "python3 -c 'print(1)'", "python3 /tmp/dlmm_pipeline.py"]:
         args = {"command": command}

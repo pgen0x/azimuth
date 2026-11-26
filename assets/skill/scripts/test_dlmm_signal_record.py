@@ -181,5 +181,92 @@ class PipelineWiringTests(unittest.TestCase):
         self.assertLess(resolve, src.index("if cli.from_batch or cli.from_signal:\n        automatic_strategy"))
 
 
+class FromSignalResolvesToDeliveryTests(unittest.TestCase):
+    """--from-signal runs gates on the daemon's delivered record, never on retyped JSON."""
+    DELIVERED_POOL = "2v3XPhyAnDeLiVeReDpooLxxxxxxxxxxhj1fz"
+    TYPED_POOL = "2v3XPhYGNmAnGLeDpooLxxxxxxxxxxxhj1fz"
+
+    def record(self, **changes):
+        rec = dict(pool=self.DELIVERED_POOL, name="SYN-SOL", base_mint="M" * 32, base_symbol="SYN",
+                   tvl=20000, volatility=2.5, score=61, mode="pulse")
+        rec.update(changes)
+        return rec
+
+    def run_pipeline(self, typed, delivered_or_error, env=None):
+        import contextlib
+        import io
+        import os
+        from unittest.mock import patch
+        import dlmm_pipeline as pipeline
+
+        class Reached(Exception):
+            pass
+        seen = {}
+
+        def conviction(records, mode):
+            seen["records"] = records
+            raise Reached()
+
+        def delivered(pool, mode):
+            seen["asked"] = (pool, mode)
+            if isinstance(delivered_or_error, Exception):
+                raise delivered_or_error
+            return delivered_or_error
+        params = dict(MIN_TVL_USD=10000, MIN_FEE_TVL_24H=1, MIN_ORGANIC_SCORE=60,
+                      MIN_MCAP_USD=150000, MIN_HOLDERS=100, MAX_POSITIONS=4)
+        out = io.StringIO()
+        with tempfile.TemporaryDirectory() as tmp, \
+                patch.object(pipeline, "PROFILE_DIR", tmp), \
+                patch.object(pipeline.sys, "argv", ["pipeline", "--mode", "pulse", "--from-signal", json.dumps(typed)]), \
+                patch.object(pipeline, "load_soul_dlmm_params", return_value=params), \
+                patch.object(pipeline, "reconcile_redis_vs_meteora"), \
+                patch.object(pipeline, "get_active_positions_count_for_mode", return_value=0), \
+                patch.object(pipeline, "risk_pause_refusal", return_value=None, create=True), \
+                patch.object(pipeline, "get_wallet_sol_balance", return_value=10.0), \
+                patch.object(pipeline, "record_pipeline_candidates", return_value=0), \
+                patch.object(pipeline, "load_delivered_record", side_effect=delivered), \
+                patch.object(pipeline, "apply_batch_conviction", side_effect=conviction), \
+                patch.dict(os.environ, env or {}), contextlib.redirect_stdout(out):
+            os.environ.pop("DLMM_FROM_SIGNAL_UNVERIFIED", None) if not env else None
+            try:
+                pipeline.main()
+                code = 0
+            except Reached:
+                code = "reached"
+            except SystemExit as e:
+                code = e.code
+        return code, out.getvalue(), seen
+
+    def test_typed_pool_not_delivered_aborts(self):
+        code, out, seen = self.run_pipeline(self.record(pool=self.TYPED_POOL),
+                                            SignalRecordError("no pulse signal delivered"))
+        self.assertEqual(code, 1)
+        self.assertEqual(seen["asked"], (self.TYPED_POOL, "pulse"))
+        self.assertIn("Aborting: --from-signal pool not in a delivered pulse signal", out)
+        self.assertNotIn("records", seen)
+
+    def test_drifted_numbers_use_the_delivered_record(self):
+        delivered = self.record()
+        typed = self.record(tvl=99999, score=88)
+        typed.pop("volatility")                     # a dropped key is drift too, not an abort
+        code, out, seen = self.run_pipeline(typed, delivered)
+        self.assertEqual(code, "reached")
+        self.assertEqual(seen["records"], [delivered])
+        self.assertIn("Signal record drift from delivery journal ignored: score, tvl, volatility", out)
+
+    def test_exact_record_prints_no_drift(self):
+        code, out, seen = self.run_pipeline(self.record(), self.record())
+        self.assertEqual(code, "reached")
+        self.assertNotIn("drift", out)
+
+    def test_operator_escape_still_passes(self):
+        typed = self.record(pool=self.TYPED_POOL)
+        code, out, seen = self.run_pipeline(typed, SignalRecordError("not delivered"),
+                                            env={"DLMM_FROM_SIGNAL_UNVERIFIED": "1"})
+        self.assertEqual(code, "reached")
+        self.assertEqual(seen["records"], [typed])
+        self.assertIn("DLMM_FROM_SIGNAL_UNVERIFIED=1", out)
+
+
 if __name__ == "__main__":
     unittest.main()

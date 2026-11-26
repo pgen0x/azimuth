@@ -3,7 +3,7 @@
 The daemon POSTs one envelope per poll cycle. Its `payload` is an **array** of
 every pool that newly qualified that cycle for a single mode — all elements
 share the same `mode`. The agent compares the set, picks the single strongest
-pool, and deploys it (via `dlmm_pipeline.py --from-signal`) — or rejects.
+pool, and deploys it (via `dlmm_pipeline.py --from-pool`) — or rejects.
 
 In **direct-deploy mode** (`DEPLOY_CMD` set) the webhook is skipped entirely:
 the daemon hands the same payload array to
@@ -126,9 +126,13 @@ Every element of `payload` is one candidate pool with these fields:
 | `gmgn_top10_pct` | GMGN's top-10 holder supply share, percent (independent recheck of `top_holders_pct`) |
 | `gmgn_dev_status` / `gmgn_dev_tokens_created` | dev wallet state (`creator_hold` = still holding, `creator_sell` = exited) and how many tokens this creator has launched before — a serial deployer (dozens+) is a rug-factory signal |
 
-To deploy, the agent passes the chosen element's **full JSON record** to
-`dlmm_pipeline.py --from-signal '<record>'`, which skips re-screening (the
+To deploy, the agent passes only the chosen pool to
+`dlmm_pipeline.py --from-pool <pool> --audit`, which loads the exact record the
+daemon delivered (memories journal, 30-minute window), skips re-screening (the
 gates below already ran) and runs only the final live gates before deploy.
+`--from-signal '<record>'` remains for manual use, but it too resolves to the
+delivered record: an undelivered pool aborts (escape: `DLMM_FROM_SIGNAL_UNVERIFIED=1`)
+and typed values that differ from the delivery are ignored and listed as drift.
 In direct-deploy mode the daemon passes the **whole payload array** to
 `--from-batch` instead and the pipeline does the picking.
 

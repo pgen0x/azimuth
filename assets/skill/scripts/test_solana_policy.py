@@ -497,6 +497,7 @@ def main():
                   mode="turnover", params={}, timeframe="30m", ticket_cap=pipeline.MAX_TICKET_SOL_DEFAULT)
         market_reads = []
         ns["check_bin_coverage"] = lambda pool,*args: market_reads.append(pool) or {"deployable":True}
+        ns["load_delivered_record"] = lambda pool, mode, record=record: dict(record)  # the daemon delivered it
         with patch.object(pipeline, "load_signal_weights", return_value={}), \
                 contextlib.redirect_stdout(io.StringIO()):
             try:

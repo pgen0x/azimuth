@@ -127,6 +127,8 @@ class PipelineCashGateIntegrationTests(unittest.TestCase):
                         if cmd.startswith('redis-cli '):return '', '', 0
                         raise AssertionError('Unexpected external command: '+cmd)
                     output=io.StringIO();stack.enter_context(contextlib.redirect_stdout(output))
+                    # --from-signal resolves to the delivered record; here the daemon delivered exactly this one.
+                    stack.enter_context(patch.object(pipeline,'load_delivered_record',side_effect=lambda pool,mode:dict(candidate)))
                     payload=[candidate] if flag=='--from-batch' else candidate
                     stack.enter_context(patch.object(sys,'argv',['dlmm_pipeline.py','--mode','turnover',flag,json.dumps(payload)]))
                     for name,value in [('record_pipeline_candidates',None),('reconcile_redis_vs_meteora',None),

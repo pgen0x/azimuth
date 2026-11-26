@@ -211,30 +211,57 @@ PY
 echo "→ Installing webhook subscription (merges into existing file if present)"
 SUB_SRC="$REPO/assets/hermes/webhook_subscriptions.json"
 SUB_DST="$PROFILE/webhook_subscriptions.json"
-if [ -f "$SUB_DST" ]; then
-  python3 - "$SUB_DST" "$SUB_SRC" "$PROFILE" <<'PY'
-import json,sys
-dst,src,profile=sys.argv[1],sys.argv[2],sys.argv[3]
-d=json.load(open(dst))
-s=json.loads(open(src).read().replace("__PROFILE__",profile))
-# Preserve per-profile config on re-install: an existing entry's secret,
-# delivery target, model and enabled flag are live operator-set values —
-# only the prompt (and any brand-new fields) should follow the repo. The
-# repo's placeholders must never clobber real values.
-PRESERVE=("secret","deliver","deliver_extra","model","enabled")
-for name,entry in s.items():
-    old=d.get(name)
-    if isinstance(old,dict):
+# The Hermes gateway serves $HERMES_HOME/webhook_subscriptions.json (the ROOT file), not the
+# profile copy, so the prompt is merged into both. An existing entry keeps its operator-set
+# fields (PRESERVE); a root file or entry that does not exist yet is never created here,
+# because a fresh entry would carry the repo's placeholder secret. Both writes are atomic.
+ROOT_SUB="${HERMES_HOME:-$HOME/.hermes}/webhook_subscriptions.json"
+merge_subscription() {  # merge_subscription <dst> <create-if-missing:0|1>
+  python3 - "$1" "$SUB_SRC" "$PROFILE" "$2" <<'PY'
+import json, os, sys, tempfile
+dst, src, profile, create = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4] == "1"
+s = json.loads(open(src).read().replace("__PROFILE__", profile))
+PRESERVE = ("secret", "deliver", "deliver_extra", "model", "enabled", "toolsets", "profile")
+if os.path.exists(dst):
+    d = json.load(open(dst))
+elif create:
+    d = {}
+else:
+    print(f"   {dst} absent; not created (the gateway reads it; set it up in Hermes first)")
+    sys.exit(0)
+changed = []
+for name, entry in s.items():
+    old = d.get(name)
+    if not isinstance(old, dict) and not create:
+        print(f"   {dst}: no {name} entry; not created")
+        continue
+    if isinstance(old, dict):
         for k in PRESERVE:
             if k in old:
-                entry[k]=old[k]
-    d[name]=entry
-json.dump(d,open(dst,'w'),indent=2)
-print("   merged dlmm-signal into existing webhook_subscriptions.json (kept existing secret/delivery/model)")
+                entry[k] = old[k]
+    d[name] = entry
+    changed.append(name)
+if not changed:
+    sys.exit(0)
+mode = os.stat(dst).st_mode & 0o777 if os.path.exists(dst) else 0o600
+fd, tmp = tempfile.mkstemp(dir=os.path.dirname(dst) or ".", prefix=".webhook_subscriptions.")
+with os.fdopen(fd, "w") as out:
+    json.dump(d, out, indent=2)
+    out.flush()
+    os.fsync(out.fileno())
+os.chmod(tmp, mode)
+os.replace(tmp, dst)
+print(f"   merged {', '.join(changed)} into {dst} (kept existing secret/delivery/model/toolsets/profile)")
 PY
+}
+if [ -f "$SUB_DST" ]; then
+  merge_subscription "$SUB_DST" 0
 else
   sed "s#__PROFILE__#$PROFILE#g" "$SUB_SRC" > "$SUB_DST"
   echo "   created $SUB_DST"
+fi
+if [ "$ROOT_SUB" != "$SUB_DST" ]; then
+  merge_subscription "$ROOT_SUB" 0
 fi
 
 if [ "$NO_BUILD" = 1 ]; then

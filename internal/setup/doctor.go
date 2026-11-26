@@ -136,6 +136,7 @@ func Doctor(ctx context.Context, opts DoctorOptions) Report {
 	d.services(ctx)
 	d.skill()
 	d.hermesScriptsDrift()
+	d.hermesWebhookDrift()
 	d.resources()
 	d.binaries()
 	return d.report
@@ -453,4 +454,45 @@ func (d *doctor) hermesScriptsDrift() {
 		parts = append(parts, "missing: "+strings.Join(missing, ", "))
 	}
 	d.add("hermes.scripts.drift", Warn, "Installed Hermes scripts differ from the repo ("+strings.Join(parts, "; ")+").", "Re-run ./install.sh <profile> (or ./azimuth setup --install).")
+}
+
+// hermesWebhookDrift compares the dlmm-signal prompt in <profile>/webhook_subscriptions.json
+// (what install.sh writes) with the one in $HERMES_HOME/webhook_subscriptions.json (default
+// ~/.hermes), which is the file the gateway actually serves. A stale root prompt kept the agent on
+// an old STEP 5 after the repo was fixed. Skips silently when either file or entry is absent; never
+// prints the prompt.
+func (d *doctor) hermesWebhookDrift() {
+	root := os.Getenv("HERMES_HOME")
+	if root == "" {
+		root = filepath.Join(d.opts.HomeDir, ".hermes")
+	}
+	prompt := func(path string) (string, bool) {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			return "", false
+		}
+		var subs map[string]struct {
+			Prompt *string `json:"prompt"`
+		}
+		if json.Unmarshal(raw, &subs) != nil || subs["dlmm-signal"].Prompt == nil {
+			return "", false
+		}
+		return *subs["dlmm-signal"].Prompt, true
+	}
+	profilePath := filepath.Join(d.opts.ProfileDir, "webhook_subscriptions.json")
+	rootPath := filepath.Join(root, "webhook_subscriptions.json")
+	if filepath.Clean(profilePath) == filepath.Clean(rootPath) {
+		return
+	}
+	want, ok1 := prompt(profilePath)
+	got, ok2 := prompt(rootPath)
+	if !ok1 || !ok2 {
+		return
+	}
+	if want == got {
+		d.add("hermes.webhook.drift", Pass, "The gateway's dlmm-signal prompt matches the profile's.", "")
+		return
+	}
+	d.add("hermes.webhook.drift", Warn, "The gateway serves a different dlmm-signal prompt ("+rootPath+") than the profile's ("+profilePath+").",
+		"Re-run ./install.sh <profile>; it merges the prompt into both files and keeps secret/delivery/model.")
 }
