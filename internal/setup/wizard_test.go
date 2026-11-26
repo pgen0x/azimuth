@@ -271,7 +271,7 @@ func TestSetupInteractiveImportAndRefusedLive(t *testing.T) {
 	if !strings.HasPrefix(d["AI_HEALTH_CMD"], w.python+" ") || len(d["HERMES_WEBHOOK_SECRET"]) != 64 || d["HERMES_WEBHOOK_URL"] == "" {
 		t.Fatal("ai route not configured")
 	}
-	if d["REPORT_CMD"] != ReportCommand || p["DLMM_ALERT_TARGET"] != "telegram" {
+	if d["REPORT_CMD"] != ReportCommandFor(w.profile) || p["DLMM_ALERT_TARGET"] != "telegram" {
 		t.Fatal("telegram not configured")
 	}
 	if !strings.HasPrefix(readValues(t, filepath.Join(w.home, ".config/azimuth/dashboard-auth.env"))["DASHBOARD_PASSWORD_HASH"], "pbkdf2-sha256:") {

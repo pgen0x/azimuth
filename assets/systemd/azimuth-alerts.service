@@ -3,7 +3,9 @@
 # Delivery is off until a drop-in sets -send-cmd, e.g. (systemctl --user edit azimuth-alerts.service):
 #   [Service]
 #   ExecStart=
-#   ExecStart=%h/.local/bin/azimuth-dashboard alerts -profile __PROFILE__ -send-cmd "%h/.local/bin/hermes send -t telegram"
+#   ExecStart=%h/.local/bin/azimuth-dashboard alerts -profile __PROFILE__ -send-cmd "%h/.local/bin/__HERMES_SEND__ -t telegram"
+# The send command must name the Hermes profile (`hermes -p <profile> send`); install.sh renders it.
+# Bare `hermes send` reads the default Hermes home, which has no messaging target on a profile install.
 # Without it each new or cleared alert is only printed to this unit's journal.
 [Unit]
 Description=Azimuth operator alerts (new or cleared red flags, at most one per alert per 6h)
@@ -11,7 +13,8 @@ Description=Azimuth operator alerts (new or cleared red flags, at most one per a
 [Service]
 Type=oneshot
 ExecStart=%h/.local/bin/azimuth-dashboard alerts -profile __PROFILE__
-# Send and collector failures exit 0 by design; read them with journalctl --user -u azimuth-alerts.
+# Collector failures and a single send failure exit 0 (read them with journalctl --user -u azimuth-alerts);
+# 3 consecutive send failures exit 1, so a dead transport shows as a failed unit.
 TimeoutStartSec=120
 NoNewPrivileges=true
 UMask=0077

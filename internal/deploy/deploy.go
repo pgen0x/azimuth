@@ -16,7 +16,7 @@ import (
 )
 
 // Runner shells out to the picker pipeline and, optionally, a report-delivery
-// command (e.g. `hermes send -t telegram`, which reuses the gateway's platform
+// command (e.g. `hermes -p <profile> send -t telegram`, which reuses the gateway's platform
 // credentials without an LLM turn).
 type Runner struct {
 	deployCmd []string
