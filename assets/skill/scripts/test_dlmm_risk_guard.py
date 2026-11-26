@@ -188,13 +188,117 @@ class Guard(unittest.TestCase):
         self.assertFalse(self.run_guard(T0 + 100 + 12 * 3600 - 1)["paused"])
         self.assertTrue(self.run_guard(T0 + 100 + 12 * 3600)["paused"])
 
-    def test_basis_change_pauses(self):
+    def journal(self):
+        path = self.sd / "risk_guard.jsonl"
+        return [json.loads(l)["event"] for l in path.read_text().splitlines()] if path.exists() else []
+
+    def test_basis_change_carries_the_peak_over(self):
+        # Peak 1.0, then the NAV journal restarts (new coverage_since): flows restart at 0.5 already counted.
         self.add(row(T0, 1.0))
         self.init()
+        self.add(row(T0 + 600, 0.9, flow_sol=0.5, since=5_000))
+        s = self.run_guard(T0 + 600)
+        self.assertFalse(s["paused"])
+        self.assertAlmostEqual(s["peak"], 1.0)            # the old peak, restated at the new flows
+        self.assertAlmostEqual(s["dd"], 0.1)              # the loss since the peak still counts
+        self.assertIn("rebase", self.journal())
+        # And a real loss on the new basis still trips the (manual) drawdown pause.
+        self.add(row(T0 + 1200, 0.7, flow_sol=0.5, since=5_000))
+        self.assertEqual(self.run_guard(T0 + 1200)["pause_kind"], "drawdown")
+
+    def test_basis_change_without_a_measured_peak_is_an_evidence_pause(self):
+        self.add(row(T0, 1.0))
+        self.init()
+        state, _ = g._read_json(self.sd / "risk_hwm.json")
+        state.pop("last_peak_sol")                        # a mark written before peaks were kept
+        g._write_json(self.sd / "risk_hwm.json", state)
         self.add(row(T0 + 600, 1.0, since=5_000))
         s = self.run_guard(T0 + 600)
-        self.assertTrue(s["paused"])
+        self.assertEqual((s["paused"], s["pause_kind"]), (True, "evidence"))
         self.assertIn("basis changed", self.pause()["reason"])
+        self.init(now=T0 + 700)                           # the operator sets a mark on the new basis
+        s = self.run_guard(T0 + 800)
+        self.assertEqual((s["paused"], s["action"]), (False, "cleared"))
+
+    # -------------------------------------------------- auto-clear
+
+    def test_blind_pause_clears_itself_when_rows_return(self):
+        self.add(row(T0, 1.0))
+        self.init()
+        self.add(row(T0 + 60, 9.0, lp=None))
+        s = self.run_guard(T0 + 12 * 3600)
+        self.assertEqual((s["paused"], s["pause_kind"]), (True, "evidence"))
+        self.assertEqual(self.pause()["kind"], "evidence")
+        self.add(row(T0 + 12 * 3600 + 60, 0.95))
+        s = self.run_guard(T0 + 12 * 3600 + 120)
+        self.assertEqual((s["paused"], s["action"]), (False, "cleared"))
+        p = self.pause()
+        self.assertEqual((p["paused"], p["prior_kind"]), (False, "evidence"))
+        self.assertIn("blind", p["prior_reason"])
+        self.assertEqual(self.journal()[-1], "auto_clear")
+        self.assertIn("resumed new entries", self.alerts()[-1])
+
+    def test_blind_pause_that_returns_to_a_loss_becomes_a_drawdown_pause(self):
+        self.add(row(T0, 1.0))
+        self.init()
+        self.add(row(T0 + 60, 9.0, lp=None))
+        self.run_guard(T0 + 12 * 3600)
+        self.add(row(T0 + 12 * 3600 + 60, 0.6))
+        s = self.run_guard(T0 + 12 * 3600 + 120)
+        self.assertEqual((s["paused"], s["action"], s["pause_kind"]), (True, "upgraded", "drawdown"))
+        self.assertEqual(self.pause()["kind"], "drawdown")
+        self.assertIn("pause_upgrade", self.journal())
+        self.add(row(T0 + 13 * 3600, 1.0))                # recovery never clears a drawdown pause
+        self.assertTrue(self.run_guard(T0 + 13 * 3600 + 60)["paused"])
+
+    def test_no_mark_and_corrupt_mark_pauses_clear_after_init(self):
+        self.add(row(T0, 1.0))
+        self.assertEqual(self.run_guard(T0 + 1)["pause_kind"], "evidence")
+        self.init(now=T0 + 2)
+        self.assertEqual(self.run_guard(T0 + 3)["action"], "cleared")
+        (self.sd / "risk_hwm.json").write_text("{broken")
+        self.assertEqual(self.run_guard(T0 + 4)["pause_kind"], "evidence")
+        self.init(now=T0 + 5)
+        self.assertFalse(self.run_guard(T0 + 6)["paused"])
+
+    def test_drawdown_and_legacy_pauses_never_clear_themselves(self):
+        self.add(row(T0, 1.0))
+        self.init()
+        self.add(row(T0 + 600, 0.7))
+        self.assertEqual(self.run_guard(T0 + 600)["pause_kind"], "drawdown")
+        self.add(row(T0 + 1200, 1.0))
+        self.assertTrue(self.run_guard(T0 + 1200)["paused"])
+        # A pause written before kinds existed is treated as a drawdown pause.
+        g._write_json(self.sd / "risk_pause.json", {"paused": True, "at": T0, "reason": "old"})
+        s = self.run_guard(T0 + 1300)
+        self.assertEqual((s["paused"], s["pause_kind"]), (True, "drawdown"))
+
+    def test_corrupt_pause_file_is_replaced_by_a_clean_evaluation(self):
+        self.add(row(T0, 1.0))
+        self.init()
+        (self.sd / "risk_pause.json").write_text("[]")
+        s = self.run_guard(T0 + 60)
+        self.assertEqual((s["paused"], s["action"]), (False, "cleared"))
+        self.assertEqual(self.pause()["paused"], False)
+
+    def test_realert_every_six_hours_while_paused(self):
+        self.add(row(T0, 1.0))
+        self.init()
+        def tick(t):  # a fresh NAV row each run, so nothing here is blind
+            self.add(row(t - 1, 0.6))
+            return self.run_guard(t)
+        tick(T0 + 60)
+        self.assertEqual(len(self.alerts()), 1)
+        tick(T0 + 60 + 6 * 3600 - 1)
+        self.assertEqual(len(self.alerts()), 1)
+        tick(T0 + 60 + 6 * 3600)
+        self.assertEqual(len(self.alerts()), 2)
+        self.assertIn("STILL paused (drawdown, 6h)", self.alerts()[-1])
+        tick(T0 + 60 + 6 * 3600 + 600)
+        self.assertEqual(len(self.alerts()), 2)
+        tick(T0 + 60 + 12 * 3600)
+        self.assertEqual(len(self.alerts()), 3)
+        self.assertEqual(self.journal().count("pause_realert"), 2)
 
     # -------------------------------------------------- resume, files
 

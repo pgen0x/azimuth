@@ -1092,8 +1092,11 @@ def risk_guard(env=None):
     else:
         paused = bool(pause and pause['paused'])
         reason = (pause or {}).get('reason') if paused else None
+    kind = None
+    if paused:  # a pause with no kind predates kinds and is manual, like a drawdown pause
+        kind = pause.get('kind') if isinstance(pause, dict) and pause.get('kind') in ('drawdown','evidence') else 'drawdown'
     keep = lambda v: v if type(v) in (int, float) and math.isfinite(v) else None
-    return {'state':'paused' if paused else 'allowed', 'reason':reason, 'dd':keep(status.get('dd')),
+    return {'state':'paused' if paused else 'allowed', 'kind':kind, 'reason':reason, 'dd':keep(status.get('dd')),
             'peak_sol':keep(status.get('peak')), 'equity_sol':keep(status.get('equity')),
             'max_drawdown':keep(status.get('max_drawdown')), 'evaluated_at':keep(status.get('ts')),
             'status_error':status_err}
