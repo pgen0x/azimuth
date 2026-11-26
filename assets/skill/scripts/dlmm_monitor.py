@@ -1658,9 +1658,15 @@ def _settlement_dust_value(pos, mint):
         f"node {EXECUTOR_PATH} settlement-dust-value {shlex.quote(pos)} {shlex.quote(mint)}", timeout=30)
     if value and value.get("success") and isinstance(value.get("value_lamports"), str):
         return {"remaining_raw": value.get("raw"), "remaining_value_lamports": value["value_lamports"],
-                "valued_at": value.get("valued_at")}
+                "value_verdict": "priced", "valued_at": value.get("valued_at")}
+    # A definite "no route" quote: nothing can recover this inventory, so the
+    # executor's entry gate treats it like a deferred swap_no_route while the
+    # verdict is fresh. It is not a value: remaining_value_lamports stays null.
+    if value and value.get("success") and value.get("value_verdict") == "no_route":
+        return {"remaining_raw": value.get("raw"), "remaining_value_lamports": None,
+                "value_verdict": "no_route", "valued_at": value.get("valued_at")}
     print(f"⚠️ Settlement dust value unavailable for {pos}: {err or (value or {}).get('verdict')}")
-    return {"remaining_value_lamports": None, "valued_at": None}
+    return {"remaining_value_lamports": None, "value_verdict": None, "valued_at": None}
 
 
 def settle_pending():
@@ -1730,7 +1736,8 @@ def settle_pending():
                 item.update(state="deferred", reason=reason, **_settlement_dust_value(pos, mint))
                 _write_settlement(path, item)
                 print(f"⚠️ Settlement deferred {pos}: {reason}, remaining value "
-                      f"{item.get('remaining_value_lamports')} lamports (entries unblock only if it is small)")
+                      f"{item.get('remaining_value_lamports')} lamports, quote {item.get('value_verdict')} "
+                      "(entries unblock only if it is small or has no route)")
             return
         if bal["amount_raw"] != "0":
             item["state"] = "pending"  # a swap is about to be sent

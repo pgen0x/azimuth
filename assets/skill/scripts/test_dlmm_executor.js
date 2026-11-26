@@ -1039,6 +1039,55 @@ vm.runInNewContext("const productionExitTransport=confirmExitTransaction;confirm
   assert.equal(settlementBlocksEntry({...unproven, remaining_value_lamports:66000}, nowSec, 100000000), true);
   assert.equal(settlementBlocksEntry({...unproven, valued_at:nowSec + 10}, nowSec, 100000000), true);
   assert.equal(settlementBlocksEntry(null, nowSec, 100000000), true);
+  // A dead token's remainder: a fresh "no route" quote unblocks like swap_no_route,
+  // whatever the size; every other unknown keeps blocking, and freshness rules hold.
+  const noRoute = {...unproven, remaining_value_lamports:null, value_verdict:"no_route", remaining_raw:"141"};
+  assert.equal(settlementBlocksEntry(noRoute, nowSec, 100000000), false);
+  assert.equal(settlementBlocksEntry({...noRoute, remaining_raw:"9".repeat(30)}, nowSec, 100000000), false);
+  for (const [blocked, why] of [
+    [{...noRoute, value_verdict:"unavailable"}, "timeout / quote error"], [{...noRoute, value_verdict:"rate_limited"}, "429"],
+    [{...noRoute, value_verdict:null}, "unknown"], [{...noRoute, value_verdict:"No_Route"}, "malformed verdict"],
+    [{...noRoute, valued_at:nowSec - 2*3600 - 1}, "stale"], [{...noRoute, valued_at:nowSec + 10}, "future"],
+    [{...noRoute, valued_at:undefined}, "unvalued"], [{...noRoute, valued_at:"1"}, "malformed time"],
+    [{...noRoute, state:"pending"}, "a swap in flight"], [{...noRoute, reason:"swap_quote_threshold_unavailable"}, "other reason"]]) {
+    assert.equal(settlementBlocksEntry(blocked, nowSec, 100000000), true, why);
+  }
+  assert.equal(settlementBlocksEntry({...noRoute, valued_at:nowSec - 2*3600}, nowSec, 100000000), false); // boundary
+  // End to end: the deploy passes the settlement gate (and stops at the held lock).
+  fs.writeFileSync(path.join(settlementDir, "position.json"), JSON.stringify(noRoute));
+  { const unlock = await acquireDeployLock(wallet.publicKey.toString());
+    try { await assert.rejects(deploy(), /BUSY/); } finally { await unlock(); } }
+  fs.writeFileSync(path.join(settlementDir, "position.json"), JSON.stringify({...noRoute, value_verdict:"unavailable"}));
+  await assert.rejects(deploy(), /awaiting verified SOL settlement/);
+  fs.rmSync(path.join(settlementDir, "position.json"));
+  // settlementDustValue reports "no_route" only for the quote API's own no-route
+  // answer; a 429, a server error, a timeout or a malformed quote stay unknown.
+  { const { settlementDustValue } = sandbox.module.exports;
+    const pos = "P".repeat(32), realFetch = sandbox.fetch, realAccounts = Connection.prototype.getParsedTokenAccountsByOwner;
+    fs.writeFileSync(path.join(settlementDir, `${pos}.json`), JSON.stringify({position:pos, mint:"DUSTMINT"}));
+    Connection.prototype.getParsedTokenAccountsByOwner = async () => ({value:[{account:{data:{parsed:{info:{tokenAmount:{amount:"141"}}}}}}]});
+    const answer = (status, body) => sandbox.fetch = async () => ({ok:status === 200, status,
+      text: async () => JSON.stringify(body), json: async () => body});
+    for (const code of ["COULD_NOT_FIND_ANY_ROUTE", "NO_ROUTES_FOUND", "TOKEN_NOT_TRADABLE"]) {
+      answer(400, {errorCode:code});
+      const r = await settlementDustValue(pos, "DUSTMINT");
+      assert.deepEqual([r.success, r.value_verdict, r.raw, r.value_lamports], [true, "no_route", "141", undefined]);
+      assert.ok(Number.isFinite(r.valued_at));
+    }
+    for (const [status, body, verdict] of [[429, {}, "rate_limited"], [400, {errorCode:"SOMETHING_ELSE"}, "unavailable"],
+                                           [500, {errorCode:"COULD_NOT_FIND_ANY_ROUTE"}, "unavailable"],
+                                           [200, {inputMint:"DUSTMINT"}, "unavailable"]]) {
+      answer(status, body);
+      const r = await settlementDustValue(pos, "DUSTMINT");
+      assert.deepEqual([r.success, r.verdict, r.value_verdict, r.valued_at], [false, verdict, undefined, undefined]);
+    }
+    sandbox.fetch = async () => { throw new Error("timeout"); };
+    assert.deepEqual(JSON.parse(JSON.stringify(await settlementDustValue(pos, "DUSTMINT"))), {success:false, raw:"141", verdict:"unavailable"});
+    answer(200, {inputMint:"DUSTMINT", outputMint:"So11111111111111111111111111111111111111112", inAmount:"141", outAmount:"7"});
+    const priced = await settlementDustValue(pos, "DUSTMINT");
+    assert.deepEqual([priced.success, priced.value_lamports, priced.value_verdict], [true, "7", "priced"]);
+    sandbox.fetch = realFetch; Connection.prototype.getParsedTokenAccountsByOwner = realAccounts;
+    fs.rmSync(path.join(settlementDir, `${pos}.json`)); }
   fs.writeFileSync(path.join(settlementDir, "position.json"), JSON.stringify({state:"deferred",reason:"swap_quote_threshold_unavailable"}));
   await assert.rejects(deploy(), /awaiting verified SOL settlement/);
   fs.rmSync(settlementDir, { recursive: true });

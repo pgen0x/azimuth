@@ -370,6 +370,21 @@ def main():
         item = json.loads(path.read_text())
         assert seen == ["deferred", "deferred"] and item["state"] == "deferred"
         assert item["remaining_value_lamports"] is None  # an unpriced remainder keeps the gate closed
+        assert item["value_verdict"] is None and item["valued_at"] is None
+        # A definite "no route" quote is recorded as a verdict with its time, never as a value of 0.
+        path.write_text(json.dumps(dict(item, last_attempt=0)))
+        no_route = ({"success": True, "raw": "141", "value_verdict": "no_route", "valued_at": 456.0}, None)
+        with patch.object(monitor, "run_command_json", side_effect=[unproven, no_route]):
+            monitor.settle_pending()
+        item = json.loads(path.read_text())
+        assert (item["state"], item["remaining_raw"], item["remaining_value_lamports"], item["value_verdict"], item["valued_at"]) == \
+            ("deferred", "141", None, "no_route", 456.0)
+        # The next unknown answer clears the verdict again (the gate closes).
+        path.write_text(json.dumps(dict(item, last_attempt=0)))
+        with patch.object(monitor, "run_command_json", side_effect=[unproven, ({"success": False, "verdict": "rate_limited"}, None)]):
+            monitor.settle_pending()
+        item = json.loads(path.read_text())
+        assert (item["value_verdict"], item["valued_at"], item["remaining_value_lamports"]) == (None, None, None)
         # A deferred retry that reaches a swap is pending only while the swap runs;
         # an executor refusal before signing restores the earlier deferral.
         path.write_text(json.dumps(dict(item, last_attempt=0)))

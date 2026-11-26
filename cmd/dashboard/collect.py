@@ -1465,7 +1465,9 @@ def settlement_blocks_entry(item, now, minimum_entry_lamports):
     if item.get('reason') in ('swap_no_route','net_recovery_below_floor'): return False
     if item.get('reason')!='settlement_inventory_unproven': return True
     value=item.get('remaining_value_lamports'); at=item.get('valued_at')
-    if not isinstance(value,str) or not value.isdigit() or not number(at) or at>now or now-at>SETTLEMENT_UNPROVEN_VALUE_MAX_AGE_S: return True
+    fresh=number(at) and at<=now and now-at<=SETTLEMENT_UNPROVEN_VALUE_MAX_AGE_S
+    if item.get('value_verdict')=='no_route': return not fresh
+    if not isinstance(value,str) or not value.isdigit() or not fresh: return True
     return int(value)*10000>minimum_entry_lamports*SETTLEMENT_UNPROVEN_VALUE_FLOOR_BPS
 
 def _minimum_entry_lamports(memory):
@@ -1760,7 +1762,8 @@ def brief_markers(memory, now):
                 if settlement_blocks_entry(q,now,minimum) and now-born>SETTLEMENT_BLOCK_ALERT_S:
                     q=q if isinstance(q,dict) else {}
                     blocking.append({'position':f.stem,'age_s':round(now-born),'state':q.get('state'),'reason':q.get('reason'),
-                                     'remaining_value_lamports':q.get('remaining_value_lamports')})
+                                     'remaining_value_lamports':q.get('remaining_value_lamports'),
+                                     'value_verdict':q.get('value_verdict')})
             age=now-born
             if age>MARKER_STALE_S:
                 c=stale.setdefault(name,{'count':0,'oldest_s':0})
