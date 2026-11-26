@@ -1516,6 +1516,10 @@ class RiskGuardPanelTests(unittest.TestCase):
                 self.assertEqual(c.risk_guard(env)['state'],'paused')  # the executor refuses too
             os.unlink(Path(d,'risk_status.json'))
             Path(d,'risk_pause.json').write_text(json.dumps({'paused':True,'reason':'blind'}))
-            self.assertEqual(c.risk_guard(env)['state'],'paused')
+            self.assertEqual((c.risk_guard(env)['state'],c.risk_guard(env)['kind']),('paused','drawdown'))  # no kind: manual
+            Path(d,'risk_pause.json').write_text(json.dumps({'paused':True,'kind':'evidence','reason':'blind 12.0h'}))
+            self.assertEqual(c.risk_guard(env)['kind'],'evidence')
+            Path(d,'risk_pause.json').write_text(json.dumps({'paused':False}))
+            self.assertIsNone(c.risk_guard(env)['kind'])
 
 if __name__=='__main__': unittest.main()

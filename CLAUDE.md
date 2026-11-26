@@ -624,8 +624,12 @@ moves are never filtered, because a rug is a real loss. `--report` is cache-only
   stores `hwm_adj = max(E - F)` with `F` the cumulative `external_flow_lamports`,
   and compares `E` with `hwm_adj + F`. A deposit moves both, so it neither trips
   the guard nor raises the mark; the literal `1 - adj/hwm` is wrong whenever `F`
-  is non-zero. A changed NAV basis (wallet or `coverage_since`) pauses, because
-  `F` restarted. Resume is manual and resets the mark.
+  is non-zero. A changed NAV basis (wallet or `coverage_since`) restarts `F`, so
+  the guard carries the last measured peak over to the new flows. Pauses have a
+  `kind`: `drawdown` (a measured loss) is manual-only and `--resume` resets the
+  mark; `evidence` (blind 12h, no or corrupt mark, unreadable pause file) clears
+  itself on the first clean evaluation. Blind is not a loss: NAV goes blind
+  whenever a dust token has no quote route. Paused re-alerts every 6h.
 - **A one-sided rung settles in quote.** `--no-swap-out` exists in both executors
   but the monitor never passes it: the re-list that kept filled bags was retired
   2026-08-13 (see the note by `ASK_BAG_STOP_PCT`). Closes that ended in quote

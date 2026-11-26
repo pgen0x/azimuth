@@ -26,21 +26,29 @@ Flow-neutral high-water mark
     A deposit raises the peak and the equity alike, so it neither trips the guard
     nor inflates the mark; a loss after it is measured against the larger capital.
 
-Pause (fail closed) when any of:
-    dd >= RISK_MAX_DRAWDOWN (env, default 0.30; outside (0, 1) keeps 0.30);
-    no acceptable row for every profile for 12h (an alert at 2h);
-    a profile's wallet or coverage_since differs from the one the mark was set on
-    (the flow sum restarted, so adj is no longer comparable);
-    no high-water mark yet (run --init-hwm at deploy), or an unreadable mark file.
-    Each pause and blind episode alerts once, through the profile's alert outbox
-    (dlmm_alerts.py; flushed by the monitor loop with `hermes -p <profile> send`).
+Pauses (fail closed) come in two kinds, recorded as `kind` in the pause file:
+    drawdown  dd >= RISK_MAX_DRAWDOWN (env, default 0.30; outside (0, 1) keeps 0.30).
+              A measured loss: cleared ONLY by `--resume --note "..."`, which journals who
+              and why and resets the mark to the current adj equity.
+    evidence  the guard cannot measure: no acceptable row for every profile for 12h (an
+              alert at 2h); no high-water mark yet, or an unreadable mark file; a peak that
+              is not positive; a NAV basis change with no measured peak to carry over; an
+              unreadable pause file. Not a loss, so it CLEARS ITSELF on the first clean
+              evaluation (acceptable rows, a mark, drawdown below the limit), journaled as
+              auto_clear. If that evaluation measures a loss instead, the pause becomes a
+              drawdown pause.
+    A pause file without a kind (written before kinds existed) is treated as drawdown.
+    Each pause and each clear alerts once, and a pause re-alerts every 6h while it holds,
+    through the profile's alert outbox (dlmm_alerts.py; flushed by the monitor loop with `hermes -p <profile> send`).
 
-Resume is manual only: `--resume --note "..."` journals who and why, clears the
-pause and resets the mark to the current adj equity (otherwise it re-trips at once).
+NAV basis change: when a profile's wallet or coverage_since differs from the one the mark
+was set on, the flow sum restarted and adj is no longer comparable. The guard restates the
+last measured peak equity at the new flows (journaled as rebase) and keeps going, so the
+loss since that peak still counts. Without a measured peak it is an evidence pause.
 
 Files (dir: AZIMUTH_RISK_STATE_DIR, default ~/.local/state/azimuth):
     risk_hwm.json     the mark, its basis per profile, alert bookkeeping
-    risk_pause.json   {paused, at, dd, hwm, equity, reason}; path overridable with
+    risk_pause.json   {paused, kind, at, dd, hwm, equity, reason}; path overridable with
                       AZIMUTH_RISK_PAUSE_FILE, which the executor reads too
     risk_status.json  the last evaluation, for the dashboard
     risk_guard.jsonl  journal of pauses, resumes, inits and alerts
@@ -68,6 +76,7 @@ DEFAULT_MAX_DD = 0.30
 BLIND_ALERT_S = 2 * 3600
 BLIND_PAUSE_S = 12 * 3600
 DD_EPSILON = 1e-9
+REALERT_S = 6 * 3600
 TAIL_BYTES = 4 << 20
 FUTURE_SKEW_S = 300
 
@@ -231,18 +240,38 @@ def _alert(profiles, text, env=None):
         return False
 
 
-def _pause(sd, pp, profiles, now, reason, obs=None, peak=None, dd=None, env=None):
+def _pause(sd, pp, profiles, now, reason, kind, obs=None, peak=None, dd=None, env=None):
+    """Write the pause, or upgrade an evidence pause to a drawdown one. Returns the action or None.
+
+    kind "drawdown" is a real loss and is cleared only by --resume. kind "evidence" is a gap
+    in what the guard can see (blind, no or corrupt mark, unmeasurable peak, corrupt pause file)
+    and clears itself once a full evaluation is clean. A pause without a kind (written before kinds
+    existed) is treated as drawdown: manual."""
     current, _ = _read_json(pp)
     if current and current.get("paused") is True:
-        return False  # keep the first pause record; it already alerted
-    record = {"paused": True, "at": int(now), "reason": reason, "dd": dd, "hwm": peak,
+        held = current.get("kind") if current.get("kind") in ("drawdown", "evidence") else "drawdown"
+        if not (held == "evidence" and kind == "drawdown"):
+            return None  # keep the first record; it already alerted
+    record = {"paused": True, "kind": kind, "at": int(now), "reason": reason, "dd": dd, "hwm": peak,
               "equity": (obs or {}).get("equity")}
     _write_json(pp, record)
-    _journal(sd, {"event": "pause", **record})
+    upgraded = bool(current and current.get("paused") is True)
+    _journal(sd, {"event": "pause_upgrade" if upgraded else "pause", **record})
     dd_txt = f"{dd:.1%}" if dd is not None else "n/a"
-    _alert(profiles, f"🛑 Azimuth risk guard PAUSED new entries: {reason} (drawdown {dd_txt}). "
-                     "Exits keep running. Resume by hand: dlmm_risk_guard.py --resume --note \"...\"", env)
-    return True
+    how = ("Resume by hand: dlmm_risk_guard.py --resume --note \"...\"" if kind == "drawdown"
+           else "This clears itself once the guard can measure equity again.")
+    _alert(profiles, f"🛑 Azimuth risk guard PAUSED new entries ({kind}): {reason} (drawdown {dd_txt}). "
+                     f"Exits keep running. {how}", env)
+    return "upgraded" if upgraded else "paused"
+
+
+def _clear(sd, pp, profiles, now, prior, why, env=None):
+    record = {"paused": False, "cleared_at": int(now), "cleared": why,
+              "prior_reason": (prior or {}).get("reason"), "prior_kind": (prior or {}).get("kind")}
+    _write_json(pp, record)
+    _journal(sd, {"event": "auto_clear", **record})
+    _alert(profiles, f"✅ Azimuth risk guard resumed new entries: {why} "
+                     f"(was: {record['prior_reason'] or 'unreadable pause file'}).", env)
 
 
 def evaluate(profiles, now=None, env=None, write=True):
@@ -258,7 +287,8 @@ def evaluate(profiles, now=None, env=None, write=True):
               "paused": bool(pause and pause.get("paused") is True) or pause_err is not None,
               "pause_reason": (pause or {}).get("reason") if (pause or {}).get("paused") is True
               else (f"pause file {pause_err}" if pause_err else None),
-              "blind_s": None, "row_age_s": None, "missing_profiles": obs["missing"], "action": None}
+              "pause_kind": None, "blind_s": None, "row_age_s": None, "missing_profiles": obs["missing"],
+              "action": None}
 
     # Blind: no acceptable row for some profile, or the newest one is old.
     blind_since = obs.get("oldest_ts")
@@ -269,31 +299,46 @@ def evaluate(profiles, now=None, env=None, write=True):
     if "oldest_ts" in obs:
         status["row_age_s"] = now - obs["oldest_ts"]
 
-    reasons = []
+    # Evidence gaps (the guard cannot measure) versus a measured loss. Only the second is manual.
+    evidence, loss = [], []
     if state_err:
-        reasons.append(f"risk_hwm.json {state_err}")
+        evidence.append(f"risk_hwm.json {state_err}")
     elif state is None or _num(state.get("hwm_adj")) is None:
-        reasons.append("no high-water mark (run --init-hwm)")
+        evidence.append("no high-water mark (run --init-hwm)")
     if blind_s >= BLIND_PAUSE_S:
-        reasons.append(f"blind {blind_s / 3600:.1f}h: no acceptable NAV row for every profile")
+        evidence.append(f"blind {blind_s / 3600:.1f}h: no acceptable NAV row for every profile")
 
-    new_hwm = None
+    new_hwm, rebase, measured = None, None, False
     if state and _num(state.get("hwm_adj")) is not None and "adj" in obs:
         basis = state.get("basis") or {}
         changed = {p for p, v in obs["profiles"].items() if basis.get(p) != v["basis"]}
         changed |= {p for p in basis if p not in obs["profiles"]}
+        hwm_adj = state["hwm_adj"]
         if changed:
-            reasons.append("NAV basis changed (wallet or coverage_since) for " + ", ".join(sorted(changed)))
-        else:
-            hwm_adj = max(state["hwm_adj"], obs["adj"])
+            # The flow sum restarted (new wallet or NAV journal), so the stored mark is not comparable.
+            # Restate the last measured peak at today's flows; without one the gap stays open.
+            last_peak = _num(state.get("last_peak_sol"))
+            if last_peak is None:
+                evidence.append("NAV basis changed (wallet or coverage_since) for " + ", ".join(sorted(changed))
+                                + " and no measured peak to carry over (run --init-hwm)")
+                hwm_adj = None
+            else:
+                hwm_adj = last_peak - obs["flow"]
+                rebase = {"changed": sorted(changed), "peak_sol": last_peak,
+                          "basis": {p: v["basis"] for p, v in obs["profiles"].items()}}
+        if hwm_adj is not None:
+            hwm_adj = max(hwm_adj, obs["adj"])
             peak, dd = drawdown(hwm_adj, obs)
             status.update(peak=peak, dd=dd)
             if dd is None:
-                reasons.append("peak equity not positive; drawdown unmeasurable")
-            elif dd >= limit - DD_EPSILON:
-                reasons.append(f"drawdown {dd:.1%} >= {limit:.0%}")
-            if hwm_adj > state["hwm_adj"]:
+                evidence.append("peak equity not positive; drawdown unmeasurable")
+            else:
+                measured = True
+                if dd >= limit - DD_EPSILON:
+                    loss.append(f"drawdown {dd:.1%} >= {limit:.0%}")
+            if rebase or hwm_adj > state["hwm_adj"]:
                 new_hwm = hwm_adj
+    reasons = loss + evidence
 
     if not write:
         if reasons and not status["paused"]:
@@ -304,6 +349,13 @@ def evaluate(profiles, now=None, env=None, write=True):
         state = dict(state or {})
         if new_hwm is not None:
             state.update(hwm_adj=new_hwm, hwm_set_at=now)
+        if rebase:
+            state["basis"] = rebase["basis"]
+            _journal(sd, {"event": "rebase", "at": now, "profiles": rebase["changed"], "peak_sol": rebase["peak_sol"]})
+            _alert(profiles, "ℹ️ Azimuth risk guard: NAV basis changed (wallet or NAV journal); the high-water mark "
+                             "was carried over from the last measured peak.", env)
+        if measured and status["peak"] is not None:
+            state["last_peak_sol"] = status["peak"]
         alerts = state.setdefault("alerted", {})
         if BLIND_ALERT_S <= blind_s < BLIND_PAUSE_S and not alerts.get("blind"):
             if _alert(profiles, f"⚠️ Azimuth risk guard is blind for {blind_s / 3600:.1f}h (no acceptable NAV "
@@ -313,12 +365,36 @@ def evaluate(profiles, now=None, env=None, write=True):
         if blind_s < BLIND_ALERT_S:
             alerts.pop("blind", None)
         state["blind_since"] = None if "oldest_ts" in obs else blind_since
-        if reasons:
+        if pause_err and not reasons:
+            # A torn or corrupt pause file is itself an evidence gap; a clean evaluation replaces it.
+            _clear(sd, pp, profiles, now, None, "pause file was unreadable; equity measured below the limit", env)
+            status.update(paused=False, pause_reason=None, action="cleared")
+        elif reasons:
+            kind = "drawdown" if loss else "evidence"
             reason = "; ".join(reasons)
-            status["action"] = "paused" if _pause(sd, pp, profiles, now, reason, obs,
-                                                  status["peak"], status["dd"], env) else "still paused"
+            action = _pause(sd, pp, profiles, now, reason, kind, obs, status["peak"], status["dd"], env)
+            status["action"] = action or "still paused"
+            if action:
+                alerts["pause"] = now
             status["paused"] = True
-            status["pause_reason"] = status["pause_reason"] or reason
+            status["pause_reason"] = reason if action else (status["pause_reason"] or reason)
+        elif pause and pause.get("paused") is True and pause.get("kind") == "evidence":
+            _clear(sd, pp, profiles, now, pause, "equity is measurable again and below the limit", env)
+            status.update(paused=False, pause_reason=None, action="cleared")
+        current, _ = _read_json(pp)
+        if current and current.get("paused") is True:
+            status["pause_kind"] = current.get("kind") if current.get("kind") in ("drawdown", "evidence") else "drawdown"
+            last = alerts.get("pause") or current.get("at") or now
+            if now - last >= REALERT_S:
+                hours = (now - (current.get("at") or now)) / 3600
+                if _alert(profiles, f"🛑 Azimuth risk guard: new entries STILL paused ({status['pause_kind']}, "
+                                    f"{hours:.0f}h): {current.get('reason')}. Exits keep running.", env):
+                    alerts["pause"] = now
+                    _journal(sd, {"event": "pause_realert", "at": now})
+            elif not alerts.get("pause"):
+                alerts["pause"] = last
+        else:
+            alerts.pop("pause", None)
         if not state_err:
             _write_json(sd / "risk_hwm.json", state)
         _write_json(sd / "risk_status.json", status)
@@ -346,6 +422,7 @@ def set_mark(profiles, value, now=None, env=None, resume_note=None):
         hwm_adj = equity - obs["flow"]  # the given equity, stated at today's flows
     with _locked(sd):
         state = {"hwm_adj": hwm_adj, "hwm_set_at": now, "alerted": {}, "blind_since": None,
+                 "last_peak_sol": hwm_adj + obs["flow"],
                  "basis": {p: v["basis"] for p, v in obs["profiles"].items()}}
         _write_json(sd / "risk_hwm.json", state)
         event = {"event": "resume" if resume_note is not None else "init_hwm", "at": now,

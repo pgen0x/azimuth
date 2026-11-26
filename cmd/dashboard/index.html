@@ -490,7 +490,7 @@ function riskLine(r){
   if(!r||r.state==='not installed'||r.status==='unavailable') return `<p class="note">Risk guard: ${esc((r&&(r.basis||r.collection_error))||'no state')}</p>`;
   const pct=v=>v==null?'n/a':(v*100).toFixed(1)+'%';
   const parts=[`drawdown ${pct(r.dd)} of max ${pct(r.max_drawdown)}`,`peak ${num(r.peak_sol)} SOL`,`checked ${age(r.evaluated_at)}`];
-  return `<p class="note"><span class="badge ${r.state==='paused'?'bad':'ok'}">${r.state==='paused'?'entries paused':'entries allowed'}</span> Risk guard: ${esc(parts.join(' · '))}${r.reason?' · '+esc(r.reason):''}</p>`;
+  return `<p class="note"><span class="badge ${r.state==='paused'?'bad':'ok'}">${r.state==='paused'?(r.kind==='evidence'?'entries paused · clears itself':'entries paused · manual resume'):'entries allowed'}</span> Risk guard: ${esc(parts.join(' · '))}${r.reason?' · '+esc(r.reason):''}</p>`;
 }
 if(!rh&&tab==='overview') {const [o,gr]=await Promise.all([api('overview'),api('growth?'+tzq).catch(e=>({error:e.message}))]);const n=o.nav||{};
 html=freshness(o)+(gr&&gr.tz?zoneNote(gr):'')+riskLine(o.risk)+growthPanels(gr||{});
