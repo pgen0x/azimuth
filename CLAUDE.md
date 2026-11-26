@@ -497,7 +497,10 @@ moves are never filtered, because a rug is a real loss. `--report` is cache-only
   skill (Python pipeline/monitor + JS executor); `assets/hermes` = the webhook
   subscription (agent decision prompt). Hermes scripts are copied, not
   symlinked: re-run `install.sh` after merging changes under `assets/hermes/`
-  (`azimuth doctor` warns via `hermes.scripts.drift`).
+  (`azimuth doctor` warns via `hermes.scripts.drift`). The gateway serves the
+  ROOT `$HERMES_HOME/webhook_subscriptions.json`, not the profile copy, so
+  install.sh merges the `dlmm-signal` prompt into both (operator-set fields
+  kept); `hermes.webhook.drift` warns when they differ.
 
 ## Conventions that matter
 

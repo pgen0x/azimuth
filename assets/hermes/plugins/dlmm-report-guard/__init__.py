@@ -14,7 +14,10 @@ from collections import OrderedDict
 from pathlib import Path
 
 MARKER = "DLMM_EXECUTION_RECEIPT="
-CLAIM = re.compile(r"\bDEPLOYED\b|\bDRY RUN DEPLOY\b|solscan\.io/tx/", re.I)
+# Positive claims only, case-sensitive: the prompt's deploy formats are "✅ DEPLOYED" and "🧪 DRY RUN",
+# and a real report links a transaction. Reject cards say "nothing deployed" / "not deployed" /
+# "no DEPLOYED header", which the old case-insensitive word match withheld as fabricated deploys.
+CLAIM = re.compile(r"(?:✅|🚀)\s*DEPLOYED\b|🧪\s*DRY RUN\b|solscan\.io/tx/[1-9A-HJ-NP-Za-km-z]{32,}")
 _home = None
 _lock = threading.Lock()
 # ponytail: retain 256 turns; use durable receipts if gateway recovery is required.
