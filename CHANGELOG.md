@@ -5,6 +5,20 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [2.28.0](https://github.com/pgen0x/azimuth/compare/v2.27.0...v2.28.0) (2026-11-26)
+
+
+### Features
+
+* **risk:** evidence pauses clear themselves; drawdown pauses stay manual ([#348](https://github.com/pgen0x/azimuth/issues/348)) ([e2808bb](https://github.com/pgen0x/azimuth/commit/e2808bb322caf3a385ac534671ea8ca85f50b6f7))
+
+
+### Bug Fixes
+
+* **ai-route:** run gates on the delivered record and stop withholding reject cards ([#350](https://github.com/pgen0x/azimuth/issues/350)) ([956ba03](https://github.com/pgen0x/azimuth/commit/956ba031ada6334aaabd3beee1dcf830aa38b881))
+* **alerts:** name the Hermes profile on every send and stop silent failures ([#346](https://github.com/pgen0x/azimuth/issues/346)) ([e910dd7](https://github.com/pgen0x/azimuth/commit/e910dd7e7e1f93c32222612f5ad0e529f5a270b8))
+* **pipeline:** require material losses for the pool-cash two-loss streak ([#349](https://github.com/pgen0x/azimuth/issues/349)) ([0532c41](https://github.com/pgen0x/azimuth/commit/0532c41703aa526ce973af755e2ae6b90c2e8dc3))
+
 ## [2.27.0](https://github.com/pgen0x/azimuth/compare/v2.26.0...v2.27.0) (2026-11-26)
 
 
