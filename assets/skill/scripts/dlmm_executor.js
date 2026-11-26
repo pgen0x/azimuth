@@ -895,6 +895,13 @@ async function resolveEntryActiveBin(pool, maxDrift = ENTRY_MAX_BIN_DRIFT) {
 // fresh (<= 2h, re-priced on the monitor's 15m retry) and small (<= 1% of the
 // minimum ticket). Unpriced or larger unproven inventory keeps blocking; the
 // dashboard raises entries_blocked_by_settlement for it.
+// Since 2026-11-26 the same proof-incomplete marker also stops blocking when a
+// fresh (<= 2h) full-balance quote answered "no route" (value_verdict
+// "no_route"): nothing can recover that inventory, exactly like a deferred
+// swap_no_route, and a dead token otherwise held every entry for days. Only
+// that verdict qualifies; a timeout, 429, malformed or other failed quote is
+// unknown, not unsellable, and keeps blocking. The verdict is entry-gate
+// evidence only: it values nothing at zero and never authorizes a sale or burn.
 // Mirrored in cmd/dashboard/collect.py settlement_blocks_entry.
 const SETTLEMENT_UNPROVEN_VALUE_MAX_AGE_S = 2 * 3600;
 const SETTLEMENT_UNPROVEN_VALUE_FLOOR_BPS = 100;
@@ -902,6 +909,9 @@ function settlementBlocksEntry(item, nowSec, minimumEntryLamports) {
   if (!item || typeof item !== "object" || item.state !== "deferred") return true;
   if (["swap_no_route", "net_recovery_below_floor"].includes(item.reason)) return false;
   if (item.reason !== "settlement_inventory_unproven") return true;
+  const fresh = Number.isFinite(item.valued_at) && item.valued_at <= nowSec
+    && nowSec - item.valued_at <= SETTLEMENT_UNPROVEN_VALUE_MAX_AGE_S;
+  if (item.value_verdict === "no_route") return !fresh;
   const value = item.remaining_value_lamports;
   if (typeof value !== "string" || !/^\d+$/.test(value)) return true;
   if (!Number.isFinite(item.valued_at) || item.valued_at > nowSec
@@ -921,10 +931,13 @@ async function settlementDustValue(position, mint) {
     return accounts.value.reduce((sum, a) => sum + BigInt(a.account.data.parsed.info.tokenAmount.amount), 0n).toString();
   });
   const valuedAt = Date.now() / 1000;
-  if (raw === "0") return { success: true, raw, value_lamports: "0", valued_at: valuedAt };
+  if (raw === "0") return { success: true, raw, value_lamports: "0", value_verdict: "priced", valued_at: valuedAt };
   const quote = await dustQuoteLamports(mint, raw);
+  // "no_route" is a definite answer (the quote API's own no-route codes), so it is
+  // returned as a verdict with its time; any other failure stays unknown.
+  if (quote.verdict === "no_route") return { success: true, raw, value_verdict: "no_route", valued_at: valuedAt };
   return quote.lamports === undefined ? { success: false, raw, verdict: quote.verdict }
-    : { success: true, raw, value_lamports: quote.lamports.toString(), valued_at: valuedAt };
+    : { success: true, raw, value_lamports: quote.lamports.toString(), value_verdict: "priced", valued_at: valuedAt };
 }
 
 async function deployPosition(poolAddressStr, amountX, amountY, binsBelow, binsAbove, strategyTypeStr = "spot", slippageBps = 1000) {

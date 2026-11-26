@@ -917,6 +917,12 @@ class BriefTests(unittest.TestCase):
                (fresh,False),(dict(fresh,remaining_value_lamports='1000000'),False),(dict(fresh,remaining_value_lamports='1000001'),True),
                (dict(fresh,remaining_value_lamports=None),True),(dict(fresh,remaining_value_lamports=66000),True),
                (dict(fresh,valued_at=T-2*3600-1),True),(dict(fresh,valued_at=T+10),True),(dict(fresh,valued_at=None),True),('x',True)]
+        no_route=dict(fresh,remaining_value_lamports=None,value_verdict='no_route',remaining_raw='141')
+        cases+=[(no_route,False),(dict(no_route,remaining_raw='9'*30),False),(dict(no_route,valued_at=T-2*3600),False),
+                (dict(no_route,value_verdict='unavailable'),True),(dict(no_route,value_verdict='rate_limited'),True),
+                (dict(no_route,value_verdict=None),True),(dict(no_route,valued_at=T-2*3600-1),True),
+                (dict(no_route,valued_at=T+10),True),(dict(no_route,valued_at=None),True),(dict(no_route,state='pending'),True),
+                (dict(no_route,reason='swap_quote_threshold_unavailable'),True)]
         for item,blocks in cases:
             with self.subTest(item=item): self.assertIs(c.settlement_blocks_entry(item,T,100000000),blocks)
 
