@@ -15,6 +15,7 @@ Usage:
   python3 dlmm_stats.py [--hours 24] [--send]
   python3 dlmm_stats.py --inventory-shadow
   python3 dlmm_stats.py --bot-band [--since YYYY-MM-DD]
+  python3 dlmm_stats.py --two-neg [--since YYYY-MM-DD]
 """
 import argparse
 import json
@@ -247,8 +248,16 @@ def main():
     ap.add_argument("--bot-band", action="store_true",
                     help="Report pulse closes by entry bot-holder band (<25 / 25-30 / >=30) with the "
                          "PULSE_MAX_BOT_HOLDERS_PCT kill-rule verdict, and exit")
-    ap.add_argument("--since", help="With --bot-band: only closes on or after this UTC date (YYYY-MM-DD)")
+    ap.add_argument("--two-neg", action="store_true",
+                    help="Report pulse closes the pre-V5 pool-cash two-loss rule would have blocked, with the "
+                         "materiality-floor kill-rule verdict, and exit")
+    ap.add_argument("--since", help="With --bot-band/--two-neg: only closes on or after this UTC date (YYYY-MM-DD)")
     cli = ap.parse_args()
+
+    if cli.two_neg:
+        from dlmm_two_neg_report import report as two_neg_report
+        print(two_neg_report(PROFILE_DIR, cli.since, apply_realized))
+        return
 
     if cli.bot_band:
         from dlmm_bot_band import report as bot_band_report

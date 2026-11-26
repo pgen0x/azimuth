@@ -34,7 +34,7 @@ Pipeline supports three modes with **isolated position budgets** — each mode's
 ### Entry Conviction & Learning
 *   Lone-Candidate Conviction Floor: 50 (degen score 0–100; a signal cycle producing exactly ONE fresh pool only emits it above this — "only option" is not "good option")
 *   Audit Gate: reject > 30% bot holders (daemon-side); reject global fees < 30 SOL when the value is present (agent-side — bundled/scam line; absent = unknown, never reject on absence)
-*   Pool Memory: never re-enter a pool whose last closes (>= 2) net out negative PnL
+*   Pool Memory: never re-enter a pool whose last closes (>= 2) net out negative PnL. The cash form of this (pipeline `pool_cash_two_negative`) counts a close as a loss only when it lost at least 0.002 SOL or 0.5% of its deposit after costs, and lifts 7d after the newer of the two losses; a close that returned its deposit minus a transaction fee is NOT a loss. When the pipeline says a pool was not blocked (`v0_would_block`), do not re-reject it on pool memory yourself
 *   Repeat-Deploy Cooldown: 3rd deploy into the same pool within 24h → 12h pool cooldown
 *   Signal Weights: darwinian — entry signals of every close are correlated with realized PnL (60d window, recalc <= 1×/6h); the deploy pick prioritizes candidates strong on high-weight signals (`sol:dlmm:signal_weights`)
 

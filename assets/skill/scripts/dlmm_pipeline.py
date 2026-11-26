@@ -1899,12 +1899,22 @@ def main():
         cash_loss = negative_pool_cash(cash_history_cache, c['pool'], hist_raw, time.time()) if hist_code == 0 else None
         if cash_loss is not None:
             if cash_loss.get("scope") == "each_of_latest_two":
+                ban_h = max(0.0, (cash_loss["ban_until"] - time.time()) / 3600)
                 record_pipeline_reject(PROFILE_DIR, mode, "pool_cash_two_negative", c.get("pool"), c.get("base_mint"), c.get("sol_is_x"), c.get("name"))
-                print(f"Skipping {c['name']} - pool cash memory: latest two positions each proved net-negative after costs")
+                print(f"Skipping {c['name']} - pool cash memory: latest two positions each lost at least "
+                      f"{cash_loss['floor_sol']:.4f} SOL after costs (materiality floor: 0.002 SOL or 0.5% of "
+                      f"deposit); block lifts 7d after the newer loss ({ban_h:.0f}h left)")
             else:
                 record_pipeline_reject(PROFILE_DIR, mode, "pool_cash_upper_bound", c.get("pool"), c.get("base_mint"), c.get("sol_is_x"), c.get("name"))
                 print(f"Skipping {c['name']} - pool cash memory: {cash_loss['closes']} closes, net cash upper bound {cash_loss['cash_upper_sol']:+.9f} SOL")
             continue
+        # Kill-rule cohort for the V5 floor/decay (dlmm_stats.py --two-neg): an
+        # entry the pre-V5 sign-only streak rule would have refused.
+        if hist_code == 0 and negative_pool_cash(cash_history_cache, c['pool'], hist_raw, time.time(),
+                                                 materiality=False) is not None:
+            c["pool_cash_gate"] = {"v0_would_block": True}
+            print(f"Pool cash memory: {c['name']} latest two losses are below the materiality floor "
+                  "or older than 7d; not blocked (v0_would_block)")
         if hist_raw and hist_raw != "(nil)":
             past_pnls = []
             for line in hist_raw.splitlines():
@@ -2384,7 +2394,7 @@ def main():
                              "volatility", "mcap", "holders", "tvl", "fee_pct",
                              "volume_tvl_ratio", "swap_count", "unique_traders",
                              "bot_holders_pct", "global_fees_sol", "bin_step",
-                             "entry_live_gates") if winner.get(key) is not None})
+                             "entry_live_gates", "pool_cash_gate") if winner.get(key) is not None})
     if mode == "pulse":
         # Bot-holder band of this entry, for the PULSE_MAX_BOT_HOLDERS_PCT kill
         # rule (dlmm_stats.py --bot-band). The monitor copies `signal` onto the close.

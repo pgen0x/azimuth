@@ -78,6 +78,7 @@ jobs:
           python3 assets/skill/scripts/test_solana_policy.py
           python3 assets/skill/scripts/test_dlmm_risk_guard.py
           python3 assets/skill/scripts/test_dlmm_bot_band.py
+          python3 assets/skill/scripts/test_dlmm_two_neg_report.py
           python3 assets/skill/scripts/test_dlmm_accounting.py
           python3 assets/skill/scripts/test_dlmm_accounting_asof.py
           python3 assets/skill/scripts/test_dlmm_recovered_close.py
