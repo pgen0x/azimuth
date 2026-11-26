@@ -575,6 +575,7 @@ installs the named units into `~/.config/systemd/user/` and enables them.
 | `azimuth-sol-net-research@.timer` | research | `dlmm_net_experiment.py dry-tick` per named instance | `~/.local/state/azimuth/optimization/<name>/` | off | copied by `--with-research`, enable `@<name>` by hand |
 | `azimuth-grad-paper` | research | `grad_paper.py`, long-running: graduation paper-trader polling public GeckoTerminal/Jupiter | paper trades in `memories/grad_paper/`; no wallet, no tx | off | `--with-paper` |
 | `azimuth-lp-paper` | research | `lp_majors_paper.py`, long-running: modelled two-sided DLMM positions in fixed majors/tokenized-stock pools from the public Meteora datapi, with bin liquidity from a keyless public RPC | hourly paper rows in `memories/lp_majors_paper/`; no wallet, no tx | off | `--with-lp-paper` |
+| `azimuth-risk-guard.timer` | safety | `dlmm_risk_guard.py` every 10 min: flow-adjusted wallet equity from `dlmm_nav.jsonl` against its high-water mark | `~/.local/state/azimuth/risk_{hwm,pause,status}.json` + `risk_guard.jsonl`; at a `RISK_MAX_DRAWDOWN` (default 0.30) drawdown, or 12h without an acceptable NAV row, the executor refuses new entries (exits keep running) until `--resume --note` | off | `--with-risk-guard` (run `--init-hwm current` first) |
 
 Only the rent timer sends transactions, so it has its own flag. `--with-ops`
 installs its files but does not enable it.

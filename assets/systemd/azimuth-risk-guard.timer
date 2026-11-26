@@ -1,0 +1,10 @@
+[Unit]
+Description=Azimuth wallet drawdown guard every 10 minutes
+
+[Timer]
+OnStartupSec=3min
+OnUnitInactiveSec=10min
+Unit=azimuth-risk-guard.service
+
+[Install]
+WantedBy=timers.target

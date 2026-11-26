@@ -119,7 +119,7 @@ const deps = {
   "dotenv": { config() {}, parse: () => ({}) },
 };
 const entryGates = { observed_at: 1, checked_deploy_sol: .1, fee_timeframe: "30m", m5_pct: 0, h1_pct: null, live_fee_tvl_ratio: 1.4, price_impact_pct: .1 };
-const env = { SOLANA_RPC_URLS: "fake-rpc-1,fake-rpc-2", DLMM_ENTRY_CONTEXT: JSON.stringify({ mode: "turnover", recenter_of: "root", pair: "TEST-SOL", dev: "developer", signal: { holders: 0, unique_traders: 100, entry_live_gates: entryGates } }) };
+const env = { AZIMUTH_RISK_PAUSE_FILE: path.join(root, "risk_pause.json"), SOLANA_RPC_URLS: "fake-rpc-1,fake-rpc-2", DLMM_ENTRY_CONTEXT: JSON.stringify({ mode: "turnover", recenter_of: "root", pair: "TEST-SOL", dev: "developer", signal: { holders: 0, unique_traders: 100, entry_live_gates: entryGates } }) };
 const sandbox = { require: (name) => deps[name] || require(name), module: { exports: {} },
   process: { argv: ["node", path.join(root, "skills/solana-dlmm/scripts/dlmm_executor.js")], env },
   fetch: async (url, options) => {
@@ -925,7 +925,10 @@ vm.runInNewContext("const productionExitTransport=confirmExitTransaction;confirm
   const savedDeployMarker = fs.existsSync(marker) ? fs.readFileSync(marker) : null;
   fs.mkdirSync(path.dirname(marker), { recursive: true });
   fs.writeFileSync(marker, JSON.stringify({ position: "deadline-position", signature: "d", lastValidBlockHeight: 1 }));
+  // A risk pause never blocks an exit.
+  fs.writeFileSync(env.AZIMUTH_RISK_PAUSE_FILE, JSON.stringify({ paused: true, dd: 0.5, reason: "test pause" }));
   assert.equal((await closePosition("deadline-position")).success, true);
+  fs.rmSync(env.AZIMUTH_RISK_PAUSE_FILE, { force: true });
   assert.equal(fs.existsSync(marker), false);
   assert.equal(confirmationAttempts, 2);
   fs.writeFileSync(marker, JSON.stringify({ position: "another-position", signature: "d", lastValidBlockHeight: 1 }));
@@ -1270,6 +1273,21 @@ vm.runInNewContext("const productionExitTransport=confirmExitTransaction;confirm
   fs.writeFileSync(marker, "broken");
   await assert.rejects(deploy(), /RPC endpoints failed/); assert.equal(sends, 6);
   await assert.rejects(deployPosition("pool", 0, -1, 20, 0), /Invalid deploy/);
+  // Drawdown auto-pause (dlmm_risk_guard.py): refused before anything is built or
+  // sent; a corrupt or unreadable file refuses too (fail closed). Every deploy above
+  // ran with the file missing, which is "not paused".
+  const riskPause = env.AZIMUTH_RISK_PAUSE_FILE, buildsBeforePause = builds;
+  fs.writeFileSync(riskPause, JSON.stringify({ paused: true, dd: 0.31, reason: "drawdown 31.0% >= 30%" }));
+  await assert.rejects(deploy(), /ENTRY REFUSED: risk pause \(dd=31\.0%; drawdown 31\.0% >= 30%\)/);
+  for (const corrupt of ["{not json", "[]", "null", JSON.stringify({ paused: "yes" }), JSON.stringify({})]) {
+    fs.writeFileSync(riskPause, corrupt);
+    await assert.rejects(deploy(), /ENTRY REFUSED: risk pause file corrupt/);
+  }
+  fs.rmSync(riskPause, { force: true }); fs.mkdirSync(riskPause);
+  await assert.rejects(deploy(), /ENTRY REFUSED: risk pause file unreadable \(EISDIR\)/);
+  fs.rmSync(riskPause, { recursive: true, force: true });
+  assert.equal(builds, buildsBeforePause); assert.equal(sends, 6);
+  fs.writeFileSync(riskPause, JSON.stringify({ paused: false, note: "resumed by hand" }));
   clearMarker(); height = 151; confirmationError = false;
   reservePost=20000000; // exact reserve boundary remains permitted
   assert.equal((await deploy()).success, true); assert.equal(sends, 7); // expired reservation recovers

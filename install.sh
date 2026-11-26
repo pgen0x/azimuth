@@ -32,6 +32,11 @@ Opt-in flags (each installs and enables only what it names; re-runs are safe):
   --with-research    install + enable the research timers: accounting, shadow,
                      candidate-paper, net-experiment, price-path (no trading).
                      azimuth-sol-net-research@ is copied, never enabled.
+  --with-risk-guard  install + enable azimuth-risk-guard.timer: the 10-min wallet
+                     drawdown guard. It pauses NEW Solana entries (never exits) at a
+                     RISK_MAX_DRAWDOWN (default 30%) drawdown from the flow-adjusted
+                     high-water mark. Set the mark first:
+                       dlmm_risk_guard.py --profile <profile> --init-hwm current
   --with-rh-nav      install + enable azimuth-rh-nav.timer: a read-only Robinhood
                      wallet snapshot every 10 min (public RPC balance reads of the
                      PUBLIC address in KRYSTAL_WALLET / UNI_NAV_WALLET; no key, no tx)
@@ -53,7 +58,7 @@ USAGE
 }
 
 PROFILE=""
-WITH_DASHBOARD=0 WITH_ALERTS=0 WITH_OPS=0 WITH_RENT_TX=0 WITH_RESEARCH=0 WITH_PAPER=0 WITH_LP_PAPER=0 WITH_RH_NAV=0 NO_BUILD=0
+WITH_DASHBOARD=0 WITH_ALERTS=0 WITH_OPS=0 WITH_RENT_TX=0 WITH_RESEARCH=0 WITH_PAPER=0 WITH_LP_PAPER=0 WITH_RH_NAV=0 WITH_RISK_GUARD=0 NO_BUILD=0
 while [ $# -gt 0 ]; do
   case "$1" in
     -h|--help) usage; exit 0 ;;
@@ -65,6 +70,7 @@ while [ $# -gt 0 ]; do
     --with-paper) WITH_PAPER=1 ;;
     --with-lp-paper) WITH_LP_PAPER=1 ;;
     --with-rh-nav) WITH_RH_NAV=1 ;;
+    --with-risk-guard) WITH_RISK_GUARD=1 ;;
     --no-build) NO_BUILD=1 ;;
     -*) echo "unknown flag: $1" >&2; usage >&2; exit 2 ;;
     *)
@@ -254,7 +260,7 @@ echo "→ Rendering optional Solana units into $PROFILE/systemd"
 mkdir -p "$PROFILE/systemd"
 for u in azimuth-sol-accounting azimuth-sol-shadow azimuth-sol-rent azimuth-sol-markers \
   azimuth-sol-net-experiment azimuth-sol-net-research@ azimuth-sol-price-path azimuth-sol-candidate-paper \
-  azimuth-sol-retention azimuth-alerts azimuth-rh-nav; do
+  azimuth-sol-retention azimuth-alerts azimuth-rh-nav azimuth-risk-guard; do
   sed "s#__PROFILE__#$PROFILE#g" "$REPO/assets/systemd/$u.service" > "$PROFILE/systemd/$u.service"
   cp "$REPO/assets/systemd/$u.timer" "$PROFILE/systemd/$u.timer"
 done
@@ -380,6 +386,12 @@ print("     the timer applies this daily" if rows else "     nothing older than 
     OPT_ENABLE+=(azimuth-rh-nav.timer)
     echo "   azimuth-rh-nav: read-only balance reads; needs KRYSTAL_WALLET (the public address) in the profile env file"
   fi
+  if [ "$WITH_RISK_GUARD" = 1 ]; then
+    render_unit azimuth-risk-guard.service; render_unit azimuth-risk-guard.timer
+    OPT_ENABLE+=(azimuth-risk-guard.timer)
+    echo "   azimuth-risk-guard: without a high-water mark it pauses new entries. Set it once:"
+    echo "     python3 $PROFILE/skills/solana-dlmm/scripts/dlmm_risk_guard.py --profile $PROFILE --init-hwm current"
+  fi
   if [ "${#OPT_ENABLE[@]}" -gt 0 ]; then
     "$SYSTEMCTL" --user daemon-reload
     "$SYSTEMCTL" --user enable --now "${OPT_ENABLE[@]}"
@@ -394,7 +406,7 @@ print("     the timer applies this daily" if rows else "     nothing older than 
     echo "     (see the header of assets/systemd/azimuth-alerts.service)."
   fi
 else
-  if [ $((WITH_DASHBOARD + WITH_ALERTS + WITH_OPS + WITH_RENT_TX + WITH_RESEARCH + WITH_PAPER + WITH_LP_PAPER + WITH_RH_NAV)) -gt 0 ]; then
+  if [ $((WITH_DASHBOARD + WITH_ALERTS + WITH_OPS + WITH_RENT_TX + WITH_RESEARCH + WITH_PAPER + WITH_LP_PAPER + WITH_RH_NAV + WITH_RISK_GUARD)) -gt 0 ]; then
     echo "   ⚠ no user systemd: the --with-* flags installed nothing. Unit files are in $PROFILE/systemd."
   fi
   echo "   ⚠ no user systemd available — run the loop + daemon yourself:"

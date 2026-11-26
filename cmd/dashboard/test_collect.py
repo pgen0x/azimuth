@@ -1499,4 +1499,23 @@ class LossAlertTests(unittest.TestCase):
             out=c.alerts(self.p,now=T,run=lambda *a,**k:1/0,statvfs=lambda _:vfs,meminfo=str(mem))
             self.assertIn('section_unavailable:loss',{a['id'] for a in out['alerts']})
 
+class RiskGuardPanelTests(unittest.TestCase):
+    def test_states(self):
+        with tempfile.TemporaryDirectory() as d:
+            env={'AZIMUTH_RISK_STATE_DIR':d}
+            self.assertEqual(c.risk_guard(env)['state'],'not installed')
+            Path(d,'risk_status.json').write_text(json.dumps({'ts':1,'dd':0.12,'peak':2.0,'equity':1.76,'max_drawdown':0.3}))
+            r=c.risk_guard(env)
+            self.assertEqual((r['state'],r['dd'],r['peak_sol'],r['max_drawdown']),('allowed',0.12,2.0,0.3))
+            Path(d,'risk_pause.json').write_text(json.dumps({'paused':True,'reason':'drawdown 31.0% >= 30%'}))
+            self.assertEqual((c.risk_guard(env)['state'],c.risk_guard(env)['reason']),('paused','drawdown 31.0% >= 30%'))
+            Path(d,'risk_pause.json').write_text(json.dumps({'paused':False}))
+            self.assertEqual(c.risk_guard(env)['state'],'allowed')
+            for bad in ('{x','[]',json.dumps({'paused':'no'})):
+                Path(d,'risk_pause.json').write_text(bad)
+                self.assertEqual(c.risk_guard(env)['state'],'paused')  # the executor refuses too
+            os.unlink(Path(d,'risk_status.json'))
+            Path(d,'risk_pause.json').write_text(json.dumps({'paused':True,'reason':'blind'}))
+            self.assertEqual(c.risk_guard(env)['state'],'paused')
+
 if __name__=='__main__': unittest.main()

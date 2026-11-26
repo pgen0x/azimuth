@@ -829,6 +829,35 @@ async function assertNoTokenExposure(pool, wallet) {
   }
 }
 
+// Wallet drawdown auto-pause, written by dlmm_risk_guard.py (azimuth-risk-guard.timer).
+// Called only from deployPosition: every new mint (pulse, AI agent, re-center) is
+// refused while paused, and no exit path reads it. A missing file means not paused;
+// an unreadable or corrupt one refuses the entry (fail closed).
+function riskPauseFile() {
+  return process.env.AZIMUTH_RISK_PAUSE_FILE
+    || path.join(require("os").homedir(), ".local", "state", "azimuth", "risk_pause.json");
+}
+
+function assertNotRiskPaused() {
+  const file = riskPauseFile();
+  let text;
+  try {
+    text = fs.readFileSync(file, "utf8");
+  } catch (e) {
+    if (e && e.code === "ENOENT") return;
+    throw new Error(`ENTRY REFUSED: risk pause file unreadable (${(e && e.code) || "error"})`);
+  }
+  let state;
+  try { state = JSON.parse(text); } catch { state = null; }
+  if (!state || typeof state !== "object" || Array.isArray(state) || typeof state.paused !== "boolean") {
+    throw new Error("ENTRY REFUSED: risk pause file corrupt");
+  }
+  if (state.paused) {
+    const dd = Number.isFinite(state.dd) ? `${(state.dd * 100).toFixed(1)}%` : "n/a";
+    throw new Error(`ENTRY REFUSED: risk pause (dd=${dd}; ${state.reason || "no reason recorded"})`);
+  }
+}
+
 async function assertRootBudget() {
   const context = JSON.parse(process.env.DLMM_ENTRY_CONTEXT || "{}");
   const root = context.root_chain_id || context.recenter_of;
@@ -950,6 +979,7 @@ async function deployPosition(poolAddressStr, amountX, amountY, binsBelow, binsA
   }
   const wallet = getWallet();
   const dry = process.env.DRY_RUN === "true";
+  assertNotRiskPaused();
   await assertRootBudget();
   const settlements = path.join(PROFILE_DIR, "memories", "dlmm_settlements");
   const minimumEntry = nativeCashPolicy().minimum_entry_lamports;
@@ -2533,5 +2563,5 @@ function exitAfterResult(grace = EXIT_GRACE_MS) {
 }
 
 if (require.main === module) main().then(() => exitAfterResult());
-module.exports = { exitAfterResult, resolveEntryActiveBin, settlementInventory, settlementBlocksEntry, settlementDustValue, swapAmountRaw, reclaimEmptyAccounts, rentDeferralReason, liquidateLegacyBags, reconcileStaleMarkersCommand, clearDeployReservation, assertRootBudget, reconcileAccounting, recordSubmission, closePosition, swapToken, confirmSignedTransaction, deployPosition, acquireDeployLock, acquireSwapLock, reconcilePendingSwap,
+module.exports = { exitAfterResult, resolveEntryActiveBin, settlementInventory, settlementBlocksEntry, settlementDustValue, swapAmountRaw, reclaimEmptyAccounts, rentDeferralReason, liquidateLegacyBags, reconcileStaleMarkersCommand, clearDeployReservation, assertRootBudget, assertNotRiskPaused, reconcileAccounting, recordSubmission, closePosition, swapToken, confirmSignedTransaction, deployPosition, acquireDeployLock, acquireSwapLock, reconcilePendingSwap,
   assertNoTokenExposure, positionIsEmpty, positionAccountExists, slippageBpsToPercent, settlementRentClose, ordinarySettlementRentClose, tokenAccountCanClose, getPositionRiskMark, candidateBinSnapshot };

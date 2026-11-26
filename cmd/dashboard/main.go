@@ -406,7 +406,7 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	var value any
 	switch r.URL.Path {
 	case "/api/overview":
-		value = object{"collected_at": data["collected_at"], "collection_error": failure, "nav": data["nav"], "services": data["services"], "sources": data["sources"]}
+		value = object{"collected_at": data["collected_at"], "collection_error": failure, "nav": data["nav"], "services": data["services"], "sources": data["sources"], "risk": data["risk"]}
 	case "/api/capital", "/api/live", "/api/robinhood", "/api/growth", "/api/venues":
 		lines, ok := logLines(r.URL.Query().Get("n"))
 		if !ok {

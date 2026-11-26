@@ -1071,6 +1071,33 @@ def venue_state(cfg, units):
         else: robin = one('live', 'live', 'Deploy is on for %s; azimuth-rh-monitor active.' % ', '.join(sorted(names & set(dep['modes']))))
     return {'solana':solana, 'robinhood':robin}
 
+def risk_guard(env=None):
+    """The wallet drawdown guard (dlmm_risk_guard.py, azimuth-risk-guard.timer), one line's worth.
+    The pause file is authoritative (the executor reads it); risk_status.json has the drawdown."""
+    env = os.environ if env is None else env
+    sd = Path(env.get('AZIMUTH_RISK_STATE_DIR') or Path.home()/'.local/state/azimuth')
+    pause_file = Path(env.get('AZIMUTH_RISK_PAUSE_FILE') or sd/'risk_pause.json')
+    def load(path):
+        try: obj = json.loads(read_regular(path, 64*1024))
+        except FileNotFoundError: return None, None
+        except (OSError, ValueError): return None, 'unreadable'
+        return (obj, None) if isinstance(obj, dict) else (None, 'unreadable')
+    status, status_err = load(sd/'risk_status.json')
+    pause, pause_err = load(pause_file)
+    if status is None and pause is None and not (status_err or pause_err):
+        return {'state':'not installed','basis':'No risk guard state: install.sh --with-risk-guard, then --init-hwm.'}
+    status = status or {}
+    if pause_err or (pause is not None and not isinstance(pause.get('paused'), bool)):
+        paused, reason = True, 'pause file unreadable: the executor refuses entries'
+    else:
+        paused = bool(pause and pause['paused'])
+        reason = (pause or {}).get('reason') if paused else None
+    keep = lambda v: v if type(v) in (int, float) and math.isfinite(v) else None
+    return {'state':'paused' if paused else 'allowed', 'reason':reason, 'dd':keep(status.get('dd')),
+            'peak_sol':keep(status.get('peak')), 'equity_sol':keep(status.get('equity')),
+            'max_drawdown':keep(status.get('max_drawdown')), 'evaluated_at':keep(status.get('ts')),
+            'status_error':status_err}
+
 def venues(run=None):
     run = run or bounded_run
     units = {}
@@ -1436,7 +1463,7 @@ def fast_panels(profile, state, since=None, now=None):
         except (OSError,ValueError): pass
     hermes['gateway'] = next((s for s in services if s.get('Id')=='hermes-gateway.service'), {'ActiveState':'unknown'})
     events.sort(key=lambda e:e.get('time') or 0,reverse=True)
-    return {'nav':nav[-1] if nav else {},'journal':events,'sources':sources,'hermes':hermes,'services':services,'venues':panel(venues)}
+    return {'nav':nav[-1] if nav else {},'journal':events,'sources':sources,'hermes':hermes,'services':services,'venues':panel(venues),'risk':panel(risk_guard)}
 
 # Agent brief: one compact, read-only status read for an orchestrating agent (CLI `brief` and /api/agent/brief).
 # Every figure keeps its basis; marks are labeled as marks and a missing source is reported, never zero.
